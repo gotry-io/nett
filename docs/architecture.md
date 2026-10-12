@@ -92,7 +92,7 @@ curl -fsSL https://hub.example.com/install.sh | sh -s -- enroll <token>
 |---|---|
 | 用户 | passkey（WebAuthn）+ 恢复码；短期会话 Cookie |
 | API token | 带权限范围、有过期时间、可吊销；固定前缀；服务端只存哈希 |
-| node | 一次性入网 token → Ed25519 双向挑战认证 |
+| node | 一次性入网 token → Ed25519 身份密钥；连接时在 WebSocket 内层用 Noise 协议双向认证并端到端加密 |
 | CI | OIDC（如 GitHub Actions），不保存长期密钥 |
 | 手机设备 | 设备凭据（WireGuard 密钥） |
 

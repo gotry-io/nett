@@ -15,7 +15,7 @@ Hub 管理着所有节点。如果 Hub 能自行决定开启任意节点的高�
 |---|---|
 | 用户 | passkey（WebAuthn）+ 恢复码；短期会话 Cookie（HttpOnly、SameSite=Strict） |
 | API token | 权限范围 + 过期时间 + 可吊销；固定前缀便于泄露扫描；服务端只存哈希，明文只显示一次 |
-| node | 一次性入网 token → Ed25519 双向挑战认证 |
+| node | 一次性入网 token → Ed25519 身份密钥；WebSocket 内层 Noise 双向认证与端到端加密 |
 | CI | OIDC 短期令牌，不保存长期密钥 |
 | 手机设备 | 设备凭据 |
 
