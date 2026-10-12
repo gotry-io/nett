@@ -77,7 +77,7 @@ pnpm -C web lint && pnpm -C web test
 
 这些规则是硬性的，违反即视为 bug：
 
-1. **nett-node 不监听任何公网端口。**所有公网监听由独立的低权限进程（nett-relay、Edge）承担；nett-relay 不持有组网私钥。
+1. **nett-node 不监听任何公网地址**（局域网和组网地址上的探测应答、DNS 除外）。所有公网监听由独立的低权限进程（nett-relay、Edge）承担；nett-relay 不持有组网私钥。
 2. **不执行 shell。**调用外部程序（如 `docker compose`、`tailscale`）只能使用白名单内的命令，以参数数组形式传参，永远不用 `sh -c`，参数逐一校验。
 3. **提升权限必须验证用户签名**；node 在应用策略前验证签名和版本号。
 4. **密钥**：本机生成的私钥不离开节点；文件权限 `0600`；内存中使用 `zeroize`；不出现在日志和错误信息中。

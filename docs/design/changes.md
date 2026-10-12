@@ -157,6 +157,7 @@ trait Action {
 | `device.add` | 设备 | 高 | 是 | M2 |
 | `access_rule.create` / `update` / `delete` | 访问规则 | 高 | 是 | M2 |
 | `link.set_policy` | 连接 | 中 | 是 | M2 |
+| `node.advertise_routes` | 节点 | 高 | 是 | M2 |
 | `stack.create` / `update` / `delete` | stack | 中 | 是 | M3 |
 | `stack.deploy` | stack | 中 | 是 | M3 |
 | `deployment.rollback` | 部署 | 中 | 是 | M3 |
