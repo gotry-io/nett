@@ -65,6 +65,7 @@ pnpm -C web lint && pnpm -C web test
 |---|---|
 | nett-node | 空闲 RSS ≤ 5 MB |
 | nett-hub | 稳定运行 ≤ 30–50 MB（数个到数十个节点） |
+| nett-relay | 空闲 RSS ≤ 5 MB；转发流量时的内存有上限 |
 
 - 依赖使用 `default-features = false`，只开启需要的特性。
 - **新增依赖时说明理由**，并报告对二进制体积的影响（`cargo bloat`）；node 的新依赖还要报告 RSS 变化。
@@ -76,7 +77,7 @@ pnpm -C web lint && pnpm -C web test
 
 这些规则是硬性的，违反即视为 bug：
 
-1. **node 不监听任何公网端口。**所有公网监听由独立的低权限进程承担。
+1. **nett-node 不监听任何公网端口。**所有公网监听由独立的低权限进程（nett-relay、Edge）承担；nett-relay 不持有组网私钥。
 2. **不执行 shell。**调用外部程序（如 `docker compose`、`tailscale`）只能使用白名单内的命令，以参数数组形式传参，永远不用 `sh -c`，参数逐一校验。
 3. **提升权限必须验证用户签名**；node 在应用策略前验证签名和版本号。
 4. **密钥**：本机生成的私钥不离开节点；文件权限 `0600`；内存中使用 `zeroize`；不出现在日志和错误信息中。
@@ -129,10 +130,11 @@ pnpm -C web lint && pnpm -C web test
 | 层级 | 要求 |
 |---|---|
 | 单元测试 | 与代码放在一起；不访问网络 |
-| node 模块 | 通过 trait 抽象外部依赖（Docker、tailscaled、Edge），测试中使用替身 |
+| node 模块 | 通过 trait 抽象外部依赖（Docker、WireGuard、Edge），测试中使用替身 |
 | Hub 集成测试 | 使用临时 SQLite，经由 HTTP 调用真实路由，覆盖权限检查 |
 | 协议兼容 | node 与 Hub 相邻版本互通 |
 | Web 端到端 | Playwright 覆盖关键流程：登录、节点入网、告警、签名授权 |
+| 组网 | 用网络模拟（如 `tc netem`）制造延迟、丢包、断开、屏蔽 UDP，验证切换时间和连接不中断 |
 | 资源 | 每个里程碑的浸泡测试与 RSS 测量 |
 
 修复 bug 时先补一个能复现它的测试。
@@ -148,5 +150,5 @@ pnpm -C web lint && pnpm -C web test
 
 - 格式：`类型(范围): 中文描述`，例如 `feat(node): 采集容器内存指标`。
 - 类型：`feat`、`fix`、`refactor`、`perf`、`test`、`docs`、`build`、`ci`、`chore`。
-- 范围：`hub`、`node`、`cli`、`web`、`proto`、`core`、`docs`、`ci`。
+- 范围：`hub`、`node`、`relay`、`cli`、`web`、`proto`、`core`、`docs`、`ci`。
 - `private/` 永远不提交。
