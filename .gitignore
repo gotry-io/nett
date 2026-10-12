@@ -1,0 +1,13 @@
+# 和具体机器相关的资料（IP、端口、盘点数据），不进入版本库
+/private/
+
+# Rust
+/target/
+
+# Web
+node_modules/
+/web/dist/
+
+# 系统和编辑器
+.DS_Store
+*.swp

@@ -1,0 +1,19 @@
+# nett
+
+> 一个让你的机器和 AI agent 连成一张网的自托管系统：AI 能看懂它、安全地运维它，你的 agent 们也能通过它可信地相互协作。
+
+面向拥有少量分散机器的个人或小团队：几台不同地域的 VPS，加上家里的 NAS 或主机。一个 Hub 加上每台机器上的 `nett-node`，覆盖组网、监控告警、部署和入口路由，资源占用极低，并为 AI 运维和 agent 通信提供安全的接口。
+
+- GoTry 旗下项目 · 主页 `nett.gotry.io`（建设中）
+- 命令行：`nett`
+- 服务：`nett-hub`、`nett-node`
+- 状态：**设计阶段**，尚无可用代码
+
+## 文档
+
+- [愿景](docs/vision.md)：要解决的问题、目标与约束
+- [架构](docs/architecture.md)：角色边界、模块、认证、组网、技术栈
+- [路线图](docs/roadmap.md)：各阶段内容与验收标准
+- [架构决策记录](docs/adr/README.md)
+- [设计文档](docs/design/README.md)
+- [开发指南](docs/development.md)
