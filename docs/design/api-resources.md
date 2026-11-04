@@ -406,6 +406,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `status.last_handshake_at` | 最近一次握手 |
 
 - **私钥只在浏览器中生成**，Hub 只保存公钥，从不经手私钥；**配置文件和二维码只在创建时由浏览器生成一次**，之后不能再导出，丢失时新建凭据（`auth.md` 第 10 节）；
+- 新增 WireGuard 设备时一次创建两份凭据：主配置（直连家里 + 移动网关）和"全部经网关"的备用配置各用一份（`mesh.md` 第 13 节）；
 - 给已有设备新增凭据是高风险操作（`device_credential.create`），与新增设备一样需要签名；创建记入 `events`；
 - 动作：`revoke`。
 
@@ -473,7 +474,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `status.forwarder_address` | 服务实际看到的转发者地址：Edge 专用地址、智能入口的入口地址或容器内成员的地址（ADR 0015）。需要真实 IP 的服务把它配置为可信代理 |
 | `status.upstream_health` | 回源健康状态 |
 
-路由的变更会同时生成"Edge 专用地址 → 目标主机:端口"的访问规则，随路由变更一起预演和批准。
+路由的变更会同时生成"Edge 专用地址 → 目标主机:端口"的访问规则，随路由变更一起预演和批准。入口节点的 ingress 模块**只为签名规则集中允许的目标生成 Edge 的回源配置**，包括与 Edge 同一台主机上的目标（经本机地址或同机容器网络访问，这类流量不经过 `nett0`，组网过滤管不到）；Hub 下发了不在签名规则集中的回源目标时，ingress 模块拒绝并上报事件。
 
 **`certificates`**：只读，由 ingress 模块上报。字段：域名、签发者、到期时间、所在入口节点、续期状态。
 
