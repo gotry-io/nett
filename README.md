@@ -8,7 +8,7 @@
 
 - GoTry 旗下项目 · 主页 `nett.gotry.io`（建设中）
 - 命令行：`nett`
-- 服务：`nett-hub`、`nett-node`、`nett-relay`、`nett-datapath`
+- 服务：`nett-hub`、`nett-node`、`nett-mesh`、`nett-transport`、`nett-relay`
 - 状态：**设计阶段**，尚无可用代码
 - 许可证：MIT 或 Apache-2.0（双许可）
 

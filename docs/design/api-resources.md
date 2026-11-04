@@ -123,6 +123,7 @@
 
 - 中、高风险的写入不直接修改资源，而是创建一个 `change`。直接调用对应资源的写接口时，Hub 返回 `202` 和新建的 `change`；
 - **降低权限**（关闭模块、吊销 token、禁用设备、收窄访问规则）始终视为低风险，可以直接执行；
+- 修改标签本身是低风险，但如果它让某条访问规则的展开结果变大（例如给节点加上被 allow 规则选中的标签），这次修改就是放宽访问，按高风险处理（第 5.7 节）；
 - `ai` 类型 token 的一切写入（包括低风险的直接修改）都通过变更集，由用户批准（auth.md 第 6.2 节）；
 - 每类写入的风险等级由动作目录（`action-types`）定义，`changes.md` 给出完整列表；
 - 变更集从 M1 起提供（最小版本），覆盖范围随阶段扩展，见第 8 节。
@@ -339,7 +340,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `summary` | 一句话描述，供时间线显示 |
 | `details` | 结构化细节；敏感值已脱敏 |
 
-- 记录范围：所有写操作和安全事件（登录、token 创建与吊销、签名、入网、部署、回滚、告警触发与恢复等）；查询不记录，导出敏感内容（如设备配置）除外；
+- 记录范围：所有写操作和安全事件（登录、token 创建与吊销、签名、入网、部署、回滚、告警触发与恢复等）；查询不记录；
 - 默认保留 90 天；API 不提供删除；
 - 支持按时间、操作方、动作、目标资源筛选；实时推送见第 7 节。
 
@@ -366,7 +367,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `status.stack_id` | 所属 stack（M3） |
 | `status.resources` | 最近一次的 CPU、内存 |
 
-动作（M3）：`restart`、`stop`、`start`（均为中风险）。
+动作（M3）：`restart`、`stop`、`start`（均为中风险），**只作用于容器**（`runtime = container`）；原生服务只观测，没有动作。
 
 ### 5.7 组网（M2）
 
@@ -389,8 +390,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `spec.name`、`spec.kind` | 名称；`phone` / `laptop` / `other` |
 | `spec.paths` | 启用的路径：直连家里、移动网关 |
 | `spec.disabled` | 禁用后，该设备的所有凭据立即失效（降低权限，直接执行） |
-| `status.gateway_node_id` | 当前所属的移动网关（由网关上报的握手决定，见 `mesh.md` 第 13 节） |
-| `status.last_handshake_at` | 最近一次握手 |
+| `status.last_handshake_at` | 各凭据中最近的一次握手 |
 
 新增设备为高风险操作（`device.add`，同时创建第一份凭据）。
 
@@ -402,10 +402,12 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `spec.kind` | `wireguard` / `connect`（CONNECT 代理凭据，见 `auth.md` 第 10 节） |
 | `status.public_key` | WireGuard 公钥（`wireguard`）；`connect` 类型只返回 token 前缀 |
 | `status.address` | 分配的组网地址（`wireguard`）。每份凭据一个地址：同一台设备的多份凭据会同时作为网关的不同对端，而 WireGuard 不允许两个对端的 `AllowedIPs` 重叠 |
+| `status.gateway_node_id` | 这份凭据当前所属的移动网关（由网关上报的握手决定，见 `mesh.md` 第 13 节） |
+| `status.last_handshake_at` | 最近一次握手 |
 
-- **私钥优先在浏览器中生成**，Hub 只保存公钥；浏览器不支持时由 Hub 生成，只显示一次；
-- 给已有设备新增凭据是高风险操作（`device_credential.create`），与新增设备一样需要签名；
-- 动作：`export`（导出配置文件和二维码，记入 `events`）、`revoke`。
+- **私钥只在浏览器中生成**，Hub 只保存公钥，从不经手私钥；**配置文件和二维码只在创建时由浏览器生成一次**，之后不能再导出，丢失时新建凭据（`auth.md` 第 10 节）；
+- 给已有设备新增凭据是高风险操作（`device_credential.create`），与新增设备一样需要签名；创建记入 `events`；
+- 动作：`revoke`。
 
 **`access-rules`**
 
@@ -418,9 +420,9 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 
 默认值因目标而异（`mesh.md` 第 12 节）：组网成员之间**默认允许**；宣告的局域网段**默认拒绝**，只对用户的设备开放；Edge 专用地址只能访问路由的目标，这部分规则由路由生成（`status.origin = route`），不能单独修改。规则按 `priority` 匹配。
 
-整份规则集作为一份带版本号的签名产物下发（`auth.md` 第 11.1 节）：放宽访问的修改是高风险操作；新增 deny 规则、删除 allow 规则属于收窄，直接执行。
+整份规则集作为一份带版本号的签名产物下发（`auth.md` 第 11.1 节）。**签名产物中写的是选择器展开后的结果**（成员 ID、地址、端口），节点只执行展开结果；标签、服务位置变化导致展开结果变大时，Hub 生成新的规则集，作为放宽访问的变更等待签名，在签名之前继续执行旧的展开结果。放宽访问的修改是高风险操作；新增 deny 规则、删除 allow 规则属于收窄，直接执行。
 
-**`whois`**（查询接口）：`GET /api/v1/mesh/whois?address=…`，按组网地址查询它属于哪个节点、设备或 Edge，供服务和 agent 识别对方身份（roadmap M2 的"身份查询"）。服务注册表即 `services` 与 `hostnames`。
+**`whois`**（查询接口）：`GET /api/v1/mesh/whois?address=…`，按组网地址查询它属于哪个节点、设备或 Edge，供控制台显示（roadmap M2 的"身份查询"）。这是 Hub 的声明；服务和 agent 需要确认对方身份时，使用本机的 `nett whois`（组网进程按已验证的准入材料回答，`mesh.md` 第 11 节）。服务注册表即 `services` 与 `hostnames`。
 
 **`hostnames`**：组网内的主机名。节点和服务自动获得主机名；用户可以添加别名。
 
@@ -438,7 +440,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 |---|---|
 | `spec.node_id` | 部署目标节点 |
 | `spec.source` | Git 仓库、路径、引用 |
-| `spec.env` | 环境变量。敏感值由浏览器用目标节点的公钥加密后提交，Hub 只保存密文（`auth.md` 第 13 节）；读取时只返回是否已设置 |
+| `spec.env` | 环境变量。敏感值由浏览器用目标节点的公钥加密后提交，Hub 只保存密文；读取时只返回是否已设置。有敏感值的 stack，定义（除镜像版本）作为签名产物 `stack_spec` 下发，节点只把机密交给与签名定义一致的容器（`auth.md` 第 13 节） |
 | `spec.hooks` | 部署前后的钩子（白名单内的命令或容器任务） |
 | `spec.auto_deploy` | CI 通知有新版本后是否自动部署；**默认关闭**，即在控制台手动一键部署 |
 | `status.current_deployment_id` | 当前生效的部署 |
@@ -538,7 +540,7 @@ changes ─► 任意资源（targets）；events.change_id ─► changes
 | M2 | `links`、`devices`、`device-credentials`、`access-rules`、`hostnames`、`whois` |
 | M3 | `stacks`、`deployments`、`routes`、`certificates`、`auto-apply-policies`、`ci-trust-rules`；`services` 的动作；变更集补全（影响分析、自动执行策略、主动验证与自动回滚） |
 
-变更集按"完整设计、最小实现"推进：数据结构和状态在 M1 一次定全，各阶段只增加动作类型和流程能力，不做数据迁移。
+变更集按"完整设计、最小实现"推进：数据结构和状态在 M1 定好，各阶段主要增加动作类型和流程能力；确实需要迁移时，使用带版本号的迁移步骤（`changes.md` 第 1 节）。
 
 ## 9. 待定问题
 

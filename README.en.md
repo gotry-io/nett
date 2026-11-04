@@ -8,7 +8,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
 
 - A GoTry project · Homepage `nett.gotry.io` (under construction)
 - CLI: `nett`
-- Services: `nett-hub`, `nett-node`, `nett-relay`, `nett-datapath`
+- Services: `nett-hub`, `nett-node`, `nett-mesh`, `nett-transport`, `nett-relay`
 - Status: **design phase**, no usable code yet
 - License: MIT or Apache-2.0 (dual-licensed)
 
