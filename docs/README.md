@@ -6,7 +6,7 @@
 | [architecture.md](architecture.md) | 整体架构、角色边界、node 模块、认证、组网、手机接入、入口路由、AI 接入、技术栈、代码组织 |
 | [roadmap.md](roadmap.md) | 各阶段内容与验收标准 |
 | [adr/](adr/README.md) | 架构决策记录：每个关键决定的背景、理由和放弃的方案 |
-| [design/](design/README.md) | 各阶段的详细设计文档 |
+| [design/](design/README.md) | 各阶段的详细设计文档；[overview.md](design/overview.md) 把全部文档串成整体技术方案 |
 | [development.md](development.md) | 开发指南：工作流程、Rust / Web 规范、安全规范、资源纪律、API 与协议约定、测试、提交 |
 
 **维护约定**

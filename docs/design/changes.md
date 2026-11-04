@@ -2,7 +2,7 @@
 
 - 状态：草案
 - 阶段：P0 设计；M1 实现最小版本，后续阶段逐步补全（见第 11 节）
-- 相关：[api-resources.md](api-resources.md)、ADR [0006](../adr/0006-auth-and-passkey-signing.md)、[0010](../adr/0010-ai-via-api-only.md)；签名格式见 `auth.md`
+- 相关：[api-resources.md](api-resources.md)、ADR [0006](../adr/0006-auth-and-passkey-signing.md)、[0010](../adr/0010-ai-via-api-only.md)、[0014](../adr/0014-signed-mesh-membership.md)、[0015](../adr/0015-origin-identity-and-lan-default-deny.md)；签名格式见 `auth.md`
 
 ## 1. 目标与原则
 
@@ -13,7 +13,7 @@
 3. **签名对象即生效对象**：高风险变更的签名覆盖实际下发的内容，接收方可以独立验证。
 4. **失败可恢复**：执行前保存原状态；验证失败时按步骤逆序回滚。
 
-低风险修改（改名称、标签、阈值；关闭模块；吊销 token 等）不使用变更集，直接修改并记录活动事件。
+低风险修改（改名称、标签、阈值；关闭模块；吊销 token 等）不使用变更集，直接修改并记录活动事件。例外：`ai` 类型 token 的一切写入都经过变更集，由用户批准。
 
 ## 2. 概念
 
@@ -93,8 +93,10 @@
 | `awaiting_approval` → `approved` | 用户 | 批准（高风险需 passkey 签名，签名绑定 `plan_hash`） |
 | `awaiting_approval` → `rejected` / `cancelled` / `expired` | 用户 / 提议方 / Hub | — |
 | `approved` → `applying` | 用户或 Hub | `manual` 模式由用户触发；其他模式自动；已到 `not_before` |
-| `applying` → `verifying` | Hub | 所有步骤执行成功 |
-| `applying` → `rolling_back` | Hub | 某个步骤失败 |
+| `applying` → `verifying` | Hub | 所有步骤执行成功，且有需要主动验证的步骤 |
+| `applying` → `succeeded` | Hub | 所有步骤执行成功，且没有需要主动验证的步骤（M1 的动作以节点回报为准） |
+| `applying` → `failed` | Hub | 某个步骤失败，且没有可回滚的已执行步骤（M1 不触发回滚） |
+| `applying` → `rolling_back` | Hub | 某个步骤失败，且有可回滚的已执行步骤 |
 | `verifying` → `succeeded` | Hub | 所有步骤验证通过 |
 | `verifying` → `rolling_back` | Hub | 验证失败或超时 |
 | `rolling_back` → `rolled_back` / `failed` | Hub | 回滚成功 / 回滚失败（附 `rollback_failed` 条件并发出严重告警） |
@@ -112,13 +114,13 @@
 
 **自动执行策略**：由用户配置，指定哪些提议方、哪些动作类型、哪些目标可以在预演无警告时自动执行，例如"CI 对 stack `web` 的部署"。策略本身的修改是高风险操作。
 
-**AI 提议**：初期一律需要用户批准，不适用自动执行策略；变更集必须填写 `reason`。
+**AI 提议**：`ai` 类型 token 的一切写入（包括低风险修改）都以变更集提出，一律需要用户批准，不适用自动执行策略；变更集必须填写 `reason`。
 
-**降低权限不经过变更集**：关闭模块、吊销 token、禁用设备、吊销节点凭据以外的降权操作，直接执行。吊销节点属于不可撤销操作，仍按高风险处理。
+**降低权限不经过变更集，直接执行**：关闭模块、吊销 token、禁用设备、收窄访问规则（新增 deny、删除 allow）、撤销宣告网段、节点自行退出。例外：吊销节点（`node.remove`）不可撤销，仍按高风险处理。
 
 ## 6. 签名
 
-- 签名对象：变更集的规范化内容，包括 `id`、`plan_hash`、`steps`、`expires_at`，以及需要下发给节点的产物（如节点策略）；
+- 签名对象：`auth.md` 第 11.1 节定义的签名载荷，包括变更集 ID、`plan_hash`（预演结果的哈希，已覆盖全部步骤，即 `status.plan.hash`）、过期时间，以及需要下发给节点的产物（节点策略、设备凭据、宣告网段、访问规则集、部署档位等）；
 - 对于下发给节点的产物，产物本身连同签名一起下发，**节点用用户的 passkey 公钥独立验证**，不信任 Hub；
 - 预演结果改变（`plan_hash` 改变）后，原签名作废；
 - 签名格式、规范化方式和信任锚的分发见 `auth.md`。
@@ -140,6 +142,22 @@ trait Action {
 - 需要节点参与的步骤，经 node ↔ Hub 协议下发，节点回报结果；
 - 同一个目标资源同一时间只能属于一个未结束的变更集；冲突的提议在创建时被拒绝，并返回占用它的变更集 ID。
 
+### 7.1 部署档位
+
+容器可以声明特权、挂载宿主目录、使用宿主网络，所以"能部署任意 stack"就等于拿到节点的 root。为了让中风险的部署不能提升权限，每个节点有一份签名的**部署档位**（`node-policies` 的 `spec.deploy_profile`），列出允许使用的特权：
+
+| 特权项 | 默认 |
+|---|---|
+| `privileged`、宿主 PID / IPC 命名空间 | 不允许 |
+| 宿主网络 | 不允许 |
+| `cap_add`、设备（`devices`） | 不允许 |
+| 挂载宿主路径 | 只允许该 stack 的数据目录 |
+| Docker socket 挂载 | 不允许 |
+| 部署钩子 | 只允许在容器中运行 |
+
+- 预演时，Hub 对照档位给出警告；执行时，nett-node 在部署前再次检查，超出档位就拒绝，不依赖 Hub 的判断；
+- 提高档位（`node.set_deploy_profile`）是高风险操作，需要签名；降低档位直接执行。
+
 ## 8. 回滚
 
 - 每个步骤执行前保存原状态快照；
@@ -149,22 +167,29 @@ trait Action {
 
 ## 9. 动作目录
 
-| 动作类型 | 目标 | 风险 | 可撤销 | 阶段 |
-|---|---|---|---|---|
-| `node.enable_module` | 节点 | 高 | 是 | M1 |
-| `node.remove` | 节点 | 高 | 否 | M1 |
-| `node.upgrade` | 节点 | 中 | 是（回到上一版本） | M1 |
-| `device.add` | 设备 | 高 | 是 | M2 |
-| `access_rule.create` / `update` / `delete` | 访问规则 | 高 | 是 | M2 |
-| `link.set_policy` | 连接 | 中 | 是 | M2 |
-| `node.advertise_routes` | 节点 | 高 | 是 | M2 |
-| `stack.create` / `update` / `delete` | stack | 中 | 是 | M3 |
-| `stack.deploy` | stack | 中 | 是 | M3 |
-| `deployment.rollback` | 部署 | 中 | 是 | M3 |
-| `service.restart` | 服务 | 中 | 不适用 | M3 |
-| `service.stop` / `start` | 服务 | 中 | 是 | M3 |
-| `route.create` / `update` / `delete` | 路由 | 中 | 是 | M3 |
-| `auto_apply_policy.update` | 自动执行策略 | 高 | 是 | M3 |
+| 动作类型 | 目标 | 风险 | 可撤销 | 所需权限范围 | 阶段 |
+|---|---|---|---|---|---|
+| `node.enable_module` | 节点 | 高（metrics 为低） | 是 | `nodes:propose` | M1 |
+| `node.remove` | 节点 | 高 | 否 | `nodes:propose` | M1 |
+| `node.allow_release` | 节点 | 高 | 是 | `nodes:propose` | M1 |
+| `device.add` | 设备 | 高 | 是 | `devices:propose` | M2 |
+| `device_credential.create` | 设备凭据 | 高 | 是 | `devices:propose` | M2 |
+| `access_rule.create` / `update` / `delete`（放宽访问时） | 访问规则 | 高 | 是 | `access-rules:propose` | M2 |
+| `link.set_policy` | 连接 | 中 | 是 | `links:propose` | M2 |
+| `node.advertise_routes` | 节点 | 高 | 是 | `nodes:propose` | M2 |
+| `node.set_roles`（relay、gateway、智能入口） | 节点 | 高 | 是 | `nodes:propose` | M2 |
+| `stack.create` / `update` / `delete` | stack | 中（受部署档位限制） | 是 | `stacks:deploy` | M3 |
+| `stack.deploy` | stack | 中（受部署档位限制） | 是 | `stacks:deploy` | M3 |
+| `deployment.rollback` | 部署 | 中 | 是 | `stacks:deploy` | M3 |
+| `node.set_deploy_profile` | 节点 | 高 | 是 | `nodes:propose` | M3 |
+| `service.restart` | 服务 | 中 | 不适用 | `services:operate` | M3 |
+| `service.stop` / `start` | 服务 | 中 | 是 | `services:operate` | M3 |
+| `route.create`；改变回源目标的 `route.update` | 路由 | 高（会把一个内网端口暴露到公网，并生成 Edge 的访问规则） | 是 | `routes:propose` | M3 |
+| 其他 `route.update`；`route.delete` | 路由 | 中 | 是 | `routes:propose` | M3 |
+| `auto_apply_policy.update` | 自动执行策略 | 高 | 是 | 仅用户会话 | M3 |
+
+- 节点升级不是动作类型：升级经期望状态的 `release` 分区进行，节点只接受更高的版本（`auth.md` 第 12.3 节），属于低风险；降级需要 `node.allow_release` 生成的签名产物；
+- 收窄访问规则、撤销宣告网段、降低部署档位属于降低权限，直接执行，不在本表中。
 
 AI 运维（M4）使用同一套动作类型；需要新增的操作（如调整容器内存上限）作为 `stack.update` 的一种 `payload` 实现，或新增动作类型，不改变流程。
 
@@ -174,7 +199,7 @@ AI 运维（M4）使用同一套动作类型；需要新增的操作（如调整
 |---|---|---|
 | **开启节点模块**（M1） | 1 个步骤 `node.enable_module`；高风险；签名绑定生成的节点策略 | 节点独立验签；节点回报模块已启用 |
 | **CI 部署**（M3） | 1 个步骤 `stack.deploy`；提议方为 CI；`apply_mode = auto`，由自动执行策略放行 | 预演无警告则自动执行；健康检查失败则回滚到上一部署 |
-| **服务迁移到另一节点**（M3） | 3 个步骤：在新节点部署 → 更新路由 → 停止旧节点上的服务 | 任一步失败，逆序回滚；路由切换后验证域名可访问 |
+| **服务迁移到另一节点**（M3） | 3 个步骤：在新节点部署 → 更新路由（改变回源目标，高风险，需要签名）→ 停止旧节点上的服务 | 任一步失败，逆序回滚；路由切换后验证域名可访问 |
 | **AI 调整内存上限**（M4） | 1 个步骤 `stack.update`；提议方为 AI，附原因 | 必须由用户批准；执行后观察一段时间无 OOM |
 | **定时部署**（M3） | `not_before` 设为凌晨 | 批准后等待到时间再执行 |
 | **并发冲突** | 用户和 CI 同时修改同一个 stack | 后提议的一方在创建时被拒绝；或执行前发现 `plan_stale` 而停止 |
@@ -187,12 +212,12 @@ AI 运维（M4）使用同一套动作类型；需要新增的操作（如调整
 |---|---|---|---|
 | 数据结构与全部状态 | ✅（部分状态暂不触发） | — | — |
 | 步骤数量 | 单步骤 | 多步骤 | — |
-| 动作类型 | `node.enable_module`、`node.remove`、`node.upgrade` | 部署、服务、路由、自动执行策略；M2 增加设备、访问规则、连接策略 | 按需新增 |
+| 动作类型 | `node.enable_module`、`node.remove`、`node.allow_release` | 部署、服务、路由、部署档位、自动执行策略；M2 增加设备、设备凭据、访问规则、宣告网段、节点角色、连接策略 | 按需新增 |
 | 预演 | 差异 | 差异 + 影响分析 | — |
-| 批准 | 手动确认、passkey 签名 | 加上自动执行策略 | AI 提议的审批 |
+| 批准 | 手动确认、passkey 签名 | 加上自动执行策略 | `ai` token 的全部写入经变更集审批 |
 | `apply_mode` | `manual`、`on_approval` | 加上 `auto` | — |
 | 验证 | 以节点回报为准 | 主动验证（健康检查、可访问性） | — |
-| 回滚 | 不触发（M1 的动作由节点回报失败即可） | 快照与逆序回滚 | — |
+| 回滚 | 不触发（M1 的动作由节点回报失败即可，经 `applying → failed` 结束） | 快照与逆序回滚 | — |
 | 定时执行 `not_before` | 字段保留 | ✅ | — |
 | 预演过期检测 | ✅ | ✅ | — |
 | 目标冲突检测 | ✅ | ✅ | — |

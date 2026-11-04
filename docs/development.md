@@ -28,7 +28,7 @@ pnpm -C web lint && pnpm -C web test
 ### 基础
 
 - Edition 2024；工具链版本固定在 `rust-toolchain.toml`；`Cargo.lock` 提交。
-- 所有 crate 声明 `#![forbid(unsafe_code)]`。确有必要时，单独模块、逐处注释理由，并在评审中说明。
+- 所有 crate 声明 `#![deny(unsafe_code)]`（不用 `forbid`：`forbid` 不能在内层放开）。确有必要时，只在单独的模块上用 `#[allow(unsafe_code)]` 放开，逐处注释理由，并在评审中说明。
 - clippy 警告视为错误。
 
 ### 错误处理
@@ -66,6 +66,7 @@ pnpm -C web lint && pnpm -C web test
 | nett-node | 空闲 RSS ≤ 5 MB |
 | nett-hub | 稳定运行 ≤ 30–50 MB（数个到数十个节点） |
 | nett-relay | 空闲 RSS ≤ 5 MB；转发流量时的内存有上限 |
+| 数据面进程 | 空闲 RSS ≤ 5 MB；转发缓冲有上限 |
 
 - 依赖使用 `default-features = false`，只开启需要的特性。
 - **新增依赖时说明理由**，并报告对二进制体积的影响（`cargo bloat`）；node 的新依赖还要报告 RSS 变化。
@@ -77,14 +78,15 @@ pnpm -C web lint && pnpm -C web test
 
 这些规则是硬性的，违反即视为 bug：
 
-1. **nett-node 不监听任何公网地址**（局域网和组网地址上的探测应答、DNS 除外）。所有公网监听由独立的低权限进程（nett-relay、Edge）承担；nett-relay 不持有组网私钥。
+1. **nett-node 不监听任何公网地址**：只在组网地址上提供 DNS 和探测应答；局域网地址上的探测应答只在存在局域网直连候选时开启，且不响应未认证的探测。所有公网监听由独立的低权限进程（nett-relay、Edge）承担；用户态 WireGuard 在数据面进程中运行；nett-relay 不持有组网私钥。
 2. **不执行 shell。**调用外部程序（如 `docker compose`、`tailscale`）只能使用白名单内的命令，以参数数组形式传参，永远不用 `sh -c`，参数逐一校验。
-3. **提升权限必须验证用户签名**；node 在应用策略前验证签名和版本号。
+3. **提升权限必须验证用户签名**；node 在应用策略、组网准入材料和部署档位前验证签名和版本号。
 4. **密钥**：本机生成的私钥不离开节点；文件权限 `0600`；内存中使用 `zeroize`；不出现在日志和错误信息中。
 5. **token** 比较使用常量时间算法；服务端只保存哈希。
-6. **TLS 始终校验证书**；node 连接 Hub 时额外校验 Hub 公钥指纹。
+6. **TLS 始终校验证书**（自签证书按 Hub 下发的指纹校验）；node 连接 Hub 时使用入网时固定的 Hub 公钥。
 7. **所有高风险操作写入审计。**
 8. 来自日志、指标等外部数据的内容，一律视为不可信数据，不作为指令处理（AI 场景下尤其重要）。
+9. **源地址转换后的地址不得是回环地址**；需要真实 IP 的服务只信任固定的转发者地址（ADR 0015）。
 
 ## 6. 依赖与许可证
 
