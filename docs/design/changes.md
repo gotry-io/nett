@@ -9,7 +9,7 @@
 变更集是一次修改的完整记录与流程：修改什么、预计产生什么影响、由谁批准、执行与验证结果如何、失败后如何恢复。
 
 1. **所有操作方走同一条路径**：用户、API token、CI、AI 发起的中高风险修改，都经过同样的预演、批准、执行与验证。
-2. **完整设计，最小实现**：数据结构、状态和扩展接口一次定全；各阶段只增加动作类型和流程能力。最小版本是完整版本的严格子集，不做数据迁移。
+2. **完整设计，最小实现**：数据结构、状态和扩展接口在 M1 定好；各阶段主要增加动作类型和流程能力，最小版本是完整版本的子集，尽量不需要迁移。确实需要迁移时，使用带版本号的迁移步骤，并用迁移测试覆盖。
 3. **签名对象即生效对象**：高风险变更的签名覆盖实际下发的内容，接收方可以独立验证。
 4. **失败可恢复**：执行前保存原状态；验证失败时按步骤逆序回滚。
 
@@ -163,7 +163,8 @@ trait Action {
 - 每个步骤执行前保存原状态快照；
 - 验证失败或某步骤失败时，按逆序对已执行的步骤调用 `rollback`；
 - 不可撤销的动作（如吊销节点）在预演时给出警告，并要求放在最后一个步骤；
-- 回滚本身失败时，变更集进入 `failed`，附带 `rollback_failed` 条件，并发出严重告警。
+- 回滚本身失败时，变更集进入 `failed`，附带 `rollback_failed` 条件，并发出严重告警；
+- **涉及签名产物的回滚**：签名产物的版本只增不减，Hub 不能自己签出"旧内容、新版本"的产物，用快照恢复旧版本也会被节点拒绝。因此改变访问范围的变更按**先放宽、后收窄**执行：签名的产物同时允许新旧两种状态（例如路由切换时，Edge 的访问规则同时允许新旧两个回源目标）；验证成功后收窄到新状态，失败时收窄回旧状态。两种收窄都不需要签名，回滚因此不需要再次批准。
 
 ## 9. 动作目录
 
@@ -174,22 +175,23 @@ trait Action {
 | `node.allow_release` | 节点 | 高 | 是 | `nodes:propose` | M1 |
 | `device.add` | 设备 | 高 | 是 | `devices:propose` | M2 |
 | `device_credential.create` | 设备凭据 | 高 | 是 | `devices:propose` | M2 |
-| `access_rule.create` / `update` / `delete`（放宽访问时） | 访问规则 | 高 | 是 | `access-rules:propose` | M2 |
+| `access_rule.create` / `update` / `delete`（放宽访问时，包括标签或服务的变化让规则的展开结果变大） | 访问规则 | 高 | 是 | `access-rules:propose` | M2 |
 | `link.set_policy` | 连接 | 中 | 是 | `links:propose` | M2 |
 | `node.advertise_routes` | 节点 | 高 | 是 | `nodes:propose` | M2 |
 | `node.set_roles`（relay、gateway、智能入口） | 节点 | 高 | 是 | `nodes:propose` | M2 |
-| `stack.create` / `update` / `delete` | stack | 中（受部署档位限制） | 是 | `stacks:deploy` | M3 |
+| `stack.create` / `update` / `delete` | stack | 中（受部署档位限制）；**带机密的 stack 除镜像版本外的改动为高**，签名产物为 `stack_spec`（auth.md 第 13 节） | 是 | `stacks:deploy` | M3 |
 | `stack.deploy` | stack | 中（受部署档位限制） | 是 | `stacks:deploy` | M3 |
 | `deployment.rollback` | 部署 | 中 | 是 | `stacks:deploy` | M3 |
 | `node.set_deploy_profile` | 节点 | 高 | 是 | `nodes:propose` | M3 |
-| `service.restart` | 服务 | 中 | 不适用 | `services:operate` | M3 |
-| `service.stop` / `start` | 服务 | 中 | 是 | `services:operate` | M3 |
+| `service.restart`（仅容器） | 服务 | 中 | 不适用 | `services:operate` | M3 |
+| `service.stop` / `start`（仅容器） | 服务 | 中 | 是 | `services:operate` | M3 |
 | `route.create`；改变回源目标的 `route.update` | 路由 | 高（会把一个内网端口暴露到公网，并生成 Edge 的访问规则） | 是 | `routes:propose` | M3 |
 | 其他 `route.update`；`route.delete` | 路由 | 中 | 是 | `routes:propose` | M3 |
 | `auto_apply_policy.update` | 自动执行策略 | 高 | 是 | 仅用户会话 | M3 |
 
 - 节点升级不是动作类型：升级经期望状态的 `release` 分区进行，节点只接受更高的版本（`auth.md` 第 12.3 节），属于低风险；降级需要 `node.allow_release` 生成的签名产物；
-- 收窄访问规则、撤销宣告网段、降低部署档位属于降低权限，直接执行，不在本表中。
+- 收窄访问规则、撤销宣告网段、降低部署档位属于降低权限，直接执行，不在本表中，执行时留下撤销记录（auth.md 第 11.4 节）；
+- 服务的动作只作用于容器（`runtime = container`）；原生服务只观测（vision.md）。
 
 AI 运维（M4）使用同一套动作类型；需要新增的操作（如调整容器内存上限）作为 `stack.update` 的一种 `payload` 实现，或新增动作类型，不改变流程。
 
@@ -199,7 +201,7 @@ AI 运维（M4）使用同一套动作类型；需要新增的操作（如调整
 |---|---|---|
 | **开启节点模块**（M1） | 1 个步骤 `node.enable_module`；高风险；签名绑定生成的节点策略 | 节点独立验签；节点回报模块已启用 |
 | **CI 部署**（M3） | CI 构建出新镜像后，经 OIDC 提出 1 个步骤 `stack.deploy`；默认 `apply_mode = manual`：控制台显示可升级，用户一键执行。stack 开启了自动部署时为 `auto`，由自动执行策略放行 | 健康检查失败则回滚到上一部署 |
-| **服务迁移到另一节点**（M3） | 3 个步骤：在新节点部署 → 更新路由（改变回源目标，高风险，需要签名）→ 停止旧节点上的服务 | 任一步失败，逆序回滚；路由切换后验证域名可访问 |
+| **服务迁移到另一节点**（M3） | 3 个步骤：在新节点部署 → 更新路由（改变回源目标，高风险，需要签名；签名的 Edge 规则同时允许新旧两个目标）→ 停止旧节点上的服务 | 路由切换后验证域名可访问；成功后把 Edge 规则收窄到新目标，失败时收窄回旧目标并逆序回滚（第 8 节） |
 | **AI 调整内存上限**（M4） | 1 个步骤 `stack.update`；提议方为 AI，附原因 | 必须由用户批准；执行后观察一段时间无 OOM |
 | **定时部署**（M3） | `not_before` 设为凌晨 | 批准后等待到时间再执行 |
 | **并发冲突** | 用户和 CI 同时修改同一个 stack | 后提议的一方在创建时被拒绝；或执行前发现 `plan_stale` 而停止 |

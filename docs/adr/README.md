@@ -18,7 +18,7 @@
 | [0010](0010-ai-via-api-only.md) | AI 只经由 Hub API 接入，node 不含 AI 逻辑 | 已采纳 |
 | [0011](0011-nett-relay.md) | nett-relay：独立的低权限中继与传输入口 | 已采纳 |
 | [0012](0012-single-binary-packaging.md) | 节点侧单一可执行文件，按子命令运行为多个进程 | 已采纳 |
-| [0013](0013-datapath-process.md) | 组网数据面独立于 nett-node | 已采纳 |
+| [0013](0013-mesh-and-transport-processes.md) | 组网进程与传输适配进程 | 已采纳 |
 | [0014](0014-signed-mesh-membership.md) | 组网成员表由签名产物构成 | 已采纳 |
 | [0015](0015-origin-identity-and-lan-default-deny.md) | 回源身份与局域网段默认拒绝 | 已采纳 |
 | [0016](0016-macos-container-member.md) | macOS 以容器内成员加入组网 | 已采纳 |
