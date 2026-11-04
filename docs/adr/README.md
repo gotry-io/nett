@@ -22,6 +22,7 @@
 | [0014](0014-signed-mesh-membership.md) | 组网成员表由签名产物构成 | 已采纳 |
 | [0015](0015-origin-identity-and-lan-default-deny.md) | 回源身份与局域网段默认拒绝 | 已采纳 |
 | [0016](0016-macos-container-member.md) | macOS 以容器内成员加入组网 | 已采纳 |
+| [0017](0017-home-assistant-os-addon.md) | Home Assistant OS 上以加载项运行 | 已采纳 |
 
 模板：
 

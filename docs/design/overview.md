@@ -32,6 +32,7 @@ architecture.md 讲原则，各设计文档各讲一个主题。本文把它们�
 | 智能入口 | 家里常开的 NAS 或小主机 | nett-node、数据面进程（用户态平台）、可选 nett-relay | 内核或用户态 | 宣告局域网段；路由器映射端口后为 `public` |
 | 局域网主机 | 家里的其他机器 | 可选 nett-node（metrics、deploy，不开 mesh） | 经智能入口 | 无需安装组网软件 |
 | macOS 主机 | Mac | 原生 nett-node（metrics、deploy）+ 容器内成员（mesh） | 容器内成员，内核 WireGuard（ADR 0016） | 同一台主机对应两个节点身份 |
+| HAOS 设备 | 运行 Home Assistant OS 的设备 | 加载项内的 nett-node（metrics、mesh），可选 nett-relay | 内核 WireGuard（ADR 0017） | 可做智能入口；deploy、ingress 不可用 |
 | 设备 | 手机 | 标准 WireGuard 客户端 | 双路径（ADR 0008） | 不运行 nett |
 
 ### 3.2 进程、权限与密钥
