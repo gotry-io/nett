@@ -4,7 +4,7 @@
 
 ## 项目
 
-nett：单用户、自托管的系统，把分散的机器和 AI agent 连成一张网。由 `nett-hub`（中枢）、每台机器上的 `nett-node`、可被外部连入的节点上的 `nett-relay`（中继与传输入口）、入口节点上的 Edge（首期为 Caddy）和 Web 控制台组成。组网自研：WireGuard 负责加密，nett 路径层负责选路和自动切换。命令行为 `nett`。
+nett：开源、自托管、单用户的基础设施，把分散的机器和 AI agent 连成一张网。由 `nett-hub`（中枢）、每台机器上的 `nett-node`、可被外部连入的节点上的 `nett-relay`（中继与传输入口）、入口节点上的 Edge（首期为 Caddy）和 Web 控制台组成。组网自研：WireGuard 负责加密，nett 路径层负责选路和自动切换。命令行为 `nett`。
 
 **当前阶段：P0（设计）**，尚无代码。进度见 `docs/roadmap.md`。
 

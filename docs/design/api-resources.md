@@ -302,6 +302,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 
 | 字段 | 说明 |
 |---|---|
+| `spec.source` | `ping`（脚本按时请求 `ping_url`）/ `systemd_timer`（由节点观察本机某个定时器的运行结果，无需改脚本） |
 | `spec.period_secs`、`spec.grace_secs` | 预期周期和宽限时间 |
 | `spec.related` | 关联的节点或服务（可选） |
 | `status.phase` | `new` / `up` / `late` / `down` |
@@ -314,7 +315,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 
 | 字段 | 说明 |
 |---|---|
-| `spec.kind` | `telegram` / `email` / `webhook` / `push`（移动端 App，M6） |
+| `spec.kind` | `telegram` / `email` / `webhook` |
 | `spec.config` | 渠道配置；凭据类字段只写 |
 | `status.last_delivery_at`、`status.last_error` | — |
 
@@ -354,7 +355,8 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | 字段 | 说明 |
 |---|---|
 | `status.node_id` | 所在节点 |
-| `status.runtime` | `container` / `process` |
+| `status.runtime` | `container` / `process` / `systemd`（原生服务只观测，不部署） |
+| `status.systemd` | 原生服务所属的 systemd 单元与状态，以及相关的定时器和最近一次运行结果 |
 | `status.container` | 容器名、镜像、镜像摘要 |
 | `status.ports` | 监听的端口和协议 |
 | `status.health` | 健康状态 |
@@ -435,7 +437,7 @@ GET /api/v1/metrics?series=host.mem.used&node=edge-us-1&from=…&to=…
 | `spec.source` | Git 仓库、路径、引用 |
 | `spec.env` | 环境变量。敏感值由浏览器用目标节点的公钥加密后提交，Hub 只保存密文（`auth.md` 第 13 节）；读取时只返回是否已设置 |
 | `spec.hooks` | 部署前后的钩子（白名单内的命令或容器任务） |
-| `spec.auto_deploy` | CI 推送镜像后是否自动部署 |
+| `spec.auto_deploy` | CI 通知有新版本后是否自动部署；**默认关闭**，即在控制台手动一键部署 |
 | `status.current_deployment_id` | 当前生效的部署 |
 | `status.health` | 整体健康状态 |
 
