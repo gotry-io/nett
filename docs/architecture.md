@@ -44,7 +44,7 @@
 
 ## 3. nett-node
 
-单进程，tokio 单线程运行时，**直接运行在系统上，不放进容器**：它要读取宿主上的全部进程、systemd 服务与定时器、SMART 与 RAID、温度、系统日志，还要通过 netlink 配置内核 WireGuard 和 nftables。放进容器就得开特权、共享宿主网络和进程空间、挂载大量宿主目录，实际上等于原生运行，而且更脆弱。macOS 的容器内成员只负责组网，是例外（ADR 0016）。
+单进程，tokio 单线程运行时，**直接运行在系统上，不放进容器**：它要读取宿主上的全部进程、systemd 服务与定时器、SMART 与 RAID、温度、系统日志，还要通过 netlink 配置内核 WireGuard 和 nftables。放进容器就得开特权、共享宿主网络和进程空间、挂载大量宿主目录，实际上等于原生运行，而且更脆弱。macOS 的容器内成员只负责组网，是例外（ADR 0016）；Home Assistant OS 不允许直接安装程序，nett 以加载项运行、能力相应受限，是另一个例外（ADR 0017）。
 
 nett-node 由以下部分组成：
 
@@ -296,6 +296,7 @@ Hub 是控制面，node 是执行者：
 |---|---|---|
 | **`nett`** | 一个可执行文件，按子命令运行为不同角色：命令行、`nett node`、`nett relay`、`nett datapath` | 所有节点 |
 | **`nett-hub`** | Hub 与内嵌的 Web 前端 | 只在 Hub 主机 |
+| **HA 加载项** | `nett` 的容器镜像与加载项仓库（ADR 0017） | 运行 Home Assistant OS 的设备 |
 
 代码层面 node、relay、cli 仍是独立的 crate，最终链接成同一个可执行文件。这样安装和升级只有一次、版本不会错配；多个进程映射同一个文件，代码页由系统共享，总内存更低。安全隔离依靠运行用户和权限，与是否同一个文件无关。
 
@@ -308,7 +309,7 @@ Hub 是控制面，node 是执行者：
 | `nett-datapath` | Linux 上为专用低权限用户，不持有任何密钥；用户态平台上为能创建 TUN 的身份，持有组网私钥 | 需要 TLS 传输或用户态 WireGuard 时，由 nett-node 启停 |
 | `nett-hub` | 专用的低权限用户；也可以用容器运行（Hub 不需要访问宿主） | Hub 主机 |
 
-服务管理：Linux 使用 systemd（设置内存上限），macOS 使用 launchd，Synology DSM 使用开机任务（以后提供套件包）。
+服务管理：Linux 使用 systemd（设置内存上限），macOS 使用 launchd，Synology DSM 使用开机任务（以后提供套件包），Home Assistant OS 使用加载项（ADR 0017）。
 
 ### 13.3 安装
 
@@ -343,3 +344,37 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <一次性 
 | `nett leave` | 退出组网并卸载，通知 Hub 把本节点标记为已移除（降低权限，不需要签名） |
 | `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
 | `nett trust reset` | 恢复密钥也丢失时，重置本机的信任锚（需要 root） |
+
+## 14. 支持的平台与外部对接
+
+### 14.1 平台（首个版本）
+
+| 平台 | 运行方式 | 组网 | 可用模块 |
+|---|---|---|---|
+| Linux（Debian、Ubuntu，以及其他内核 ≥ 5.6 的发行版） | systemd，原生 | 内核 WireGuard | 全部 |
+| Linux（旧内核） | systemd，原生 | 用户态 WireGuard | 全部 |
+| Synology DSM 7.x | 开机任务（以后提供套件包），原生 | 用户态 WireGuard | metrics、mesh、relay；deploy 需要安装 Container Manager |
+| macOS（OrbStack、Docker Desktop） | launchd，原生；组网由容器内成员承担（ADR 0016） | 容器内成员，内核 WireGuard | metrics、deploy；mesh 在容器内成员中 |
+| Home Assistant OS | 加载项（ADR 0017） | 内核 WireGuard | metrics（经 Supervisor 接口，部分受限）、mesh（可做智能入口）、relay |
+| 手机 | 标准 WireGuard 客户端 | — | — |
+
+- 其他平台标为"未测试"，不承诺支持；能力探测会说明缺少什么、降级成什么；
+- 运行在普通 Linux 上的 Home Assistant（Container、Core 安装方式）按 Linux 处理。
+
+### 14.2 外部对接（首批）
+
+| 类别 | 首批支持 | 扩展方式 |
+|---|---|---|
+| CI 身份 | GitHub Actions（OIDC） | 其他签发 OIDC 令牌的 CI（GitLab、Gitea 等）按需增加 |
+| 告警渠道 | Telegram、邮件、webhook | 新增渠道类型 |
+| 证书验证用的 DNS 服务商 | 阿里云 DNS、Cloudflare | 按需增加 |
+| 容器运行时 | Docker（包括 OrbStack、Docker Desktop） | — |
+| Edge | Caddy | 新增翻译后端，例如 Nginx（ADR 0009） |
+
+### 14.3 语言
+
+Web 界面、命令行输出、API 错误信息、告警通知，以及面向用户的文档（README、安装、使用与排障手册），都提供中文和英文。设计文档和 ADR 以中文为准，只维护一份（development.md 第 12 节）。
+
+### 14.4 遥测
+
+默认不收集、不上报任何使用数据。

@@ -19,16 +19,17 @@ P0 立项 → M1 观测 → M2 组网 → M3 部署与入口 → M4 MCP 与 AI �
 - [x] 设计：整体技术方案与全文档复核（草案；决定见 ADR 0013–0016）
 - [ ] Rust workspace 与 Web 骨架、CI（clippy、测试、cargo-deny、生成文件检查）、发布签名
 - [ ] 许可证文件：MIT 或 Apache-2.0 双许可（已决定）
+- [x] 英文版 README
 
 ## M1：观测
 
-- Hub 与 nett-node（原生运行）：入网、能力探测、资产清单（机器、服务、对外监听的端口）；以替代轻量监控（如 Beszel）为准的指标：主机 CPU、内存、磁盘、网络、温度，容器指标，平台特有指标（如 NAS 的 SMART、RAID）；原生服务的观测（进程、systemd 服务与定时器）；node 经公网 HTTPS 连接 Hub，不依赖组网
+- Hub 与 nett-node（原生运行）：入网、能力探测、资产清单（机器、服务、对外监听的端口）；以替代轻量监控（如 Beszel）为准的指标：主机 CPU、内存、磁盘、网络、温度，容器指标，平台特有指标（如 NAS 的 SMART、RAID）；原生服务的观测（进程、systemd 服务与定时器）；node 经公网 HTTPS 连接 Hub，不依赖组网。首批平台：Linux、Synology DSM、macOS、Home Assistant OS（加载项，指标经 Supervisor 接口读取）
 - **线路测量**：节点之间、节点到关键目标的延迟、丢包、抖动，形成线路质量矩阵，为 M2 选路积累数据（由节点主动发起，不新增监听）
 - 认证：passkey 登录、恢复密钥与备份密钥、API token、node 密钥与准入证明、信任锚；变更集最小版本与浏览器内 passkey 签名
-- 告警：阈值、OOM 与重启、节点离线、心跳缺失（URL 心跳，以及 systemd 定时器没有按时成功）
-- Web 控制台：节点、服务、指标与历史图表、线路质量、告警
-- 完整的 OpenAPI；`nett status`、`nett doctor`、`nett leave`；排障手册
-- 安装：Hub 安装脚本与一次性初始化，生成 Hub 主机的初始 Edge 配置；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew；自动升级与回滚（项目发布签名、防降级）
+- 告警：阈值、OOM 与重启、节点离线、心跳缺失（URL 心跳，以及 systemd 定时器没有按时成功）；渠道为 Telegram、邮件、webhook
+- Web 控制台：节点、服务、指标与历史图表、线路质量、告警；中英双语
+- 完整的 OpenAPI；`nett status`、`nett doctor`、`nett leave`，命令行输出中英双语；排障手册（中英双语）
+- 安装：Hub 安装脚本与一次性初始化，生成 Hub 主机的初始 Edge 配置；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew；Home Assistant 加载项仓库；自动升级与回滚（项目发布签名、防降级）
 - 可用性：node 本地缓存配置和指标；Hub 外部死信开关；Hub 备份（含身份私钥，加密后由其他节点拉取）与重建手册
 
 **验收**：
@@ -40,7 +41,7 @@ P0 立项 → M1 观测 → M2 组网 → M3 部署与入口 → M4 MCP 与 AI �
 
 ## M2：组网
 
-- 会话层：Linux 内核 WireGuard；DSM 和旧内核使用 Rust 用户态实现，运行在数据面进程中；macOS 以容器内成员加入；成员准入验证（签名的成员表、网段、访问规则）
+- 会话层：Linux 内核 WireGuard；DSM 和旧内核使用 Rust 用户态实现，运行在数据面进程中；macOS 以容器内成员加入；Home Assistant OS 加载项可做智能入口；成员准入验证（签名的成员表、网段、访问规则）
 - 路径层：局域网直连、公网直连、经单个中继；持续测量、打分、防抖、快速切换；节点离线时自主切换
 - 传输：UDP；TCP/TLS 443 兜底（由数据面进程适配）
 - nett-relay：单端口转发加密数据包、接收 TCP/TLS 传输、探测应答、HTTPS CONNECT 代理（入口节点上仅 HTTP/2）
@@ -68,6 +69,7 @@ P0 立项 → M1 观测 → M2 组网 → M3 部署与入口 → M4 MCP 与 AI �
 - 变更集补全：多步骤、影响分析、自动执行策略、主动验证与回滚
 - 部署档位；机密用节点公钥加密下发
 - 只读的容器日志
+- 外部对接：CI 身份首批为 GitHub Actions；证书验证用的 DNS 服务商首批为阿里云 DNS、Cloudflare
 - 从现有工具导入 stack 和路由
 
 **验收**：

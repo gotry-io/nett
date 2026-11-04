@@ -3,7 +3,7 @@
 | 文档 | 内容 |
 |---|---|
 | [vision.md](vision.md) | 要解决的问题、目标、设计约束、需求优先级、不做什么 |
-| [architecture.md](architecture.md) | 整体架构、角色边界、node 模块、认证、组网、手机接入、入口路由、AI 接入、技术栈、代码组织 |
+| [architecture.md](architecture.md) | 整体架构、角色边界、node 模块、认证、组网、手机接入、入口路由、AI 接入、技术栈、代码组织、支持的平台与外部对接 |
 | [roadmap.md](roadmap.md) | 各阶段内容与验收标准 |
 | [adr/](adr/README.md) | 架构决策记录：每个关键决定的背景、理由和放弃的方案 |
 | [design/](design/README.md) | 各阶段的详细设计文档；[overview.md](design/overview.md) 把全部文档串成整体技术方案 |

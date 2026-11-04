@@ -106,6 +106,8 @@
 }
 ```
 
+`code` 稳定不变，供程序判断；`title` 和 `detail` 按请求的 `Accept-Language`（或用户的 `locale`）返回中文或英文。
+
 ### 2.7 敏感字段
 
 - 密钥、token、私钥只在创建时返回一次，之后只返回前缀或指纹；
@@ -224,6 +226,7 @@ POST /api/v1/<资源>/{id}/actions/<动作>
 | `status.phase` | `pending`（已创建入网 token，尚未连接）/ `online` / `offline` / `removed` |
 | `status.version` | nett 版本 |
 | `status.platform` | `os`、`distro`、`kernel`、`arch` |
+| `status.install_method` | `native` / `container_member`（macOS 的容器内成员）/ `haos_addon`（Home Assistant OS 加载项）；控制台据此只显示可用的模块 |
 | `status.capabilities` | `wireguard_kernel`、`tun`、`docker`、`root` 等探测结果 |
 | `status.hard_deny` | 节点本地硬性禁止的模块（只读，由 node 上报） |
 | `status.modules` | 每个模块的状态：`{ name, enabled, state, message }` |

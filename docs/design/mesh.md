@@ -260,6 +260,7 @@ WireGuard 会根据最近一次通过认证的数据包的来源，自动更新�
 | Linux（内核 ≥ 5.6） | 内核 WireGuard（netlink） | nftables | 主要目标；TLS 传输由数据面进程适配 |
 | Linux（旧内核）、Synology DSM | 数据面进程：Rust 用户态实现 + TUN | 数据面进程 | DSM 需要 root 才能使用 TUN |
 | macOS | 容器内成员：Docker Linux 虚拟机中的内核 WireGuard（ADR 0016） | nftables（虚拟机内） | 宿主上的原生 nett-node 负责 metrics、deploy；原生 utun 方案推迟 |
+| Home Assistant OS | 加载项内运行，使用 HAOS 内核自带的 WireGuard（ADR 0017） | 宿主网络上的包过滤（以能力探测为准） | 可做智能入口、移动网关、中继 |
 | 手机 | 标准 WireGuard 客户端 | 由移动网关和智能入口执行 | 见第 13 节 |
 
 用户态 WireGuard 的具体实现在 M2 开工前评估选定，M2 只需覆盖 DSM 和旧内核的 Linux。
