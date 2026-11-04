@@ -8,6 +8,7 @@
 2. **架构变化写 ADR**：影响角色边界、协议、存储、安全模型、核心依赖的决定，新增一份 `docs/adr/`，再同步 `architecture.md` 和 `roadmap.md`。
 3. **小步提交**：一次提交只做一件事，提交前所有检查通过。
 4. **用证据说明完成**：涉及资源占用的改动附上测量数据；涉及行为的改动附上测试。
+5. **按开源项目设计**：设计和代码不得依赖特定的云厂商、地区或网络环境；环境差异通过能力探测和测量处理，不写死。
 
 ## 2. 命令
 
@@ -90,7 +91,8 @@ pnpm -C web lint && pnpm -C web test
 
 ## 6. 依赖与许可证
 
-- 允许：MIT、Apache-2.0、BSD-2/3-Clause、ISC、Zlib、Unicode、MPL-2.0。
+- **项目本身**：开源，采用 MIT 或 Apache-2.0 双许可（Rust 生态的惯例）。
+- 依赖允许：MIT、Apache-2.0、BSD-2/3-Clause、ISC、Zlib、Unicode、MPL-2.0。
 - 禁止：GPL、AGPL、LGPL 及其他传染性许可证；由 `cargo deny` 强制检查。
 - 安全公告由 `cargo deny check advisories` 检查，CI 中失败即阻止合并。
 
