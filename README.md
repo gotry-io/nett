@@ -6,7 +6,7 @@
 
 - GoTry 旗下项目 · 主页 `nett.gotry.io`（建设中）
 - 命令行：`nett`
-- 服务：`nett-hub`、`nett-node`
+- 服务：`nett-hub`、`nett-node`、`nett-relay`、`nett-datapath`
 - 状态：**设计阶段**，尚无可用代码
 
 ## 文档
