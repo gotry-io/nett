@@ -18,7 +18,7 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - [x] 设计：组网（会话层、路径层、传输、中继、选路与切换）（草案）
 - [x] 设计：总体设计（architecture.md，草案）
 - [x] Rust workspace 骨架（`crates/`）与 CI（格式、clippy、测试、cargo-deny，在 GitHub Actions 上通过）；生成文件检查随第一个生成文件加入；Web 骨架在 M1 与 Hub 一起搭
-- [ ] 发布签名：生成主备两把钥匙并离线备份，发布公钥作为构建参数，CI 发布工作流自动签名（签名任务与构建分开，ADR 0020）
+- [x] 发布签名钥匙：主备两把已生成，公钥在 `keys/`；主私钥在 CI 的 `release` 环境中，只对 `v*` 版本标签可用；版本标签受保护（ADR 0020）
 - [x] 许可证文件：MIT 或 Apache-2.0 双许可（`LICENSE-MIT`、`LICENSE-APACHE`）
 - [x] 英文版 README
 - [x] 范围：nett 只做组网（ADR 0019）
@@ -31,7 +31,7 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - **组网离不开的基础**：
   - Hub 与 nett-node（原生运行）：入网、能力探测（WireGuard、TUN、包过滤、能否被外部连入）；node 经公网 HTTPS 连接 Hub，不依赖组网；node 把 `trust` 和 `mesh` 分区转交组网进程
   - 认证：passkey 登录、恢复密钥与备份密钥、API token、node 密钥与准入证明、信任锚；变更集最小版本与浏览器内 passkey 签名
-  - 安装：Hub 安装脚本与一次性初始化，生成 Hub 前的反向代理配置（默认 Caddy，包括按 SNI 转交 nett-relay 的一段）；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew（macOS）；Home Assistant 加载项仓库；自动升级与回滚（项目发布签名、防降级）
+  - 安装：Hub 安装脚本与一次性初始化，生成 Hub 前的反向代理配置（默认 Caddy，包括按 SNI 转交 nett-relay 的一段）；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew（macOS）；Home Assistant 加载项仓库；发布工作流（CI 构建，单独的签名任务自动签名）与发布公钥作为构建参数；自动升级与回滚（项目发布签名、防降级）
   - 可用性：node 和组网进程在本地保存配置；Hub 备份（含身份私钥，加密后由其他节点拉取）与重建手册
 - 组网进程独立于 nett-node 运行，TLS 传输适配单独以低权限运行（ADR 0013）；核心逻辑与平台无关，数据面按平台分后端，为 M3 的客户端预留（ADR 0018）
 - 会话层：Linux 内核 WireGuard；DSM 和旧内核使用 Rust 用户态实现，运行在组网进程中；macOS 原生加入（用户态 WireGuard + utun；铺开前先实测与代理类 VPN 应用共存），需要访客真实 IP 的容器服务另用容器内成员；Home Assistant OS 加载项可做智能入口；成员准入验证（签名的成员表、网段、访问规则）
