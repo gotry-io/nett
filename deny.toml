@@ -1,0 +1,33 @@
+# 依赖的许可证、安全公告、重复依赖与来源检查（CLAUDE.md "技术栈"）
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "MPL-2.0",
+]
+confidence-threshold = 0.9
+# 允许清单是政策，不要求每一项当前都有依赖用到
+unused-allowed-license = "allow"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

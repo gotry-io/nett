@@ -17,7 +17,7 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - [x] 设计：node ↔ Hub 协议（草案）
 - [x] 设计：组网（会话层、路径层、传输、中继、选路与切换）（草案）
 - [x] 设计：总体设计（architecture.md，草案）
-- [ ] Rust workspace、CI（clippy、测试、cargo-deny、生成文件检查）；Web 骨架在 M1 与 Hub 一起搭
+- [x] Rust workspace 骨架（`crates/`）与 CI（格式、clippy、测试、cargo-deny，在 GitHub Actions 上通过）；生成文件检查随第一个生成文件加入；Web 骨架在 M1 与 Hub 一起搭
 - [ ] 发布签名：生成主备两把钥匙并离线备份，发布公钥作为构建参数，CI 发布工作流自动签名（签名任务与构建分开，ADR 0020）
 - [x] 许可证文件：MIT 或 Apache-2.0 双许可（`LICENSE-MIT`、`LICENSE-APACHE`）
 - [x] 英文版 README

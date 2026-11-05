@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gotry-io/nett"
+publish = false
+
+# 每个 crate 用 `[lints] workspace = true` 继承这里的规则（CLAUDE.md "代码规则"）
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+dbg_macro = "deny"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
