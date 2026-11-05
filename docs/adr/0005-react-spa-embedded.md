@@ -5,12 +5,12 @@
 
 ## 背景
 
-Web 是首要的交互入口。控制台是单用户的管理后台，数据密集（表格、实时图表、拓扑图、表单、审批流程），只调用对外 API。
+Web 是首要的交互入口。控制台是单用户的组网控制台，数据密集（表格、拓扑图、表单、审批流程），只调用对外 API。
 
 ## 决定
 
 - React + Vite 构建纯静态 SPA，不使用服务端渲染；
-- TanStack Router / Query / Table、shadcn/ui + Tailwind、uPlot（时序图）、xyflow（拓扑图）；
+- TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow（拓扑图）；
 - API 客户端由 OpenAPI 生成（openapi-typescript + openapi-fetch）；
 - 构建产物在构建时预压缩，用 rust-embed 嵌入 Hub 二进制。
 
@@ -24,7 +24,7 @@ Web 是首要的交互入口。控制台是单用户的管理后台，数据密�
 ## 放弃的方案
 
 - **Svelte / SvelteKit**：体积更小，但组件生态较小。
-- **HTMX + 服务端模板**：页面接口与 JSON API 需要各写一套，与 API 优先冲突；实时图表和 WebAuthn 交互不便。
+- **HTMX + 服务端模板**：页面接口与 JSON API 需要各写一套，与 API 优先冲突；WebAuthn 交互不便。
 - **Rust 编译到 WASM（Leptos、Dioxus）**：全栈一种语言，但生态不成熟，WASM 体积大，迭代慢。
 
 ## 影响

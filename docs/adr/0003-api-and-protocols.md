@@ -5,18 +5,18 @@
 
 ## 背景
 
-Hub 有两类对端：面向用户和工具的客户端（Web、脚本、以后的 MCP 和移动端），以及大量常驻的 node。
+Hub 有两类对端：面向用户和工具的客户端（Web、脚本、以后的移动端），以及大量常驻的 node。
 
 ## 决定
 
-- **对外 API**：REST + JSON，资源化设计；实时数据用 SSE；从 Hub 的 Rust 代码（utoipa）生成 OpenAPI 3.1，作为唯一来源，客户端由它生成。
+- **对外 API**：REST + JSON，资源化设计；事件和状态的实时推送用 SSE；从 Hub 的 Rust 代码（utoipa）生成 OpenAPI 3.1，作为唯一来源，客户端由它生成。
 - **node ↔ Hub**：node 主动建立 WebSocket over TLS 长连接，消息用 Protobuf（prost）。
 
 ## 理由
 
-- REST + OpenAPI 对所有客户端通用，并能生成 TypeScript、Swift 客户端和 MCP 工具定义。
-- 所有客户端共用同一套 API，界面能做的事 API 都能做，这是 AI 接入的前提。
-- node 主动连接，节点无需开放入站端口；Protobuf 适合高频指标上报，字段演进安全。
+- REST + OpenAPI 对所有客户端通用，并能生成 TypeScript、Swift 客户端。
+- 所有客户端共用同一套 API，界面能做的事 API 都能做；以后另做的观测和管理项目也经 API 对接（ADR 0019）。
+- node 主动连接，节点无需开放入站端口；Protobuf 消息紧凑，字段演进安全。
 - 内外协议分开，内部协议可以自由演进而不影响公开 API。
 
 ## 放弃的方案
