@@ -15,7 +15,7 @@
   - `nett-transport`：按需运行的低权限传输适配进程，UDP 不可用时把流量转成 TLS
   - `nett-relay`：能被外部连入的节点上的中继与公网传输入口
 - 状态：**设计阶段**，尚无可用代码
-- 许可证：MIT 或 Apache-2.0（双许可）
+- 许可证：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)（双许可，任选其一）
 
 ## 文档
 
@@ -24,4 +24,5 @@
 - [路线图](docs/roadmap.md)：各阶段内容与验收标准
 - [架构决策记录](docs/adr/README.md)
 - [设计文档](docs/design/README.md)
+- [安全问题报告](SECURITY.md)
 - [开发规则](CLAUDE.md)：安全边界、编码规范与提交约定（也供 AI 编码助手使用）

@@ -15,7 +15,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
   - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
   - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
 - Status: **design phase**, no usable code yet
-- License: MIT or Apache-2.0 (dual-licensed)
+- License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
 
 ## Documentation
 
@@ -26,4 +26,5 @@ Design documents are written in Chinese, which is the source of truth. User-faci
 - [Roadmap](docs/roadmap.md): milestones and acceptance criteria
 - [Architecture decision records](docs/adr/README.md)
 - [Design documents](docs/design/README.md)
+- [Security policy](SECURITY.md)
 - [Development rules](CLAUDE.md): security boundaries, coding conventions and commit format (also used by AI coding assistants)
