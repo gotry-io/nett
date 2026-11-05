@@ -283,6 +283,7 @@ nett/
 │   ├── nett-relay/
 │   └── nett-cli/       # nett 命令
 ├── web/                # React SPA；src/api 由 OpenAPI 生成
+├── keys/               # 发布签名公钥（ADR 0020）
 └── docs/
 ```
 
