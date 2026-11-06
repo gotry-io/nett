@@ -25,7 +25,7 @@ use crate::prober::{Incoming, Outgoing, Prober};
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
 pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
 /// 读取各对端状态（流量、endpoint）的间隔：endpoint 被漫游改掉后在这个时间内纠正（第 8.3 节）。
-const STATS_INTERVAL: Duration = Duration::from_millis(500);
+const STATS_INTERVAL: Duration = Duration::from_millis(100);
 
 pub struct Engine<D> {
     node_id: NodeId,

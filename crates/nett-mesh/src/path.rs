@@ -177,6 +177,8 @@ pub enum SwitchReason {
     BetterType,
     /// 同类型的更优路径。
     BetterScore,
+    /// 当前中继仍能应答探测而隧道不通：它丢了这条连接的索引，在同一中继上重新握手（第 8.4 节）。
+    RelayLostSession,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -219,6 +221,8 @@ pub struct PeerPaths {
     phase: Phase,
     /// 当前路径切换以来收到过隧道内应答。
     tunnel_established: bool,
+    /// 这次故障中已经在同一中继上重新握手过一次。
+    rehandshake_tried: bool,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
     seq: u32,
@@ -251,6 +255,7 @@ impl PeerPaths {
             last_tunnel_probe: None,
             phase: Phase::Normal,
             tunnel_established: false,
+            rehandshake_tried: false,
             high_loss_since: None,
             better_since: None,
             seq: 0,
@@ -290,6 +295,7 @@ impl PeerPaths {
         self.tunnel
             .record_reply(now.saturating_duration_since(sent));
         self.tunnel_established = true;
+        self.rehandshake_tried = false;
         self.phase = Phase::Normal;
     }
 
@@ -355,8 +361,10 @@ impl PeerPaths {
                         next: now + BURST_SPACING,
                         since: now,
                     };
+                    // 当前路径经中继时也探测这个中继：它若还能应答，说明是它丢了这条连接的索引
+                    let current_is_relay = self.current_kind() == PathKind::Relay;
                     for index in 0..self.candidates.len() {
-                        if index != self.current {
+                        if index != self.current || current_is_relay {
                             actions.extend(self.probe_candidate(index, now));
                         }
                     }
@@ -451,6 +459,23 @@ impl PeerPaths {
             && sent >= BURST_COUNT
             && self.tunnel_outstanding.is_empty()
         {
+            let current = &self.candidates[self.current];
+            if current.kind == PathKind::Relay
+                && !self.rehandshake_tried
+                && current.last_reply.is_some_and(|t| t >= since)
+            {
+                self.rehandshake_tried = true;
+                let route = current.route;
+                self.tunnel = PathStats::seeded(self.tunnel.rtt_ms);
+                self.tunnel_outstanding.clear();
+                self.phase = Phase::Normal;
+                self.high_loss_since = None;
+                return Some(Action::Switch {
+                    to: route,
+                    rehandshake: true,
+                    reason: SwitchReason::RelayLostSession,
+                });
+            }
             let action = self.fail_over(now, since, SwitchReason::Unreachable);
             if action.is_none() {
                 // 没有刚测通的候选：保持现状，重新开始一轮疑似故障，再探测全部候选
@@ -609,6 +634,8 @@ mod tests {
         sent: Vec<u32>,
         /// 候选探测能通，但隧道内的流量不通（例如 WireGuard 握手失败）。
         tunnel_broken: Vec<bool>,
+        /// 在这条路径上重新握手后隧道恢复（中继丢了索引的情形）。
+        fix_on_rehandshake: bool,
         /// (送达时刻, 是否隧道内, 下标, 序号)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
@@ -625,6 +652,7 @@ mod tests {
                 drop_every: vec![0; n],
                 sent: vec![0; n],
                 tunnel_broken: vec![false; n],
+                fix_on_rehandshake: true,
                 inflight: Vec::new(),
                 switches: Vec::new(),
             }
@@ -670,6 +698,10 @@ mod tests {
                             reason,
                         } => {
                             self.switches.push((now, to, rehandshake, reason));
+                            if rehandshake && self.fix_on_rehandshake {
+                                let i = self.paths.current;
+                                self.tunnel_broken[i] = false;
+                            }
                             // 切换后，尚在途中的旧路径探测作废
                             self.inflight.retain(|f| !f.1);
                         }
@@ -827,6 +859,51 @@ mod tests {
         assert!(
             waits.last().is_some_and(|w| *w >= Duration::from_secs(40)),
             "{waits:?}"
+        );
+    }
+
+    #[test]
+    fn rehandshakes_on_a_relay_that_lost_the_session() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(10));
+        // 中继 1 重启后丢了索引：探测照常应答，隧道不通，直到重新握手
+        sim.tunnel_broken[0] = true;
+        let lost = sim.now;
+        sim.run(Duration::from_secs(6));
+        let (at, to, rehandshake, reason) = sim.switches[0];
+        assert_eq!(
+            (to, rehandshake, reason),
+            (relay(1), true, SwitchReason::RelayLostSession)
+        );
+        assert!(at.saturating_duration_since(lost) <= Duration::from_millis(3600));
+        // 重新握手之后中继 1 又通了，留在中继 1
+        sim.switches.clear();
+        sim.run(Duration::from_secs(30));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        assert_eq!(sim.paths.current(), relay(1));
+    }
+
+    #[test]
+    fn moves_on_when_rehandshaking_the_same_relay_does_not_help() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(10));
+        // 中继 1 到对端的那一段坏了：中继本身能应答，重新握手也无济于事
+        sim.tunnel_broken[0] = true;
+        sim.fix_on_rehandshake = false;
+        sim.run(Duration::from_secs(10));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(
+            reasons,
+            [
+                (relay(1), SwitchReason::RelayLostSession),
+                (relay(2), SwitchReason::Unreachable)
+            ]
         );
     }
 
