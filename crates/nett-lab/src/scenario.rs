@@ -2081,6 +2081,22 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         v.sort_unstable();
         v[v.len() / 2]
     };
+    // 对照：组网进程仍停着，只在 b 上单独打开接收探测用的原始套接字与过滤器
+    let me = std::env::current_exe().context("locating nett-lab")?;
+    let raw = spawn_in(&ns_b, &me, ["raw-listen"], &out.join("raw-listen.log"))?;
+    lab.helpers.push(raw);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut raw_only: Vec<u64> = Vec::new();
+    for i in 0..3 {
+        raw_only.push(iperf(&mut lab, b.mesh_ipv4, out, &format!("raw-only-{i}"))?);
+    }
+    report.record(
+        "wgport:throughput-raw-socket-only",
+        format!(
+            "median {} kbit/s ({raw_only:?})",
+            median(&mut raw_only.clone())
+        ),
+    );
     let (w, wo) = (median(&mut with), median(&mut without));
     report.check(
         "wgport:throughput-unaffected",

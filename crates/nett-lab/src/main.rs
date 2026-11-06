@@ -98,6 +98,7 @@ fn run() -> anyhow::Result<bool> {
         }
         ["tcp-source"] => measure::tcp_source(to.context(USAGE)?).map(|()| true),
         ["forge"] => measure::forge(to.context(USAGE)?, 300).map(|()| true),
+        ["raw-listen"] => measure::raw_listen(41820).map(|()| true),
         ["tcp-sink"] => {
             measure::tcp_sink(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
         }
