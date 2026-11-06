@@ -18,7 +18,7 @@ architecture.md 第 2 节要求 Hub 和 node 都停止时组网照常工作。�
 
 | 进程 | 负责 | 运行身份 | 持有的密钥 |
 |---|---|---|---|
-| **组网进程** `nett mesh` | WireGuard 配置（内核 netlink，或用户态实现 + TUN）；路径层（测量、打分、切换、与对端协调）；组网地址和局域网地址上的探测应答；DNS 应答器；访问规则、Edge 专用地址的防冒用与地址转换、智能入口地址转换的过滤规则；准入材料验证；本机的身份查询 | Linux：`CAP_NET_ADMIN`，DNS 需要时加 `CAP_NET_BIND_SERVICE`，不是 root；用户态平台：能创建 TUN 的身份（通常是 root） | 组网私钥 |
+| **组网进程** `nett mesh` | WireGuard 配置（内核 netlink，或用户态实现 + TUN）；路径层（测量、打分、切换、与对端协调）；组网地址和局域网地址上的探测应答；DNS 应答器；访问规则、Edge 专用地址的防冒用与地址转换、智能入口地址转换的过滤规则；准入材料验证；本机的身份查询 | Linux：`CAP_NET_ADMIN`、`CAP_NET_RAW`（在 WireGuard 端口上探测，ADR 0021），DNS 需要时加 `CAP_NET_BIND_SERVICE`，不是 root；用户态平台：能创建 TUN 的身份（通常是 root） | 组网私钥 |
 | **传输适配进程** `nett transport` | TLS（WebSocket）传输适配，后期加入 QUIC：在回环地址上收发 WireGuard 密文，转写到 TLS 连接 | 专用低权限用户 | 无，只经手密文 |
 
 - **组网进程独立运行**：从 nett-node 经本机接口接收 `trust` 和 `mesh` 分区，自己验证签名，持久化最后一次的配置、信任锚和撤销记录；node 停止时照常测量、切换、应答 DNS。它不连接 Hub、不访问 Docker、不执行外部命令；

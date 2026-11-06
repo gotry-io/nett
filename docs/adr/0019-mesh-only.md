@@ -30,7 +30,7 @@
   - 智能入口按来源分类转换；macOS 上需要访客真实 IP 的容器服务使用容器内成员（ADR 0016）。
 - **Hub 自己的 HTTPS**：Hub 安装脚本为 Hub 的控制台域名生成反向代理配置（默认 Caddy，ADR 0009），并在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay。这台反向代理也可以同时是用户的 Edge，但 nett 只生成 Hub 和 nett-relay 这两段配置。
 - **agent 互访待讨论**：工作负载身份可能作为组网的扩展（沿用 Edge 专用地址的机制，给单个程序分配专用地址）；MCP 网关不属于 nett。不排期。
-- **阶段**：P0 立项 → M1 组网 → M2 组网增强（多跳、QUIC 与混淆、CONNECT 的 UDP 支持、对称型 NAT 的打洞、在 WireGuard 端口上探测）→ M3 客户端（iOS、Android App 与 Windows）。
+- **阶段**：P0 立项 → M1 组网 → M2 组网增强（多跳、QUIC 与混淆、CONNECT 的 UDP 支持、两端都在对称型 NAT 后时的打洞）→ M3 客户端（iOS、Android App 与 Windows）。
 - 角色边界和资源预算：nett-node、组网进程、传输适配进程、nett-relay 空闲 RSS 各 ≤ 5 MB，Hub ≤ 30–50 MB。
 
 ## 理由
