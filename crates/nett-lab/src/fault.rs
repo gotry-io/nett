@@ -210,6 +210,67 @@ pub fn delay_to(
     Ok(())
 }
 
+/// 节点发往 `dst` 的包加上固定延迟（场景 5 交替变好：只拖慢数据方向的一段），不乱序。
+pub fn delay_dst(name: &str, dst: std::net::Ipv4Addr, delay_ms: u32) -> anyhow::Result<()> {
+    let ns = crate::net::netns(name);
+    run(
+        "tc",
+        [
+            "-n", &ns, "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "prio",
+        ],
+    )?;
+    run(
+        "tc",
+        [
+            "-n",
+            &ns,
+            "qdisc",
+            "replace",
+            "dev",
+            "eth0",
+            "parent",
+            "1:3",
+            "handle",
+            "30:",
+            "netem",
+            "delay",
+            &format!("{delay_ms}ms"),
+        ],
+    )?;
+    run(
+        "tc",
+        [
+            "-n",
+            &ns,
+            "filter",
+            "add",
+            "dev",
+            "eth0",
+            "parent",
+            "1:0",
+            "protocol",
+            "ip",
+            "prio",
+            "1",
+            "u32",
+            "match",
+            "ip",
+            "dst",
+            &format!("{dst}/32"),
+            "flowid",
+            "1:3",
+        ],
+    )?;
+    Ok(())
+}
+
+/// 去掉节点 `eth0` 上的全部排队规则与过滤器。
+pub fn clear_eth0(name: &str) -> anyhow::Result<()> {
+    let ns = crate::net::netns(name);
+    run("tc", ["-n", &ns, "qdisc", "del", "dev", "eth0", "root"]).ok();
+    Ok(())
+}
+
 /// 只拦截从 `src` 发来的 UDP（单方向）。
 pub fn block_udp_from(name: &str, src: std::net::Ipv4Addr) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);

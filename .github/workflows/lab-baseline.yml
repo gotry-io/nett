@@ -1,4 +1,5 @@
-# 对比对象 Tailscale 的部署检查与对比场景（design/prototype.md 第 5.1、7 节）：手动触发，不在每次推送时运行。
+# 与对比对象 Tailscale 的验收对比（design/prototype.md 第 5.1、6、7 节）：手动触发，不在每次推送时运行。
+# 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类每种 5 分钟、各 3 次。
 # 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。
 
 name: Lab baseline
@@ -15,11 +16,43 @@ env:
   TAILSCALE_SHA256: "720cbbccbfc03d8b55df72afc19e5a72e31b0f65934700aa6fa38074d4ad7bf7"
   HEADSCALE_VERSION: "0.29.7"
   HEADSCALE_SHA256: "e827fc9b12d958bc95b081c4401dd63f8e0471d025b45b508535a920532150a8"
+  # derper 与 Tailscale 同版本，从源码构建
+  GO_VERSION: "1.27.3"
+  GO_SHA256: "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
 
 jobs:
-  tailscale:
+  compare:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: tailscale-deployment
+            run: tailscale --topology crates/nett-lab/topologies/direct.toml
+          - name: 1-8-failover
+            run: failover --topology crates/nett-lab/topologies/failover.toml --repeat 20 --with-tailscale
+          - name: 2-relay-loss
+            run: relay-loss --topology crates/nett-lab/topologies/relays.toml --repeat 20 --with-tailscale
+          - name: 3-relay-restart
+            run: relay-restart --topology crates/nett-lab/topologies/relays.toml --repeat 20 --with-tailscale
+          - name: 4-loss-5
+            run: loss --level 5 --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 4-loss-15
+            run: loss --level 15 --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 4-loss-30
+            run: loss --level 30 --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 5-jitter-20
+            run: jitter --level 20 --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 5-jitter-80
+            run: jitter --level 80 --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 5-alternate
+            run: alternate --level 40 --duration 600 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 6-flap
+            run: flap --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 15-roaming
+            run: roaming --duration 600 --topology crates/nett-lab/topologies/failover.toml
+    name: ${{ matrix.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -29,8 +62,8 @@ jobs:
       - name: 安装实验网络用到的工具
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 openssl
-      - name: 安装 Tailscale 与 Headscale（固定版本，校验哈希）
+          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 openssl tcpdump
+      - name: 安装 Tailscale、Headscale 与 derper（固定版本，校验哈希）
         run: |
           bin="$RUNNER_TEMP/baseline-bin"
           mkdir -p "$bin"
@@ -44,21 +77,19 @@ jobs:
             "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/$hs"
           echo "${HEADSCALE_SHA256}  $bin/headscale" | sha256sum --check -
           chmod +x "$bin/headscale"
+          go="go${GO_VERSION}.linux-amd64.tar.gz"
+          curl --fail --silent --show-error --location --max-time 300 -o "$go" "https://go.dev/dl/$go"
+          echo "${GO_SHA256}  $go" | sha256sum --check -
+          tar -xzf "$go" -C "$RUNNER_TEMP"
+          GOBIN="$bin" "$RUNNER_TEMP/go/bin/go" install "tailscale.com/cmd/derper@v${TAILSCALE_VERSION}"
           echo "$bin" >> "$GITHUB_PATH"
       - name: 确认内核 WireGuard 可用
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
       - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
-      - name: Tailscale 对照部署：直连、经 DERP 回退、测量工具可用
+      - name: ${{ matrix.name }}
         run: >-
-          sudo env "PATH=$PATH" ./target/debug/nett-lab run tailscale
-          --topology crates/nett-lab/topologies/direct.toml
-          --out "$RUNNER_TEMP/lab-tailscale"
-      - name: 场景 1、8 与 Tailscale 对比
-        run: >-
-          sudo env "PATH=$PATH" ./target/debug/nett-lab run failover
-          --topology crates/nett-lab/topologies/failover.toml
+          sudo env "PATH=$PATH" ./target/debug/nett-lab run ${{ matrix.run }}
           --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-failover"
-          --repeat 3 --with-tailscale
+          --out "$RUNNER_TEMP/lab"
