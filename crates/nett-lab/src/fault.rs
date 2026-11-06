@@ -28,7 +28,7 @@ impl Netem {
         }
     }
 
-    fn args(&self) -> Vec<String> {
+    pub fn args(&self) -> Vec<String> {
         let mut args = Vec::new();
         if let Some(delay) = self.delay_ms {
             args.extend(["delay".into(), format!("{delay}ms")]);
@@ -144,6 +144,86 @@ pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
         ],
     )
     .ok();
+    Ok(())
+}
+
+/// 节点发往 `dst` 的包加上延迟与乱序（场景 15：旧路径上迟到、乱序的包），其他流量不受影响。
+pub fn delay_to(
+    name: &str,
+    dst: std::net::Ipv4Addr,
+    delay_ms: u32,
+    jitter_ms: u32,
+) -> anyhow::Result<()> {
+    let ns = crate::net::netns(name);
+    run(
+        "tc",
+        [
+            "-n", &ns, "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "prio",
+        ],
+    )?;
+    run(
+        "tc",
+        [
+            "-n",
+            &ns,
+            "qdisc",
+            "replace",
+            "dev",
+            "eth0",
+            "parent",
+            "1:3",
+            "handle",
+            "30:",
+            "netem",
+            "delay",
+            &format!("{delay_ms}ms"),
+            &format!("{jitter_ms}ms"),
+            "reorder",
+            "25%",
+            "50%",
+        ],
+    )?;
+    run(
+        "tc",
+        [
+            "-n",
+            &ns,
+            "filter",
+            "add",
+            "dev",
+            "eth0",
+            "parent",
+            "1:0",
+            "protocol",
+            "ip",
+            "prio",
+            "1",
+            "u32",
+            "match",
+            "ip",
+            "dst",
+            &format!("{dst}/32"),
+            "flowid",
+            "1:3",
+        ],
+    )?;
+    Ok(())
+}
+
+/// 只拦截从 `src` 发来的 UDP（单方向）。
+pub fn block_udp_from(name: &str, src: std::net::Ipv4Addr) -> anyhow::Result<()> {
+    let ns = crate::net::netns(name);
+    let rules = format!(
+        "table inet {FAULT_TABLE} {{\n\
+         chain in {{ type filter hook input priority 0; ip saddr {src} meta l4proto udp drop; }}\n\
+         }}\n"
+    );
+    run_with_input(
+        "ip",
+        ["netns", "exec", &ns, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        COMMAND_TIMEOUT,
+    )?;
     Ok(())
 }
 

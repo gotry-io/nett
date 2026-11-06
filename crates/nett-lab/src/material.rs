@@ -290,7 +290,13 @@ pub fn generate(
                             ),
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
-                        // 直连候选：对端在"公网"上时就是它的公网地址
+                        // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址
+                        None if c == "direct6" => Some(Candidate::Direct {
+                            endpoint: SocketAddr::new(
+                                underlay.node(other)?.ipv6?.into(),
+                                LISTEN_PORT,
+                            ),
+                        }),
                         None => Some(Candidate::Direct {
                             endpoint: SocketAddr::new(
                                 underlay.public_ipv4(other)?.into(),
@@ -472,6 +478,12 @@ fn write_relay_configs(
         write_json(&dir.join("relay.json"), &config)?;
     }
     Ok(())
+}
+
+/// WireGuard 工具使用的公钥文本（标准 base64）。
+pub fn wg_text(key: &X25519PublicKey) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
 }
 
 /// 从文件读回 WireGuard 公钥文本（用于核对 `wg show` 的输出）。

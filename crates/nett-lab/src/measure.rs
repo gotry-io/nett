@@ -116,6 +116,41 @@ pub fn probe_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<Prob
     })
 }
 
+/// 场景 18 的"陌生人"：从 41820 端口向 `to` 发送 `count` 个伪造的直连探测（首字节 0x82，其余随机）和
+/// 同样多的随机握手发起（WireGuard 类型 1），每 100 毫秒一组。它们都没有合法的校验码。
+pub fn forge(to: SocketAddr, count: u32) -> anyhow::Result<()> {
+    let bind: SocketAddr = if to.is_ipv4() {
+        "0.0.0.0:41820".parse()?
+    } else {
+        "[::]:41820".parse()?
+    };
+    let socket = UdpSocket::bind(bind).context("binding forger")?;
+    let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ now_ms();
+    let mut fill = |buf: &mut [u8]| {
+        for b in buf.iter_mut() {
+            // xorshift：只需要看起来随机的字节
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = (state & 0xff) as u8;
+        }
+    };
+    for _ in 0..count {
+        let mut probe = [0u8; 64];
+        fill(&mut probe);
+        probe[0] = 0x82;
+        probe[1..4].fill(0);
+        socket.send_to(&probe, to).ok();
+        let mut init = [0u8; 148];
+        fill(&mut init);
+        init[0] = 1;
+        init[1..4].fill(0);
+        socket.send_to(&init, to).ok();
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
 /// 长连接的发送端：连接后持续写入，直到出错或进程被结束。出错时以非 0 退出，原因写入标准错误。
 pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
     let mut stream =

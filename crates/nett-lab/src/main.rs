@@ -36,13 +36,17 @@ fn main() -> ExitCode {
 const USAGE: &str = "usage:
   nett-lab run <admission|selftest|relay-smoke> --topology <file.toml> --nett <path/to/nett> --out <dir>
   nett-lab run tailscale --topology <file.toml> --out <dir>
-  nett-lab run failover --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
+  nett-lab run wgport --topology <file.toml> --nett <path/to/nett> --out <dir>
+  nett-lab run roaming --topology <file.toml> --nett <path/to/nett> --out <dir> [--duration SECONDS]
+  nett-lab run <loss|jitter|flap> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
+  nett-lab run <failover|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
 measurement helpers (started by the scenarios inside a node's network namespace):
   nett-lab probe-send --to <addr:port>
   nett-lab probe-recv --listen <addr:port> --out <file>
   nett-lab tcp-source --to <addr:port>
-  nett-lab tcp-sink --listen <addr:port> --out <file>";
+  nett-lab tcp-sink --listen <addr:port> --out <file>
+  nett-lab forge --to <addr:port>";
 
 #[cfg(not(target_os = "linux"))]
 fn run() -> anyhow::Result<bool> {
@@ -64,6 +68,7 @@ fn run() -> anyhow::Result<bool> {
     let (mut topology, mut nett, mut out) = (None, None, None);
     let (mut to, mut listen) = (None, None);
     let (mut repeat, mut with_tailscale) = (1usize, false);
+    let (mut level, mut duration_s) = (None::<u64>, 300u64);
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -76,6 +81,8 @@ fn run() -> anyhow::Result<bool> {
             Long("out") => out = Some(PathBuf::from(parser.value()?)),
             Long("repeat") => repeat = parser.value()?.string()?.parse()?,
             Long("with-tailscale") => with_tailscale = true,
+            Long("level") => level = Some(parser.value()?.string()?.parse()?),
+            Long("duration") => duration_s = parser.value()?.string()?.parse()?,
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -90,6 +97,7 @@ fn run() -> anyhow::Result<bool> {
             measure::probe_recv(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
         }
         ["tcp-source"] => measure::tcp_source(to.context(USAGE)?).map(|()| true),
+        ["forge"] => measure::forge(to.context(USAGE)?, 300).map(|()| true),
         ["tcp-sink"] => {
             measure::tcp_sink(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
         }
@@ -103,6 +111,38 @@ fn run() -> anyhow::Result<bool> {
                 "relay-smoke" => scenario::relay_smoke(&topology, &nett()?, &out)?,
                 "failover" => {
                     scenario::failover(&topology, &nett()?, &out, repeat, with_tailscale)?
+                }
+                "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
+                "roaming" => scenario::roaming(
+                    &topology,
+                    &nett()?,
+                    &out,
+                    std::time::Duration::from_secs(duration_s),
+                )?,
+                "loss" | "jitter" | "flap" => {
+                    let wave = match *name {
+                        "loss" => scenario::Wave::Loss(level.context("--level <percent>")? as f32),
+                        "jitter" => scenario::Wave::Jitter(level.context("--level <ms>")? as u32),
+                        _ => scenario::Wave::Flap,
+                    };
+                    let duration = std::time::Duration::from_secs(duration_s);
+                    scenario::wave(
+                        &topology,
+                        &nett()?,
+                        &out,
+                        repeat,
+                        with_tailscale,
+                        wave,
+                        duration,
+                    )?
+                }
+                "relay-loss" | "relay-restart" => {
+                    let kind = if *name == "relay-loss" {
+                        scenario::RelayFault::Loss
+                    } else {
+                        scenario::RelayFault::Restart
+                    };
+                    scenario::relay_fault(&topology, &nett()?, &out, repeat, with_tailscale, kind)?
                 }
                 "tailscale" => scenario::tailscale(&topology, &out)?,
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
