@@ -141,6 +141,8 @@ cargo deny --locked check        # 许可证、安全公告、重复依赖、来
 cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
 sudo ./target/debug/nett-lab run admission --topology crates/nett-lab/topologies/direct.toml \
   --nett ./target/debug/nett --out /tmp/lab-14
+sudo ./target/debug/nett-lab run selftest --topology crates/nett-lab/topologies/direct.toml \
+  --nett ./target/debug/nett --out /tmp/lab-selftest
 ```
 
 `web/` 在 M1 搭好之后加上 `pnpm -C web lint && pnpm -C web test`。

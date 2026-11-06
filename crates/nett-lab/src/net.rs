@@ -21,6 +21,8 @@ pub struct NodeNet {
     pub ipv6: Option<Ipv6Addr>,
     /// 在"公网"上可以直接访问的地址；在 NAT 之后的节点没有。
     pub public_ipv4: Option<Ipv4Addr>,
+    /// 节点接入的交换机所在的命名空间：公网节点是 `nl-inet`，NAT 之后的节点是路由器。
+    pub switch_ns: String,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +67,7 @@ impl Underlay {
                         u16::from(index),
                     )),
                     public_ipv4: Some(Ipv4Addr::new(198, 51, 100, index)),
+                    switch_ns: INET_NETNS.to_owned(),
                 },
                 Some(router) => {
                     let (_, k, _) = routers
@@ -76,6 +79,7 @@ impl Underlay {
                         ipv4: Ipv4Addr::new(192, 168, *k, 10 + index),
                         ipv6: None,
                         public_ipv4: None,
+                        switch_ns: netns(router),
                     }
                 }
             };
@@ -86,6 +90,16 @@ impl Underlay {
 
     pub fn node(&self, name: &str) -> Option<&NodeNet> {
         self.nodes.get(name)
+    }
+
+    /// 节点或路由器接入链路在交换侧的一端：`(命名空间, 接口名)`。
+    pub fn switch_port(&self, name: &str) -> Option<(String, String)> {
+        let switch_ns = match self.nodes.get(name) {
+            Some(node) => node.switch_ns.clone(),
+            None if self.routers.iter().any(|(r, _, _)| r == name) => INET_NETNS.to_owned(),
+            None => return None,
+        };
+        Some((switch_ns, format!("v-{name}")))
     }
 
     pub fn public_ipv4(&self, name: &str) -> Option<Ipv4Addr> {
@@ -146,7 +160,9 @@ impl Underlay {
                 Nat::Ipv6Firewall => anyhow::bail!("ipv6-firewall routers are not supported yet"),
             };
             let rules = format!(
-                "table ip nat {{ chain post {{ type nat hook postrouting priority 100; oifname \"eth0\" {masquerade}; }} }}\n"
+                "table ip nat {{\n\
+                 chain post {{ type nat hook postrouting priority 100; oifname \"eth0\" {masquerade}; }}\n\
+                 }}\n"
             );
             run_with_input(
                 "ip",
