@@ -1,0 +1,171 @@
+//! 组网进程的期望状态：期望状态 `trust` 与 `mesh` 分区中组网进程用到的部分（design/protocol.md 第 6 节）。
+//!
+//! 来源只负责交付文档（[`crate::source`]）；这里在边界处校验一次，之后只传递已校验的类型。
+//! 签名产物在这里只解析格式，签名和准入由 [`crate::members`] 逐项验证，不因来源而跳过。
+
+use std::collections::BTreeMap;
+use std::net::{IpAddr, SocketAddr};
+
+use nett_core::id::NodeId;
+use nett_trust::admission::AdmissionMaterial;
+use nett_trust::anchors::{AnchorsError, TrustAnchors, TrustAnchorsDoc};
+use nett_trust::revocation::Revocation;
+use serde::{Deserialize, Serialize};
+
+use crate::prefix::IpPrefix;
+
+/// 期望状态的文档形式。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DesiredMeshDoc {
+    pub node_id: NodeId,
+    pub reachability: Reachability,
+    pub listen_port: u16,
+    pub prefixes: MeshPrefixes,
+    pub trust_anchors: TrustAnchorsDoc,
+    pub members: Vec<AdmissionMaterial>,
+    pub revocations: Vec<Revocation>,
+    pub paths: Vec<PathDoc>,
+}
+
+/// 节点的网络可达性（design/architecture.md 第 6.5 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reachability {
+    Public,
+    DialOnly,
+}
+
+/// 组网网段（design/mesh.md 第 3 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MeshPrefixes {
+    pub ipv4: IpPrefix,
+    pub ipv6: IpPrefix,
+}
+
+/// 到一个对端的候选路径，相当于 Hub 的计算结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathDoc {
+    pub peer: NodeId,
+    pub candidates: Vec<Candidate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Candidate {
+    /// 公网直连：对端 WireGuard 端口的地址。
+    Direct { endpoint: SocketAddr },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ConfigError {
+    #[error("desired state is not valid: {0}")]
+    Document(String),
+    #[error(transparent)]
+    Anchors(#[from] AnchorsError),
+    #[error("listen port must not be 0")]
+    ListenPort,
+    #[error("mesh prefix {0} is not a private-use range of a sensible size")]
+    Prefix(IpPrefix),
+    #[error("paths list peer {0} more than once")]
+    DuplicatePath(NodeId),
+}
+
+/// 已校验的期望状态。
+#[derive(Debug, Clone)]
+pub struct DesiredMesh {
+    pub node_id: NodeId,
+    pub reachability: Reachability,
+    pub listen_port: u16,
+    pub prefixes: MeshPrefixes,
+    pub anchors: TrustAnchors,
+    pub members: Vec<AdmissionMaterial>,
+    pub revocations: Vec<Revocation>,
+    pub paths: BTreeMap<NodeId, Vec<Candidate>>,
+}
+
+impl DesiredMesh {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
+        let doc: DesiredMeshDoc =
+            serde_json::from_slice(bytes).map_err(|e| ConfigError::Document(e.to_string()))?;
+        Self::from_doc(doc)
+    }
+
+    pub fn from_doc(doc: DesiredMeshDoc) -> Result<Self, ConfigError> {
+        if doc.listen_port == 0 {
+            return Err(ConfigError::ListenPort);
+        }
+        for prefix in [doc.prefixes.ipv4, doc.prefixes.ipv6] {
+            if !is_sensible_mesh_prefix(&prefix) {
+                return Err(ConfigError::Prefix(prefix));
+            }
+        }
+        let mut paths = BTreeMap::new();
+        for path in doc.paths {
+            if paths.insert(path.peer.clone(), path.candidates).is_some() {
+                return Err(ConfigError::DuplicatePath(path.peer));
+            }
+        }
+        Ok(Self {
+            node_id: doc.node_id,
+            reachability: doc.reachability,
+            listen_port: doc.listen_port,
+            prefixes: doc.prefixes,
+            anchors: TrustAnchors::from_doc(&doc.trust_anchors)?,
+            members: doc.members,
+            revocations: doc.revocations,
+            paths,
+        })
+    }
+}
+
+/// 组网网段只能取私有地址范围，大小合理：发往组网网段的流量都进入 `nett0`，
+/// 一个过大的网段（例如 `0.0.0.0/0`）会把本机的其他流量（包括连接 Hub 的流量）一起吞掉。
+fn is_sensible_mesh_prefix(prefix: &IpPrefix) -> bool {
+    let private: &[(&str, u8)] = if prefix.is_ipv4() {
+        &[
+            ("10.0.0.0/8", 30),
+            ("172.16.0.0/12", 30),
+            ("192.168.0.0/16", 30),
+            ("100.64.0.0/10", 30),
+        ]
+    } else {
+        // ULA；Hub 初始化时生成一个 /48
+        &[("fc00::/7", 120)]
+    };
+    private.iter().any(|(range, max_len)| {
+        let range: IpPrefix = range.parse().expect("built-in prefix is valid");
+        range.covers(prefix)
+            && prefix.prefix_len() <= *max_len
+            && prefix.prefix_len() >= min_len(prefix.addr())
+    })
+}
+
+fn min_len(addr: IpAddr) -> u8 {
+    if addr.is_ipv4() { 8 } else { 48 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mesh_prefixes_must_be_private_and_sized() {
+        for (s, ok) in [
+            ("100.88.0.0/16", true),
+            ("10.0.0.0/8", true),
+            ("100.0.0.0/8", false),
+            ("0.0.0.0/0", false),
+            ("8.8.0.0/16", false),
+            ("100.88.0.0/31", false),
+            ("fd00:88::/48", true),
+            ("fd00::/8", false),
+            ("2001:db8::/48", false),
+        ] {
+            let p: IpPrefix = s.parse().expect(s);
+            assert_eq!(is_sensible_mesh_prefix(&p), ok, "{s}");
+        }
+    }
+}

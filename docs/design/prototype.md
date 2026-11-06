@@ -178,7 +178,4 @@ candidates = ["direct", "relay:r1", "relay:r2", "tls:r1"]
 
 | 问题 | 说明 |
 |---|---|
-| netlink 的实现 | 用 rust-netlink 系列的 crate（`netlink-packet-wireguard`、`netlink-packet-route` 等），还是自己封装需要的几种消息；G1 按体积和维护状态选定 |
-| 签名载荷的规范化（RFC 8785） | 用现成的库，还是自己实现（规则不多，自己实现便于控制依赖）；G1 选定 |
-| 命令行解析 | `nett mesh` 等子命令的参数解析库，G1 量过体积后选定 |
 | Tailscale 对比的版本与配置 | 关卡开始时选定一个版本并固定下来；版本更新后是否重跑对比，在 M1 验收前决定 |

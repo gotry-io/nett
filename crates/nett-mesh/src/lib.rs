@@ -1,1 +1,16 @@
-//! 组网进程 `nett mesh`：与平台无关的核心（准入、测量、选路、切换）和各平台的数据面后端（design/mesh.md，ADR 0013、0018）。
+//! 组网进程：与平台无关的核心（准入、测量、选路、切换）+ 各平台的数据面后端（ADR 0013、0018，design/mesh.md）。
+
+pub mod config;
+pub mod dataplane;
+pub mod engine;
+pub mod event;
+pub mod key;
+#[cfg(feature = "lab")]
+pub mod lab;
+#[cfg(target_os = "linux")]
+pub mod linux;
+pub mod members;
+pub mod prefix;
+pub mod run;
+#[cfg(test)]
+mod testutil;
