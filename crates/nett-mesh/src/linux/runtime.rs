@@ -23,7 +23,8 @@ use crate::probe::TUNNEL_PROBE_PORT;
 use crate::prober::{Incoming, Outgoing};
 use crate::run::Applier;
 
-/// 选路推进的间隔：疑似故障时的加探间隔是 200 毫秒（design/mesh.md 第 8.2 节）。
+/// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
+/// 200 毫秒的加探间隔（第 8.2 节）。
 const TICK: Duration = Duration::from_millis(100);
 /// 后台线程的消息队列上限。
 const QUEUE: usize = 1024;
