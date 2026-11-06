@@ -10,6 +10,17 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/gotry-io/nett"
 publish = false
 
+# 依赖的版本集中在这里，各 crate 用 `workspace = true` 引用；默认特性一律关闭，按需开启
+[workspace.dependencies]
+nett-core = { path = "crates/nett-core" }
+nett-trust = { path = "crates/nett-trust" }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
+ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
+serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+thiserror = { version = "2.0.21", default-features = false }
+zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
+
 # 每个 crate 用 `[lints] workspace = true` 继承这里的规则（CLAUDE.md "代码规则"）
 [workspace.lints.rust]
 unsafe_code = "deny"

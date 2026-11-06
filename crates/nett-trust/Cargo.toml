@@ -9,3 +9,19 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+nett-core.workspace = true
+base64.workspace = true
+ring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize = { workspace = true, optional = true }
+
+[dev-dependencies]
+zeroize.workspace = true
+
+[features]
+# 生成签名：只供实验工具和测试使用，正式构建不开启
+signing = ["dep:zeroize"]
