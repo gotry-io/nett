@@ -40,6 +40,8 @@ const USAGE: &str = "usage:
   nett-lab run roaming --topology <file.toml> --nett <path/to/nett> --out <dir> [--duration SECONDS]
   nett-lab run <loss|jitter|flap|alternate> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
   nett-lab run <failover|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
+  nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
+  nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
 measurement helpers (started by the scenarios inside a node's network namespace):
   nett-lab probe-send --to <addr:port>
@@ -69,6 +71,7 @@ fn run() -> anyhow::Result<bool> {
     let (mut to, mut listen) = (None, None);
     let (mut repeat, mut with_tailscale) = (1usize, false);
     let (mut level, mut duration_s) = (None::<u64>, 300u64);
+    let mut clock_skew_ms = 0i64;
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -83,6 +86,7 @@ fn run() -> anyhow::Result<bool> {
             Long("with-tailscale") => with_tailscale = true,
             Long("level") => level = Some(parser.value()?.string()?.parse()?),
             Long("duration") => duration_s = parser.value()?.string()?.parse()?,
+            Long("clock-skew") => clock_skew_ms = parser.value()?.string()?.parse()?,
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -146,6 +150,23 @@ fn run() -> anyhow::Result<bool> {
                         scenario::RelayFault::Restart
                     };
                     scenario::relay_fault(&topology, &nett()?, &out, repeat, with_tailscale, kind)?
+                }
+                "dial-only-switch" | "dial-only-outage" => {
+                    let fault = if *name == "dial-only-switch" {
+                        scenario::PairFault::Slow
+                    } else {
+                        scenario::PairFault::Outage {
+                            skew_ms: clock_skew_ms,
+                        }
+                    };
+                    scenario::dial_only_pair(
+                        &topology,
+                        &nett()?,
+                        &out,
+                        repeat,
+                        with_tailscale,
+                        fault,
+                    )?
                 }
                 "tailscale" => scenario::tailscale(&topology, &out)?,
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),

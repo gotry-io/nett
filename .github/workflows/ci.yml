@@ -97,6 +97,19 @@ jobs:
           --topology crates/nett-lab/topologies/cone-nat.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-14-nat"
+      - name: 场景 16：双方都是 dial-only，经隧道提议后两端一起切换
+        run: >-
+          sudo ./target/debug/nett-lab run dial-only-switch
+          --topology crates/nett-lab/topologies/dial-pair.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-16"
+      - name: 场景 17：双方都是 dial-only，当前中继失效，靠时间片汇合
+        run: >-
+          sudo ./target/debug/nett-lab run dial-only-outage
+          --clock-skew 1500
+          --topology crates/nett-lab/topologies/dial-pair.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-17"
 
   deny:
     runs-on: ubuntu-24.04

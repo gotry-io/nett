@@ -189,6 +189,17 @@ fn start(
     underlay: Underlay,
     nett: &Path,
 ) -> anyhow::Result<Lab> {
+    start_with(topo, generated, underlay, nett, |_| Vec::new())
+}
+
+/// `extra(节点名)` 是这个节点的组网进程额外的命令行参数。
+fn start_with(
+    topo: &Topology,
+    generated: &Generated,
+    underlay: Underlay,
+    nett: &Path,
+    extra: impl Fn(&str) -> Vec<String>,
+) -> anyhow::Result<Lab> {
     underlay.up(topo)?;
     let mut lab = Lab {
         underlay,
@@ -197,7 +208,7 @@ fn start(
         helpers: Vec::new(),
     };
     for node in &generated.nodes {
-        lab.spawn(node, nett)?;
+        lab.spawn_with(node, nett, &extra(&node.name))?;
         if topo
             .node(&node.name)
             .is_some_and(|n| n.roles.iter().any(|r| r == "relay"))
@@ -210,22 +221,23 @@ fn start(
 
 impl Lab {
     fn spawn(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
+        self.spawn_with(node, nett, &[])
+    }
+
+    fn spawn_with(&mut self, node: &LabNode, nett: &Path, extra: &[String]) -> anyhow::Result<()> {
         let net = self.underlay.node(&node.name).context("planned node")?;
         let dir = &node.dir;
-        let child = spawn_in(
-            &net.netns,
-            nett,
-            [
-                "mesh".as_ref(),
-                "--config".as_ref(),
-                dir.join("desired.json").as_os_str(),
-                "--key".as_ref(),
-                dir.join("mesh.key").as_os_str(),
-                "--events".as_ref(),
-                dir.join("events.jsonl").as_os_str(),
-            ],
-            &dir.join("mesh.log"),
-        )?;
+        let mut args: Vec<std::ffi::OsString> = vec![
+            "mesh".into(),
+            "--config".into(),
+            dir.join("desired.json").into(),
+            "--key".into(),
+            dir.join("mesh.key").into(),
+            "--events".into(),
+            dir.join("events.jsonl").into(),
+        ];
+        args.extend(extra.iter().map(Into::into));
+        let child = spawn_in(&net.netns, nett, &args, &dir.join("mesh.log"))?;
         self.processes.push((node.name.clone(), child));
         Ok(())
     }
@@ -1170,6 +1182,35 @@ pub struct RelayRun {
 /// 故障持续多久之后统计。
 const RELAY_FAULT_HOLD: Duration = Duration::from_secs(20);
 
+/// 最近 2 秒承载流量最多的中继链路（低于 [`RELAY_QUIET_BYTES_PER_S`] 时为空）。
+fn busiest(monitor: &PathMonitor) -> Option<usize> {
+    let rates = monitor.rates(Duration::from_secs(2));
+    let (i, r) = rates.iter().enumerate().max_by_key(|(_, r)| **r)?;
+    (*r >= RELAY_QUIET_BYTES_PER_S).then_some(i)
+}
+
+/// 等流量稳定在某一个中继上：探测流持续收到，且有一条中继链路承载流量。返回它的序号。
+fn settle_on_relay(
+    monitor: &PathMonitor,
+    probe_file: &Path,
+    system: &str,
+) -> anyhow::Result<usize> {
+    use crate::measure::{now_ms, probe_stats};
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    loop {
+        std::thread::sleep(Duration::from_secs(1));
+        let now = now_ms();
+        let flowing =
+            probe_stats(probe_file, now.saturating_sub(3000), now).is_ok_and(|p| p.received >= 25);
+        if let (true, Some(i)) = (flowing, busiest(monitor)) {
+            return Ok(i);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("{system}: traffic did not settle on a relay within {SETTLE_TIMEOUT:?}");
+        }
+    }
+}
+
 /// `links`：每个中继（或 DERP）的名称与它的链路。`fault` 对第 i 个中继执行故障。
 fn relay_fault_run(
     lab: &mut Lab,
@@ -1187,25 +1228,7 @@ fn relay_fault_run(
             .collect(),
     );
     let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
-    let busiest = |m: &PathMonitor| -> Option<usize> {
-        let rates = m.rates(Duration::from_secs(2));
-        let (i, r) = rates.iter().enumerate().max_by_key(|(_, r)| **r)?;
-        (*r >= RELAY_QUIET_BYTES_PER_S).then_some(i)
-    };
-    // 先等流量稳定在某一个中继上
-    let deadline = Instant::now() + SETTLE_TIMEOUT;
-    let current = loop {
-        std::thread::sleep(Duration::from_secs(1));
-        let now = now_ms();
-        let flowing =
-            probe_stats(&probe_file, now.saturating_sub(3000), now).is_ok_and(|p| p.received >= 25);
-        if let (true, Some(i)) = (flowing, busiest(&monitor)) {
-            break i;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("{system}: traffic did not settle on a relay within {SETTLE_TIMEOUT:?}");
-        }
-    };
+    let current = settle_on_relay(&monitor, &probe_file, system)?;
     let fault_ms = now_ms();
     fault(lab, current)?;
     std::thread::sleep(RELAY_FAULT_HOLD);
@@ -2148,5 +2171,317 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
     );
     write_report(out, &report)?;
     drop(lab);
+    Ok(report)
+}
+
+/// 场景 16：当前中继变慢时，经隧道提议的延迟（毫秒，加在中继链路的两端）。
+const PAIR_SLOW_MS: u32 = 40;
+/// 场景 16：等待流量换到另一个中继的上限（同类更优路径要持续 30 秒）。
+const PAIR_SWITCH_WAIT: Duration = Duration::from_secs(90);
+/// 场景 17：故障之后观察的时长。
+const PAIR_OUTAGE_WATCH: Duration = Duration::from_secs(60);
+/// 场景 17 的通过标准：在三个时间片（45 秒）内恢复。
+const PAIR_RECOVERY_LIMIT_MS: u64 = 45_000;
+/// 场景 16 的通过标准：中断不超过 1 秒。
+const PAIR_SWITCH_OUTAGE_LIMIT_MS: u64 = 1_000;
+
+/// 双方都是 `dial-only` 的一次运行（design/prototype.md 第 6.2 节场景 16、17）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PairRun {
+    pub system: String,
+    pub from: String,
+    pub after: Option<String>,
+    /// 场景 16：探测流最长的中断；场景 17：从故障到探测流恢复（观察期内没有恢复为空）。
+    pub outage_ms: Option<u64>,
+    /// 两端各自执行切换的时刻之差（毫秒）。
+    pub sides_apart_ms: Option<u64>,
+    pub tcp_ended: Option<String>,
+}
+
+/// 场景 16 或 17。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairFault {
+    /// 当前中继变慢：经隧道提议与确认，两端一起切换。
+    Slow,
+    /// 当前中继失效、没有 Hub：靠时间片汇合。`skew_ms` 是 b 的时钟偏差。
+    Outage { skew_ms: i64 },
+}
+
+/// 某个节点在 `after_ms` 之后第一次切换路径的时刻与原因。
+fn first_switch(node: &LabNode, after_ms: u64) -> Option<(u64, String)> {
+    events(node).iter().find_map(|e| {
+        let at = e["at_ms"].as_u64()?;
+        (e["event"] == "path_switched" && at >= after_ms)
+            .then(|| (at, e["reason"].as_str().unwrap_or_default().to_owned()))
+    })
+}
+
+/// 故障开始后，探测流在什么时刻恢复（最长的一段中断结束时）；到 `to_ms` 仍未恢复为空。
+fn resumed_at(probe_file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<Option<u64>> {
+    let stats = crate::measure::probe_stats(probe_file, from_ms, to_ms)?;
+    let Some((start, len)) = stats.gaps.iter().max_by_key(|g| g.1).copied() else {
+        return Ok(Some(from_ms));
+    };
+    Ok((start + len + 200 < to_ms).then_some(start + len))
+}
+
+fn nett_pair_once(
+    topo: &Topology,
+    nett: &Path,
+    out: &Path,
+    fault: PairFault,
+) -> anyhow::Result<PairRun> {
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    let generated = material::generate(topo, &underlay, out, false)?;
+    let extra = |name: &str| -> Vec<String> {
+        let PairFault::Outage { skew_ms } = fault else {
+            return Vec::new();
+        };
+        // 双方各自认为的时钟误差：b 偏差不超过 2 秒时双方都按时间片，否则都改用随机间隔
+        let trusted = if skew_ms.unsigned_abs() <= 2_000 {
+            "yes"
+        } else {
+            "no"
+        };
+        let mut args = vec!["--clock-trusted".to_owned(), trusted.to_owned()];
+        if name == "b" {
+            args.extend(["--clock-offset-ms".to_owned(), skew_ms.to_string()]);
+        }
+        args
+    };
+    let mut lab = start_with(topo, &generated, underlay, nett, extra)?;
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| generated.nodes.iter().find(|n| n.name == name);
+    let (a, b) = (node("a").context("node a")?, node("b").context("node b")?);
+    let relays: Vec<&LabNode> = ["r1", "r2"].iter().filter_map(|r| node(r)).collect();
+    let links: Vec<(String, String)> = relays
+        .iter()
+        .filter_map(|r| {
+            lab.underlay
+                .node(&r.name)
+                .map(|n| (n.netns.clone(), "eth0".to_owned()))
+        })
+        .collect();
+    let monitor = PathMonitor::start(links);
+    let (probe_file, tcp_file) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
+    let current = settle_on_relay(&monitor, &probe_file, "nett")?;
+    let fault_ms = now_ms();
+    let (watch, netem) = match fault {
+        PairFault::Slow => (
+            PAIR_SWITCH_WAIT,
+            crate::fault::Netem {
+                delay_ms: Some(PAIR_SLOW_MS),
+                ..Default::default()
+            },
+        ),
+        PairFault::Outage { .. } => (PAIR_OUTAGE_WATCH, crate::fault::Netem::loss(100.0)),
+    };
+    crate::fault::set_link(&lab.underlay, &relays[current].name, &netem)?;
+    // 流量换到另一个中继、探测流持续 5 秒之后提前结束
+    let deadline = Instant::now() + watch;
+    let mut stable_since = None;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        let now = now_ms();
+        let flowing =
+            probe_stats(&probe_file, now.saturating_sub(1000), now).is_ok_and(|p| p.received >= 8);
+        let moved = busiest(&monitor).is_some_and(|i| i != current);
+        if flowing && moved {
+            let since = *stable_since.get_or_insert(now);
+            if now.saturating_sub(since) >= 5_000 {
+                break;
+            }
+        } else {
+            stable_since = None;
+        }
+    }
+    let end_ms = now_ms();
+    let after = busiest(&monitor).map(|i| relays[i].name.clone());
+    let outage_ms = match fault {
+        PairFault::Slow => Some(probe_stats(&probe_file, fault_ms, end_ms)?.max_gap_ms),
+        PairFault::Outage { .. } => {
+            resumed_at(&probe_file, fault_ms, end_ms)?.map(|t| t.saturating_sub(fault_ms))
+        }
+    };
+    let tcp = tcp_stats(&tcp_file, fault_ms - 2000, end_ms)?;
+    let sides_apart_ms = match (first_switch(a, fault_ms), first_switch(b, fault_ms)) {
+        (Some((x, _)), Some((y, _))) => Some(x.abs_diff(y)),
+        _ => None,
+    };
+    drop(monitor);
+    drop(lab);
+    Ok(PairRun {
+        system: "nett".to_owned(),
+        from: relays[current].name.clone(),
+        after,
+        outage_ms,
+        sides_apart_ms,
+        tcp_ended: tcp.ended,
+    })
+}
+
+/// Tailscale 一组（场景 17，结果只记录）：两端之间没有直连，流量经 DERP；同时停掉 Headscale 和当前 DERP。
+fn tailscale_pair_once(topo: &Topology, out: &Path) -> anyhow::Result<PairRun> {
+    use crate::measure::{now_ms, tcp_stats};
+    use crate::tailscale::{TailscaleLab, derp_netns};
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        relays: Vec::new(),
+        helpers: Vec::new(),
+    };
+    let (a_egress, b_egress) = (
+        lab.underlay.egress_ipv4("a").context("a egress")?,
+        lab.underlay.egress_ipv4("b").context("b egress")?,
+    );
+    crate::fault::block_udp_with("a", &[b_egress.into()])?;
+    crate::fault::block_udp_with("b", &[a_egress.into()])?;
+    let mut ts = TailscaleLab::up_with(out, &["a", "b"], 2)?;
+    let ip_b = ts.ipv4("b")?;
+    ts.cli(
+        "a",
+        &["ping", "-c", "5", "--until-direct=false", &ip_b.to_string()],
+    )
+    .ok();
+    let links: Vec<(String, String)> = (1..=2)
+        .map(|i| (derp_netns(i), "eth0".to_owned()))
+        .collect();
+    let monitor = PathMonitor::start(links);
+    let (probe_file, tcp_file) = start_workload(&mut lab, "a", "b", ip_b.into(), out)?;
+    let current = settle_on_relay(&monitor, &probe_file, "tailscale")?;
+    let fault_ms = now_ms();
+    ts.stop_control();
+    ts.stop_derp(current + 1);
+    std::thread::sleep(PAIR_OUTAGE_WATCH);
+    let end_ms = now_ms();
+    let after = busiest(&monitor).map(|i| format!("derp{}", i + 1));
+    let outage_ms = resumed_at(&probe_file, fault_ms, end_ms)?.map(|t| t.saturating_sub(fault_ms));
+    let tcp = tcp_stats(&tcp_file, fault_ms - 2000, end_ms)?;
+    drop(monitor);
+    drop(ts);
+    drop(lab);
+    Ok(PairRun {
+        system: "tailscale".to_owned(),
+        from: format!("derp{}", current + 1),
+        after,
+        outage_ms,
+        sides_apart_ms: None,
+        tcp_ended: tcp.ended,
+    })
+}
+
+/// 场景 16（当前路径可用，经隧道提议与确认后两端一起切换）与 17（当前路径断开、没有 Hub，靠时间片
+/// 汇合），design/prototype.md 第 6.2 节。
+pub fn dial_only_pair(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    repeat: usize,
+    with_tailscale: bool,
+    fault: PairFault,
+) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let name = match fault {
+        PairFault::Slow => "16-dial-only-switch",
+        PairFault::Outage { .. } => "17-dial-only-outage",
+    };
+    let mut report = Report::new(name);
+    let mut runs = Vec::new();
+    for i in 0..repeat {
+        runs.push(nett_pair_once(
+            &topo,
+            nett,
+            &out.join(format!("nett-{i}")),
+            fault,
+        )?);
+        if with_tailscale && matches!(fault, PairFault::Outage { .. }) {
+            runs.push(tailscale_pair_once(
+                &topo,
+                &out.join(format!("tailscale-{i}")),
+            )?);
+        }
+    }
+    for r in &runs {
+        report.record(&format!("run:{}", r.system), format!("{r:?}"));
+    }
+    let nett_runs: Vec<&PairRun> = runs.iter().filter(|r| r.system == "nett").collect();
+    let moved = nett_runs
+        .iter()
+        .filter(|r| r.after.as_ref().is_some_and(|a| *a != r.from))
+        .count();
+    let mut outages: Vec<u64> = nett_runs.iter().filter_map(|r| r.outage_ms).collect();
+    let summary = format!(
+        "moved {moved}/{repeat}; outage p50 {:?} p95 {:?} max {:?} ms",
+        percentile(&mut outages.clone(), 0.5),
+        percentile(&mut outages.clone(), 0.95),
+        outages.iter().max()
+    );
+    outages.sort_unstable();
+    match fault {
+        PairFault::Slow => {
+            report.check("nett:moved-to-the-faster-relay", moved == repeat, &summary);
+            let within = nett_runs
+                .iter()
+                .filter(|r| {
+                    r.outage_ms
+                        .is_some_and(|o| o <= PAIR_SWITCH_OUTAGE_LIMIT_MS)
+                })
+                .count();
+            report.check(
+                "nett:outage-within-1s",
+                within == repeat,
+                format!("{within} of {repeat} runs"),
+            );
+            let resets = nett_runs.iter().filter(|r| r.tcp_ended.is_some()).count();
+            report.check(
+                "nett:long-connection-never-reset",
+                resets == 0,
+                format!("{resets} of {repeat} runs reset the connection"),
+            );
+        }
+        PairFault::Outage { skew_ms } => {
+            let within = nett_runs
+                .iter()
+                .filter(|r| r.outage_ms.is_some_and(|o| o <= PAIR_RECOVERY_LIMIT_MS))
+                .count();
+            if skew_ms.unsigned_abs() <= 2_000 {
+                // 20 次中至少 18 次
+                let needed = (repeat * 9).div_ceil(10);
+                report.check(
+                    "nett:recovered-within-45s",
+                    within >= needed,
+                    format!("{within} of {repeat} runs (need {needed}); {summary}"),
+                );
+            } else {
+                report.record(
+                    "nett:random-retry",
+                    format!(
+                        "clock skew {skew_ms} ms: {within} of {repeat} runs within 45 s; {summary}"
+                    ),
+                );
+            }
+        }
+    }
+    let t: Vec<&PairRun> = runs.iter().filter(|r| r.system == "tailscale").collect();
+    if !t.is_empty() {
+        report.record(
+            "tailscale:summary",
+            format!(
+                "recovered {} of {}: {:?}",
+                t.iter().filter(|r| r.outage_ms.is_some()).count(),
+                t.len(),
+                t.iter().map(|r| r.outage_ms).collect::<Vec<_>>()
+            ),
+        );
+    }
+    write_report(out, &report)?;
     Ok(report)
 }
