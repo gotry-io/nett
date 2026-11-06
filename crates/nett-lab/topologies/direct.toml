@@ -1,0 +1,17 @@
+# 两个 public 节点经"公网"直连（场景 14：准入验证；两节点直连通信）
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "public"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct"]

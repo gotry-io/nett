@@ -24,6 +24,7 @@ serde = { version = "1.0.229", default-features = false, features = ["std", "der
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
 thiserror = { version = "2.0.21", default-features = false }
 tokio = { version = "1.54.1", default-features = false }
+toml = { version = "1.2.0", default-features = false, features = ["std", "parse", "serde"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "ansi"] }
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
