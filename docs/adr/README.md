@@ -26,6 +26,7 @@
 | [0018](0018-client-platforms.md) | 终端设备：macOS 原生成员、代理客户端配置与客户端规划 | 已采纳 |
 | [0019](0019-mesh-only.md) | nett 只做组网 | 已采纳 |
 | [0020](0020-release-signing.md) | 发布签名：主备两把钥匙，公钥是构建参数 | 已采纳 |
+| [0021](0021-tailscale-parity.md) | 组网体验以 Tailscale 为基线 | 已采纳 |
 
 模板：
 
