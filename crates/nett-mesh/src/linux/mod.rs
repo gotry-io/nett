@@ -3,7 +3,10 @@
 
 mod netlink;
 mod rtnl;
+pub mod runtime;
+mod sys;
 mod wg;
+mod wgport;
 
 use std::collections::BTreeMap;
 
@@ -12,7 +15,7 @@ use rustix::net::netlink::GENERIC;
 
 use self::netlink::{NlError, Socket};
 use self::wg::PeerChange;
-use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec};
+use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
 
 pub struct KernelWireGuard {
@@ -165,5 +168,60 @@ impl DataPlane for KernelWireGuard {
         }
         wg::apply_peers(&mut self.generic, self.family, ifindex, &changes)
             .map_err(kernel("update wireguard peers"))
+    }
+
+    fn peer_stats(&mut self) -> Result<Vec<PeerStat>, DataPlaneError> {
+        let ifindex = self.ifindex.ok_or_else(|| DataPlaneError::Protocol {
+            op: "read peer state",
+            detail: "interface is not set up".to_owned(),
+        })?;
+        let device = retry_interrupted(|| wg::get_device(&mut self.generic, self.family, ifindex))
+            .map_err(kernel("read wireguard peers"))?;
+        Ok(device
+            .peers
+            .into_iter()
+            .map(|p| PeerStat {
+                public_key: p.public_key,
+                endpoint: p.endpoint,
+                rx_bytes: p.rx_bytes,
+                tx_bytes: p.tx_bytes,
+            })
+            .collect())
+    }
+
+    fn set_endpoint(
+        &mut self,
+        public_key: &X25519PublicKey,
+        endpoint: std::net::SocketAddr,
+    ) -> Result<(), DataPlaneError> {
+        let ifindex = self.ifindex.ok_or_else(|| DataPlaneError::Protocol {
+            op: "set endpoint",
+            detail: "interface is not set up".to_owned(),
+        })?;
+        let change = PeerChange::Endpoint {
+            public_key: *public_key,
+            endpoint,
+        };
+        wg::apply_peers(&mut self.generic, self.family, ifindex, &[change])
+            .map_err(kernel("set peer endpoint"))
+    }
+
+    fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {
+        let ifindex = self.ifindex.ok_or_else(|| DataPlaneError::Protocol {
+            op: "re-handshake",
+            detail: "interface is not set up".to_owned(),
+        })?;
+        // 删除对端会清掉它的会话；按新 endpoint 加回后，下一个数据包触发经新路径的握手
+        let changes = [
+            PeerChange::Remove(peer.public_key),
+            PeerChange::Upsert {
+                public_key: peer.public_key,
+                endpoint: peer.endpoint,
+                keepalive: peer.persistent_keepalive.unwrap_or(0),
+                allowed_ips: peer.allowed_ips.clone(),
+            },
+        ];
+        wg::apply_peers(&mut self.generic, self.family, ifindex, &changes)
+            .map_err(kernel("re-handshake peer"))
     }
 }

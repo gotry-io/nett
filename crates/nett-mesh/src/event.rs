@@ -25,6 +25,19 @@ pub enum Event {
     PeersApplied { peers: usize },
     /// 数据面操作失败，保持现状并在下一份期望状态时重试。
     DataPlaneFailed { reason: String },
+    /// 决定方切换了到某个对端的路径（design/mesh.md 第 8.2 节）。
+    PathSwitched {
+        node_id: NodeId,
+        to: String,
+        reason: crate::path::SwitchReason,
+        rehandshake: bool,
+    },
+    /// endpoint 被 WireGuard 的漫游改回了旧路径，决定方把它改回期望的路径（第 8.3 节）。
+    EndpointCorrected {
+        node_id: NodeId,
+        from: Option<std::net::SocketAddr>,
+        to: std::net::SocketAddr,
+    },
 }
 
 pub trait EventSink {
@@ -64,6 +77,15 @@ pub fn log_event(event: &Event) {
         Event::MemberRemoved { node_id } => tracing::info!(%node_id, "member removed"),
         Event::PeersApplied { peers } => tracing::info!(peers, "peers applied"),
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
+        Event::PathSwitched {
+            node_id,
+            to,
+            reason,
+            rehandshake,
+        } => tracing::info!(%node_id, %to, ?reason, rehandshake, "path switched"),
+        Event::EndpointCorrected { node_id, from, to } => {
+            tracing::debug!(%node_id, ?from, %to, "endpoint corrected")
+        }
     }
 }
 

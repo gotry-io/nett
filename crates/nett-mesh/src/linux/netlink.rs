@@ -299,6 +299,12 @@ pub(crate) fn parse_u32(b: &[u8]) -> Result<u32, NlError> {
         .map_err(|_| NlError::Malformed("u32 attribute"))
 }
 
+pub(crate) fn parse_u64(b: &[u8]) -> Result<u64, NlError> {
+    b.try_into()
+        .map(u64::from_ne_bytes)
+        .map_err(|_| NlError::Malformed("u64 attribute"))
+}
+
 pub(crate) fn parse_str(b: &[u8]) -> Result<&str, NlError> {
     let b = b.strip_suffix(&[0]).unwrap_or(b);
     std::str::from_utf8(b).map_err(|_| NlError::Malformed("string attribute"))

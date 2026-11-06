@@ -123,6 +123,10 @@ impl Topology {
         Ok(())
     }
 
+    pub fn node(&self, name: &str) -> Option<&Node> {
+        self.nodes.iter().find(|n| n.name == name)
+    }
+
     /// 节点在拓扑中的序号，从 1 开始；用于分配地址。
     pub fn index(&self, name: &str) -> Option<u8> {
         self.nodes

@@ -13,7 +13,7 @@ use nett_trust::payload::{
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
-use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec};
+use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
 
 pub fn node_id(n: u8) -> NodeId {
@@ -116,6 +116,7 @@ impl Mesh {
                 .filter(|n| **n != me)
                 .map(|n| PathDoc {
                     peer: node_id(*n),
+                    peer_reachability: Reachability::Public,
                     candidates: vec![Candidate::Direct {
                         endpoint: format!("192.0.2.{n}:41820").parse().expect("endpoint"),
                     }],
@@ -135,6 +136,7 @@ pub struct FakeDataPlane {
     pub interfaces: Vec<InterfaceSpec>,
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
+    pub rehandshakes: Vec<PeerSpec>,
 }
 
 impl FakeDataPlane {
@@ -144,6 +146,7 @@ impl FakeDataPlane {
             interfaces: vec![],
             peers: None,
             fail_peers: false,
+            rehandshakes: Vec::new(),
         }
     }
 }
@@ -167,5 +170,40 @@ impl DataPlane for FakeDataPlane {
         }
         self.peers = Some(peers.to_vec());
         Ok(())
+    }
+
+    fn peer_stats(&mut self) -> Result<Vec<PeerStat>, DataPlaneError> {
+        Ok(self
+            .peers
+            .iter()
+            .flatten()
+            .map(|p| PeerStat {
+                public_key: p.public_key,
+                endpoint: p.endpoint,
+                rx_bytes: 0,
+                tx_bytes: 0,
+            })
+            .collect())
+    }
+
+    fn set_endpoint(
+        &mut self,
+        public_key: &X25519PublicKey,
+        endpoint: std::net::SocketAddr,
+    ) -> Result<(), DataPlaneError> {
+        for p in self.peers.iter_mut().flatten() {
+            if p.public_key == *public_key {
+                p.endpoint = Some(endpoint);
+            }
+        }
+        Ok(())
+    }
+
+    fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {
+        self.rehandshakes.push(peer.clone());
+        self.set_endpoint(
+            &peer.public_key,
+            peer.endpoint.unwrap_or(crate::probe::UNSPECIFIED),
+        )
     }
 }

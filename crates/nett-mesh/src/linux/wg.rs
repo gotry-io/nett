@@ -5,7 +5,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV
 use nett_trust::keys::X25519PublicKey;
 
 use super::netlink::{
-    Message, NLM_F_ACK, NLM_F_DUMP, NlError, Socket, attrs, parse_u16, parse_u32,
+    Message, NLM_F_ACK, NLM_F_DUMP, NlError, Socket, attrs, parse_u16, parse_u32, parse_u64,
 };
 use crate::prefix::IpPrefix;
 
@@ -29,9 +29,12 @@ const WGPEER_A_PUBLIC_KEY: u16 = 1;
 const WGPEER_A_FLAGS: u16 = 3;
 const WGPEER_A_ENDPOINT: u16 = 4;
 const WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: u16 = 5;
+const WGPEER_A_RX_BYTES: u16 = 7;
+const WGPEER_A_TX_BYTES: u16 = 8;
 const WGPEER_A_ALLOWEDIPS: u16 = 9;
 const WGPEER_F_REMOVE_ME: u32 = 1;
 const WGPEER_F_REPLACE_ALLOWEDIPS: u32 = 2;
+const WGPEER_F_UPDATE_ONLY: u32 = 4;
 
 const WGALLOWEDIP_A_FAMILY: u16 = 1;
 const WGALLOWEDIP_A_IPADDR: u16 = 2;
@@ -50,6 +53,8 @@ pub(crate) struct PeerState {
     pub endpoint: Option<SocketAddr>,
     pub keepalive: u16,
     pub allowed_ips: Vec<IpPrefix>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +75,11 @@ pub(crate) enum PeerChange {
         allowed_ips: Vec<IpPrefix>,
     },
     Remove(X25519PublicKey),
+    /// 只改 endpoint；对端不存在时内核不创建它。
+    Endpoint {
+        public_key: X25519PublicKey,
+        endpoint: SocketAddr,
+    },
 }
 
 fn genl_header(cmd: u8, version: u8) -> [u8; 4] {
@@ -180,6 +190,14 @@ fn encode_peer(m: &mut Message, index: usize, change: &PeerChange) {
             m.attr(WGPEER_A_PUBLIC_KEY, public_key.as_bytes());
             m.attr_u32(WGPEER_A_FLAGS, WGPEER_F_REMOVE_ME);
         }
+        PeerChange::Endpoint {
+            public_key,
+            endpoint,
+        } => {
+            m.attr(WGPEER_A_PUBLIC_KEY, public_key.as_bytes());
+            m.attr_u32(WGPEER_A_FLAGS, WGPEER_F_UPDATE_ONLY);
+            m.attr(WGPEER_A_ENDPOINT, &encode_sockaddr(endpoint));
+        }
         PeerChange::Upsert {
             public_key,
             endpoint,
@@ -225,12 +243,15 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
     let mut endpoint = None;
     let mut keepalive = 0;
     let mut allowed_ips = Vec::new();
+    let (mut rx_bytes, mut tx_bytes) = (0, 0);
     for attr in attrs(buf) {
         let (ty, payload) = attr?;
         match ty {
             WGPEER_A_PUBLIC_KEY => public_key = Some(parse_key(payload)?),
             WGPEER_A_ENDPOINT => endpoint = decode_sockaddr(payload)?,
             WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL => keepalive = parse_u16(payload)?,
+            WGPEER_A_RX_BYTES => rx_bytes = parse_u64(payload)?,
+            WGPEER_A_TX_BYTES => tx_bytes = parse_u64(payload)?,
             WGPEER_A_ALLOWEDIPS => {
                 for ip in attrs(payload) {
                     let (_, ip) = ip?;
@@ -245,6 +266,8 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
         endpoint,
         keepalive,
         allowed_ips,
+        rx_bytes,
+        tx_bytes,
     })
 }
 

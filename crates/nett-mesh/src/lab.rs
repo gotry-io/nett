@@ -63,9 +63,15 @@ impl JsonLinesSink {
 impl EventSink for JsonLinesSink {
     fn emit(&mut self, event: Event) {
         log_event(&event);
-        let line = serde_json::to_string(&event).map(|mut s| {
-            s.push('\n');
-            s
+        // 每行带上发生时刻（Unix 毫秒），供 nett-lab 与底层网络的测量对齐
+        let line = serde_json::to_value(&event).and_then(|mut v| {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("at_ms".into(), serde_json::Value::from(now_ms()));
+            }
+            serde_json::to_string(&v).map(|mut s| {
+                s.push('\n');
+                s
+            })
         });
         let written = match line {
             Ok(line) => self.file.write_all(line.as_bytes()),
@@ -75,4 +81,11 @@ impl EventSink for JsonLinesSink {
             tracing::warn!(%error, "writing event file failed");
         }
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }

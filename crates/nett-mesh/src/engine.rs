@@ -1,23 +1,31 @@
-//! 把已准入的成员落到数据面：本机的组网接口，以及每个其他成员一个 WireGuard 对端。
+//! 把已准入的成员落到数据面：本机的组网接口，以及每个其他成员一个 WireGuard 对端；按选路的结果
+//! 切换对端的 endpoint，并纠正被 WireGuard 漫游改掉的 endpoint（design/mesh.md 第 4、8 节）。
 //!
-//! 数据面操作失败时保持现状，在下一份期望状态到来时重试（"拿不准时，连接保持现状"）。
+//! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。
 
-use std::net::IpAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
+use std::time::{Duration, Instant};
 
 use nett_core::id::NodeId;
 use nett_trust::admission::Member;
+use nett_trust::keys::X25519PublicKey;
 
-use crate::config::{Candidate, DesiredMesh, Reachability};
+use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
 };
 use crate::event::{Event, EventSink};
 use crate::key::PrivateKey;
 use crate::members::MemberSet;
+use crate::path::Route;
 use crate::prefix::IpPrefix;
+use crate::prober::{Incoming, Outgoing, Prober};
 
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
 pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
+/// 读取各对端状态（流量、endpoint）的间隔：endpoint 被漫游改掉后在这个时间内纠正（第 8.3 节）。
+const STATS_INTERVAL: Duration = Duration::from_millis(500);
 
 pub struct Engine<D> {
     node_id: NodeId,
@@ -26,6 +34,12 @@ pub struct Engine<D> {
     members: MemberSet,
     /// 最近一次成功应用的接口配置。
     interface: Option<InterfaceSpec>,
+    reachability: Reachability,
+    prober: Option<Prober>,
+    /// 已经配置到数据面的对端：跟随方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
+    configured: HashSet<X25519PublicKey>,
+    bytes: HashMap<X25519PublicKey, (u64, u64)>,
+    last_stats: Option<Instant>,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -36,11 +50,21 @@ impl<D: DataPlane> Engine<D> {
             dataplane,
             members: MemberSet::default(),
             interface: None,
+            reachability: Reachability::Public,
+            prober: None,
+            configured: HashSet::new(),
+            bytes: HashMap::new(),
+            last_stats: None,
         }
     }
 
     pub fn members(&self) -> &MemberSet {
         &self.members
+    }
+
+    /// 组网接口已经就绪（探测套接字可以绑定到组网地址上）。
+    pub fn interface(&self) -> Option<&InterfaceSpec> {
+        self.interface.as_ref()
     }
 
     pub fn apply(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
@@ -61,8 +85,9 @@ impl<D: DataPlane> Engine<D> {
             });
             // 本机已被撤销：不再与任何对端通信
             if self.interface.is_some() {
-                self.sync_peers(&[], events);
+                self.sync_peers(Vec::new(), events);
             }
+            self.prober = None;
             return;
         };
 
@@ -88,23 +113,160 @@ impl<D: DataPlane> Engine<D> {
             }
         }
 
+        self.reachability = desired.reachability;
+        let own_key = me.mesh_public_key;
+        let prober = self.prober.get_or_insert_with(|| Prober::new(&own_key));
+        prober.update(
+            &self.node_id,
+            desired.reachability,
+            &self.private_key,
+            self.members.members(),
+            &desired.paths,
+        );
         let peers: Vec<PeerSpec> = self
             .members
             .members()
             .values()
             .filter(|m| m.node_id != self.node_id)
-            .map(|m| peer_spec(m, desired))
+            .map(|m| {
+                // 决定方总是写入期望的 endpoint；跟随方只在新增对端时写入，之后由漫游跟随
+                let endpoint = prober.desired_endpoint(&m.node_id).or_else(|| {
+                    (!self.configured.contains(&m.mesh_public_key))
+                        .then(|| prober.endpoint(&m.node_id))
+                        .flatten()
+                });
+                peer_spec(m, desired.reachability, endpoint)
+            })
             .collect();
-        self.sync_peers(&peers, events);
+        self.sync_peers(peers, events);
     }
 
-    fn sync_peers(&mut self, peers: &[PeerSpec], events: &mut impl EventSink) {
-        match self.dataplane.sync_peers(peers) {
-            Ok(()) => events.emit(Event::PeersApplied { peers: peers.len() }),
+    fn sync_peers(&mut self, peers: Vec<PeerSpec>, events: &mut impl EventSink) {
+        match self.dataplane.sync_peers(&peers) {
+            Ok(()) => {
+                events.emit(Event::PeersApplied { peers: peers.len() });
+                self.configured = peers.iter().map(|p| p.public_key).collect();
+            }
             Err(e) => events.emit(Event::DataPlaneFailed {
                 reason: e.to_string(),
             }),
         }
+    }
+
+    /// 定期调用（约 100 毫秒一次）：读取对端状态、纠正 endpoint、推进选路，返回要发出的探测。
+    pub fn tick(
+        &mut self,
+        now: Instant,
+        now_ms: u64,
+        events: &mut impl EventSink,
+    ) -> Vec<Outgoing> {
+        if self.interface.is_none() {
+            return Vec::new();
+        }
+        if self
+            .last_stats
+            .is_none_or(|t| now.saturating_duration_since(t) >= STATS_INTERVAL)
+        {
+            self.last_stats = Some(now);
+            self.check_peers(now, events);
+        }
+        let Some(prober) = self.prober.as_mut() else {
+            return Vec::new();
+        };
+        let (out, switches) = prober.tick(now, now_ms);
+        for switch in switches {
+            let result = if switch.rehandshake {
+                match self.members.get(&switch.peer) {
+                    Some(member) => {
+                        let spec = peer_spec(member, self.reachability, Some(switch.to.endpoint()));
+                        self.dataplane.rehandshake(&spec)
+                    }
+                    None => continue,
+                }
+            } else {
+                self.dataplane
+                    .set_endpoint(&switch.public_key, switch.to.endpoint())
+            };
+            match result {
+                Ok(()) => events.emit(Event::PathSwitched {
+                    node_id: switch.peer,
+                    to: route_label(&switch.to),
+                    reason: switch.reason,
+                    rehandshake: switch.rehandshake,
+                }),
+                Err(e) => events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                }),
+            }
+        }
+        out
+    }
+
+    /// 读取各对端的流量与 endpoint：有流量的对端按第 7 节的频率探测；决定方发现 endpoint 被漫游
+    /// 改掉就改回（第 8.3 节）。
+    fn check_peers(&mut self, now: Instant, events: &mut impl EventSink) {
+        let Some(prober) = self.prober.as_mut() else {
+            return;
+        };
+        let stats = match self.dataplane.peer_stats() {
+            Ok(stats) => stats,
+            Err(e) => {
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+                return;
+            }
+        };
+        let by_key: HashMap<X25519PublicKey, NodeId> = prober
+            .peer_ids()
+            .map(|(id, key)| (*key, id.clone()))
+            .collect();
+        for stat in stats {
+            let Some(id) = by_key.get(&stat.public_key) else {
+                continue;
+            };
+            let bytes = (stat.rx_bytes, stat.tx_bytes);
+            if self.bytes.insert(stat.public_key, bytes) != Some(bytes) {
+                prober.mark_active(id, now);
+            }
+            let Some(want) = prober.desired_endpoint(id) else {
+                continue;
+            };
+            if stat.endpoint != Some(want) {
+                match self.dataplane.set_endpoint(&stat.public_key, want) {
+                    Ok(()) => events.emit(Event::EndpointCorrected {
+                        node_id: id.clone(),
+                        from: stat.endpoint,
+                        to: want,
+                    }),
+                    Err(e) => events.emit(Event::DataPlaneFailed {
+                        reason: e.to_string(),
+                    }),
+                }
+            }
+        }
+    }
+
+    /// 处理收到的探测消息，返回要发出的应答。
+    pub fn on_packet(
+        &mut self,
+        kind: Incoming,
+        from: SocketAddr,
+        data: &[u8],
+        at: Instant,
+        now_ms: u64,
+    ) -> Vec<Outgoing> {
+        match self.prober.as_mut() {
+            Some(prober) => prober.on_packet(kind, from, data, at, now_ms),
+            None => Vec::new(),
+        }
+    }
+}
+
+fn route_label(route: &Route) -> String {
+    match route {
+        Route::Direct(e) => format!("direct {e}"),
+        Route::Relay { endpoint, .. } => format!("relay {endpoint}"),
     }
 }
 
@@ -126,14 +288,7 @@ fn interface_spec(me: &Member, desired: &DesiredMesh) -> InterfaceSpec {
     }
 }
 
-fn peer_spec(member: &Member, desired: &DesiredMesh) -> PeerSpec {
-    let endpoint = desired
-        .paths
-        .get(&member.node_id)
-        .and_then(|candidates| candidates.first())
-        .map(|candidate| match candidate {
-            Candidate::Direct { endpoint } => *endpoint,
-        });
+fn peer_spec(member: &Member, own: Reachability, endpoint: Option<SocketAddr>) -> PeerSpec {
     PeerSpec {
         public_key: member.mesh_public_key,
         allowed_ips: vec![
@@ -141,8 +296,7 @@ fn peer_spec(member: &Member, desired: &DesiredMesh) -> PeerSpec {
             IpPrefix::host(IpAddr::V6(member.addresses.ipv6)),
         ],
         endpoint,
-        persistent_keepalive: (desired.reachability == Reachability::DialOnly)
-            .then_some(DIAL_ONLY_KEEPALIVE_SECS),
+        persistent_keepalive: (own == Reachability::DialOnly).then_some(DIAL_ONLY_KEEPALIVE_SECS),
     }
 }
 

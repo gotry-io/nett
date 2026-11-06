@@ -57,6 +57,15 @@ pub enum DataPlaneError {
     NotWireGuard(String),
 }
 
+/// 接口上一个对端的当前状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerStat {
+    pub public_key: X25519PublicKey,
+    pub endpoint: Option<SocketAddr>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 pub trait DataPlane: Send {
     /// 创建或沿用组网接口，设置私钥、监听端口、MTU 和地址并启用。返回接口实际使用的公钥。
     /// 已有的对端保持不变：组网进程重启时，进行中的连接不中断。
@@ -66,6 +75,20 @@ pub trait DataPlane: Send {
         private_key: &PrivateKey,
     ) -> Result<X25519PublicKey, DataPlaneError>;
 
-    /// 让接口上的对端恰好是 `peers`：增加缺少的、更新变化的、删除多余的。
+    /// 让接口上的对端恰好是 `peers`：增加缺少的、更新变化的、删除多余的。`endpoint` 为空的对端保留
+    /// 内核当前的 endpoint。
     fn sync_peers(&mut self, peers: &[PeerSpec]) -> Result<(), DataPlaneError>;
+
+    /// 各对端的 endpoint 与收发字节数。
+    fn peer_stats(&mut self) -> Result<Vec<PeerStat>, DataPlaneError>;
+
+    /// 只修改一个对端的 endpoint，会话不受影响（design/mesh.md 第 4 节）。
+    fn set_endpoint(
+        &mut self,
+        public_key: &X25519PublicKey,
+        endpoint: SocketAddr,
+    ) -> Result<(), DataPlaneError>;
+
+    /// 删除对端再按 `peer` 加回：下一个数据包触发新的握手，让新中继建立索引（design/mesh.md 第 8.4 节）。
+    fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError>;
 }

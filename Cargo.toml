@@ -18,6 +18,7 @@ nett-mesh = { path = "crates/nett-mesh" }
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
 base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 lexopt = { version = "0.3.2", default-features = false }
+libc = { version = "0.2.191", default-features = false }
 ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rustix = { version = "1.1.6", default-features = false, features = ["std", "net"] }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
@@ -27,6 +28,7 @@ tokio = { version = "1.54.1", default-features = false }
 toml = { version = "1.2.0", default-features = false, features = ["std", "parse", "serde"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "ansi"] }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 
 # 每个 crate 用 `[lints] workspace = true` 继承这里的规则（CLAUDE.md "代码规则"）
