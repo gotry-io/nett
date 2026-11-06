@@ -1,0 +1,22 @@
+# a 在"公网"上，b 是 dial-only，位于锥形 NAT 之后：b 主动连 a，a 从握手中得知 b 的映射地址
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "public"
+
+[[node]]
+name = "b"
+reachability = "dial-only"
+behind = "nat-b"
+
+[[router]]
+name = "nat-b"
+nat = "cone"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct"]

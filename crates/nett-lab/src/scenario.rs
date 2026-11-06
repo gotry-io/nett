@@ -14,6 +14,9 @@ use crate::material::{self, Generated, LabNode, key_from_wg_text};
 use crate::net::Underlay;
 use crate::topology::Topology;
 
+/// 连通性检查的最长等待时间。
+const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
+
 /// 等待组网进程应用期望状态的上限。
 const APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -67,10 +70,16 @@ impl Report {
 struct Lab {
     underlay: Underlay,
     processes: Vec<(String, Child)>,
+    /// 测量用的辅助进程（探测流、长连接）。
+    helpers: Vec<Child>,
 }
 
 impl Drop for Lab {
     fn drop(&mut self) {
+        for child in &mut self.helpers {
+            child.kill().ok();
+            child.wait().ok();
+        }
         for (_, child) in &mut self.processes {
             run("kill", ["-TERM", &child.id().to_string()]).ok();
         }
@@ -148,8 +157,24 @@ fn memory(pid: u32) -> String {
     )
 }
 
+/// 先等到能连通（最多 [`CONNECT_DEADLINE`]），再连续 ping 3 次。对端在 NAT 之后时，它的第一次握手
+/// 可能早于本机配置好它而被丢弃，WireGuard 5 秒后重试（场景 20 实测这段时间）；没有 endpoint 时
+/// `ping` 遇到发送错误会立即退出，所以由这里反复尝试。
 fn ping(netns: &str, target: &str) -> anyhow::Result<String> {
-    run_in(netns, "ping", ["-c", "3", "-i", "0.2", "-W", "2", target])
+    let started = Instant::now();
+    while run_in(netns, "ping", ["-c", "1", "-W", "1", target]).is_err() {
+        if started.elapsed() >= CONNECT_DEADLINE {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let reachable_after = started.elapsed();
+    let out = run_in(netns, "ping", ["-c", "3", "-i", "0.2", "-W", "2", target])?;
+    let rtt = out.lines().last().unwrap_or_default();
+    Ok(format!(
+        "{rtt}; reachable after {} ms",
+        reachable_after.as_millis()
+    ))
 }
 
 fn start(
@@ -162,6 +187,7 @@ fn start(
     let mut lab = Lab {
         underlay,
         processes: Vec::new(),
+        helpers: Vec::new(),
     };
     for node in &generated.nodes {
         lab.spawn(node, nett)?;
@@ -188,6 +214,15 @@ impl Lab {
             &dir.join("mesh.log"),
         )?;
         self.processes.push((node.name.clone(), child));
+        Ok(())
+    }
+
+    /// 在节点的命名空间中启动一个测量辅助进程（`nett-lab` 自己的子命令）。
+    fn helper(&mut self, name: &str, args: &[&str], log: &Path) -> anyhow::Result<()> {
+        let net = self.underlay.node(name).context("planned node")?;
+        let me = std::env::current_exe().context("locating nett-lab")?;
+        let child = spawn_in(&net.netns, &me, args, log)?;
+        self.helpers.push(child);
         Ok(())
     }
 
@@ -326,6 +361,15 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         ),
     );
 
+    // 各节点 WireGuard 的现场，供排查
+    for node in &generated.nodes {
+        if let Some(net) = lab.underlay.node(&node.name) {
+            let dump =
+                run_in(&net.netns, "wg", ["show", "nett0"]).unwrap_or_else(|e| format!("{e:#}"));
+            report.record(&format!("wg:{}", node.name), dump);
+        }
+    }
+
     // 资源占用只记录（场景 21 在 G6 按"负载后静置 10 分钟"的方法正式测量）
     for (name, child) in &lab.processes {
         report.record(&format!("memory:{name}"), memory(child.id()));
@@ -341,4 +385,109 @@ pub fn write_report(out: &Path, report: &Report) -> anyhow::Result<PathBuf> {
     let text = serde_json::to_vec_pretty(report).context("serializing report")?;
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
     Ok(path)
+}
+
+/// 实验工具自检：在已知的故障上确认测量和故障注入本身是准的。不是 nett 的验收场景。
+pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+    use crate::fault::{self, Netem};
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let mut lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new("lab-selftest");
+    let (a, b) = (&generated.nodes[0], &generated.nodes[1]);
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+
+    let probe_file = out.join("probe.txt");
+    let tcp_file = out.join("tcp.txt");
+    let probe_addr = format!("{}:7000", b.mesh_ipv4);
+    let tcp_addr = format!("{}:7001", b.mesh_ipv4);
+    lab.helper(
+        &b.name,
+        &[
+            "probe-recv",
+            "--listen",
+            &probe_addr,
+            "--out",
+            &probe_file.to_string_lossy(),
+        ],
+        &out.join("probe-recv.log"),
+    )?;
+    lab.helper(
+        &b.name,
+        &[
+            "tcp-sink",
+            "--listen",
+            &tcp_addr,
+            "--out",
+            &tcp_file.to_string_lossy(),
+        ],
+        &out.join("tcp-sink.log"),
+    )?;
+    std::thread::sleep(Duration::from_millis(300));
+    lab.helper(
+        &a.name,
+        &["probe-send", "--to", &probe_addr],
+        &out.join("probe-send.log"),
+    )?;
+    lab.helper(
+        &a.name,
+        &["tcp-source", "--to", &tcp_addr],
+        &out.join("tcp-source.log"),
+    )?;
+
+    // 2 秒的双向 100% 丢包
+    std::thread::sleep(Duration::from_secs(3));
+    let net_b = lab.underlay.node(&b.name).context("node b")?.netns.clone();
+    let before = fault::counters(&net_b, "eth0")?;
+    let start_ms = now_ms();
+    fault::set_link(&lab.underlay, &b.name, &Netem::loss(100.0))?;
+    std::thread::sleep(Duration::from_secs(2));
+    fault::clear_link(&lab.underlay, &b.name)?;
+    std::thread::sleep(Duration::from_secs(3));
+
+    // 1 秒的 UDP 拦截（WireGuard 的外层是 UDP）
+    let block_ms = now_ms();
+    fault::block_udp(&b.name)?;
+    std::thread::sleep(Duration::from_secs(1));
+    fault::unblock_udp(&b.name)?;
+    std::thread::sleep(Duration::from_secs(3));
+    let end_ms = now_ms();
+    let after = fault::counters(&net_b, "eth0")?;
+
+    let loss = probe_stats(&probe_file, start_ms - 2000, block_ms - 500)?;
+    report.check(
+        "probe:2s-loss-measured",
+        (1800..=2600).contains(&loss.max_gap_ms) && loss.gaps.len() == 1,
+        format!("{loss:?}"),
+    );
+    let block = probe_stats(&probe_file, block_ms - 500, end_ms)?;
+    report.check(
+        "probe:1s-udp-block-measured",
+        (800..=1600).contains(&block.max_gap_ms) && block.gaps.len() == 1,
+        format!("{block:?}"),
+    );
+    let tcp = tcp_stats(&tcp_file, start_ms - 2000, end_ms)?;
+    report.check(
+        "tcp:long-connection-survives",
+        tcp.ended.is_none() && tcp.kbps > 0,
+        format!("{tcp:?}"),
+    );
+    report.check(
+        "counters:underlay-traffic-seen",
+        after.0 > before.0 && after.1 > before.1,
+        format!(
+            "eth0 of {} rx {} -> {}, tx {} -> {}",
+            b.name, before.0, after.0, before.1, after.1
+        ),
+    );
+
+    write_report(out, &report)?;
+    drop(lab);
+    Ok(report)
 }

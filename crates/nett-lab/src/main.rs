@@ -6,7 +6,11 @@
 #[cfg(target_os = "linux")]
 mod cmd;
 #[cfg(target_os = "linux")]
+mod fault;
+#[cfg(target_os = "linux")]
 mod material;
+#[cfg(target_os = "linux")]
+mod measure;
 #[cfg(target_os = "linux")]
 mod net;
 #[cfg(target_os = "linux")]
@@ -28,8 +32,13 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  nett-lab run admission --topology <file.toml> --nett <path/to/nett> --out <dir>
-  nett-lab down --topology <file.toml>";
+  nett-lab run <admission|selftest> --topology <file.toml> --nett <path/to/nett> --out <dir>
+  nett-lab down --topology <file.toml>
+measurement helpers (started by the scenarios inside a node's network namespace):
+  nett-lab probe-send --to <addr:port>
+  nett-lab probe-recv --listen <addr:port> --out <file>
+  nett-lab tcp-source --to <addr:port>
+  nett-lab tcp-sink --listen <addr:port> --out <file>";
 
 #[cfg(not(target_os = "linux"))]
 fn run() -> anyhow::Result<bool> {
@@ -49,9 +58,14 @@ fn run() -> anyhow::Result<bool> {
     let mut parser = lexopt::Parser::from_env();
     let mut words = Vec::new();
     let (mut topology, mut nett, mut out) = (None, None, None);
+    let (mut to, mut listen) = (None, None);
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
+            Long("to") => to = Some(parser.value()?.string()?.parse::<std::net::SocketAddr>()?),
+            Long("listen") => {
+                listen = Some(parser.value()?.string()?.parse::<std::net::SocketAddr>()?)
+            }
             Long("topology") => topology = Some(PathBuf::from(parser.value()?)),
             Long("nett") => nett = Some(PathBuf::from(parser.value()?)),
             Long("out") => out = Some(PathBuf::from(parser.value()?)),
@@ -63,12 +77,24 @@ fn run() -> anyhow::Result<bool> {
         }
     }
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
-    let topology = topology.context(USAGE)?;
     match words.as_slice() {
-        ["run", "admission"] => {
-            let nett = nett.context(USAGE)?;
+        ["probe-send"] => measure::probe_send(to.context(USAGE)?).map(|()| true),
+        ["probe-recv"] => {
+            measure::probe_recv(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
+        }
+        ["tcp-source"] => measure::tcp_source(to.context(USAGE)?).map(|()| true),
+        ["tcp-sink"] => {
+            measure::tcp_sink(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
+        }
+        ["run", name] => {
+            let topology = topology.context(USAGE)?;
             let out = out.context(USAGE)?;
-            let report = scenario::admission(&topology, &nett, &out)?;
+            let nett = || nett.clone().context(USAGE);
+            let report = match *name {
+                "admission" => scenario::admission(&topology, &nett()?, &out)?,
+                "selftest" => scenario::selftest(&topology, &nett()?, &out)?,
+                _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
+            };
             for check in &report.checks {
                 println!(
                     "{} {} {}",
@@ -85,7 +111,7 @@ fn run() -> anyhow::Result<bool> {
             Ok(report.passed)
         }
         ["down"] => {
-            let topo = topology::Topology::load(&topology)?;
+            let topo = topology::Topology::load(&topology.context(USAGE)?)?;
             net::Underlay::plan(&topo)?.down()?;
             Ok(true)
         }
