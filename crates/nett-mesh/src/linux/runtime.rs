@@ -1,8 +1,8 @@
 //! Linux 上组网进程的运行时：一个后台线程持有引擎，推进选路、执行切换；每个套接字一个接收线程，把收到的
 //! 探测消息交给后台线程。队列有上限，满了丢弃测量消息（只影响一次测量）。
 //!
-//! 套接字：组网地址上的探测端口（绑定到 `nett0`）；发往中继的探测从组网进程自己的端口发出；直连探测走
-//! WireGuard 端口（[`super::wgport`]）。
+//! 套接字：组网地址上的探测端口（绑定到 `nett0`）；发往中继的探测从组网进程自己的端口发出；直连探测
+//! 以 WireGuard 端口为源端口发出（[`super::wgport`]），由 nftables 拷贝收到的探测（[`super::nft`]）。
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsFd;
@@ -13,6 +13,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::KernelWireGuard;
+use super::nft::{ProbeLog, install_probe_copy};
 use super::sys::bind_to_device;
 use super::wgport::WgPort;
 use crate::config::{ConfigError, DesiredMesh};
@@ -179,6 +180,9 @@ impl<E: EventSink> Worker<E> {
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;
         let relay = UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))?;
         let wg_port = Arc::new(WgPort::open(listen_port)?);
+        // 日志组取 WireGuard 端口号：同一台主机上每个组网进程一个
+        install_probe_copy(listen_port, listen_port).map_err(std::io::Error::other)?;
+        let mut log = ProbeLog::bind(listen_port, listen_port).map_err(std::io::Error::other)?;
 
         for (socket, kind) in [
             (tunnel_v4.try_clone()?, Incoming::Tunnel),
@@ -196,27 +200,16 @@ impl<E: EventSink> Worker<E> {
                 }
             }));
         }
-        for v6 in [false, true] {
-            let (port, tx, stop, dropped) = (
-                wg_port.clone(),
-                self.tx.clone(),
-                self.stop.clone(),
-                self.dropped.clone(),
-            );
-            self.receivers.push(std::thread::spawn(move || {
-                let mut buf = vec![0u8; MAX_DATAGRAM];
-                while !stop.load(Ordering::Relaxed) {
-                    let got = if v6 {
-                        port.recv_v6(&mut buf)
-                    } else {
-                        port.recv_v4(&mut buf)
-                    };
-                    if let Ok(Some((from, data))) = got {
+        let (tx, stop, dropped) = (self.tx.clone(), self.stop.clone(), self.dropped.clone());
+        self.receivers.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if let Ok(probes) = log.recv() {
+                    for (from, data) in probes {
                         forward(&tx, &dropped, Incoming::Direct, from, data);
                     }
                 }
-            }));
-        }
+            }
+        }));
         Ok(Sockets {
             tunnel_v4,
             tunnel_v6,

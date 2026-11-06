@@ -2,11 +2,12 @@
 //! 需要 `CAP_NET_ADMIN`。
 
 mod netlink;
+mod nft;
 mod rtnl;
 pub mod runtime;
 mod sys;
 mod wg;
-pub mod wgport;
+mod wgport;
 
 use std::collections::BTreeMap;
 

@@ -149,13 +149,70 @@ impl Socket {
     }
 }
 
-struct Header {
-    ty: u16,
-    flags: u16,
-    seq: u32,
+impl Socket {
+    /// 发送一批消息（nftables 的事务），等每一条带确认标志的消息都得到确认；任何一条出错即返回错误。
+    pub(crate) fn request_batch(&mut self, msgs: Vec<Message>) -> Result<(), NlError> {
+        let mut bytes = Vec::new();
+        let mut pending = std::collections::BTreeSet::new();
+        for msg in msgs {
+            self.seq = self.seq.wrapping_add(1);
+            if msg.flags & NLM_F_ACK != 0 {
+                pending.insert(self.seq);
+            }
+            bytes.extend_from_slice(&msg.finish(self.seq));
+        }
+        let sent = sendto(
+            &self.fd,
+            &bytes,
+            SendFlags::empty(),
+            &SocketAddrNetlink::new(0, 0),
+        )?;
+        if sent != bytes.len() {
+            return Err(NlError::Malformed("short send"));
+        }
+        while !pending.is_empty() {
+            let (len, _) = recv(&self.fd, &mut self.buf[..], RecvFlags::empty())?;
+            let mut rest = &self.buf[..len];
+            while !rest.is_empty() {
+                let (header, payload, next) = split_message(rest)?;
+                rest = next;
+                if header.ty == NLMSG_ERROR && pending.remove(&header.seq) {
+                    let code = payload
+                        .get(..4)
+                        .and_then(|b| b.try_into().ok())
+                        .map(i32::from_ne_bytes)
+                        .ok_or(NlError::Malformed("short error message"))?;
+                    if code < 0 {
+                        return Err(NlError::Kernel(io::Error::from_raw_os_error(-code)));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 接收一个数据报（用于订阅类的套接字，例如 nfnetlink_log）；超时返回 `None`。
+    pub(crate) fn recv_datagram(&mut self) -> Result<Option<&[u8]>, NlError> {
+        match recv(&self.fd, &mut self.buf[..], RecvFlags::empty()) {
+            Ok((len, _)) => Ok(Some(&self.buf[..len])),
+            Err(e) if e == rustix::io::Errno::AGAIN || e == rustix::io::Errno::INTR => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    pub(crate) fn set_recv_timeout(&self, timeout: Duration) -> Result<(), NlError> {
+        set_socket_timeout(&self.fd, Timeout::Recv, Some(timeout))?;
+        Ok(())
+    }
 }
 
-fn split_message(buf: &[u8]) -> Result<(Header, &[u8], &[u8]), NlError> {
+pub(crate) struct Header {
+    pub(crate) ty: u16,
+    flags: u16,
+    pub(crate) seq: u32,
+}
+
+pub(crate) fn split_message(buf: &[u8]) -> Result<(Header, &[u8], &[u8]), NlError> {
     if buf.len() < NLMSG_HDR_LEN {
         return Err(NlError::Malformed("truncated message header"));
     }
