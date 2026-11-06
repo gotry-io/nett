@@ -11,15 +11,16 @@ use nett_relay::lab::RelayConfig;
 use tokio::signal::unix::{SignalKind, signal};
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    let mut config = None;
+    let (mut config, mut state) = (None, None);
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("state") => state = Some(PathBuf::from(parser.value()?)),
             other => return Err(other.unexpected().into()),
         }
     }
     let Some(config) = config else {
-        bail!("usage: nett relay --config <relay.json>");
+        bail!("usage: nett relay --config <relay.json> [--state <relay-state.json>]");
     };
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
@@ -39,7 +40,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let worker_stop = stop.clone();
     let worker = std::thread::Builder::new()
         .name("nett-relay".into())
-        .spawn(move || nett_relay::server::serve(&socket, relay, &worker_stop))
+        .spawn(move || nett_relay::server::serve(&socket, relay, &worker_stop, state.as_deref()))
         .context("starting the relay thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()

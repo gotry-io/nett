@@ -25,6 +25,34 @@ const BIND_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// 新绑定后这么久收不到来自新地址的数据，恢复旧绑定。
 const BIND_CONFIRM: Duration = Duration::from_secs(10);
 
+/// 保存状态的格式版本。
+const STATE_V1: u32 = 1;
+
+/// 重启时恢复的状态（design/mesh.md 第 5.2 节）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayState {
+    pub v: u32,
+    pub bindings: Vec<Binding>,
+    pub sessions: Vec<SavedSession>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Binding {
+    pub public_key: X25519PublicKey,
+    pub address: SocketAddr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SavedSession {
+    pub index: Index,
+    pub owner: X25519PublicKey,
+    /// 保存时已经空闲了多久。
+    pub idle_ms: u64,
+}
+
 /// 中继分配中的一个成员（design/mesh.md 第 5.2 节）。
 #[derive(Debug, Clone)]
 pub struct AssignedMember {
@@ -70,6 +98,7 @@ pub enum Outcome {
 }
 
 struct Member {
+    public_key: X25519PublicKey,
     mac1: Mac1Key,
     key_id: KeyId,
     probe_key: ProbeKey,
@@ -129,6 +158,7 @@ impl Relay {
             members: members
                 .iter()
                 .map(|m| Member {
+                    public_key: m.public_key,
                     mac1: Mac1Key::for_public_key(m.public_key.as_bytes()),
                     key_id: KeyId::of(m.public_key.as_bytes()),
                     probe_key: ProbeKey::from_token(&m.token),
@@ -338,6 +368,62 @@ impl Relay {
         }
     }
 
+    /// 要保存的状态：地址绑定与正式表项（design/mesh.md 第 5.2 节）。只有会话索引和地址，没有密钥。
+    pub fn snapshot(&self, now: Instant) -> RelayState {
+        RelayState {
+            v: STATE_V1,
+            bindings: self
+                .members
+                .iter()
+                .filter_map(|m| {
+                    m.bound.map(|addr| Binding {
+                        public_key: m.public_key,
+                        address: addr,
+                    })
+                })
+                .collect(),
+            sessions: self
+                .sessions
+                .iter()
+                .map(|(index, s)| SavedSession {
+                    index: *index,
+                    owner: self.members[s.owner].public_key,
+                    idle_ms: u64::try_from(now.saturating_duration_since(s.at).as_millis())
+                        .unwrap_or(u64::MAX),
+                })
+                .collect(),
+        }
+    }
+
+    /// 恢复保存的状态。只恢复仍在分配中的成员，过期或冲突的表项丢弃。
+    pub fn restore(&mut self, state: &RelayState, now: Instant) {
+        if state.v != STATE_V1 {
+            return;
+        }
+        let find = |members: &[Member], key: &X25519PublicKey| {
+            members.iter().position(|m| m.public_key == *key)
+        };
+        for b in &state.bindings {
+            if let Some(i) = find(&self.members, &b.public_key) {
+                self.members[i].bound = Some(b.address);
+            }
+        }
+        for saved in &state.sessions {
+            let idle = Duration::from_millis(saved.idle_ms);
+            let Some(owner) = find(&self.members, &saved.owner) else {
+                continue;
+            };
+            if idle >= SESSION_IDLE
+                || self.sessions.len() >= MAX_SESSIONS
+                || self.sessions.contains_key(&saved.index)
+            {
+                continue;
+            }
+            let at = now.checked_sub(idle).unwrap_or(now);
+            self.sessions.insert(saved.index, Session { owner, at });
+        }
+    }
+
     pub fn table_sizes(&self) -> (usize, usize) {
         (self.pending.len(), self.sessions.len())
     }
@@ -505,6 +591,34 @@ mod tests {
         assert_eq!(r.table_sizes(), (0, 2));
         r.expire(t0 + SESSION_IDLE);
         assert_eq!(r.table_sizes(), (0, 0));
+    }
+
+    #[test]
+    fn restored_state_keeps_forwarding() {
+        let mut r = relay();
+        let now = Instant::now();
+        handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
+        let saved = r.snapshot(now + Duration::from_secs(1));
+        let text = serde_json::to_string(&saved).expect("serialize");
+        // 重启：新的中继只有分配，没有索引表；恢复后照常转发两个方向的数据
+        let mut restarted = relay();
+        assert_eq!(
+            restarted.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Drop(Drop::UnknownIndex)
+        );
+        restarted.restore(&serde_json::from_str(&text).expect("parse"), now);
+        assert_eq!(
+            restarted.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Forward(addr("203.0.113.5:50000"))
+        );
+        assert_eq!(
+            restarted.handle(addr("203.0.113.5:50000"), &data(22), now, 0),
+            Outcome::Forward(addr("198.51.100.1:41820"))
+        );
+        // 已经过期的表项不恢复
+        let mut stale = relay();
+        stale.restore(&r.snapshot(now + SESSION_IDLE), now);
+        assert_eq!(stale.table_sizes(), (0, 0));
     }
 
     #[test]
