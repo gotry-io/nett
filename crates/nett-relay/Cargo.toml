@@ -9,3 +9,16 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+nett-mesh.workspace = true
+nett-trust.workspace = true
+blake2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[features]
+# 实验构建：中继分配读自本地文件（design/prototype.md 第 3 节），官方构建不开启
+lab = []
