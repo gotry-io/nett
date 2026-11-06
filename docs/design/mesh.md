@@ -189,7 +189,7 @@ Hub 为每一对成员计算候选路径列表，经 `mesh` 分区下发；成�
 
 直连候选的探测和打洞（第 6.1 节）必须走 WireGuard 自己的 NAT 映射，所以从 WireGuard 端口发出（ADR 0021）：
 
-- **Linux 内核 WireGuard**：组网进程用原始套接字构造源端口为 WireGuard 端口的 UDP 包发出；另用一个原始套接字接收发往这个端口的副本，挂上 BPF 过滤器，只把带 nett 探测标记的包交给用户态。这些包不是 WireGuard 消息，内核 WireGuard 收到后直接丢弃。组网进程因此需要 `CAP_NET_RAW`；
+- **Linux 内核 WireGuard**：组网进程用原始套接字构造源端口为 WireGuard 端口的 UDP 包发出（因此需要 `CAP_NET_RAW`）。接收用 nftables：组网进程经 netlink 在 input 链上加一条规则，只把发往 WireGuard 端口、首字节为探测类型的包的副本（`log`，nfnetlink_log）交给自己；其他包只多一次规则匹配，不复制。这些探测包不是 WireGuard 消息，内核 WireGuard 收到后直接丢弃。不用原始套接字接收：内核会把每个进来的 UDP 包先复制一份交给原始套接字再过滤，实测让 WireGuard 的吞吐下降约 7%（prototype.md 第 9 节）；
 - **用户态平台**：组网进程本来就持有 WireGuard 的 UDP 端口，按首个字节区分探测和 WireGuard 消息；
 - 探测消息的首个字节与 WireGuard 的四种消息类型都不同；探测带认证（见上），未认证的包不作任何响应，WireGuard 端口对外的表现不变；
 - 发往中继的探测从组网进程自己的端口发出，由 nett-relay 在中继端口上应答。
@@ -406,6 +406,6 @@ M3：iOS、Android App 与 Windows 成员（ADR 0018）。
 | 用户态 WireGuard 实现的选型 | 在维护状态、性能和内存之间评估；覆盖 DSM、旧内核和 macOS，并考虑 M3 的 iOS、Android 能否复用 |
 | NAS 系统上的 TUN、IP 转发、NAT 能力 | 原型关卡之后、铺开到 NAS 之前逐项验证 |
 | macOS 原生成员与代理类 VPN 应用（增强模式）共存 | 铺开到 macOS 之前实测（ADR 0018） |
-| 原始套接字在 WireGuard 端口上收发探测 | 各发行版内核上的行为（含 IPv6、主机上已有的连接跟踪和 NAT 规则）在原型关卡中验证 |
+| 在 WireGuard 端口上收发探测 | 各发行版内核上的行为（含 IPv6、主机上已有的连接跟踪和 NAT 规则、nfnetlink_log 是否可用）在原型关卡中验证 |
 | 两端都在对称型 NAT 后时的打洞 | M2 再设计 |
 | 新成员首次连通的时间 | NAT 之后的 `dial-only` 成员，第一次握手若早于对端配置好它，会被对端丢弃，WireGuard 5 秒后才重试：实测 5.2–5.7 秒连通，直连只要 11 毫秒（prototype.md 第 9 节）。之后优化，例如对端配置好新成员后经已有路径通知它立即重新握手；先与 Tailscale 的首次连通时间对比 |
