@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use nett_core::id::NodeId;
-use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc};
+use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken};
+use nett_relay::lab::{MemberDoc, RelayConfig};
 use nett_trust::admission::{
     AdmissionMaterial, AdmissionProof, AdmissionProofDoc, AdmissionProofKind,
 };
@@ -29,6 +30,8 @@ use crate::topology::Topology;
 
 /// 组网进程的 WireGuard 端口（design/mesh.md 第 4 节的默认值）。
 pub const LISTEN_PORT: u16 = 41820;
+/// 实验中 nett-relay 的中继端口。
+pub const RELAY_PORT: u16 = 41900;
 
 /// 实验材料中记录的节点信息，供场景检查使用。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -237,6 +240,23 @@ pub fn generate(
         (vec![], vec![], vec![])
     };
 
+    // 每个（成员，中继）一个探测令牌（design/mesh.md 第 5.2 节）
+    let mut tokens: BTreeMap<(String, String), [u8; 32]> = BTreeMap::new();
+    for link in &topo.links {
+        for relay in link
+            .candidates
+            .iter()
+            .filter_map(|c| c.strip_prefix("relay:"))
+        {
+            for member in &link.peers {
+                tokens
+                    .entry((member.clone(), relay.to_owned()))
+                    .or_insert_with(random_token);
+            }
+        }
+    }
+    write_relay_configs(topo, underlay, &nodes, &tokens)?;
+
     let mut first_desired = None;
     for (i, node) in topo.nodes.iter().enumerate() {
         let mut members: Vec<AdmissionMaterial> = materials.values().cloned().collect();
@@ -257,14 +277,26 @@ pub fn generate(
                     return None;
                 };
                 let peer = nodes.iter().find(|n| &n.name == other)?;
-                // 直连候选：对端在"公网"上时就是它的公网地址
-                let endpoint = underlay.public_ipv4(other)?;
                 let candidates = link
                     .candidates
                     .iter()
-                    .filter(|c| *c == "direct")
-                    .map(|_| Candidate::Direct {
-                        endpoint: SocketAddr::new(endpoint.into(), LISTEN_PORT),
+                    .filter_map(|c| match c.strip_prefix("relay:") {
+                        // 经中继：中继端口在中继节点的公网地址上
+                        Some(relay) => Some(Candidate::Relay {
+                            relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
+                            endpoint: SocketAddr::new(
+                                underlay.public_ipv4(relay)?.into(),
+                                RELAY_PORT,
+                            ),
+                            token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
+                        }),
+                        // 直连候选：对端在"公网"上时就是它的公网地址
+                        None => Some(Candidate::Direct {
+                            endpoint: SocketAddr::new(
+                                underlay.public_ipv4(other)?.into(),
+                                LISTEN_PORT,
+                            ),
+                        }),
                     })
                     .collect();
                 Some(PathDoc {
@@ -372,6 +404,74 @@ fn negative_examples(
         });
     }
     Ok((members, revocations, list))
+}
+
+fn random_token() -> [u8; 32] {
+    let mut token = [0u8; 32];
+    ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut token)
+        .expect("the system random source works");
+    token
+}
+
+/// 每个中继节点一份中继分配：经它的连接两端的组网公钥、`public` 一端的地址、各成员的令牌。
+fn write_relay_configs(
+    topo: &Topology,
+    underlay: &Underlay,
+    nodes: &[LabNode],
+    tokens: &BTreeMap<(String, String), [u8; 32]>,
+) -> anyhow::Result<()> {
+    let key_of = |name: &str| {
+        nodes
+            .iter()
+            .find(|n| n.name == name)
+            .map(|n| n.mesh_public_key)
+    };
+    for relay in topo
+        .nodes
+        .iter()
+        .filter(|n| n.roles.iter().any(|r| r == "relay"))
+    {
+        let mut members = Vec::new();
+        let mut connections = Vec::new();
+        for link in topo.links.iter().filter(|l| {
+            l.candidates
+                .iter()
+                .any(|c| c.strip_prefix("relay:") == Some(relay.name.as_str()))
+        }) {
+            for member in &link.peers {
+                if members
+                    .iter()
+                    .any(|m: &MemberDoc| Some(m.public_key) == key_of(member))
+                {
+                    continue;
+                }
+                members.push(MemberDoc {
+                    public_key: key_of(member).context("member key")?,
+                    address: underlay
+                        .public_ipv4(member)
+                        .map(|ip| SocketAddr::new(ip.into(), LISTEN_PORT)),
+                    token: tokens[&(member.clone(), relay.name.clone())],
+                });
+            }
+            connections.push([
+                key_of(&link.peers[0]).context("member key")?,
+                key_of(&link.peers[1]).context("member key")?,
+            ]);
+        }
+        let config = RelayConfig {
+            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
+            members,
+            connections,
+        };
+        let dir = nodes
+            .iter()
+            .find(|n| n.name == relay.name)
+            .context("relay node")?
+            .dir
+            .clone();
+        write_json(&dir.join("relay.json"), &config)?;
+    }
+    Ok(())
 }
 
 /// 从文件读回 WireGuard 公钥文本（用于核对 `wg show` 的输出）。

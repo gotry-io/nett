@@ -92,6 +92,17 @@ impl Underlay {
         self.nodes.get(name)
     }
 
+    /// 节点在"公网"上的出口地址：公网节点是自己的地址，NAT 之后的节点是路由器的外网地址。
+    pub fn egress_ipv4(&self, name: &str) -> Option<Ipv4Addr> {
+        let node = self.nodes.get(name)?;
+        if node.public_ipv4.is_some() {
+            return node.public_ipv4;
+        }
+        let router = node.switch_ns.strip_prefix(NETNS_PREFIX)?;
+        let (_, k, _) = self.routers.iter().find(|(r, _, _)| r == router)?;
+        Some(Ipv4Addr::new(198, 51, 100, 200 + k))
+    }
+
     /// 节点或路由器接入链路在交换侧的一端：`(命名空间, 接口名)`。
     pub fn switch_port(&self, name: &str) -> Option<(String, String)> {
         let switch_ns = match self.nodes.get(name) {

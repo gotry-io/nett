@@ -17,8 +17,10 @@ lexopt.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 nett-core.workspace = true
 nett-mesh.workspace = true
+nett-relay = { workspace = true, features = ["lab"] }
 nett-trust = { workspace = true, features = ["signing"] }
 base64.workspace = true
+ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
