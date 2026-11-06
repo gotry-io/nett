@@ -10,12 +10,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use super::KernelWireGuard;
 use super::nft::{ProbeLog, install_probe_copy};
 use super::sys::bind_to_device;
 use super::wgport::WgPort;
+use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::dataplane::INTERFACE_NAME;
 use crate::engine::Engine;
@@ -27,6 +28,8 @@ use crate::run::Applier;
 /// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
 /// 200 毫秒的加探间隔（第 8.2 节）。
 const TICK: Duration = Duration::from_millis(100);
+/// 检查本机时钟误差的间隔（design/mesh.md 第 8.4 节）。
+const CLOCK_CHECK: Duration = Duration::from_secs(10);
 /// 后台线程的消息队列上限。
 const QUEUE: usize = 1024;
 /// 接收线程的读超时：据此定期检查是否该退出。
@@ -58,9 +61,10 @@ impl Applier for Runtime {
 }
 
 impl Runtime {
-    pub fn spawn<E: EventSink + Send + 'static>(
+    pub fn spawn<E: EventSink + Send + 'static, C: Clock + 'static>(
         engine: Engine<KernelWireGuard>,
         events: E,
+        clock: C,
     ) -> std::io::Result<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         let worker_tx = tx.clone();
@@ -77,6 +81,7 @@ impl Runtime {
                     receivers: Vec::new(),
                 };
                 let mut last_tick = Instant::now();
+                let mut last_clock_check: Option<Instant> = None;
                 loop {
                     match rx.recv_timeout(TICK.saturating_sub(last_tick.elapsed())) {
                         Ok(Msg::Desired(Ok(desired))) => {
@@ -92,15 +97,24 @@ impl Runtime {
                             data,
                             at,
                         }) => {
-                            let out = worker.engine.on_packet(kind, from, &data, at, now_ms());
+                            let out =
+                                worker
+                                    .engine
+                                    .on_packet(kind, from, &data, at, clock.now_ms());
                             worker.send_all(out);
                         }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
+                    if last_clock_check.is_none_or(|t| t.elapsed() >= CLOCK_CHECK) {
+                        last_clock_check = Some(Instant::now());
+                        worker.engine.set_clock_trusted(clock.trusted());
+                    }
                     if last_tick.elapsed() >= TICK {
                         last_tick = Instant::now();
-                        let out = worker.engine.tick(last_tick, now_ms(), &mut worker.events);
+                        let out = worker
+                            .engine
+                            .tick(last_tick, clock.now_ms(), &mut worker.events);
                         worker.send_all(out);
                     }
                 }
@@ -123,13 +137,6 @@ impl Runtime {
             _ => Ok(()),
         }
     }
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
 }
 
 struct Sockets {

@@ -36,10 +36,11 @@ pub struct Engine<D> {
     interface: Option<InterfaceSpec>,
     reachability: Reachability,
     prober: Option<Prober>,
-    /// 已经配置到数据面的对端：跟随方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
+    /// 已经配置到数据面的对端：经漫游跟随的一方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
     configured: HashSet<X25519PublicKey>,
     bytes: HashMap<X25519PublicKey, (u64, u64)>,
     last_stats: Option<Instant>,
+    clock_trusted: bool,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -55,6 +56,7 @@ impl<D: DataPlane> Engine<D> {
             configured: HashSet::new(),
             bytes: HashMap::new(),
             last_stats: None,
+            clock_trusted: false,
         }
     }
 
@@ -115,7 +117,12 @@ impl<D: DataPlane> Engine<D> {
 
         self.reachability = desired.reachability;
         let own_key = me.mesh_public_key;
-        let prober = self.prober.get_or_insert_with(|| Prober::new(&own_key));
+        let trusted = self.clock_trusted;
+        let prober = self.prober.get_or_insert_with(|| {
+            let mut prober = Prober::new(&own_key);
+            prober.set_clock_trusted(trusted);
+            prober
+        });
         prober.update(
             &self.node_id,
             desired.reachability,
@@ -129,7 +136,7 @@ impl<D: DataPlane> Engine<D> {
             .values()
             .filter(|m| m.node_id != self.node_id)
             .map(|m| {
-                // 决定方总是写入期望的 endpoint；跟随方只在新增对端时写入，之后由漫游跟随
+                // 有选路状态的一方总是写入期望的 endpoint；经漫游跟随的一方只在新增对端时写入
                 let endpoint = prober.desired_endpoint(&m.node_id).or_else(|| {
                     (!self.configured.contains(&m.mesh_public_key))
                         .then(|| prober.endpoint(&m.node_id))
@@ -150,6 +157,14 @@ impl<D: DataPlane> Engine<D> {
             Err(e) => events.emit(Event::DataPlaneFailed {
                 reason: e.to_string(),
             }),
+        }
+    }
+
+    /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
+    pub fn set_clock_trusted(&mut self, trusted: bool) {
+        self.clock_trusted = trusted;
+        if let Some(prober) = self.prober.as_mut() {
+            prober.set_clock_trusted(trusted);
         }
     }
 

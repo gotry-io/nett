@@ -19,6 +19,8 @@ pub const TUNNEL_PROBE: u8 = 0x80;
 pub const TUNNEL_REPLY: u8 = 0x81;
 pub const DIRECT_PROBE: u8 = 0x82;
 pub const DIRECT_REPLY: u8 = 0x83;
+pub const SWITCH_PROPOSAL: u8 = 0x84;
+pub const SWITCH_ACK: u8 = 0x85;
 pub const RELAY_PROBE: u8 = 0x90;
 pub const RELAY_REPLY: u8 = 0x91;
 
@@ -31,6 +33,7 @@ pub const MAX_CLOCK_SKEW_MS: u64 = 30_000;
 /// 隧道内应答最多带的中继测量条数。
 pub const MAX_RELAY_REPORTS: usize = 16;
 const TUNNEL_PROBE_LEN: usize = 8;
+const SWITCH_LEN: usize = 16;
 const RELAY_REPORT_LEN: usize = 12;
 
 const DIRECT_KEY_LABEL: &[u8] = b"nett direct probe v1";
@@ -246,6 +249,39 @@ pub fn decode_tunnel_probe(b: &[u8]) -> Option<u32> {
         .then(|| u32::from_be_bytes([b[4], b[5], b[6], b[7]]))
 }
 
+/// 切换提议与确认（design/mesh.md 第 8.4 节）：`类型 | 0 | 0 | 0 | 轮次 | 目标中继的编号`。
+/// 经隧道收发，来源已由 WireGuard 认证。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SwitchMessage {
+    pub kind: u8,
+    pub round: u32,
+    pub relay: KeyId,
+}
+
+impl SwitchMessage {
+    pub fn encode(&self) -> [u8; SWITCH_LEN] {
+        let mut b = [0u8; SWITCH_LEN];
+        b[0] = self.kind;
+        b[4..8].copy_from_slice(&self.round.to_be_bytes());
+        b[8..16].copy_from_slice(&self.relay.0);
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let b: &[u8; SWITCH_LEN] = b.try_into().ok()?;
+        if !matches!(b[0], SWITCH_PROPOSAL | SWITCH_ACK) || b[1..4] != [0; 3] {
+            return None;
+        }
+        let mut relay = [0u8; 8];
+        relay.copy_from_slice(&b[8..16]);
+        Some(Self {
+            kind: b[0],
+            round: u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+            relay: KeyId(relay),
+        })
+    }
+}
+
 /// 隧道内应答：`类型 | 条数 | 0 | 0 | 序号 | 每条 12 字节的中继测量`。
 pub fn encode_tunnel_reply(seq: u32, reports: &[RelayReport]) -> Vec<u8> {
     let reports = &reports[..reports.len().min(MAX_RELAY_REPORTS)];
@@ -372,6 +408,16 @@ mod tests {
     #[test]
     fn tunnel_messages_round_trip() {
         assert_eq!(decode_tunnel_probe(&encode_tunnel_probe(42)), Some(42));
+        let proposal = SwitchMessage {
+            kind: SWITCH_PROPOSAL,
+            round: 7,
+            relay: KeyId([9; 8]),
+        };
+        assert_eq!(SwitchMessage::decode(&proposal.encode()), Some(proposal));
+        let mut bad = proposal.encode();
+        bad[0] = TUNNEL_PROBE;
+        assert_eq!(SwitchMessage::decode(&bad), None);
+        assert_eq!(SwitchMessage::decode(&proposal.encode()[..15]), None);
         assert_eq!(
             decode_tunnel_probe(&[TUNNEL_PROBE, 0, 0, 1, 0, 0, 0, 1]),
             None

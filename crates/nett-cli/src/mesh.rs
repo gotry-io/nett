@@ -8,24 +8,40 @@ use nett_core::id::NodeId;
 use nett_mesh::engine::Engine;
 use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
-use nett_mesh::lab::{FileSource, JsonLinesSink};
-use nett_mesh::linux::KernelWireGuard;
+use nett_mesh::lab::{FileSource, JsonLinesSink, LabClock};
 use nett_mesh::linux::runtime::Runtime;
+use nett_mesh::linux::{KernelWireGuard, SystemClock};
 use tokio::signal::unix::{SignalKind, signal};
 
 struct Args {
     config: PathBuf,
     key: PathBuf,
     events: Option<PathBuf>,
+    /// 模拟时钟误差（design/prototype.md 场景 17）。
+    clock_offset_ms: i64,
+    clock_trusted: Option<bool>,
 }
 
+const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> \
+[--events <events.jsonl>] [--clock-offset-ms <ms>] [--clock-trusted <yes|no>]";
+
 fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
+    use lexopt::ValueExt as _;
     let (mut config, mut key, mut events) = (None, None, None);
+    let (mut clock_offset_ms, mut clock_trusted) = (0, None);
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("events") => events = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("clock-offset-ms") => clock_offset_ms = parser.value()?.parse()?,
+            lexopt::Arg::Long("clock-trusted") => {
+                clock_trusted = Some(match parser.value()?.string()?.as_str() {
+                    "yes" => true,
+                    "no" => false,
+                    _ => bail!("--clock-trusted takes yes or no"),
+                });
+            }
             other => return Err(other.unexpected().into()),
         }
     }
@@ -34,10 +50,10 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
             config,
             key,
             events,
+            clock_offset_ms,
+            clock_trusted,
         }),
-        _ => bail!(
-            "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--events <events.jsonl>]"
-        ),
+        _ => bail!(USAGE),
     }
 }
 
@@ -70,7 +86,12 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         None => Box::new(LogSink),
     };
     let engine = Engine::new(node_id, key, dataplane);
-    let worker = Runtime::spawn(engine, sink).context("starting the mesh worker thread")?;
+    let clock = LabClock {
+        inner: SystemClock,
+        offset_ms: args.clock_offset_ms,
+        trusted: args.clock_trusted,
+    };
+    let worker = Runtime::spawn(engine, sink, clock).context("starting the mesh worker thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
