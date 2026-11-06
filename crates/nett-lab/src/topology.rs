@@ -116,7 +116,7 @@ impl Topology {
             }
             for candidate in &link.candidates {
                 match candidate.strip_prefix("relay:") {
-                    None if candidate == "direct" => {}
+                    None if candidate == "direct" || candidate == "direct6" => {}
                     Some(relay) => ensure!(
                         self.nodes.iter().any(|n| n.name == relay
                             && n.behind.is_none()

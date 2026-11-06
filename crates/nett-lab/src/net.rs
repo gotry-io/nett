@@ -11,6 +11,8 @@ use crate::cmd::{COMMAND_TIMEOUT, run, run_in, run_with_input};
 use crate::topology::{Nat, Topology};
 
 pub const INET_NETNS: &str = "nl-inet";
+/// 场景 18 中发送未认证探测的"陌生人"，接在"公网"上，不是成员。
+pub const OUTSIDER_NETNS: &str = "nl-x";
 const NETNS_PREFIX: &str = "nl-";
 
 #[derive(Debug, Clone)]
@@ -121,6 +123,9 @@ impl Underlay {
         let mut all = vec![
             INET_NETNS.to_owned(),
             crate::tailscale::CONTROL_NETNS.to_owned(),
+            crate::tailscale::derp_netns(1),
+            crate::tailscale::derp_netns(2),
+            OUTSIDER_NETNS.to_owned(),
         ];
         all.extend(self.routers.iter().map(|(name, _, _)| netns(name)));
         all.extend(self.nodes.values().map(|n| n.netns.clone()));

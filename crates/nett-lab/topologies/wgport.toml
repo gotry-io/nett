@@ -1,0 +1,23 @@
+# 场景 18：a、b 都在"公网"上，有 IPv4、IPv6 两条直连候选。初始路径经中继，开始时两条直连候选都是
+# 更优类型、每 3 秒在 WireGuard 端口上探测一次
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "public"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[node]]
+name = "r1"
+reachability = "public"
+roles = ["relay"]
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["relay:r1", "direct", "direct6"]

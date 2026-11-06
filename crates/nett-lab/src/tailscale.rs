@@ -28,10 +28,17 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 pub struct TailscaleLab {
     sockets: BTreeMap<String, PathBuf>,
     children: Vec<Child>,
+    /// 独立 DERP 的编号与证书目录，重启时用。
+    derp_args: Vec<(usize, PathBuf)>,
+    derps: Vec<(usize, Child)>,
 }
 
 impl Drop for TailscaleLab {
     fn drop(&mut self) {
+        for (_, child) in &mut self.derps {
+            child.kill().ok();
+            child.wait().ok();
+        }
         for child in &mut self.children {
             child.kill().ok();
             child.wait().ok();
@@ -62,13 +69,21 @@ pub fn versions() -> String {
 }
 
 impl TailscaleLab {
-    /// 启动 Headscale 与 DERP，再让 `nodes` 中的每个节点登录。底层网络必须已经搭好。
+    /// 启动 Headscale 与内置的 DERP，再让 `nodes` 中的每个节点登录。底层网络必须已经搭好。
     pub fn up(out: &Path, nodes: &[&str]) -> anyhow::Result<Self> {
+        Self::up_with(out, nodes, 0)
+    }
+
+    /// `derps` 为 0 时用 Headscale 内置的 DERP；否则另起这么多个独立的 DERP 区域（`derper`，与
+    /// Tailscale 同版本），Headscale 只做控制面，弄断某个 DERP 不影响控制面。
+    pub fn up_with(out: &Path, nodes: &[&str], derps: usize) -> anyhow::Result<Self> {
         let dir = out.join("tailscale");
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut lab = Self {
             sockets: BTreeMap::new(),
             children: Vec::new(),
+            derp_args: Vec::new(),
+            derps: Vec::new(),
         };
 
         add_netns(CONTROL_NETNS)?;
@@ -93,31 +108,48 @@ impl TailscaleLab {
 
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
-        run(
-            "openssl",
-            [
-                "req",
-                "-x509",
-                "-newkey",
-                "ec",
-                "-pkeyopt",
-                "ec_paramgen_curve:prime256v1",
-                "-nodes",
-                "-days",
-                "7",
-                "-subj",
-                "/CN=nett-lab",
-                "-addext",
-                &format!("subjectAltName=IP:{CONTROL_IPV4}"),
-                "-keyout",
-                &key.to_string_lossy(),
-                "-out",
-                &cert.to_string_lossy(),
-            ],
-        )?;
+        self_signed(CONTROL_IPV4, &cert, &key)?;
+
+        // 独立的 DERP 节点：每个一个命名空间，证书按 derper 的手动模式命名为 <主机名>.crt/.key
+        let mut bundle = std::fs::read(&cert).context("reading the control certificate")?;
+        let mut derp_map = None;
+        if derps > 0 {
+            let mut regions = String::from("regions:\n");
+            for i in 1..=derps {
+                let ns = derp_netns(i);
+                let ip = derp_ipv4(i);
+                add_netns(&ns)?;
+                attach(&ns, INET_NETNS, &format!("v-derp{i}"), "br0")?;
+                run(
+                    "ip",
+                    ["-n", &ns, "addr", "add", &format!("{ip}/24"), "dev", "eth0"],
+                )?;
+                let certdir = dir.join(format!("derp{i}"));
+                std::fs::create_dir_all(&certdir)
+                    .with_context(|| format!("creating {}", certdir.display()))?;
+                let crt = certdir.join(format!("{ip}.crt"));
+                self_signed(ip, &crt, &certdir.join(format!("{ip}.key")))?;
+                bundle.extend(std::fs::read(&crt).context("reading a DERP certificate")?);
+                let region = 900 + i;
+                regions.push_str(&format!(
+                    "  {region}:\n    regionid: {region}\n    regioncode: lab{i}\n    regionname: lab{i}\n    nodes:\n      - name: {region}a\n        regionid: {region}\n        hostname: {ip}\n        ipv4: {ip}\n        stunport: 3478\n        derpport: 443\n"
+                ));
+                lab.derp_args.push((i, certdir));
+                lab.start_derp(i)?;
+            }
+            let map = dir.join("derpmap.yaml");
+            std::fs::write(&map, regions).with_context(|| format!("writing {}", map.display()))?;
+            derp_map = Some(map);
+        }
+        let bundle_path = dir.join("ca-bundle.pem");
+        std::fs::write(&bundle_path, bundle).context("writing the certificate bundle")?;
+
         let config = dir.join("headscale.yaml");
-        std::fs::write(&config, headscale_config(&dir, &cert, &key))
-            .with_context(|| format!("writing {}", config.display()))?;
+        std::fs::write(
+            &config,
+            headscale_config(&dir, &cert, &key, derp_map.as_deref()),
+        )
+        .with_context(|| format!("writing {}", config.display()))?;
         let child = spawn_in(
             CONTROL_NETNS,
             Path::new("headscale"),
@@ -159,7 +191,7 @@ impl TailscaleLab {
                 &netns(name),
                 Path::new("env"),
                 [
-                    format!("SSL_CERT_FILE={}", cert.display()),
+                    format!("SSL_CERT_FILE={}", bundle_path.display()),
                     // 不向 Tailscale 的日志服务上报
                     "TS_NO_LOGS_NO_SUPPORT=true".to_owned(),
                     "tailscaled".to_owned(),
@@ -189,6 +221,40 @@ impl TailscaleLab {
         Ok(lab)
     }
 
+    fn start_derp(&mut self, i: usize) -> anyhow::Result<()> {
+        let (_, certdir) = self
+            .derp_args
+            .iter()
+            .find(|(n, _)| *n == i)
+            .context("unknown DERP")?;
+        let ip = derp_ipv4(i);
+        let child = spawn_in(
+            &derp_netns(i),
+            Path::new("derper"),
+            [
+                format!("-a={ip}:443"),
+                format!("-hostname={ip}"),
+                "-certmode=manual".to_owned(),
+                format!("-certdir={}", certdir.display()),
+                "-http-port=-1".to_owned(),
+                "-stun-port=3478".to_owned(),
+            ],
+            &certdir.join("derper.log"),
+        )?;
+        self.derps.push((i, child));
+        Ok(())
+    }
+
+    /// 重启第 `i` 个 DERP 进程（场景 3）。
+    pub fn restart_derp(&mut self, i: usize) -> anyhow::Result<()> {
+        if let Some(pos) = self.derps.iter().position(|(n, _)| *n == i) {
+            let (_, mut child) = self.derps.remove(pos);
+            child.kill().ok();
+            child.wait().ok();
+        }
+        self.start_derp(i)
+    }
+
     /// 在节点的命名空间中运行 `tailscale` 命令。
     pub fn cli(&self, name: &str, args: &[&str]) -> anyhow::Result<String> {
         let sock = self
@@ -208,8 +274,48 @@ impl TailscaleLab {
     }
 }
 
-fn headscale_config(dir: &Path, cert: &Path, key: &Path) -> String {
+/// 第 `i` 个独立 DERP 的命名空间与地址。
+pub fn derp_netns(i: usize) -> String {
+    format!("nl-derp{i}")
+}
+
+pub fn derp_ipv4(i: usize) -> Ipv4Addr {
+    Ipv4Addr::new(198, 51, 100, 240 + u8::try_from(i).unwrap_or(0))
+}
+
+/// 为一个 IP 地址生成自签证书。
+fn self_signed(ip: Ipv4Addr, cert: &Path, key: &Path) -> anyhow::Result<()> {
+    run(
+        "openssl",
+        [
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-days",
+            "7",
+            "-subj",
+            "/CN=nett-lab",
+            "-addext",
+            &format!("subjectAltName=IP:{ip}"),
+            "-keyout",
+            &key.to_string_lossy(),
+            "-out",
+            &cert.to_string_lossy(),
+        ],
+    )?;
+    Ok(())
+}
+
+fn headscale_config(dir: &Path, cert: &Path, key: &Path, derp_map: Option<&Path>) -> String {
     let d = dir.display();
+    let (embedded, paths) = match derp_map {
+        Some(map) => ("false", format!("[{}]", map.display())),
+        None => ("true", "[]".to_owned()),
+    };
     format!(
         "server_url: https://{CONTROL_IPV4}
 listen_addr: {CONTROL_IPV4}:443
@@ -224,7 +330,7 @@ prefixes:
   allocation: sequential
 derp:
   server:
-    enabled: true
+    enabled: {embedded}
     region_id: 999
     region_code: lab
     region_name: lab
@@ -234,7 +340,7 @@ derp:
     automatically_add_embedded_derp_region: true
     ipv4: {CONTROL_IPV4}
   urls: []
-  paths: []
+  paths: {paths}
   auto_update_enabled: false
 disable_check_updates: true
 database:
