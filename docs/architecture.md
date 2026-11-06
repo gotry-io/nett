@@ -261,8 +261,8 @@ nett 不含 AI 逻辑。AI 和其他外部程序一样，只经 Hub API（`scrip
 |---|---|
 | Hub | Rust：axum、SQLite + sqlx、utoipa、webauthn-rs、rustls、rust-embed |
 | node | Rust：tokio（单线程）、tokio-tungstenite、prost、hyper；WireGuard 通过 netlink 管理内核实现（只编码用到的几种消息，不引入 netlink 库） |
-| 各组件共用 | serde、serde_json；ring（签名验证与哈希，也作为 rustls 的加密后端）；rustix（netlink 与原始套接字的系统调用）；lexopt（命令行解析） |
-| nett-relay | Rust：tokio、rustls、hyper（HTTP/2 CONNECT）；后期 quinn（QUIC） |
+| 各组件共用 | serde、serde_json；ring（签名验证、哈希、HMAC、HKDF，也作为 rustls 的加密后端）；x25519-dalek（由组网私钥派生成员之间直连探测的密钥，ring 不能导入已有的私钥）；rustix（netlink 与原始套接字的系统调用）；lexopt（命令行解析） |
+| nett-relay | Rust：tokio、rustls、hyper（HTTP/2 CONNECT）；blake2（按 WireGuard 协议计算 `mac1`）；后期 quinn（QUIC） |
 | 用户态 WireGuard | Rust 实现，用于无内核模块的平台（具体实现待评估） |
 | 协议 | 对外 REST + JSON + SSE（OpenAPI 3.1）；内部 WebSocket + Protobuf |
 | Web | React + Vite、TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow |
