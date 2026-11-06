@@ -107,7 +107,10 @@ impl Underlay {
     }
 
     fn all_netns(&self) -> Vec<String> {
-        let mut all = vec![INET_NETNS.to_owned()];
+        let mut all = vec![
+            INET_NETNS.to_owned(),
+            crate::tailscale::CONTROL_NETNS.to_owned(),
+        ];
         all.extend(self.routers.iter().map(|(name, _, _)| netns(name)));
         all.extend(self.nodes.values().map(|n| n.netns.clone()));
         all
@@ -255,14 +258,14 @@ impl Underlay {
     }
 }
 
-fn add_netns(ns: &str) -> anyhow::Result<()> {
+pub(crate) fn add_netns(ns: &str) -> anyhow::Result<()> {
     run("ip", ["netns", "add", ns])?;
     run("ip", ["-n", ns, "link", "set", "lo", "up"])?;
     Ok(())
 }
 
 /// 用一对 veth 把 `ns` 接到 `switch_ns` 的网桥上：`ns` 中的一端叫 `eth0`。
-fn attach(ns: &str, switch_ns: &str, port: &str, bridge: &str) -> anyhow::Result<()> {
+pub(crate) fn attach(ns: &str, switch_ns: &str, port: &str, bridge: &str) -> anyhow::Result<()> {
     run(
         "ip",
         [

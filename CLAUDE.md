@@ -143,6 +143,8 @@ sudo ./target/debug/nett-lab run admission --topology crates/nett-lab/topologies
   --nett ./target/debug/nett --out /tmp/lab-14
 sudo ./target/debug/nett-lab run selftest --topology crates/nett-lab/topologies/direct.toml \
   --nett ./target/debug/nett --out /tmp/lab-selftest
+# 对比对象：PATH 中需要 tailscale、tailscaled、headscale（版本见 .github/workflows/lab-baseline.yml）
+sudo ./target/debug/nett-lab run tailscale --topology crates/nett-lab/topologies/direct.toml --out /tmp/lab-ts
 ```
 
 `web/` 在 M1 搭好之后加上 `pnpm -C web lint && pnpm -C web test`。
