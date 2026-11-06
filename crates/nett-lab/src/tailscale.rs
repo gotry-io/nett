@@ -27,6 +27,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct TailscaleLab {
     sockets: BTreeMap<String, PathBuf>,
+    /// Headscale。
+    control: Option<Child>,
     children: Vec<Child>,
     /// 独立 DERP 的编号与证书目录，重启时用。
     derp_args: Vec<(usize, PathBuf)>,
@@ -35,6 +37,7 @@ pub struct TailscaleLab {
 
 impl Drop for TailscaleLab {
     fn drop(&mut self) {
+        self.stop_control();
         for (_, child) in &mut self.derps {
             child.kill().ok();
             child.wait().ok();
@@ -81,6 +84,7 @@ impl TailscaleLab {
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         let mut lab = Self {
             sockets: BTreeMap::new(),
+            control: None,
             children: Vec::new(),
             derp_args: Vec::new(),
             derps: Vec::new(),
@@ -156,7 +160,7 @@ impl TailscaleLab {
             ["-c".as_ref(), config.as_os_str(), "serve".as_ref()],
             &dir.join("headscale.log"),
         )?;
-        lab.children.push(child);
+        lab.control = Some(child);
         let socket = dir.join("headscale.sock");
         wait_until("headscale", || socket.exists())?;
 
@@ -245,13 +249,26 @@ impl TailscaleLab {
         Ok(())
     }
 
-    /// 重启第 `i` 个 DERP 进程（场景 3）。
-    pub fn restart_derp(&mut self, i: usize) -> anyhow::Result<()> {
+    /// 停掉 Headscale（场景 17）。
+    pub fn stop_control(&mut self) {
+        if let Some(mut child) = self.control.take() {
+            child.kill().ok();
+            child.wait().ok();
+        }
+    }
+
+    /// 停掉第 `i` 个 DERP 进程（场景 17）。
+    pub fn stop_derp(&mut self, i: usize) {
         if let Some(pos) = self.derps.iter().position(|(n, _)| *n == i) {
             let (_, mut child) = self.derps.remove(pos);
             child.kill().ok();
             child.wait().ok();
         }
+    }
+
+    /// 重启第 `i` 个 DERP 进程（场景 3）。
+    pub fn restart_derp(&mut self, i: usize) -> anyhow::Result<()> {
+        self.stop_derp(i);
         self.start_derp(i)
     }
 
