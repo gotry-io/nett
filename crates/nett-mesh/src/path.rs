@@ -30,12 +30,16 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(600);
 const SAME_TYPE_RATIO: f64 = 0.85;
 const SAME_TYPE_MIN_MS: f64 = 10.0;
 const SAME_TYPE_HOLD: Duration = Duration::from_secs(30);
-/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 3 秒；当前路径明显变慢时，
+/// 当前路径丢包明显（最近 [`LOSS_WINDOW`] 次隧道内探测丢失这么多次以上）、候选连续有应答时，
+/// 同类型的更优路径只需持续 [`LOSSY_HOLD`]（ADR 0021）。
+const LOSSY_LOSSES: usize = 2;
+const LOSSY_HOLD: Duration = Duration::from_secs(5);
+/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 3 秒；当前路径明显变差时，
 /// 同类候选也每 3 秒；空闲时每 5 分钟。
 const CANDIDATE_INTERVAL: Duration = Duration::from_secs(15);
 const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(3);
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
-/// 判断当前路径"明显变慢"的最小增量（毫秒）。
+/// 判断当前路径"明显变慢"的往返时间最小增量（毫秒）。
 const DEGRADED_MIN_MS: f64 = 10.0;
 /// 更优类型的候选第一次有应答之后，确认探测的间隔。
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
@@ -526,12 +530,19 @@ impl PeerPaths {
         })
     }
 
-    /// 当前路径明显变慢：往返时间比切到它以来的最好值翻倍，且至少多 10 毫秒（design/mesh.md 第 7 节）。
+    /// 当前路径明显变差：往返时间比切到它以来的最好值翻倍且至少多 10 毫秒，或丢包明显
+    /// （design/mesh.md 第 7 节）。
     fn degraded(&self) -> bool {
-        match (self.tunnel.rtt_ms(), self.best_rtt_ms) {
+        let slower = match (self.tunnel.rtt_ms(), self.best_rtt_ms) {
             (Some(rtt), Some(best)) => rtt >= 2.0 * best && rtt >= best + DEGRADED_MIN_MS,
             _ => false,
-        }
+        };
+        slower || self.lossy()
+    }
+
+    /// 最近 10 次隧道内探测丢失 2 次以上：低于判为故障的丢包率，但已经明显（ADR 0021）。
+    fn lossy(&self) -> bool {
+        self.tunnel.window.iter().filter(|ok| !**ok).count() >= LOSSY_LOSSES
     }
 
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
@@ -706,7 +717,15 @@ impl PeerPaths {
             .map(|(i, _)| i);
         match (better, self.better_since) {
             (Some(i), Some((j, since))) if i == j => {
-                if now.saturating_duration_since(since) >= SAME_TYPE_HOLD {
+                // 当前路径丢包明显、候选连续有应答：不必等 30 秒
+                let hold = if self.lossy()
+                    && self.candidates[i].stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
+                {
+                    LOSSY_HOLD
+                } else {
+                    SAME_TYPE_HOLD
+                };
+                if now.saturating_duration_since(since) >= hold {
                     return Some(self.decide(i, SwitchReason::BetterScore));
                 }
             }
@@ -1284,5 +1303,39 @@ mod tests {
         ));
         sim.paths.set_hold(false);
         assert_eq!(sim.paths.current(), relay(2));
+    }
+
+    #[test]
+    fn leaves_a_moderately_lossy_path_quickly() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        // 当前中继每 5 个包丢 1 个：低于判为故障的 30%
+        sim.drop_every[0] = 5;
+        let lossy = sim.now;
+        sim.run(Duration::from_secs(25));
+        let (at, to, _, reason) = *sim.switches.first().expect("left the lossy relay");
+        assert_eq!((to, reason), (relay(2), SwitchReason::BetterScore));
+        let took = at.saturating_duration_since(lossy);
+        assert!(took <= Duration::from_secs(20), "took {took:?}");
+        // 之后不再回到受损的中继
+        sim.run(Duration::from_secs(120));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+    }
+
+    #[test]
+    fn a_single_lost_probe_does_not_switch() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        sim.up[0] = false;
+        sim.run(Duration::from_millis(1000));
+        sim.up[0] = true;
+        sim.run(Duration::from_secs(60));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
     }
 }

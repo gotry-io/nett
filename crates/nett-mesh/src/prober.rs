@@ -1443,8 +1443,10 @@ mod tests {
             .iter()
             .map(|(_, from_a, s)| (*from_a, s.reason, s.rehandshake))
             .collect();
+        // 丢包明显时同类更优路径 5 秒即切换，可能先于判为故障
         assert!(
-            reasons.contains(&(true, SwitchReason::HighLoss, true)),
+            reasons.contains(&(true, SwitchReason::HighLoss, true))
+                || reasons.contains(&(true, SwitchReason::BetterScore, true)),
             "{reasons:?}"
         );
         assert!(
