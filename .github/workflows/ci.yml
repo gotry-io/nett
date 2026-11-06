@@ -1,4 +1,4 @@
-# 推送到 main 和每个拉取请求时运行：格式、clippy、测试、依赖检查（CLAUDE.md "命令"）。
+# 推送到 main 和每个拉取请求时运行：格式、clippy、测试、依赖检查、实验场景（CLAUDE.md "命令"）。
 # 第三方 action 固定到提交哈希；下载的工具固定版本并校验哈希。
 
 name: CI
@@ -25,8 +25,36 @@ jobs:
       - name: 安装 rust-toolchain.toml 指定的工具链
         run: rustup toolchain install
       - run: cargo fmt --all --check
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+
+  # 实验环境 A 的短场景，每次推送各跑一次 nett（design/prototype.md 第 7 节）
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 rust-toolchain.toml 指定的工具链
+        run: rustup toolchain install
+      - name: 安装实验网络用到的工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3
+      - name: 确认内核 WireGuard 可用
+        run: |
+          uname -r
+          sudo modprobe wireguard
+          sudo ip link add wgcheck type wireguard
+          sudo ip link del wgcheck
+      - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
+      - name: 场景 14：准入验证与直连通信
+        run: >-
+          sudo ./target/debug/nett-lab run admission
+          --topology crates/nett-lab/topologies/direct.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-14"
 
   deny:
     runs-on: ubuntu-24.04
