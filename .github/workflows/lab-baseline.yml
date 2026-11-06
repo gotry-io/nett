@@ -1,0 +1,57 @@
+# 对比对象 Tailscale 的部署检查（design/prototype.md 第 5.1、7 节）：手动触发，不在每次推送时运行。
+# 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。
+
+name: Lab baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAILSCALE_VERSION: "1.104.5"
+  TAILSCALE_SHA256: "720cbbccbfc03d8b55df72afc19e5a72e31b0f65934700aa6fa38074d4ad7bf7"
+  HEADSCALE_VERSION: "0.29.7"
+  HEADSCALE_SHA256: "e827fc9b12d958bc95b081c4401dd63f8e0471d025b45b508535a920532150a8"
+
+jobs:
+  tailscale:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 rust-toolchain.toml 指定的工具链
+        run: rustup toolchain install
+      - name: 安装实验网络用到的工具
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 openssl
+      - name: 安装 Tailscale 与 Headscale（固定版本，校验哈希）
+        run: |
+          bin="$RUNNER_TEMP/baseline-bin"
+          mkdir -p "$bin"
+          ts="tailscale_${TAILSCALE_VERSION}_amd64"
+          curl --fail --silent --show-error --location --max-time 300 -o "$ts.tgz" \
+            "https://pkgs.tailscale.com/stable/$ts.tgz"
+          echo "${TAILSCALE_SHA256}  $ts.tgz" | sha256sum --check -
+          tar -xzf "$ts.tgz" --strip-components=1 -C "$bin" "$ts/tailscale" "$ts/tailscaled"
+          hs="headscale_${HEADSCALE_VERSION}_linux_amd64"
+          curl --fail --silent --show-error --location --max-time 300 -o "$bin/headscale" \
+            "https://github.com/juanfont/headscale/releases/download/v${HEADSCALE_VERSION}/$hs"
+          echo "${HEADSCALE_SHA256}  $bin/headscale" | sha256sum --check -
+          chmod +x "$bin/headscale"
+          echo "$bin" >> "$GITHUB_PATH"
+      - name: 确认内核 WireGuard 可用
+        run: |
+          sudo modprobe wireguard
+          sudo modprobe tun
+      - run: cargo build --locked -p nett-lab
+      - name: Tailscale 对照部署：直连、经 DERP 回退、测量工具可用
+        run: >-
+          sudo env "PATH=$PATH" ./target/debug/nett-lab run tailscale
+          --topology crates/nett-lab/topologies/direct.toml
+          --out "$RUNNER_TEMP/lab-tailscale"

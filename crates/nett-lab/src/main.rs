@@ -16,6 +16,8 @@ mod net;
 #[cfg(target_os = "linux")]
 mod scenario;
 #[cfg(target_os = "linux")]
+mod tailscale;
+#[cfg(target_os = "linux")]
 mod topology;
 
 use std::process::ExitCode;
@@ -33,6 +35,7 @@ fn main() -> ExitCode {
 
 const USAGE: &str = "usage:
   nett-lab run <admission|selftest> --topology <file.toml> --nett <path/to/nett> --out <dir>
+  nett-lab run tailscale --topology <file.toml> --out <dir>
   nett-lab down --topology <file.toml>
 measurement helpers (started by the scenarios inside a node's network namespace):
   nett-lab probe-send --to <addr:port>
@@ -93,6 +96,7 @@ fn run() -> anyhow::Result<bool> {
             let report = match *name {
                 "admission" => scenario::admission(&topology, &nett()?, &out)?,
                 "selftest" => scenario::selftest(&topology, &nett()?, &out)?,
+                "tailscale" => scenario::tailscale(&topology, &out)?,
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
             };
             for check in &report.checks {

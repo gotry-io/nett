@@ -491,3 +491,142 @@ pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repo
     drop(lab);
     Ok(report)
 }
+
+/// 在同一拓扑中部署 Tailscale，确认对比对象可用：直连、直连被拦时经 DERP 回退，测量工具在它上面同样可用。
+/// 中断时间只记录，与 nett 的对比在 G2 的场景中进行。
+pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
+    use crate::fault::{self, Netem};
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+    use crate::tailscale::{TailscaleLab, versions};
+
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(&topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        helpers: Vec::new(),
+    };
+    let names: Vec<&str> = topo.nodes.iter().map(|n| n.name.as_str()).collect();
+    // 在 lab 之后声明：先于 lab 析构，进程结束之后再拆网络
+    let ts = TailscaleLab::up(out, &names)?;
+    let mut report = Report::new("tailscale-baseline");
+    report.record("versions", versions());
+
+    let (a, b) = (names[0], names[1]);
+    let ip_b = ts.ipv4(b)?;
+    let b_underlay = lab
+        .underlay
+        .public_ipv4(b)
+        .context("b has a public address")?;
+    // 直连走 IPv4 或 IPv6 都算
+    let net_b = lab.underlay.node(b).context("node b")?;
+    let mut b_addrs = vec![std::net::IpAddr::V4(b_underlay)];
+    b_addrs.extend(net_b.ipv6.map(std::net::IpAddr::V6));
+    let direct_markers: Vec<String> = b_addrs
+        .iter()
+        .map(|addr| match addr {
+            std::net::IpAddr::V4(a) => format!("via {a}:"),
+            std::net::IpAddr::V6(a) => format!("via [{a}]:"),
+        })
+        .collect();
+    let direct = ts.cli(a, &["ping", "-c", "10", &ip_b.to_string()]);
+    report.check(
+        "tailscale:direct-path",
+        direct
+            .as_ref()
+            .is_ok_and(|o| direct_markers.iter().any(|m| o.contains(m.as_str()))),
+        direct.map_or_else(
+            |e| format!("{e:#}"),
+            |o| o.lines().last().unwrap_or_default().to_owned(),
+        ),
+    );
+    let icmp = ping(&crate::net::netns(a), &ip_b.to_string());
+    report.check(
+        "tailscale:icmp",
+        icmp.is_ok(),
+        icmp.err().map(|e| format!("{e:#}")).unwrap_or_default(),
+    );
+
+    // 测量工具在 Tailscale 上同样可用；2 秒双向丢包后的中断时间只记录
+    let probe_file = out.join("probe.txt");
+    let tcp_file = out.join("tcp.txt");
+    let probe_addr = format!("{ip_b}:7000");
+    let tcp_addr = format!("{ip_b}:7001");
+    lab.helper(
+        b,
+        &[
+            "probe-recv",
+            "--listen",
+            &probe_addr,
+            "--out",
+            &probe_file.to_string_lossy(),
+        ],
+        &out.join("probe-recv.log"),
+    )?;
+    lab.helper(
+        b,
+        &[
+            "tcp-sink",
+            "--listen",
+            &tcp_addr,
+            "--out",
+            &tcp_file.to_string_lossy(),
+        ],
+        &out.join("tcp-sink.log"),
+    )?;
+    std::thread::sleep(Duration::from_millis(300));
+    lab.helper(
+        a,
+        &["probe-send", "--to", &probe_addr],
+        &out.join("probe-send.log"),
+    )?;
+    lab.helper(
+        a,
+        &["tcp-source", "--to", &tcp_addr],
+        &out.join("tcp-source.log"),
+    )?;
+    std::thread::sleep(Duration::from_secs(3));
+    let start_ms = now_ms();
+    fault::set_link(&lab.underlay, b, &Netem::loss(100.0))?;
+    std::thread::sleep(Duration::from_secs(2));
+    fault::clear_link(&lab.underlay, b)?;
+    std::thread::sleep(Duration::from_secs(5));
+    let end_ms = now_ms();
+    let outage = probe_stats(&probe_file, start_ms - 2000, end_ms)?;
+    report.check(
+        "probe:measured-over-tailscale",
+        outage.received > 0,
+        format!("{outage:?}"),
+    );
+    let tcp = tcp_stats(&tcp_file, start_ms - 2000, end_ms)?;
+    report.check(
+        "tcp:long-connection-over-tailscale",
+        tcp.ended.is_none() && tcp.kbps > 0,
+        format!("{tcp:?}"),
+    );
+
+    // 拦掉 a 到 b 的直连 UDP（IPv4 与 IPv6）：Tailscale 应回退到 DERP
+    fault::block_udp_to(a, &b_addrs)?;
+    std::thread::sleep(Duration::from_secs(8));
+    let via_derp = ts.cli(
+        a,
+        &["ping", "-c", "3", "--until-direct=false", &ip_b.to_string()],
+    );
+    fault::unblock_udp(a)?;
+    report.check(
+        "tailscale:derp-fallback",
+        via_derp.as_ref().is_ok_and(|o| o.contains("via DERP(lab)")),
+        via_derp.map_or_else(
+            |e| format!("{e:#}"),
+            |o| o.lines().last().unwrap_or_default().to_owned(),
+        ),
+    );
+
+    write_report(out, &report)?;
+    drop(ts);
+    drop(lab);
+    Ok(report)
+}
