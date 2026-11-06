@@ -48,6 +48,11 @@ pub fn serve(
                 match relay.handle(from, &buf[..len], Instant::now(), now_ms()) {
                     // 发送失败（例如对方暂时没有路由）只丢这一个包
                     Outcome::Forward(to) => drop(socket.send_to(&buf[..len], map_v6(to))),
+                    Outcome::ForwardEach(targets) => {
+                        for to in targets {
+                            drop(socket.send_to(&buf[..len], map_v6(to)));
+                        }
+                    }
                     Outcome::Reply(reply) => drop(socket.send_to(&reply, map_v6(from))),
                     Outcome::Drop(reason) => {
                         dropped += 1;

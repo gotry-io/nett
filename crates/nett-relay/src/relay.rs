@@ -16,6 +16,8 @@ pub const MAX_MEMBERS: usize = 1024;
 /// 待定表项与正式表项的上限。
 const MAX_PENDING: usize = 4096;
 const MAX_SESSIONS: usize = 16 * 1024;
+/// 接收方还没有地址时，一份握手发起最多转发给几个候选地址（design/mesh.md 第 5.2 节）。
+const MAX_CANDIDATES: usize = 4;
 /// 待定表项的寿命：WireGuard 5 秒后会以新索引重试握手。
 const PENDING_TTL: Duration = Duration::from_secs(5);
 /// 会话空闲多久后删除：WireGuard 的会话最长 180 秒（REJECT_AFTER_TIME），过后必然重新握手。
@@ -57,7 +59,7 @@ pub struct SavedSession {
 #[derive(Debug, Clone)]
 pub struct AssignedMember {
     pub public_key: X25519PublicKey,
-    /// `public` 成员的地址随分配下发；`dial-only` 成员的地址取自它发来的第一份握手消息。
+    /// `public` 成员的地址随分配下发；`dial-only` 成员的地址由握手确定。
     pub address: Option<SocketAddr>,
     pub token: [u8; 32],
 }
@@ -92,6 +94,8 @@ pub enum Drop {
 pub enum Outcome {
     /// 原样转发到这个地址。
     Forward(SocketAddr),
+    /// 接收方还没有地址：原样转发到每个候选地址（design/mesh.md 第 5.2 节）。
+    ForwardEach(Vec<SocketAddr>),
     /// 回给来源一份应答（探测）。
     Reply(Vec<u8>),
     Drop(Drop),
@@ -111,6 +115,8 @@ struct Member {
 struct Pending {
     src: SocketAddr,
     receiver: usize,
+    /// 接收方还没有地址时，握手发起转发到的候选地址：应答必须来自其中之一。
+    candidates: Vec<SocketAddr>,
     at: Instant,
 }
 
@@ -234,9 +240,6 @@ impl Relay {
         let Some(receiver) = self.find_by_mac1(signed, mac1) else {
             return Outcome::Drop(Drop::UnknownReceiver);
         };
-        let Some(dest) = self.members[receiver].bound else {
-            return Outcome::Drop(Drop::ReceiverUnbound);
-        };
         // 会话索引冲突：丢弃，WireGuard 会以新索引重试
         if self.index_taken(sender, from) {
             return Outcome::Drop(Drop::IndexCollision);
@@ -244,15 +247,47 @@ impl Relay {
         if self.pending.len() >= MAX_PENDING && !self.pending.contains_key(&sender) {
             return Outcome::Drop(Drop::TableFull);
         }
+        let bound = self.members[receiver].bound;
+        let candidates = match bound {
+            Some(_) => Vec::new(),
+            None => self.candidates_for(receiver, from),
+        };
+        let outcome = match (bound, candidates.as_slice()) {
+            (Some(dest), _) => Outcome::Forward(dest),
+            // 先留在待定表中，等另一端的握手发起把它作为候选地址
+            (None, []) => Outcome::Drop(Drop::ReceiverUnbound),
+            (None, [dest]) => Outcome::Forward(*dest),
+            (None, _) => Outcome::ForwardEach(candidates.clone()),
+        };
         self.pending.insert(
             sender,
             Pending {
                 src: from,
                 receiver,
+                candidates,
                 at: now,
             },
         );
-        Outcome::Forward(dest)
+        outcome
+    }
+
+    /// 还没有地址的 `receiver` 可能在哪里：它发出的握手发起的来源。它的握手发起以它的某个已分配对端为
+    /// 接收方，仍在待定表中。
+    fn candidates_for(&self, receiver: usize, from: SocketAddr) -> Vec<SocketAddr> {
+        let mut out = Vec::new();
+        for p in self.pending.values() {
+            if out.len() >= MAX_CANDIDATES {
+                break;
+            }
+            if p.src != from
+                && p.receiver != receiver
+                && self.connections.contains(&pair(receiver, p.receiver))
+                && !out.contains(&p.src)
+            {
+                out.push(p.src);
+            }
+        }
+        out
     }
 
     fn response(
@@ -271,8 +306,12 @@ impl Relay {
             return Outcome::Drop(Drop::NoPending);
         };
         let responder = pending.receiver;
-        // 握手应答只接受来自应答方当前绑定地址的
-        if self.members[responder].bound != Some(from) {
+        // 握手应答只接受来自应答方当前绑定地址的；应答方还没有地址时，只接受来自转发过的候选地址的
+        let from_responder = match self.members[responder].bound {
+            Some(bound) => bound == from,
+            None => pending.candidates.contains(&from),
+        };
+        if !from_responder {
             return Outcome::Drop(Drop::ResponseFromUnbound);
         }
         if !self.connections.contains(&pair(initiator, responder)) {
@@ -284,20 +323,14 @@ impl Relay {
         if self.sessions.len() + 2 > MAX_SESSIONS {
             return Outcome::Drop(Drop::TableFull);
         }
-        // 对端针对发起方的新地址发回了应答：更新发起方的绑定（限速，之后等新地址上的数据确认）
+        // 对端针对发起方的新地址发回了应答：更新发起方的绑定，应答方还没有地址时一起绑定
+        // （限速，之后等新地址上的数据确认）
         let new_addr = pending.src;
-        let member = &mut self.members[initiator];
-        if member.bound != Some(new_addr) {
-            if member
-                .last_change
-                .is_some_and(|t| now.saturating_duration_since(t) < BIND_MIN_INTERVAL)
-            {
-                return Outcome::Drop(Drop::BindRateLimited);
-            }
-            member.unconfirmed = Some((member.bound, now));
-            member.bound = Some(new_addr);
-            member.last_change = Some(now);
+        if !self.may_bind(initiator, new_addr, now) || !self.may_bind(responder, from, now) {
+            return Outcome::Drop(Drop::BindRateLimited);
         }
+        self.bind(initiator, new_addr, now);
+        self.bind(responder, from, now);
         self.pending.remove(&receiver);
         self.sessions.insert(
             receiver,
@@ -314,6 +347,23 @@ impl Relay {
             },
         );
         Outcome::Forward(new_addr)
+    }
+
+    fn may_bind(&self, member: usize, addr: SocketAddr, now: Instant) -> bool {
+        let m = &self.members[member];
+        m.bound == Some(addr)
+            || !m
+                .last_change
+                .is_some_and(|t| now.saturating_duration_since(t) < BIND_MIN_INTERVAL)
+    }
+
+    fn bind(&mut self, member: usize, addr: SocketAddr, now: Instant) {
+        let m = &mut self.members[member];
+        if m.bound != Some(addr) {
+            m.unconfirmed = Some((m.bound, now));
+            m.bound = Some(addr);
+            m.last_change = Some(now);
+        }
     }
 
     fn forward_to_owner(&mut self, receiver: Index, now: Instant) -> Outcome {
@@ -438,6 +488,8 @@ mod tests {
     const A: [u8; 32] = [1; 32];
     const B: [u8; 32] = [2; 32];
     const C: [u8; 32] = [3; 32];
+    const D: [u8; 32] = [4; 32];
+    const E: [u8; 32] = [5; 32];
 
     fn addr(s: &str) -> SocketAddr {
         s.parse().expect("addr")
@@ -518,9 +570,69 @@ mod tests {
             r.handle(addr("203.0.113.9:1"), &initiation(7, &[9; 32]), now, 0),
             Outcome::Drop(Drop::UnknownReceiver)
         );
-        // 接收方还没有地址
+    }
+
+    /// D、E 都是 `dial-only`，都还没有地址。
+    fn dial_only_pair() -> Relay {
+        let member = |k: [u8; 32]| AssignedMember {
+            public_key: X25519PublicKey::from_bytes(k),
+            address: None,
+            token: [k[0]; 32],
+        };
+        Relay::new(
+            &[member(D), member(E), member(C)],
+            &[(
+                X25519PublicKey::from_bytes(D),
+                X25519PublicKey::from_bytes(E),
+            )],
+        )
+        .expect("assignment")
+    }
+
+    #[test]
+    fn two_unbound_dial_only_members_meet() {
+        let mut r = dial_only_pair();
+        let now = Instant::now();
+        let (d, e) = (addr("203.0.113.4:40000"), addr("192.0.2.5:50000"));
+        // D 先到：E 的地址未知，握手发起留在待定表中
         assert_eq!(
-            r.handle(addr("198.51.100.1:41820"), &initiation(8, &B), now, 0),
+            r.handle(d, &initiation(41, &E), now, 0),
+            Outcome::Drop(Drop::ReceiverUnbound)
+        );
+        // E 的握手发起转发给 D 可能在的地址；D 从那里应答，两端一起绑定
+        assert_eq!(
+            r.handle(e, &initiation(51, &D), now, 0),
+            Outcome::Forward(d)
+        );
+        assert_eq!(
+            r.handle(d, &response(42, 51, &E), now, 0),
+            Outcome::Forward(e)
+        );
+        assert_eq!(r.handle(d, &data(51), now, 0), Outcome::Forward(e));
+        assert_eq!(r.handle(e, &data(42), now, 0), Outcome::Forward(d));
+    }
+
+    #[test]
+    fn unbound_responder_must_answer_from_a_candidate() {
+        let mut r = dial_only_pair();
+        let now = Instant::now();
+        let (d, e) = (addr("203.0.113.4:40000"), addr("192.0.2.5:50000"));
+        r.handle(d, &initiation(41, &E), now, 0);
+        r.handle(e, &initiation(51, &D), now, 0);
+        assert_eq!(
+            r.handle(addr("198.51.100.66:1"), &response(42, 51, &E), now, 0),
+            Outcome::Drop(Drop::ResponseFromUnbound)
+        );
+        // 从未转发过的握手发起（D 的）得不到应答方的地址
+        assert_eq!(
+            r.handle(e, &response(52, 41, &D), now, 0),
+            Outcome::Drop(Drop::ResponseFromUnbound)
+        );
+        // 以没有分配给 D 的成员（C）为接收方的握手发起，来源不是 D 的候选地址
+        let mut r = dial_only_pair();
+        r.handle(addr("198.51.100.3:1"), &initiation(61, &C), now, 0);
+        assert_eq!(
+            r.handle(e, &initiation(51, &D), now, 0),
             Outcome::Drop(Drop::ReceiverUnbound)
         );
     }
