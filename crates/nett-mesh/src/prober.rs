@@ -226,6 +226,15 @@ impl Prober {
         }
     }
 
+    /// 有对端在高频探测刚切走的更优路径（design/mesh.md 第 7 节）。
+    pub fn fast_recovering(&self, now: Instant) -> bool {
+        self.peers.values().any(|p| {
+            p.paths
+                .as_ref()
+                .is_some_and(|paths| paths.fast_recovering(now))
+        })
+    }
+
     /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
     pub fn set_clock_trusted(&mut self, trusted: bool) {
         self.clock_trusted = trusted;
@@ -1175,7 +1184,9 @@ mod tests {
         let (at, s) = net.switches.last().expect("switched back");
         assert_eq!(s.to.endpoint(), addr("198.51.100.2:41820"));
         assert_eq!(s.reason, SwitchReason::BetterType);
-        assert!(at.saturating_duration_since(restored) <= Duration::from_millis(3600));
+        // 切走后的 15 秒内高频探测；模拟每 100 毫秒推进一次
+        let took = at.saturating_duration_since(restored);
+        assert!(took <= Duration::from_millis(300), "took {took:?}");
     }
 
     #[test]

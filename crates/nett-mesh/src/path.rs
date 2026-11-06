@@ -34,10 +34,17 @@ const SAME_TYPE_HOLD: Duration = Duration::from_secs(30);
 /// 同类型的更优路径只需持续 [`LOSSY_HOLD`]（ADR 0021）。
 const LOSSY_LOSSES: usize = 2;
 const LOSSY_HOLD: Duration = Duration::from_secs(5);
-/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 3 秒；当前路径明显变差时，
-/// 同类候选也每 3 秒；空闲时每 5 分钟。
+/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 1 秒；当前路径明显变差时，
+/// 同类候选每 3 秒；空闲时每 5 分钟。
 const CANDIDATE_INTERVAL: Duration = Duration::from_secs(15);
-const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(3);
+const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(1);
+const DEGRADED_INTERVAL: Duration = Duration::from_secs(3);
+/// 刚因第一次故障从一条更优类型的路径切走时，这么久之内每 [`FAST_RECOVERY_INTERVAL`] 探测它一次，
+/// 恢复后很快切回（ADR 0021）。
+const FAST_RECOVERY_WINDOW: Duration = Duration::from_secs(15);
+pub const FAST_RECOVERY_INTERVAL: Duration = Duration::from_millis(50);
+/// 一个候选最多同时等待应答的探测数：高频探测时，上一个探测还没超时就发下一个。
+const MAX_CANDIDATE_OUTSTANDING: usize = 32;
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
 /// 判断当前路径"明显变慢"的往返时间最小增量（毫秒）。
 const DEGRADED_MIN_MS: f64 = 10.0;
@@ -164,11 +171,14 @@ struct Candidate {
     route: Route,
     kind: PathKind,
     stats: PathStats,
-    outstanding: Option<(u32, Instant)>,
+    /// 等待应答的探测，按发出的先后排列。
+    outstanding: VecDeque<(u32, Instant)>,
     last_probe: Option<Instant>,
     last_reply: Option<Instant>,
     /// 作为当前路径时故障的时刻，用于恢复时的退避。
     failures: VecDeque<Instant>,
+    /// 最近一次作为当前路径故障而被切走的时刻（不论是否计入退避）。
+    left_at: Option<Instant>,
     /// 最近一次连续有应答的开始时刻。
     healthy_since: Option<Instant>,
     /// 已经用过一次"从未连通过就失败不算故障"。
@@ -284,10 +294,11 @@ impl PeerPaths {
                     route,
                     kind,
                     stats: PathStats::default(),
-                    outstanding: None,
+                    outstanding: VecDeque::new(),
                     last_probe: None,
                     last_reply: None,
                     failures: VecDeque::new(),
+                    left_at: None,
                     healthy_since: None,
                     grace_used: false,
                 })
@@ -418,13 +429,15 @@ impl PeerPaths {
         let Some(c) = self.candidates.get_mut(index) else {
             return;
         };
-        let Some((expected, sent)) = c.outstanding else {
+        let Some(pos) = c.outstanding.iter().position(|(s, _)| *s == seq) else {
             return;
         };
-        if expected != seq {
-            return;
+        // 更早发出、还没有应答的探测已经被这个应答越过，算作丢失；之后不会再超时打断连续的应答
+        for _ in 0..pos {
+            c.outstanding.pop_front();
+            c.stats.record_loss();
         }
-        c.outstanding = None;
+        let (_, sent) = c.outstanding.pop_front().expect("position is in range");
         let (extra_rtt, extra_loss) = extra.unwrap_or((Duration::ZERO, 0.0));
         if extra_loss >= 1.0 {
             // 另一段不通：这条经中继的路径整体不通
@@ -475,7 +488,7 @@ impl PeerPaths {
                         if self.role != Role::FollowTogether
                             && (index != self.current || current_is_relay)
                         {
-                            actions.extend(self.probe_candidate(index, now));
+                            actions.extend(self.probe_candidate(index, now, false));
                         }
                     }
                     return actions;
@@ -495,7 +508,8 @@ impl PeerPaths {
                 let lossy = self.high_loss_since == Some(now);
                 for index in 0..self.candidates.len() {
                     if index != self.current && (lossy || self.candidate_due(index, now, active)) {
-                        actions.extend(self.probe_candidate(index, now));
+                        let stack = self.fast_recovery(index, now);
+                        actions.extend(self.probe_candidate(index, now, stack));
                     }
                 }
                 if !self.hold
@@ -515,13 +529,15 @@ impl PeerPaths {
         seq
     }
 
-    fn probe_candidate(&mut self, index: usize, now: Instant) -> Option<Action> {
+    /// `stack`：上一个探测还在等待应答时也发出（高频探测）。
+    fn probe_candidate(&mut self, index: usize, now: Instant, stack: bool) -> Option<Action> {
         let seq = self.next_seq();
         let c = &mut self.candidates[index];
-        if c.outstanding.is_some() {
+        if c.outstanding.len() >= MAX_CANDIDATE_OUTSTANDING || (!stack && !c.outstanding.is_empty())
+        {
             return None;
         }
-        c.outstanding = Some((seq, now));
+        c.outstanding.push_back((seq, now));
         c.last_probe = Some(now);
         Some(Action::CandidateProbe {
             index,
@@ -545,16 +561,40 @@ impl PeerPaths {
         self.tunnel.window.iter().filter(|ok| !**ok).count() >= LOSSY_LOSSES
     }
 
+    /// 刚因第一次故障从这条更优类型的路径切走，还在高频探测的时间内（ADR 0021）。
+    fn fast_recovery(&self, index: usize, now: Instant) -> bool {
+        let c = &self.candidates[index];
+        c.kind < self.current_kind()
+            && c.left_at
+                .is_some_and(|t| now.saturating_duration_since(t) < FAST_RECOVERY_WINDOW)
+            && backoff(&c.failures, now).is_zero()
+    }
+
+    /// 有候选在高频探测：调用方要推进得比 [`FAST_RECOVERY_INTERVAL`] 更密。
+    pub fn fast_recovering(&self, now: Instant) -> bool {
+        (0..self.candidates.len()).any(|i| i != self.current && self.fast_recovery(i, now))
+    }
+
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
         let c = &self.candidates[index];
         let better = c.kind < self.current_kind();
+        let first_reply = c.stats.consecutive_successes == 1;
         let interval = if !active {
             IDLE_CANDIDATE_INTERVAL
-        } else if better && c.stats.consecutive_successes == 1 {
-            // 更优类型的候选刚有一次应答：立即再探测一次确认，不等下一个 3 秒
+        } else if self.fast_recovery(index, now) {
+            // 第一次应答之后立即确认：应答晚于最近一次探测，说明确认还没有发出
+            if first_reply && c.last_reply >= c.last_probe {
+                Duration::ZERO
+            } else {
+                FAST_RECOVERY_INTERVAL
+            }
+        } else if better && first_reply {
+            // 更优类型的候选刚有一次应答：很快再探测一次确认，不等下一个间隔
             CONFIRM_INTERVAL
-        } else if better || (c.kind == self.current_kind() && self.degraded()) {
+        } else if better {
             BETTER_TYPE_INTERVAL
+        } else if c.kind == self.current_kind() && self.degraded() {
+            DEGRADED_INTERVAL
         } else {
             CANDIDATE_INTERVAL
         };
@@ -573,10 +613,11 @@ impl PeerPaths {
             self.tunnel.record_loss();
         }
         for c in &mut self.candidates {
-            if let Some((_, sent)) = c.outstanding
-                && now.saturating_duration_since(sent) >= CANDIDATE_TIMEOUT
-            {
-                c.outstanding = None;
+            while let Some((_, sent)) = c.outstanding.front() {
+                if now.saturating_duration_since(*sent) < CANDIDATE_TIMEOUT {
+                    break;
+                }
+                c.outstanding.pop_front();
                 c.stats.record_loss();
                 c.healthy_since = None;
             }
@@ -675,6 +716,7 @@ impl PeerPaths {
     fn record_failure(&mut self, now: Instant) {
         let established = self.tunnel_established;
         let c = &mut self.candidates[self.current];
+        c.left_at = Some(now);
         if established || c.grace_used {
             c.failures.push_back(now);
         } else {
@@ -979,7 +1021,7 @@ mod tests {
         sim.up[0] = false;
         sim.run(Duration::from_secs(10));
         assert_eq!(sim.paths.current(), relay(1));
-        // 直连恢复：第一次故障不退避；更优类型每 3 秒探测，第一次应答后 200 毫秒再确认
+        // 直连恢复：第一次故障不退避；切走后的 15 秒内高频探测，第一次应答后立即再确认
         let restored = sim.now;
         sim.up[0] = true;
         sim.run(Duration::from_secs(30));
@@ -991,10 +1033,60 @@ mod tests {
         assert_eq!(back.3, SwitchReason::BetterType);
         assert!(!back.2, "switching to direct needs no new handshake");
         let took = back.0.saturating_duration_since(restored);
+        // 模拟按 100 毫秒推进，应答在下一次推进时处理
+        assert!(took <= Duration::from_millis(300), "recovery took {took:?}");
+    }
+
+    #[test]
+    fn returns_to_direct_within_a_second_after_a_long_outage() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(10));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(40));
+        let restored = sim.now;
+        sim.up[0] = true;
+        sim.run(Duration::from_secs(10));
+        let back = sim
+            .switches
+            .iter()
+            .find(|s| s.1 == direct())
+            .expect("switched back");
+        let took = back.0.saturating_duration_since(restored);
         assert!(
-            took <= Duration::from_millis(3600),
+            took <= Duration::from_millis(1300),
             "recovery took {took:?}"
         );
+    }
+
+    #[test]
+    fn probes_fast_only_after_the_first_failure() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(10));
+        // 第一次故障：切走后高频探测直连
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(5));
+        let before = sim.sent[0];
+        sim.run(Duration::from_secs(5));
+        assert!(
+            sim.sent[0] - before >= 40,
+            "{} probes",
+            sim.sent[0] - before
+        );
+        sim.up[0] = true;
+        sim.run(Duration::from_secs(5));
+        assert_eq!(sim.paths.current(), direct());
+        // 10 分钟内第二次故障：恢复要退避，不再高频探测
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(5));
+        let before = sim.sent[0];
+        sim.run(Duration::from_secs(5));
+        assert!(sim.sent[0] - before <= 6, "{} probes", sim.sent[0] - before);
     }
 
     #[test]

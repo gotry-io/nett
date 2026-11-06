@@ -21,12 +21,14 @@ use crate::config::{ConfigError, DesiredMesh};
 use crate::dataplane::INTERFACE_NAME;
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
+use crate::path::FAST_RECOVERY_INTERVAL;
 use crate::probe::TUNNEL_PROBE_PORT;
 use crate::prober::{Incoming, Outgoing};
 use crate::run::Applier;
 
 /// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
-/// 200 毫秒的加探间隔（第 8.2 节）。
+/// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时改为 [`FAST_RECOVERY_INTERVAL`] 的一半（第 7 节）：
+/// 收到探测消息时的立即推进会打乱定时，推进得更密，到期的探测才能及时发出。
 const TICK: Duration = Duration::from_millis(100);
 /// 检查本机时钟误差的间隔（design/mesh.md 第 8.4 节）。
 const CLOCK_CHECK: Duration = Duration::from_secs(10);
@@ -83,7 +85,14 @@ impl Runtime {
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
                 loop {
-                    match rx.recv_timeout(TICK.saturating_sub(last_tick.elapsed())) {
+                    let interval = if worker.engine.fast_recovering(Instant::now()) {
+                        FAST_RECOVERY_INTERVAL / 2
+                    } else {
+                        TICK
+                    };
+                    // 收到探测消息后立即推进：高频探测时应答一到就处理，不等下一次定时推进
+                    let mut tick_now = false;
+                    match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
                         Ok(Msg::Desired(Ok(desired))) => {
                             worker.engine.apply(&desired, &mut worker.events);
                             worker.ensure_sockets(&desired);
@@ -102,6 +111,7 @@ impl Runtime {
                                     .engine
                                     .on_packet(kind, from, &data, at, clock.now_ms());
                             worker.send_all(out);
+                            tick_now = true;
                         }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
@@ -110,7 +120,7 @@ impl Runtime {
                         last_clock_check = Some(Instant::now());
                         worker.engine.set_clock_trusted(clock.trusted());
                     }
-                    if last_tick.elapsed() >= TICK {
+                    if tick_now || last_tick.elapsed() >= interval {
                         last_tick = Instant::now();
                         let out = worker
                             .engine

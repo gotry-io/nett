@@ -160,6 +160,12 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
+    /// 有对端在高频探测刚因故障切走的更优路径：运行时要推进得比
+    /// [`crate::path::FAST_RECOVERY_INTERVAL`] 更密（design/mesh.md 第 7 节）。
+    pub fn fast_recovering(&self, now: Instant) -> bool {
+        self.prober.as_ref().is_some_and(|p| p.fast_recovering(now))
+    }
+
     /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
     pub fn set_clock_trusted(&mut self, trusted: bool) {
         self.clock_trusted = trusted;
