@@ -6,7 +6,7 @@ mod rtnl;
 pub mod runtime;
 mod sys;
 mod wg;
-mod wgport;
+pub mod wgport;
 
 use std::collections::BTreeMap;
 

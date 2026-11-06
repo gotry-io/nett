@@ -241,6 +241,17 @@ pub fn tcp_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<TcpSta
     Ok(TcpStats { ended, bytes, kbps })
 }
 
+/// 只打开组网进程在 WireGuard 端口上接收探测用的原始套接字与过滤器，一直接收到进程被结束
+/// （场景 18 的对照：分离出它对吞吐的影响）。
+pub fn raw_listen(port: u16) -> anyhow::Result<()> {
+    let wg_port =
+        nett_mesh::linux::wgport::WgPort::open(port).context("opening the raw sockets")?;
+    let mut buf = vec![0u8; 2048];
+    loop {
+        wg_port.recv_v4(&mut buf).ok();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
