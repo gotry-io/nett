@@ -1433,6 +1433,8 @@ pub enum Wave {
     Jitter(u32),
     /// 间歇断开：断 2 秒、通 8 秒。
     Flap,
+    /// 两条路径的延迟交替变好：前半程当前中继加这么多毫秒的延迟，后半程换成另一个中继加。
+    Alternate(u32),
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1442,6 +1444,8 @@ pub struct WaveRun {
     pub switches: usize,
     /// 是否回到过之前离开的路径（来回切换）。
     pub returned: bool,
+    /// 交替变好时，每个半程开始后跟随到更快路径所用的秒数。
+    pub follow_s: Vec<Option<usize>>,
     pub tcp_kbps: u64,
     pub tcp_ended: Option<String>,
     /// 探测流的送达率（千分比）与最长中断。
@@ -1456,7 +1460,7 @@ fn wave_run(
     system: &str,
     target: std::net::IpAddr,
     links: &[(String, String, String)],
-    (wave, duration): (Wave, Duration),
+    (wave, duration, relay_ips): (Wave, Duration, Option<[std::net::Ipv4Addr; 2]>),
     mut impair: impl FnMut(&mut Lab, usize, Option<&crate::fault::Netem>) -> anyhow::Result<()>,
 ) -> anyhow::Result<WaveRun> {
     use crate::fault::Netem;
@@ -1503,6 +1507,16 @@ fn wave_run(
             impair(lab, current, Some(&netem))?;
             std::thread::sleep(duration);
         }
+        Wave::Alternate(ms) => {
+            // 延迟加在数据方向上：发送方 a 到中继（或 DERP）那一段，两种系统的往返时间都只增加一次延迟
+            let ips = relay_ips.context("alternating needs the relay addresses")?;
+            crate::fault::delay_dst("a", ips[current], ms)?;
+            std::thread::sleep(duration / 2);
+            crate::fault::clear_eth0("a")?;
+            crate::fault::delay_dst("a", ips[1 - current], ms)?;
+            std::thread::sleep(duration / 2);
+            crate::fault::clear_eth0("a")?;
+        }
         Wave::Flap => {
             let end = Instant::now() + duration;
             while Instant::now() < end {
@@ -1516,6 +1530,16 @@ fn wave_run(
     let end_ms = now_ms();
     impair(lab, current, None)?;
     let busiest = monitor.busiest_per_second(start_ms, end_ms, RELAY_QUIET_BYTES_PER_S);
+    // 交替变好：每个半程开始后，流量换到更快的那个中继用了多少秒
+    let follow_s: Vec<Option<usize>> = if matches!(wave, Wave::Alternate(_)) {
+        let half = busiest.len() / 2;
+        [(0, 1 - current), (half, current)]
+            .iter()
+            .map(|(from, faster)| busiest[*from..].iter().position(|b| *b == Some(*faster)))
+            .collect()
+    } else {
+        Vec::new()
+    };
     // 注入损伤之前所在的中继是起点：损伤开始后第一秒内就离开，也算一次切换
     let mut switches = 0;
     let mut last = Some(current);
@@ -1537,6 +1561,7 @@ fn wave_run(
         system: system.to_owned(),
         switches,
         returned,
+        follow_s,
         tcp_kbps: tcp.kbps,
         tcp_ended: tcp.ended,
         delivered_permille: (probe.received as u64 * 1000 / expected.max(1)).min(1000),
@@ -1585,6 +1610,7 @@ pub fn wave(
         Wave::Loss(p) => format!("4-loss-{p}"),
         Wave::Jitter(ms) => format!("5-jitter-{ms}ms"),
         Wave::Flap => "6-flap".to_owned(),
+        Wave::Alternate(ms) => format!("5-alternate-{ms}ms"),
     };
     let mut report = Report::new(&name);
     let mut runs = Vec::new();
@@ -1612,13 +1638,20 @@ pub fn wave(
                     .map(|n| ((*r).to_owned(), n.netns.clone(), "eth0".to_owned()))
             })
             .collect();
+        let relay_addrs = match (
+            lab.underlay.public_ipv4("r1"),
+            lab.underlay.public_ipv4("r2"),
+        ) {
+            (Some(a), Some(b)) => Some([a, b]),
+            _ => None,
+        };
         runs.push(wave_run(
             &mut lab,
             &dir,
             "nett",
             b.mesh_ipv4.into(),
             &links,
-            (wave, duration),
+            (wave, duration, relay_addrs),
             |lab, i, netem| match netem {
                 Some(n) => crate::fault::set_link(&lab.underlay, relays[i], n),
                 None => crate::fault::clear_link(&lab.underlay, relays[i]),
@@ -1658,7 +1691,14 @@ pub fn wave(
             "tailscale",
             ip_b.into(),
             &links,
-            (wave, duration),
+            (
+                wave,
+                duration,
+                Some([
+                    crate::tailscale::derp_ipv4(1),
+                    crate::tailscale::derp_ipv4(2),
+                ]),
+            ),
             |_, i, netem| derp_impair(i, netem),
         )?);
         drop(ts);
@@ -1678,9 +1718,28 @@ pub fn wave(
         n.iter().all(|r| r.tcp_ended.is_none()),
         "",
     );
+    if matches!(wave, Wave::Alternate(_)) {
+        report.check(
+            "nett:follows-within-a-minute",
+            n.iter().all(|r| {
+                r.follow_s.len() == 2 && r.follow_s.iter().all(|f| f.is_some_and(|s| s <= 60))
+            }),
+            format!(
+                "seconds to follow each half {:?}",
+                n.iter().map(|r| r.follow_s.clone()).collect::<Vec<_>>()
+            ),
+        );
+    }
+    // 交替变好时每个半程跟随一次更优的路径；其他波动离开受损路径至多一次、不往返
+    let allowed = if matches!(wave, Wave::Alternate(_)) {
+        2
+    } else {
+        1
+    };
     report.check(
         "nett:no-flapping",
-        n.iter().all(|r| r.switches <= 1 && !r.returned),
+        n.iter()
+            .all(|r| r.switches <= allowed && (allowed > 1 || !r.returned)),
         format!(
             "switches per run {:?}",
             n.iter().map(|r| r.switches).collect::<Vec<_>>()

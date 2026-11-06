@@ -38,7 +38,7 @@ const USAGE: &str = "usage:
   nett-lab run tailscale --topology <file.toml> --out <dir>
   nett-lab run wgport --topology <file.toml> --nett <path/to/nett> --out <dir>
   nett-lab run roaming --topology <file.toml> --nett <path/to/nett> --out <dir> [--duration SECONDS]
-  nett-lab run <loss|jitter|flap> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
+  nett-lab run <loss|jitter|flap|alternate> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
   nett-lab run <failover|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -119,10 +119,13 @@ fn run() -> anyhow::Result<bool> {
                     &out,
                     std::time::Duration::from_secs(duration_s),
                 )?,
-                "loss" | "jitter" | "flap" => {
+                "loss" | "jitter" | "flap" | "alternate" => {
                     let wave = match *name {
                         "loss" => scenario::Wave::Loss(level.context("--level <percent>")? as f32),
                         "jitter" => scenario::Wave::Jitter(level.context("--level <ms>")? as u32),
+                        "alternate" => {
+                            scenario::Wave::Alternate(level.context("--level <ms>")? as u32)
+                        }
                         _ => scenario::Wave::Flap,
                     };
                     let duration = std::time::Duration::from_secs(duration_s);
