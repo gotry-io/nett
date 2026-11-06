@@ -752,9 +752,15 @@ pub fn relay_smoke(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<R
     Ok(report)
 }
 
-/// 按底层链路的流量判断当前路径（design/prototype.md 第 6.1 节）：每 200 毫秒读一次各接口的接收字节数。
+/// 按底层链路的流量判断当前路径（design/prototype.md 第 6.1 节）：每 [`SAMPLE_INTERVAL`] 读一次各接口的
+/// 接收字节数。
 /// 一次采样：时刻（Unix 毫秒）与各接口的累计接收字节数。
 type Sample = (u64, Vec<u64>);
+
+/// 采样间隔：恢复时间要分辨到几十毫秒；一次读取不到 1 毫秒。
+const SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
+/// 判定流量已经离开一组链路：从某一刻起持续这么久低于阈值。
+const QUIET_HOLD_MS: u64 = 200;
 
 struct PathMonitor {
     samples: std::sync::Arc<std::sync::Mutex<Vec<Sample>>>,
@@ -778,7 +784,7 @@ impl PathMonitor {
                 if let Ok(mut v) = s.lock() {
                     v.push((now, rx));
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(SAMPLE_INTERVAL);
             }
         });
         Self {
@@ -863,22 +869,31 @@ impl PathMonitor {
         out
     }
 
-    /// `after_ms` 之后，被观察的接口合计接收速率第一次低于 `bytes_per_s` 的时刻。
+    /// `after_ms` 之后，被观察的接口合计接收速率从哪一刻起持续 [`QUIET_HOLD_MS`] 低于 `bytes_per_s`。
     fn first_quiet(&self, after_ms: u64, bytes_per_s: u64) -> Option<u64> {
         let v = self.samples.lock().ok()?;
-        v.windows(2)
-            .filter(|w| w[0].0 >= after_ms)
-            .find(|w| {
-                let dt = w[1].0.saturating_sub(w[0].0).max(1);
-                let bytes: u64 = w[1]
-                    .1
-                    .iter()
-                    .zip(&w[0].1)
-                    .map(|(b, a)| b.saturating_sub(*a))
-                    .sum();
-                bytes * 1000 / dt < bytes_per_s
-            })
-            .map(|w| w[1].0)
+        let quiet = |w: &[Sample]| {
+            let dt = w[1].0.saturating_sub(w[0].0).max(1);
+            let bytes: u64 = w[1]
+                .1
+                .iter()
+                .zip(&w[0].1)
+                .map(|(b, a)| b.saturating_sub(*a))
+                .sum();
+            bytes * 1000 / dt < bytes_per_s
+        };
+        let windows: Vec<&[Sample]> = v.windows(2).filter(|w| w[0].0 >= after_ms).collect();
+        (0..windows.len()).find_map(|i| {
+            let start = windows[i][0].0;
+            let stretch: Vec<&&[Sample]> = windows[i..]
+                .iter()
+                .take_while(|w| w[0].0 < start + QUIET_HOLD_MS)
+                .collect();
+            let covered = stretch
+                .last()
+                .is_some_and(|w| w[1].0 >= start + QUIET_HOLD_MS);
+            (covered && stretch.iter().all(|w| quiet(w))).then_some(start)
+        })
     }
 }
 
@@ -899,13 +914,19 @@ pub struct FailoverRun {
     pub settled_after_ms: u64,
     /// 探测流最长的中断（毫秒）。
     pub outage_ms: u64,
-    /// 从故障解除到流量回到直连（毫秒），按底层链路判断。
+    /// 从故障解除到流量回到直连（毫秒），按底层链路判断（每 200 毫秒采样一次）。
     pub recovery_ms: Option<u64>,
+    /// nett：从故障解除到决定方切回直连的事件（毫秒），用来区分决定的快慢与测量的粒度。
+    pub switched_back_ms: Option<u64>,
     /// 长连接是否被重置。
     pub tcp_ended: Option<String>,
     pub tcp_kbps: u64,
+    #[serde(skip)]
+    restored_at_ms: u64,
 }
 
+/// 恢复时间不超过这个值，也算不比 Tailscale 差（design/prototype.md 第 6.1 节）。
+const RECOVERY_FLOOR_MS: u64 = 200;
 /// 中继链路上的流量低于这个速率，视为流量已经不走中继（长连接约 13 Mbit/s）。
 const RELAY_QUIET_BYTES_PER_S: u64 = 100_000;
 const WARMUP: Duration = Duration::from_secs(3);
@@ -1009,8 +1030,10 @@ fn failover_run(
         settled_after_ms: settled_ms.saturating_sub(start_ms),
         outage_ms: outage.max_gap_ms,
         recovery_ms,
+        switched_back_ms: None,
         tcp_ended: tcp.ended,
         tcp_kbps: tcp.kbps,
+        restored_at_ms: restore_ms,
     })
 }
 
@@ -1035,7 +1058,19 @@ fn nett_failover_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Resul
                 .map(|n| (n.netns.clone(), "eth0".to_owned()))
         })
         .collect();
-    let run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links)?;
+    let mut run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links)?;
+    let a = generated
+        .nodes
+        .iter()
+        .find(|n| n.name == "a")
+        .context("node a")?;
+    run.switched_back_ms = events(a).iter().find_map(|e| {
+        let at = e["at_ms"].as_u64()?;
+        (e["event"] == "path_switched"
+            && at >= run.restored_at_ms
+            && e["to"].as_str().is_some_and(|t| t.starts_with("direct")))
+        .then(|| at - run.restored_at_ms)
+    });
     drop(lab);
     Ok(run)
 }
@@ -1152,10 +1187,13 @@ pub fn failover(
             not_worse(nett_s.0, ts_s.0) && not_worse(nett_s.1, ts_s.1),
             "p95 and max",
         );
+        // 恢复期间流量照常经较差的路径：不超过绝对下限也算不比 Tailscale 差（design/prototype.md 第 6.1 节）
+        let within_floor = |n: Option<u64>| n.is_some_and(|n| n <= RECOVERY_FLOOR_MS);
         report.check(
             "recovery:not-worse-than-tailscale",
-            not_worse(nett_s.2, ts_s.2) && not_worse(nett_s.3, ts_s.3),
-            "p95 and max",
+            (not_worse(nett_s.2, ts_s.2) || within_floor(nett_s.2))
+                && (not_worse(nett_s.3, ts_s.3) || within_floor(nett_s.3)),
+            format!("p95 and max, or within {RECOVERY_FLOOR_MS} ms"),
         );
     }
     write_report(out, &report)?;
@@ -1474,6 +1512,8 @@ pub struct WaveRun {
     /// 探测流的送达率（千分比）与最长中断。
     pub delivered_permille: u64,
     pub max_gap_ms: u64,
+    /// 最长的几段中断：（距损伤开始的毫秒数，时长），用于判断中断发生在切换时还是损伤变化时。
+    pub longest_gaps: Vec<(u64, u64)>,
 }
 
 /// `impair(lab, i, wave)` 在第 i 个中继的链路上施加（`Some`）或解除（`None`）损伤。
@@ -1494,6 +1534,10 @@ fn wave_run(
             .map(|(_, ns, dev)| (ns.clone(), dev.clone()))
             .collect(),
     );
+    if let Wave::Alternate(ms) = wave {
+        // 排队规则在开始传输之前建好，之后只改过滤器：替换排队规则会丢掉正在排队的包
+        crate::fault::prepare_delay("a", &["delay".into(), format!("{ms}ms")])?;
+    }
     let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
     let deadline = Instant::now() + SETTLE_TIMEOUT;
     let current = loop {
@@ -1530,15 +1574,13 @@ fn wave_run(
             impair(lab, current, Some(&netem))?;
             std::thread::sleep(duration);
         }
-        Wave::Alternate(ms) => {
+        Wave::Alternate(_) => {
             // 延迟加在数据方向上：发送方 a 到中继（或 DERP）那一段，两种系统的往返时间都只增加一次延迟
             let ips = relay_ips.context("alternating needs the relay addresses")?;
-            crate::fault::delay_dst("a", ips[current], ms)?;
+            crate::fault::route_delay("a", ips[current])?;
             std::thread::sleep(duration / 2);
-            crate::fault::clear_eth0("a")?;
-            crate::fault::delay_dst("a", ips[1 - current], ms)?;
+            crate::fault::route_delay("a", ips[1 - current])?;
             std::thread::sleep(duration / 2);
-            crate::fault::clear_eth0("a")?;
         }
         Wave::Flap => {
             let end = Instant::now() + duration;
@@ -1552,6 +1594,9 @@ fn wave_run(
     }
     let end_ms = now_ms();
     impair(lab, current, None)?;
+    if matches!(wave, Wave::Alternate(_)) {
+        crate::fault::clear_eth0("a")?;
+    }
     let busiest = monitor.busiest_per_second(start_ms, end_ms, RELAY_QUIET_BYTES_PER_S);
     // 交替变好：每个半程开始后，流量换到更快的那个中继用了多少秒
     let follow_s: Vec<Option<usize>> = if matches!(wave, Wave::Alternate(_)) {
@@ -1580,6 +1625,9 @@ fn wave_run(
     let probe = probe_stats(&probe_file, start_ms, end_ms)?;
     let expected = (end_ms - start_ms) / u64::try_from(PROBE_INTERVAL.as_millis()).unwrap_or(100);
     let tcp = tcp_stats(&tcp_file, start_ms, end_ms)?;
+    let mut longest = probe.gaps.clone();
+    longest.sort_by_key(|g| std::cmp::Reverse(g.1));
+    longest.truncate(5);
     Ok(WaveRun {
         system: system.to_owned(),
         switches,
@@ -1589,6 +1637,10 @@ fn wave_run(
         tcp_ended: tcp.ended,
         delivered_permille: (probe.received as u64 * 1000 / expected.max(1)).min(1000),
         max_gap_ms: probe.max_gap_ms,
+        longest_gaps: longest
+            .into_iter()
+            .map(|(at, len)| (at.saturating_sub(start_ms), len))
+            .collect(),
     })
 }
 

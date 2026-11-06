@@ -154,89 +154,57 @@ pub fn delay_to(
     delay_ms: u32,
     jitter_ms: u32,
 ) -> anyhow::Result<()> {
+    prepare_delay(
+        name,
+        &[
+            "delay".into(),
+            format!("{delay_ms}ms"),
+            format!("{jitter_ms}ms"),
+            "reorder".into(),
+            "25%".into(),
+            "50%".into(),
+        ],
+    )?;
+    route_delay(name, dst)
+}
+
+/// 在节点的 `eth0` 上建好"按目的地址加延迟"的排队规则：四个优先级队列，平时全部流量走第一个，第四个
+/// 挂 netem；由 [`route_delay`] 决定发往哪个地址的包进入第四个。替换根排队规则会丢掉正在排队的包，
+/// 所以在开始传输之前调用（场景 5 交替变好）。
+pub fn prepare_delay(name: &str, netem: &[String]) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
-    run(
-        "tc",
-        [
-            "-n", &ns, "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "prio",
-        ],
-    )?;
-    run(
-        "tc",
-        [
-            "-n",
-            &ns,
-            "qdisc",
-            "replace",
-            "dev",
-            "eth0",
-            "parent",
-            "1:3",
-            "handle",
-            "30:",
-            "netem",
-            "delay",
-            &format!("{delay_ms}ms"),
-            &format!("{jitter_ms}ms"),
-            "reorder",
-            "25%",
-            "50%",
-        ],
-    )?;
-    run(
-        "tc",
-        [
-            "-n",
-            &ns,
-            "filter",
-            "add",
-            "dev",
-            "eth0",
-            "parent",
-            "1:0",
-            "protocol",
-            "ip",
-            "prio",
-            "1",
-            "u32",
-            "match",
-            "ip",
-            "dst",
-            &format!("{dst}/32"),
-            "flowid",
-            "1:3",
-        ],
-    )?;
+    let mut root: Vec<String> = [
+        "-n", &ns, "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "prio", "bands", "4",
+        "priomap",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    root.extend(std::iter::repeat_n("0".to_owned(), 16));
+    run("tc", &root)?;
+    let mut leaf: Vec<String> = [
+        "-n", &ns, "qdisc", "replace", "dev", "eth0", "parent", "1:4", "handle", "40:", "netem",
+    ]
+    .iter()
+    .map(|s| (*s).to_owned())
+    .collect();
+    leaf.extend(netem.iter().cloned());
+    run("tc", &leaf)?;
     Ok(())
 }
 
-/// 节点发往 `dst` 的包加上固定延迟（场景 5 交替变好：只拖慢数据方向的一段），不乱序。
-pub fn delay_dst(name: &str, dst: std::net::Ipv4Addr, delay_ms: u32) -> anyhow::Result<()> {
+/// 让发往 `dst` 的包进入 [`prepare_delay`] 建好的延迟队列，替换之前的选择。只改过滤器，不动排队规则，
+/// 正在排队的包不受影响。
+pub fn route_delay(name: &str, dst: std::net::Ipv4Addr) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
+    // 还没有过滤器时删除会失败，忽略
     run(
         "tc",
         [
-            "-n", &ns, "qdisc", "replace", "dev", "eth0", "root", "handle", "1:", "prio",
+            "-n", &ns, "filter", "del", "dev", "eth0", "parent", "1:", "prio", "1",
         ],
-    )?;
-    run(
-        "tc",
-        [
-            "-n",
-            &ns,
-            "qdisc",
-            "replace",
-            "dev",
-            "eth0",
-            "parent",
-            "1:3",
-            "handle",
-            "30:",
-            "netem",
-            "delay",
-            &format!("{delay_ms}ms"),
-        ],
-    )?;
+    )
+    .ok();
     run(
         "tc",
         [
@@ -247,7 +215,7 @@ pub fn delay_dst(name: &str, dst: std::net::Ipv4Addr, delay_ms: u32) -> anyhow::
             "dev",
             "eth0",
             "parent",
-            "1:0",
+            "1:",
             "protocol",
             "ip",
             "prio",
@@ -258,7 +226,7 @@ pub fn delay_dst(name: &str, dst: std::net::Ipv4Addr, delay_ms: u32) -> anyhow::
             "dst",
             &format!("{dst}/32"),
             "flowid",
-            "1:3",
+            "1:4",
         ],
     )?;
     Ok(())
