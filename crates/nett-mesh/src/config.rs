@@ -49,14 +49,41 @@ pub struct MeshPrefixes {
 #[serde(deny_unknown_fields)]
 pub struct PathDoc {
     pub peer: NodeId,
+    /// 对端的可达性：据此确定这一对由谁决定路径（design/mesh.md 第 8.3 节）。
+    pub peer_reachability: Reachability,
+    /// 按 Hub 给出的顺序排列，初始路径取第一条。
     pub candidates: Vec<Candidate>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Candidate {
     /// 公网直连：对端 WireGuard 端口的地址。
     Direct { endpoint: SocketAddr },
+    /// 经中继：中继的节点 ID、中继端口的地址，以及本机与这个中继之间的探测令牌（design/mesh.md 第 5.2 节）。
+    Relay {
+        relay: NodeId,
+        endpoint: SocketAddr,
+        token: ProbeToken,
+    },
+}
+
+/// 成员与中继之间的探测令牌。`Debug` 不输出内容（硬性规则 10）。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProbeToken(#[serde(with = "nett_trust::encoding::b64_fixed")] pub [u8; 32]);
+
+impl std::fmt::Debug for ProbeToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProbeToken(<redacted>)")
+    }
+}
+
+/// 一个对端的路径配置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerPathConfig {
+    pub reachability: Reachability,
+    pub candidates: Vec<Candidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -83,7 +110,7 @@ pub struct DesiredMesh {
     pub anchors: TrustAnchors,
     pub members: Vec<AdmissionMaterial>,
     pub revocations: Vec<Revocation>,
-    pub paths: BTreeMap<NodeId, Vec<Candidate>>,
+    pub paths: BTreeMap<NodeId, PeerPathConfig>,
 }
 
 impl DesiredMesh {
@@ -104,7 +131,11 @@ impl DesiredMesh {
         }
         let mut paths = BTreeMap::new();
         for path in doc.paths {
-            if paths.insert(path.peer.clone(), path.candidates).is_some() {
+            let config = PeerPathConfig {
+                reachability: path.peer_reachability,
+                candidates: path.candidates,
+            };
+            if paths.insert(path.peer.clone(), config).is_some() {
                 return Err(ConfigError::DuplicatePath(path.peer));
             }
         }

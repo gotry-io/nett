@@ -10,6 +10,7 @@ use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
 use nett_mesh::lab::{FileSource, JsonLinesSink};
 use nett_mesh::linux::KernelWireGuard;
+use nett_mesh::linux::runtime::Runtime;
 use tokio::signal::unix::{SignalKind, signal};
 
 struct Args {
@@ -69,6 +70,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         None => Box::new(LogSink),
     };
     let engine = Engine::new(node_id, key, dataplane);
+    let worker = Runtime::spawn(engine, sink).context("starting the mesh worker thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -86,7 +88,11 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        nett_mesh::run::run(source, engine, sink, shutdown).await?;
+        let worker = nett_mesh::run::run(source, worker, shutdown).await?;
+        tokio::task::spawn_blocking(move || worker.shutdown())
+            .await
+            .context("stopping the mesh worker")?
+            .map_err(anyhow::Error::msg)?;
         tracing::info!("mesh process stopped; the interface stays up");
         anyhow::Ok(())
     })

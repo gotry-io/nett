@@ -10,7 +10,10 @@ pub mod lab;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod members;
+pub mod path;
 pub mod prefix;
+pub mod probe;
+pub mod prober;
 pub mod run;
 #[cfg(test)]
 mod testutil;

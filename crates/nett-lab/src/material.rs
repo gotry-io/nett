@@ -269,6 +269,7 @@ pub fn generate(
                     .collect();
                 Some(PathDoc {
                     peer: peer.node_id.clone(),
+                    peer_reachability: topo.node(other)?.reachability,
                     candidates,
                 })
             })
