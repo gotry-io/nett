@@ -29,10 +29,13 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(600);
 const SAME_TYPE_RATIO: f64 = 0.85;
 const SAME_TYPE_MIN_MS: f64 = 10.0;
 const SAME_TYPE_HOLD: Duration = Duration::from_secs(30);
-/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 3 秒；空闲时每 5 分钟。
+/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 3 秒；当前路径明显变慢时，
+/// 同类候选也每 3 秒；空闲时每 5 分钟。
 const CANDIDATE_INTERVAL: Duration = Duration::from_secs(15);
 const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(3);
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
+/// 判断当前路径"明显变慢"的最小增量（毫秒）。
+const DEGRADED_MIN_MS: f64 = 10.0;
 /// 更优类型的候选第一次有应答之后，确认探测的间隔。
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
 /// 候选探测等待应答的上限。
@@ -92,6 +95,8 @@ impl PathStats {
     pub fn record_reply(&mut self, rtt: Duration) {
         let ms = rtt.as_secs_f64() * 1000.0;
         self.rtt_ms = Some(match self.rtt_ms {
+            // 与平均值相差一倍以上：路径变了，直接采用新值，不等平均值慢慢跟上
+            Some(prev) if ms >= 2.0 * prev || ms <= prev / 2.0 => ms,
             Some(prev) => {
                 self.jitter_ms += RTT_ALPHA * ((ms - prev).abs() - self.jitter_ms);
                 prev + RTT_ALPHA * (ms - prev)
@@ -221,6 +226,8 @@ pub struct PeerPaths {
     phase: Phase,
     /// 当前路径切换以来收到过隧道内应答。
     tunnel_established: bool,
+    /// 切到当前路径以来隧道内往返时间的最好值（毫秒），用来判断它是否明显变慢。
+    best_rtt_ms: Option<f64>,
     /// 这次故障中已经在同一中继上重新握手过一次。
     rehandshake_tried: bool,
     high_loss_since: Option<Instant>,
@@ -255,6 +262,7 @@ impl PeerPaths {
             last_tunnel_probe: None,
             phase: Phase::Normal,
             tunnel_established: false,
+            best_rtt_ms: None,
             rehandshake_tried: false,
             high_loss_since: None,
             better_since: None,
@@ -292,8 +300,10 @@ impl PeerPaths {
             self.tunnel_outstanding.pop_front();
             self.tunnel.record_loss();
         }
-        self.tunnel
-            .record_reply(now.saturating_duration_since(sent));
+        let rtt = now.saturating_duration_since(sent);
+        self.tunnel.record_reply(rtt);
+        let ms = rtt.as_secs_f64() * 1000.0;
+        self.best_rtt_ms = Some(self.best_rtt_ms.map_or(ms, |b| b.min(ms)));
         self.tunnel_established = true;
         self.rehandshake_tried = false;
         self.phase = Phase::Normal;
@@ -415,15 +425,23 @@ impl PeerPaths {
         })
     }
 
+    /// 当前路径明显变慢：往返时间比切到它以来的最好值翻倍，且至少多 10 毫秒（design/mesh.md 第 7 节）。
+    fn degraded(&self) -> bool {
+        match (self.tunnel.rtt_ms(), self.best_rtt_ms) {
+            (Some(rtt), Some(best)) => rtt >= 2.0 * best && rtt >= best + DEGRADED_MIN_MS,
+            _ => false,
+        }
+    }
+
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
         let c = &self.candidates[index];
         let better = c.kind < self.current_kind();
         let interval = if !active {
             IDLE_CANDIDATE_INTERVAL
         } else if better && c.stats.consecutive_successes == 1 {
-            // 更优类型的候选刚有一次应答：立即再探测一次确认，不等下一个 5 秒
+            // 更优类型的候选刚有一次应答：立即再探测一次确认，不等下一个 3 秒
             CONFIRM_INTERVAL
-        } else if better {
+        } else if better || (c.kind == self.current_kind() && self.degraded()) {
             BETTER_TYPE_INTERVAL
         } else {
             CANDIDATE_INTERVAL
@@ -579,6 +597,7 @@ impl PeerPaths {
         self.tunnel = PathStats::seeded(self.candidates[target].stats.rtt_ms);
         self.tunnel_outstanding.clear();
         self.tunnel_established = false;
+        self.best_rtt_ms = None;
         self.phase = Phase::Normal;
         self.high_loss_since = None;
         self.better_since = None;
@@ -942,6 +961,38 @@ mod tests {
         let (_, to, rehandshake, reason) = sim.switches[0];
         assert_eq!((to, reason), (relay(2), SwitchReason::BetterScore));
         assert!(rehandshake);
+    }
+
+    #[test]
+    fn follows_the_faster_relay_when_latencies_alternate() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        // 前半程中继 1 变慢：切到中继 2
+        sim.rtt = vec![80 * MS, 2 * MS];
+        let first = sim.now;
+        sim.run(Duration::from_secs(60));
+        let (at, to, _, _) = sim.switches[0];
+        assert_eq!(to, relay(2));
+        assert!(
+            at.saturating_duration_since(first) <= Duration::from_secs(40),
+            "{:?}",
+            at.saturating_duration_since(first)
+        );
+        // 后半程中继 2 变慢、中继 1 恢复：一分钟内切回中继 1
+        sim.rtt = vec![2 * MS, 80 * MS];
+        let second = sim.now;
+        sim.run(Duration::from_secs(60));
+        let (at, to, _, _) = *sim.switches.last().expect("switched back");
+        assert_eq!(to, relay(1));
+        assert!(
+            at.saturating_duration_since(second) <= Duration::from_secs(60),
+            "{:?}",
+            at.saturating_duration_since(second)
+        );
+        assert_eq!(sim.switches.len(), 2);
     }
 
     #[test]
