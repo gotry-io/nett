@@ -115,8 +115,15 @@ impl Topology {
                 );
             }
             for candidate in &link.candidates {
-                if candidate != "direct" {
-                    bail!("candidate `{candidate}` is not supported yet");
+                match candidate.strip_prefix("relay:") {
+                    None if candidate == "direct" => {}
+                    Some(relay) => ensure!(
+                        self.nodes.iter().any(|n| n.name == relay
+                            && n.behind.is_none()
+                            && n.roles.iter().any(|r| r == "relay")),
+                        "candidate `{candidate}` names no public node with the relay role"
+                    ),
+                    None => bail!("candidate `{candidate}` is not supported yet"),
                 }
             }
         }

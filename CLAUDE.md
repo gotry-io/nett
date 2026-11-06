@@ -135,16 +135,15 @@ cargo test --workspace --all-features --locked
 cargo deny --locked check        # 许可证、安全公告、重复依赖、来源；配置见 deny.toml
 ```
 
-实验场景（Linux，需要 root；`nett` 用 `lab` 特性构建，见 design/prototype.md）：
+实验场景（Linux，需要 root；`nett` 用 `lab` 特性构建，场景与通过标准见 design/prototype.md，全部场景见 `nett-lab --help`）：
 
 ```bash
 cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
 sudo ./target/debug/nett-lab run admission --topology crates/nett-lab/topologies/direct.toml \
   --nett ./target/debug/nett --out /tmp/lab-14
-sudo ./target/debug/nett-lab run selftest --topology crates/nett-lab/topologies/direct.toml \
-  --nett ./target/debug/nett --out /tmp/lab-selftest
-# 对比对象：PATH 中需要 tailscale、tailscaled、headscale（版本见 .github/workflows/lab-baseline.yml）
-sudo ./target/debug/nett-lab run tailscale --topology crates/nett-lab/topologies/direct.toml --out /tmp/lab-ts
+# 与 Tailscale 对比：PATH 中需要 tailscale、tailscaled、headscale（版本见 .github/workflows/lab-baseline.yml）
+sudo ./target/debug/nett-lab run failover --topology crates/nett-lab/topologies/failover.toml \
+  --nett ./target/debug/nett --out /tmp/lab-failover --repeat 20 --with-tailscale
 ```
 
 `web/` 在 M1 搭好之后加上 `pnpm -C web lint && pnpm -C web test`。

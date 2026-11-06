@@ -97,21 +97,26 @@ pub fn block_udp(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 只拦截节点发往 `dsts` 的 UDP（IPv4 与 IPv6 地址都要列出）：切断两个节点之间的直连，
-/// 其他路径（例如中继）不受影响。
-pub fn block_udp_to(name: &str, dsts: &[std::net::IpAddr]) -> anyhow::Result<()> {
+/// 拦截节点与 `peers` 之间双向的 UDP（IPv4 与 IPv6 地址都要列出）：切断两个节点之间的直连，
+/// 经其他地址的路径（例如中继）不受影响。
+pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
-    let matches: String = dsts
-        .iter()
-        .map(|dst| {
-            let family = if dst.is_ipv4() { "ip" } else { "ip6" };
-            format!("{family} daddr {dst} meta l4proto udp drop; ")
-        })
-        .collect();
+    let rule = |dir: &str| -> String {
+        peers
+            .iter()
+            .map(|ip| {
+                let family = if ip.is_ipv4() { "ip" } else { "ip6" };
+                format!("{family} {dir} {ip} meta l4proto udp drop; ")
+            })
+            .collect()
+    };
     let rules = format!(
         "table inet {FAULT_TABLE} {{\n\
-         chain out {{ type filter hook output priority 0; {matches}}}\n\
-         }}\n"
+         chain out {{ type filter hook output priority 0; {}}}\n\
+         chain in {{ type filter hook input priority 0; {}}}\n\
+         }}\n",
+        rule("daddr"),
+        rule("saddr")
     );
     run_with_input(
         "ip",
@@ -122,7 +127,7 @@ pub fn block_udp_to(name: &str, dsts: &[std::net::IpAddr]) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 解除 [`block_udp`] 或 [`block_udp_to`]。
+/// 解除 [`block_udp`] 或 [`block_udp_with`]。
 pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     run(

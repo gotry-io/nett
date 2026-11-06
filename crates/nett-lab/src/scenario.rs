@@ -70,12 +70,18 @@ impl Report {
 struct Lab {
     underlay: Underlay,
     processes: Vec<(String, Child)>,
+    /// 中继节点上的 nett-relay。
+    relays: Vec<(String, Child)>,
     /// 测量用的辅助进程（探测流、长连接）。
     helpers: Vec<Child>,
 }
 
 impl Drop for Lab {
     fn drop(&mut self) {
+        for (_, child) in &mut self.relays {
+            run("kill", ["-TERM", &child.id().to_string()]).ok();
+            child.wait().ok();
+        }
         for child in &mut self.helpers {
             child.kill().ok();
             child.wait().ok();
@@ -187,10 +193,17 @@ fn start(
     let mut lab = Lab {
         underlay,
         processes: Vec::new(),
+        relays: Vec::new(),
         helpers: Vec::new(),
     };
     for node in &generated.nodes {
         lab.spawn(node, nett)?;
+        if topo
+            .node(&node.name)
+            .is_some_and(|n| n.roles.iter().any(|r| r == "relay"))
+        {
+            lab.spawn_relay(node, nett)?;
+        }
     }
     Ok(lab)
 }
@@ -223,6 +236,22 @@ impl Lab {
         let me = std::env::current_exe().context("locating nett-lab")?;
         let child = spawn_in(&net.netns, &me, args, log)?;
         self.helpers.push(child);
+        Ok(())
+    }
+
+    fn spawn_relay(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
+        let net = self.underlay.node(&node.name).context("planned node")?;
+        let child = spawn_in(
+            &net.netns,
+            nett,
+            [
+                "relay".as_ref(),
+                "--config".as_ref(),
+                node.dir.join("relay.json").as_os_str(),
+            ],
+            &node.dir.join("relay.log"),
+        )?;
+        self.relays.push((node.name.clone(), child));
         Ok(())
     }
 
@@ -507,6 +536,7 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
     let mut lab = Lab {
         underlay,
         processes: Vec::new(),
+        relays: Vec::new(),
         helpers: Vec::new(),
     };
     let names: Vec<&str> = topo.nodes.iter().map(|n| n.name.as_str()).collect();
@@ -609,7 +639,7 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
     );
 
     // 拦掉 a 到 b 的直连 UDP（IPv4 与 IPv6）：Tailscale 应回退到 DERP
-    fault::block_udp_to(a, &b_addrs)?;
+    fault::block_udp_with(a, &b_addrs)?;
     std::thread::sleep(Duration::from_secs(8));
     let via_derp = ts.cli(
         a,
@@ -628,5 +658,418 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
     write_report(out, &report)?;
     drop(ts);
     drop(lab);
+    Ok(report)
+}
+
+/// 中继冒烟测试：两个成员之间只有经中继的候选，确认真实的 WireGuard 握手和数据经 nett-relay 转发。
+pub fn relay_smoke(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new("relay-smoke");
+    let (a, b) = (&generated.nodes[0], &generated.nodes[1]);
+    let relay = topo
+        .nodes
+        .iter()
+        .find(|n| n.roles.iter().any(|r| r == "relay"))
+        .context("topology has a relay")?;
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let ns_a = lab.underlay.node(&a.name).context("node a")?.netns.clone();
+    let ns_r = lab
+        .underlay
+        .node(&relay.name)
+        .context("relay")?
+        .netns
+        .clone();
+    let before = crate::fault::counters(&ns_r, "eth0")?;
+    for target in [b.mesh_ipv4.to_string(), b.mesh_ipv6.to_string()] {
+        let result = ping(&ns_a, &target);
+        report.check(
+            &format!("ping-via-relay:{}->{}:{target}", a.name, b.name),
+            result.is_ok(),
+            result.unwrap_or_else(|e| format!("{e:#}")),
+        );
+    }
+    let after = crate::fault::counters(&ns_r, "eth0")?;
+    report.check(
+        "relay-carried-traffic",
+        after.0 > before.0 && after.1 > before.1,
+        format!(
+            "relay eth0 rx {} -> {}, tx {} -> {}",
+            before.0, after.0, before.1, after.1
+        ),
+    );
+    for node in &generated.nodes {
+        if let Some(net) = lab.underlay.node(&node.name) {
+            let dump =
+                run_in(&net.netns, "wg", ["show", "nett0"]).unwrap_or_else(|e| format!("{e:#}"));
+            report.record(&format!("wg:{}", node.name), dump);
+        }
+    }
+    write_report(out, &report)?;
+    drop(lab);
+    Ok(report)
+}
+
+/// 按底层链路的流量判断当前路径（design/prototype.md 第 6.1 节）：每 200 毫秒读一次各接口的接收字节数。
+/// 一次采样：时刻（Unix 毫秒）与各接口的累计接收字节数。
+type Sample = (u64, Vec<u64>);
+
+struct PathMonitor {
+    samples: std::sync::Arc<std::sync::Mutex<Vec<Sample>>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl PathMonitor {
+    fn start(watched: Vec<(String, String)>) -> Self {
+        use std::sync::atomic::Ordering;
+        let samples = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (s, st) = (samples.clone(), stop.clone());
+        let handle = std::thread::spawn(move || {
+            while !st.load(Ordering::Relaxed) {
+                let now = crate::measure::now_ms();
+                let rx: Vec<u64> = watched
+                    .iter()
+                    .map(|(ns, dev)| crate::fault::counters(ns, dev).map(|c| c.0).unwrap_or(0))
+                    .collect();
+                if let Ok(mut v) = s.lock() {
+                    v.push((now, rx));
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        });
+        Self {
+            samples,
+            stop,
+            handle: Some(handle),
+        }
+    }
+
+    /// 最近 `window` 内每个采样间隔的合计接收速率都低于 `bytes_per_s`。
+    fn quiet_for(&self, window: Duration, bytes_per_s: u64) -> bool {
+        let Ok(v) = self.samples.lock() else {
+            return false;
+        };
+        let Some(last) = v.last().map(|s| s.0) else {
+            return false;
+        };
+        let since = last.saturating_sub(u64::try_from(window.as_millis()).unwrap_or(u64::MAX));
+        let recent: Vec<_> = v.iter().filter(|s| s.0 >= since).collect();
+        recent.len() >= 2
+            && v.first().is_some_and(|s| s.0 <= since)
+            && recent.windows(2).all(|w| {
+                let dt = w[1].0.saturating_sub(w[0].0).max(1);
+                let bytes: u64 = w[1]
+                    .1
+                    .iter()
+                    .zip(&w[0].1)
+                    .map(|(b, a)| b.saturating_sub(*a))
+                    .sum();
+                bytes * 1000 / dt < bytes_per_s
+            })
+    }
+
+    /// `after_ms` 之后，被观察的接口合计接收速率第一次低于 `bytes_per_s` 的时刻。
+    fn first_quiet(&self, after_ms: u64, bytes_per_s: u64) -> Option<u64> {
+        let v = self.samples.lock().ok()?;
+        v.windows(2)
+            .filter(|w| w[0].0 >= after_ms)
+            .find(|w| {
+                let dt = w[1].0.saturating_sub(w[0].0).max(1);
+                let bytes: u64 = w[1]
+                    .1
+                    .iter()
+                    .zip(&w[0].1)
+                    .map(|(b, a)| b.saturating_sub(*a))
+                    .sum();
+                bytes * 1000 / dt < bytes_per_s
+            })
+            .map(|w| w[1].0)
+    }
+}
+
+impl Drop for PathMonitor {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// 故障切换一次运行的结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct FailoverRun {
+    pub system: String,
+    /// 从开始传输到流量稳定在直连上（毫秒）。
+    pub settled_after_ms: u64,
+    /// 探测流最长的中断（毫秒）。
+    pub outage_ms: u64,
+    /// 从故障解除到流量回到直连（毫秒），按底层链路判断。
+    pub recovery_ms: Option<u64>,
+    /// 长连接是否被重置。
+    pub tcp_ended: Option<String>,
+    pub tcp_kbps: u64,
+}
+
+/// 中继链路上的流量低于这个速率，视为流量已经不走中继（长连接约 13 Mbit/s）。
+const RELAY_QUIET_BYTES_PER_S: u64 = 100_000;
+const WARMUP: Duration = Duration::from_secs(3);
+/// 等待流量稳定在直连上的上限。
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
+const FAULT_HOLD: Duration = Duration::from_secs(12);
+const RECOVERY_WAIT: Duration = Duration::from_secs(30);
+
+fn start_workload(
+    lab: &mut Lab,
+    a: &str,
+    b: &str,
+    target: std::net::IpAddr,
+    out: &Path,
+) -> anyhow::Result<(PathBuf, PathBuf)> {
+    let probe_file = out.join("probe.txt");
+    let tcp_file = out.join("tcp.txt");
+    let probe_addr = std::net::SocketAddr::new(target, 7000).to_string();
+    let tcp_addr = std::net::SocketAddr::new(target, 7001).to_string();
+    lab.helper(
+        b,
+        &[
+            "probe-recv",
+            "--listen",
+            &probe_addr,
+            "--out",
+            &probe_file.to_string_lossy(),
+        ],
+        &out.join("probe-recv.log"),
+    )?;
+    lab.helper(
+        b,
+        &[
+            "tcp-sink",
+            "--listen",
+            &tcp_addr,
+            "--out",
+            &tcp_file.to_string_lossy(),
+        ],
+        &out.join("tcp-sink.log"),
+    )?;
+    std::thread::sleep(Duration::from_millis(300));
+    lab.helper(
+        a,
+        &["probe-send", "--to", &probe_addr],
+        &out.join("probe-send.log"),
+    )?;
+    lab.helper(
+        a,
+        &["tcp-source", "--to", &tcp_addr],
+        &out.join("tcp-source.log"),
+    )?;
+    Ok((probe_file, tcp_file))
+}
+
+/// 场景 1 与 8：切断 a 与 b 之间的直连 UDP，12 秒后恢复。`relay_links` 是中继路径经过的接口。
+fn failover_run(
+    lab: &mut Lab,
+    out: &Path,
+    system: &str,
+    target: std::net::IpAddr,
+    relay_links: Vec<(String, String)>,
+) -> anyhow::Result<FailoverRun> {
+    use crate::fault;
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+    let start_ms = now_ms();
+    let monitor = PathMonitor::start(relay_links);
+    let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
+    std::thread::sleep(WARMUP);
+    // 故障之前流量必须已经稳定在直连上：探测流持续收到（最近 3 秒至少 25 个），而中继链路没有流量
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let flowing = || {
+        let now = now_ms();
+        probe_stats(&probe_file, now.saturating_sub(3000), now).is_ok_and(|p| p.received >= 25)
+    };
+    while !(flowing() && monitor.quiet_for(Duration::from_secs(3), RELAY_QUIET_BYTES_PER_S)) {
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "{system}: traffic did not settle on the direct path within {SETTLE_TIMEOUT:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let settled_ms = now_ms();
+    let a_egress = lab.underlay.egress_ipv4("a").context("a egress")?;
+    let fault_ms = now_ms();
+    fault::block_udp_with("b", &[a_egress.into()])?;
+    std::thread::sleep(FAULT_HOLD);
+    let restore_ms = now_ms();
+    fault::unblock_udp("b")?;
+    std::thread::sleep(RECOVERY_WAIT);
+    let end_ms = now_ms();
+    let outage = probe_stats(&probe_file, fault_ms - 1000, restore_ms)?;
+    let tcp = tcp_stats(&tcp_file, fault_ms - 2000, end_ms)?;
+    let recovery_ms = monitor
+        .first_quiet(restore_ms, RELAY_QUIET_BYTES_PER_S)
+        .map(|t| t.saturating_sub(restore_ms));
+    drop(monitor);
+    Ok(FailoverRun {
+        system: system.to_owned(),
+        settled_after_ms: settled_ms.saturating_sub(start_ms),
+        outage_ms: outage.max_gap_ms,
+        recovery_ms,
+        tcp_ended: tcp.ended,
+        tcp_kbps: tcp.kbps,
+    })
+}
+
+fn nett_failover_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Result<FailoverRun> {
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    let generated = material::generate(topo, &underlay, out, false)?;
+    let mut lab = start(topo, &generated, underlay, nett)?;
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let b = generated
+        .nodes
+        .iter()
+        .find(|n| n.name == "b")
+        .context("node b")?;
+    let links = ["r1", "r2"]
+        .iter()
+        .filter_map(|r| {
+            lab.underlay
+                .node(r)
+                .map(|n| (n.netns.clone(), "eth0".to_owned()))
+        })
+        .collect();
+    let run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links)?;
+    drop(lab);
+    Ok(run)
+}
+
+fn tailscale_failover_once(topo: &Topology, out: &Path) -> anyhow::Result<FailoverRun> {
+    use crate::tailscale::{CONTROL_NETNS, TailscaleLab};
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        relays: Vec::new(),
+        helpers: Vec::new(),
+    };
+    let ts = TailscaleLab::up(out, &["a", "b"])?;
+    let ip_b = ts.ipv4("b")?;
+    // 等到直连：tailscale ping 在拿到直连应答后停止
+    ts.cli("a", &["ping", "-c", "20", &ip_b.to_string()]).ok();
+    let links = vec![(CONTROL_NETNS.to_owned(), "eth0".to_owned())];
+    let run = failover_run(&mut lab, out, "tailscale", ip_b.into(), links)?;
+    drop(ts);
+    drop(lab);
+    Ok(run)
+}
+
+fn percentile(values: &mut [u64], p: f64) -> Option<u64> {
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_unstable();
+    let rank = ((p * values.len() as f64).ceil() as usize).clamp(1, values.len());
+    Some(values[rank - 1])
+}
+
+/// 场景 1、8 与 Tailscale 对比：中断时间、恢复时间的 p95 与最大值不超过 Tailscale，长连接不断
+/// （design/prototype.md 第 6.1、6.2 节）。
+pub fn failover(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    repeat: usize,
+    with_tailscale: bool,
+) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let mut report = Report::new("1-8-failover");
+    let mut runs = Vec::new();
+    for i in 0..repeat {
+        runs.push(nett_failover_once(
+            &topo,
+            nett,
+            &out.join(format!("nett-{i}")),
+        )?);
+        if with_tailscale {
+            runs.push(tailscale_failover_once(
+                &topo,
+                &out.join(format!("tailscale-{i}")),
+            )?);
+        }
+    }
+    for r in &runs {
+        report.record(&format!("run:{}", r.system), format!("{r:?}"));
+    }
+    let summary = |system: &str| {
+        let mine: Vec<&FailoverRun> = runs.iter().filter(|r| r.system == system).collect();
+        let mut outage: Vec<u64> = mine.iter().map(|r| r.outage_ms).collect();
+        let mut recovery: Vec<u64> = mine.iter().filter_map(|r| r.recovery_ms).collect();
+        let unrecovered = mine.iter().filter(|r| r.recovery_ms.is_none()).count();
+        let resets = mine.iter().filter(|r| r.tcp_ended.is_some()).count();
+        (
+            percentile(&mut outage, 0.95),
+            outage.iter().max().copied(),
+            percentile(&mut recovery, 0.95),
+            recovery.iter().max().copied(),
+            unrecovered,
+            resets,
+        )
+    };
+    let nett_s = summary("nett");
+    report.check(
+        "nett:long-connection-never-reset",
+        nett_s.5 == 0,
+        format!("{} of {repeat} runs reset the connection", nett_s.5),
+    );
+    report.check(
+        "nett:recovered-to-direct",
+        nett_s.4 == 0,
+        format!(
+            "{} of {repeat} runs did not return to direct within {RECOVERY_WAIT:?}",
+            nett_s.4
+        ),
+    );
+    report.record(
+        "nett:summary",
+        format!(
+            "outage p95 {:?} max {:?} ms; recovery p95 {:?} max {:?} ms",
+            nett_s.0, nett_s.1, nett_s.2, nett_s.3
+        ),
+    );
+    if with_tailscale {
+        let ts_s = summary("tailscale");
+        report.record(
+            "tailscale:summary",
+            format!(
+                "outage p95 {:?} max {:?} ms; recovery p95 {:?} max {:?} ms; resets {}",
+                ts_s.0, ts_s.1, ts_s.2, ts_s.3, ts_s.5
+            ),
+        );
+        let not_worse =
+            |n: Option<u64>, t: Option<u64>| matches!((n, t), (Some(n), Some(t)) if n <= t);
+        report.check(
+            "outage:not-worse-than-tailscale",
+            not_worse(nett_s.0, ts_s.0) && not_worse(nett_s.1, ts_s.1),
+            "p95 and max",
+        );
+        report.check(
+            "recovery:not-worse-than-tailscale",
+            not_worse(nett_s.2, ts_s.2) && not_worse(nett_s.3, ts_s.3),
+            "p95 and max",
+        );
+    }
+    write_report(out, &report)?;
     Ok(report)
 }

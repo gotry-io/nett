@@ -61,6 +61,18 @@ jobs:
           --topology crates/nett-lab/topologies/direct.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-14"
+      - name: 经中继转发（真实的 WireGuard 握手与数据）
+        run: >-
+          sudo ./target/debug/nett-lab run relay-smoke
+          --topology crates/nett-lab/topologies/relay-only.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-relay"
+      - name: 场景 1、8：直连失效切到中继，恢复后回到直连
+        run: >-
+          sudo ./target/debug/nett-lab run failover
+          --topology crates/nett-lab/topologies/failover.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-failover"
       - name: 场景 14：一端在锥形 NAT 之后
         run: >-
           sudo ./target/debug/nett-lab run admission

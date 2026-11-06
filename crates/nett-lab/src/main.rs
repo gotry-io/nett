@@ -34,8 +34,9 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
-  nett-lab run <admission|selftest> --topology <file.toml> --nett <path/to/nett> --out <dir>
+  nett-lab run <admission|selftest|relay-smoke> --topology <file.toml> --nett <path/to/nett> --out <dir>
   nett-lab run tailscale --topology <file.toml> --out <dir>
+  nett-lab run failover --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
 measurement helpers (started by the scenarios inside a node's network namespace):
   nett-lab probe-send --to <addr:port>
@@ -62,6 +63,7 @@ fn run() -> anyhow::Result<bool> {
     let mut words = Vec::new();
     let (mut topology, mut nett, mut out) = (None, None, None);
     let (mut to, mut listen) = (None, None);
+    let (mut repeat, mut with_tailscale) = (1usize, false);
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -72,6 +74,8 @@ fn run() -> anyhow::Result<bool> {
             Long("topology") => topology = Some(PathBuf::from(parser.value()?)),
             Long("nett") => nett = Some(PathBuf::from(parser.value()?)),
             Long("out") => out = Some(PathBuf::from(parser.value()?)),
+            Long("repeat") => repeat = parser.value()?.string()?.parse()?,
+            Long("with-tailscale") => with_tailscale = true,
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -96,6 +100,10 @@ fn run() -> anyhow::Result<bool> {
             let report = match *name {
                 "admission" => scenario::admission(&topology, &nett()?, &out)?,
                 "selftest" => scenario::selftest(&topology, &nett()?, &out)?,
+                "relay-smoke" => scenario::relay_smoke(&topology, &nett()?, &out)?,
+                "failover" => {
+                    scenario::failover(&topology, &nett()?, &out, repeat, with_tailscale)?
+                }
                 "tailscale" => scenario::tailscale(&topology, &out)?,
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
             };

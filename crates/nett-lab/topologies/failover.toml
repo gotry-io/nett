@@ -1,0 +1,32 @@
+# 场景 1、8：a 在锥形 NAT 之后（dial-only）与 b（public）直连，另有经 r1、r2 两个中继的候选
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "nat-a"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[node]]
+name = "r1"
+reachability = "public"
+roles = ["relay"]
+
+[[node]]
+name = "r2"
+reachability = "public"
+roles = ["relay"]
+
+[[router]]
+name = "nat-a"
+nat = "cone"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct", "relay:r1", "relay:r2"]

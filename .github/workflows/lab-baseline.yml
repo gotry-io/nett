@@ -1,4 +1,4 @@
-# 对比对象 Tailscale 的部署检查（design/prototype.md 第 5.1、7 节）：手动触发，不在每次推送时运行。
+# 对比对象 Tailscale 的部署检查与对比场景（design/prototype.md 第 5.1、7 节）：手动触发，不在每次推送时运行。
 # 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。
 
 name: Lab baseline
@@ -19,7 +19,7 @@ env:
 jobs:
   tailscale:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -49,9 +49,16 @@ jobs:
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
-      - run: cargo build --locked -p nett-lab
+      - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
       - name: Tailscale 对照部署：直连、经 DERP 回退、测量工具可用
         run: >-
           sudo env "PATH=$PATH" ./target/debug/nett-lab run tailscale
           --topology crates/nett-lab/topologies/direct.toml
           --out "$RUNNER_TEMP/lab-tailscale"
+      - name: 场景 1、8 与 Tailscale 对比
+        run: >-
+          sudo env "PATH=$PATH" ./target/debug/nett-lab run failover
+          --topology crates/nett-lab/topologies/failover.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-failover"
+          --repeat 3 --with-tailscale
