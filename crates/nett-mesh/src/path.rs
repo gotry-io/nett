@@ -1,4 +1,5 @@
-//! 每个对端的选路状态机（design/mesh.md 第 7、8 节，ADR 0021）。只在决定方运行（第 8.3 节）。
+//! 每个对端的选路状态机（design/mesh.md 第 7、8 节，ADR 0021）。在决定方运行（第 8.3 节）；双方都是
+//! `dial-only` 时跟随方也运行，只检测中断（第 8.4 节）。
 //!
 //! 纯逻辑：时间由调用方传入，发送探测和切换 endpoint 以 [`Action`] 交给调用方执行，测试中可以精确模拟时间。
 
@@ -184,6 +185,28 @@ pub enum SwitchReason {
     BetterScore,
     /// 当前中继仍能应答探测而隧道不通：它丢了这条连接的索引，在同一中继上重新握手（第 8.4 节）。
     RelayLostSession,
+    /// 双方都是 `dial-only`：跟随方按决定方经隧道发来的提议切换（第 8.4 节）。
+    Proposed,
+    /// 双方都是 `dial-only`、当前路径中断：按时间片（时钟不可信时按随机间隔）轮换中继（第 8.4 节）。
+    Rotation,
+}
+
+/// 这一端在这一对成员中的角色（第 8.3、8.4 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// 决定方，对端经漫游跟随。
+    Decide,
+    /// 双方都是 `dial-only` 时的决定方：择优的切换先经隧道提议（[`Action::Propose`]），中断时报告
+    /// [`Action::Lost`]。
+    DecideTogether,
+    /// 双方都是 `dial-only` 时的跟随方：只检测中断，不择优、不探测候选。
+    FollowTogether,
+}
+
+impl Role {
+    pub fn together(self) -> bool {
+        self != Role::Decide
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +225,11 @@ pub enum Action {
         rehandshake: bool,
         reason: SwitchReason,
     },
+    /// 双方都是 `dial-only` 时的决定方：要切到第 `index` 个候选，先经隧道提议，对端确认后由调用方
+    /// [`PeerPaths::adopt`]（第 8.4 节）。在此之前不再另行择优。
+    Propose { index: usize, reason: SwitchReason },
+    /// 双方都是 `dial-only`：当前路径中断，要两端一起恢复（第 8.4 节），由调用方决定去哪里。
+    Lost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +246,7 @@ enum Phase {
 /// 一个对端的选路状态。
 #[derive(Debug, Clone)]
 pub struct PeerPaths {
+    role: Role,
     candidates: Vec<Candidate>,
     current: usize,
     tunnel: PathStats,
@@ -232,16 +261,19 @@ pub struct PeerPaths {
     rehandshake_tried: bool,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
+    /// 两端一起切换的过程中（等待确认、轮换中）：只检测中断，不另行择优。
+    hold: bool,
     seq: u32,
 }
 
 impl PeerPaths {
     /// `routes` 按 Hub 给出的顺序排列；初始路径取第一条。
-    pub fn new(routes: Vec<(Route, PathKind)>) -> Option<Self> {
+    pub fn new(routes: Vec<(Route, PathKind)>, role: Role) -> Option<Self> {
         if routes.is_empty() {
             return None;
         }
         Some(Self {
+            role,
             candidates: routes
                 .into_iter()
                 .map(|(route, kind)| Candidate {
@@ -266,7 +298,17 @@ impl PeerPaths {
             rehandshake_tried: false,
             high_loss_since: None,
             better_since: None,
+            hold: false,
             seq: 0,
+        })
+        .map(|mut paths| {
+            // 两端一起切换时，两端从同一个中继开始
+            if role.together()
+                && let Some(first) = paths.relays_in_order().first()
+            {
+                paths.current = *first;
+            }
+            paths
         })
     }
 
@@ -276,6 +318,58 @@ impl PeerPaths {
 
     pub fn current_kind(&self) -> PathKind {
         self.candidates[self.current].kind
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
+    }
+
+    /// 切到当前路径以来收到过隧道内应答：本端发出的探测得到了对端的应答，双向都通。
+    pub fn tunnel_established(&self) -> bool {
+        self.tunnel_established
+    }
+
+    /// 经中继 `relay` 的候选。
+    pub fn relay_index(&self, relay: KeyId) -> Option<usize> {
+        self.candidates
+            .iter()
+            .position(|c| matches!(c.route, Route::Relay { relay: r, .. } if r == relay))
+    }
+
+    /// 经中继的候选按中继编号排序：两端各自的候选列表顺序可能不同，排序后是同一份（第 8.4 节）。
+    pub fn relays_in_order(&self) -> Vec<usize> {
+        let mut relays: Vec<(KeyId, usize)> = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(i, c)| match c.route {
+                Route::Relay { relay, .. } => Some((relay, i)),
+                Route::Direct(_) => None,
+            })
+            .collect();
+        relays.sort();
+        relays.into_iter().map(|(_, i)| i).collect()
+    }
+
+    /// 由调用方决定的切换（两端一起切换时）：切到第 `index` 个候选；经中继时总是重新握手，
+    /// 即使仍是当前中继，好让两端都在它上面发起新的握手。
+    pub fn adopt(&mut self, index: usize, reason: SwitchReason) -> Option<Action> {
+        self.candidates.get(index)?;
+        let Action::Switch { to, .. } = self.switch_to(index, reason) else {
+            return None;
+        };
+        // 立即发一个隧道内探测：它触发新的握手，也尽快确认新路径
+        self.last_tunnel_probe = None;
+        Some(Action::Switch {
+            to,
+            rehandshake: matches!(to, Route::Relay { .. }),
+            reason,
+        })
+    }
+
+    /// 两端一起切换的过程中暂停择优（[`Action::Propose`] 之后自动暂停）。
+    pub fn set_hold(&mut self, hold: bool) {
+        self.hold = hold;
     }
 
     pub fn tunnel_stats(&self) -> &PathStats {
@@ -374,7 +468,9 @@ impl PeerPaths {
                     // 当前路径经中继时也探测这个中继：它若还能应答，说明是它丢了这条连接的索引
                     let current_is_relay = self.current_kind() == PathKind::Relay;
                     for index in 0..self.candidates.len() {
-                        if index != self.current || current_is_relay {
+                        if self.role != Role::FollowTogether
+                            && (index != self.current || current_is_relay)
+                        {
                             actions.extend(self.probe_candidate(index, now));
                         }
                     }
@@ -388,6 +484,9 @@ impl PeerPaths {
                     let seq = self.send_tunnel(now);
                     actions.push(Action::TunnelProbe { seq });
                 }
+                if self.role == Role::FollowTogether {
+                    return actions;
+                }
                 // 丢包率刚开始过高时，同疑似故障一样立即探测全部候选
                 let lossy = self.high_loss_since == Some(now);
                 for index in 0..self.candidates.len() {
@@ -395,7 +494,9 @@ impl PeerPaths {
                         actions.extend(self.probe_candidate(index, now));
                     }
                 }
-                if let Some(action) = self.check_improvement(now) {
+                if !self.hold
+                    && let Some(action) = self.check_improvement(now)
+                {
                     actions.push(action);
                 }
             }
@@ -477,6 +578,12 @@ impl PeerPaths {
             && sent >= BURST_COUNT
             && self.tunnel_outstanding.is_empty()
         {
+            if self.role.together() {
+                // 两端一起恢复：记下这次故障，交给调用方；之后重新开始一轮检测
+                self.record_failure(now);
+                self.reset_tunnel(self.tunnel.rtt_ms);
+                return Some(Action::Lost);
+            }
             let current = &self.candidates[self.current];
             if current.kind == PathKind::Relay
                 && !self.rehandshake_tried
@@ -502,7 +609,10 @@ impl PeerPaths {
             }
             return action;
         }
-        // 丢包率持续过高：从开始过高时起测到的候选里选
+        // 丢包率持续过高：从开始过高时起测到的候选里选（跟随方交给决定方）
+        if self.role == Role::FollowTogether || self.hold {
+            return None;
+        }
         if self.tunnel.window.len() >= LOSS_WINDOW / 2
             && self.tunnel.loss_rate() > LOSS_FAILURE_RATE
         {
@@ -533,16 +643,33 @@ impl PeerPaths {
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i);
         let target = best?;
-        let c = &mut self.candidates[current];
-        // 从未连通过就失败（例如首次握手还没完成）的第一次不算故障，不参与恢复时的退避；
-        // 再次这样失败就照常计入，避免在探测能通而 WireGuard 不通的路径上来回切
-        if self.tunnel_established || c.grace_used {
+        self.record_failure(now);
+        Some(self.decide(target, reason))
+    }
+
+    /// 决定切到第 `target` 个候选：两端一起切换时先提议。
+    fn decide(&mut self, target: usize, reason: SwitchReason) -> Action {
+        if self.role == Role::DecideTogether {
+            self.hold = true;
+            return Action::Propose {
+                index: target,
+                reason,
+            };
+        }
+        self.switch_to(target, reason)
+    }
+
+    /// 当前路径故障，记入恢复时的退避。从未连通过就失败（例如首次握手还没完成）的第一次不算故障；
+    /// 再次这样失败就照常计入，避免在探测能通而 WireGuard 不通的路径上来回切。
+    fn record_failure(&mut self, now: Instant) {
+        let established = self.tunnel_established;
+        let c = &mut self.candidates[self.current];
+        if established || c.grace_used {
             c.failures.push_back(now);
         } else {
             c.grace_used = true;
         }
         c.healthy_since = None;
-        Some(self.switch_to(target, reason))
     }
 
     /// 当前路径正常时，检查是否有更优的路径。
@@ -557,7 +684,7 @@ impl PeerPaths {
                     .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
         });
         if let Some((i, _)) = better_type {
-            return Some(self.switch_to(i, SwitchReason::BetterType));
+            return Some(self.decide(i, SwitchReason::BetterType));
         }
         // 同类型的更优路径：持续 30 秒才切换
         let current_score = self.tunnel.score(current_kind)?;
@@ -580,7 +707,7 @@ impl PeerPaths {
         match (better, self.better_since) {
             (Some(i), Some((j, since))) if i == j => {
                 if now.saturating_duration_since(since) >= SAME_TYPE_HOLD {
-                    return Some(self.switch_to(i, SwitchReason::BetterScore));
+                    return Some(self.decide(i, SwitchReason::BetterScore));
                 }
             }
             (Some(i), _) => self.better_since = Some((i, now)),
@@ -594,18 +721,24 @@ impl PeerPaths {
         let to = self.candidates[target].route;
         self.current = target;
         // 新路径的丢包从头统计：候选的窗口里可能还留着它故障期间的丢包；往返时间沿用候选的测量作为起点
-        self.tunnel = PathStats::seeded(self.candidates[target].stats.rtt_ms);
+        self.reset_tunnel(self.candidates[target].stats.rtt_ms);
+        Action::Switch {
+            to,
+            rehandshake: matches!(to, Route::Relay { .. }) && from != to,
+            reason,
+        }
+    }
+}
+
+impl PeerPaths {
+    fn reset_tunnel(&mut self, rtt_ms: Option<f64>) {
+        self.tunnel = PathStats::seeded(rtt_ms);
         self.tunnel_outstanding.clear();
         self.tunnel_established = false;
         self.best_rtt_ms = None;
         self.phase = Phase::Normal;
         self.high_loss_since = None;
         self.better_since = None;
-        Action::Switch {
-            to,
-            rehandshake: matches!(to, Route::Relay { .. }) && from != to,
-            reason,
-        }
     }
 }
 
@@ -658,13 +791,20 @@ mod tests {
         /// (送达时刻, 是否隧道内, 下标, 序号)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
+        lost: Vec<Instant>,
+        proposals: Vec<(Instant, usize, SwitchReason)>,
+        candidate_probes: usize,
     }
 
     impl Sim {
         fn new(routes: Vec<(Route, PathKind)>) -> Self {
+            Self::with_role(routes, Role::Decide)
+        }
+
+        fn with_role(routes: Vec<(Route, PathKind)>, role: Role) -> Self {
             let n = routes.len();
             Self {
-                paths: PeerPaths::new(routes).expect("routes"),
+                paths: PeerPaths::new(routes, role).expect("routes"),
                 now: Instant::now(),
                 up: vec![true; n],
                 rtt: vec![2 * MS; n],
@@ -674,6 +814,9 @@ mod tests {
                 fix_on_rehandshake: true,
                 inflight: Vec::new(),
                 switches: Vec::new(),
+                lost: Vec::new(),
+                proposals: Vec::new(),
+                candidate_probes: 0,
             }
         }
 
@@ -706,6 +849,7 @@ mod tests {
                             }
                         }
                         Action::CandidateProbe { index, seq, .. } => {
+                            self.candidate_probes += 1;
                             if self.delivers(index) {
                                 self.inflight
                                     .push((now + self.rtt[index], false, index, seq));
@@ -723,6 +867,10 @@ mod tests {
                             }
                             // 切换后，尚在途中的旧路径探测作废
                             self.inflight.retain(|f| !f.1);
+                        }
+                        Action::Lost => self.lost.push(now),
+                        Action::Propose { index, reason } => {
+                            self.proposals.push((now, index, reason));
                         }
                     }
                 }
@@ -1039,10 +1187,10 @@ mod tests {
 
     #[test]
     fn relay_path_with_dead_far_segment_is_not_used() {
-        let mut paths = PeerPaths::new(vec![
-            (direct(), PathKind::Direct),
-            (relay(1), PathKind::Relay),
-        ])
+        let mut paths = PeerPaths::new(
+            vec![(direct(), PathKind::Direct), (relay(1), PathKind::Relay)],
+            Role::Decide,
+        )
         .expect("routes");
         let now = Instant::now();
         let actions = paths.tick(now, true);
@@ -1055,5 +1203,86 @@ mod tests {
             .expect("relay probed");
         paths.on_candidate_reply(1, seq, now + 5 * MS, Some((Duration::from_millis(5), 1.0)));
         assert_eq!(paths.candidates[1].last_reply, None);
+    }
+
+    #[test]
+    fn together_roles_report_loss_instead_of_choosing() {
+        for role in [Role::DecideTogether, Role::FollowTogether] {
+            let mut sim = Sim::with_role(
+                vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)],
+                role,
+            );
+            sim.run(Duration::from_secs(5));
+            sim.up[0] = false;
+            let down = sim.now;
+            sim.run(Duration::from_secs(5));
+            assert!(sim.switches.is_empty(), "{role:?}: {:?}", sim.switches);
+            let took = sim.lost[0].saturating_duration_since(down);
+            assert!(took <= Duration::from_secs(4), "{role:?}: took {took:?}");
+        }
+    }
+
+    #[test]
+    fn follower_together_neither_probes_candidates_nor_improves() {
+        let mut sim = Sim::with_role(
+            vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)],
+            Role::FollowTogether,
+        );
+        sim.rtt[0] = 80 * MS;
+        sim.rtt[1] = 5 * MS;
+        // 丢包率持续过高也交给决定方
+        sim.drop_every[0] = 2;
+        sim.run(Duration::from_secs(90));
+        assert_eq!(sim.candidate_probes, 0);
+        assert!(sim.switches.is_empty() && sim.lost.is_empty());
+    }
+
+    #[test]
+    fn adopting_the_current_relay_still_rehandshakes() {
+        let mut paths = PeerPaths::new(
+            vec![(relay(2), PathKind::Relay), (relay(1), PathKind::Relay)],
+            Role::DecideTogether,
+        )
+        .expect("routes");
+        // 按中继编号排序，与候选列表的顺序无关
+        assert_eq!(paths.relays_in_order(), vec![1, 0]);
+        assert_eq!(paths.relay_index(KeyId([1; 8])), Some(1));
+        assert_eq!(
+            paths.adopt(0, SwitchReason::Rotation),
+            Some(Action::Switch {
+                to: relay(2),
+                rehandshake: true,
+                reason: SwitchReason::Rotation,
+            })
+        );
+        assert_eq!(paths.adopt(5, SwitchReason::Rotation), None);
+    }
+
+    #[test]
+    fn decider_together_proposes_instead_of_switching() {
+        let mut sim = Sim::with_role(
+            vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)],
+            Role::DecideTogether,
+        );
+        sim.rtt[0] = 80 * MS;
+        sim.rtt[1] = 5 * MS;
+        sim.run(Duration::from_secs(60));
+        assert!(sim.switches.is_empty());
+        assert_eq!(sim.proposals.len(), 1, "{:?}", sim.proposals);
+        let (_, index, reason) = sim.proposals[0];
+        assert_eq!((index, reason), (1, SwitchReason::BetterScore));
+        // 在确认之前不再另行提议；确认后切换，之后照常择优
+        sim.run(Duration::from_secs(60));
+        assert_eq!(sim.proposals.len(), 1);
+        let switched = sim.paths.adopt(index, reason);
+        assert!(matches!(
+            switched,
+            Some(Action::Switch {
+                rehandshake: true,
+                ..
+            })
+        ));
+        sim.paths.set_hold(false);
+        assert_eq!(sim.paths.current(), relay(2));
     }
 }

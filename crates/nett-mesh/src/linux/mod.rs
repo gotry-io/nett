@@ -19,6 +19,19 @@ use self::wg::PeerChange;
 use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
 
+/// 系统时钟；误差以内核报告的最大误差为准（[`sys::max_clock_error`]）。
+pub struct SystemClock;
+
+impl crate::clock::Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        crate::clock::system_now_ms()
+    }
+
+    fn trusted(&self) -> bool {
+        sys::max_clock_error().is_ok_and(|e| e <= crate::clock::MAX_TRUSTED_ERROR)
+    }
+}
+
 pub struct KernelWireGuard {
     route: Socket,
     generic: Socket,

@@ -1,9 +1,10 @@
-//! rustix 没有提供的套接字选项：绑定到接口。只在这里使用 `unsafe`（CLAUDE.md "代码规则"）：
-//! 把指向本地数据的指针和它的长度交给 `setsockopt`。
+//! rustix 没有提供的系统调用：绑定到接口的套接字选项，读取内核的时钟误差。只在这里使用 `unsafe`
+//! （CLAUDE.md "代码规则"）：把指向本地数据的指针交给内核。
 #![allow(unsafe_code)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::time::Duration;
 
 /// 把套接字绑定到一个接口：只收发经这个接口的包。
 pub(crate) fn bind_to_device(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
@@ -22,4 +23,19 @@ pub(crate) fn bind_to_device(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
     } else {
         Err(io::Error::last_os_error())
     }
+}
+
+/// 内核报告的时钟最大误差（`adjtimex` 的 `maxerror`），由时间同步服务维护；没有同步时它逐秒增大，
+/// 最终达到 16 秒。只读取，不修改任何时间变量。
+pub(crate) fn max_clock_error() -> io::Result<Duration> {
+    // SAFETY: `timex` 只含整数字段，全零是合法值；`modes` 为 0 表示只读取
+    let mut tx: libc::timex = unsafe { std::mem::zeroed() };
+    // SAFETY: 指针指向本地的 `timex`，内核只在调用期间写入它
+    let rc = unsafe { libc::adjtimex(&mut tx) };
+    if rc == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Duration::from_micros(
+        u64::try_from(tx.maxerror).unwrap_or(u64::MAX),
+    ))
 }
