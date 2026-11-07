@@ -1,0 +1,54 @@
+# 场景 10：a、b 都在锥形 NAT 之后（dial-only），开始经 r1、r2 中继，尝试打洞；
+# a、b 各与 r1、r2 直连，由它们的应答得知自己的映射地址与 NAT 类型
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "nat-a"
+
+[[node]]
+name = "b"
+reachability = "dial-only"
+behind = "nat-b"
+
+[[node]]
+name = "r1"
+reachability = "public"
+roles = ["relay"]
+
+[[node]]
+name = "r2"
+reachability = "public"
+roles = ["relay"]
+
+[[router]]
+name = "nat-a"
+nat = "cone"
+
+[[router]]
+name = "nat-b"
+nat = "cone"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["relay:r1", "relay:r2", "punch"]
+
+[[link]]
+peers = ["a", "r1"]
+candidates = ["direct"]
+
+[[link]]
+peers = ["a", "r2"]
+candidates = ["direct"]
+
+[[link]]
+peers = ["b", "r1"]
+candidates = ["direct"]
+
+[[link]]
+peers = ["b", "r2"]
+candidates = ["direct"]

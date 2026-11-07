@@ -340,6 +340,7 @@ pub fn generate(
                             fingerprint: *fingerprints.get(relay)?,
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
+                        None if c == "punch" => Some(Candidate::Punch),
                         // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址
                         None if c == "direct6" => Some(Candidate::Direct {
                             endpoint: SocketAddr::new(

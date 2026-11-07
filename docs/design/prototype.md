@@ -82,7 +82,7 @@ candidates = ["direct", "relay:r1", "relay:r2", "tls:r1"]
 ### 5.1 实验 A：单机网络命名空间
 
 - 每个成员、中继和路由器各占一个网络命名空间，用 veth 相连；"公网"是一个网桥；
-- NAT 在路由器的命名空间中用 nftables 实现：锥形（`masquerade`，端口保持，映射与目的地址无关）、对称型（`masquerade random-fully`）、IPv6 有状态防火墙（入方向只放行已建立的连接）；
+- NAT 在路由器的命名空间中用 nftables 实现：锥形（`masquerade`，端口保持，映射与目的地址无关）、对称型（`masquerade fully-random`）、IPv6 有状态防火墙（入方向只放行已建立的连接；IPv4 为对称型 NAT）。与家用路由器一样，路由器的外网口丢弃从外面新发起、发给路由器自己的连接：被丢弃的包不在连接跟踪表里留下记录，否则对方先到的打洞包留下的记录会与本端随后的地址转换冲突，路由器只好换一个端口（实测这时 nett 与 Tailscale 都打不通）；
 - 链路质量用 `tc netem` 设置延迟、丢包、乱序和限速。故障注入方式：链路 100% 丢包、拦截 UDP、降低路由器接口的 MTU、重启进程；
 - **对比对象 Tailscale**：在同一拓扑中，每个成员的命名空间运行 `tailscaled`，另一个接在"公网"上的命名空间运行 Headscale 和它内置的 DERP 服务器（自签证书只交给 `tailscaled`，不连接外部服务）。版本固定为 Tailscale 1.104.5（ADR 0021 依据的版本）和 Headscale 0.29.7。nett 和 Tailscale 分开运行，不同时占用网络，同样的故障由 `nett-lab` 在底层网络上注入。Tailscale 对比其默认配置；所用版本支持 UDP 中继（peer relay）时，开启它再跑一组。版本和配置随结果一起记录；
 - 在 CI 中运行：GitHub Actions 的 Ubuntu 运行器支持 sudo 和网络命名空间，能加载 `wireguard` 内核模块；在开发机上用 Linux 虚拟机运行；

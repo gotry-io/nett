@@ -49,7 +49,7 @@ pub struct Router {
 pub enum Nat {
     /// 端口保持、映射与目的地址无关（`masquerade`）。
     Cone,
-    /// 每个目的地址一个随机端口（`masquerade random-fully`）。
+    /// 每个目的地址一个随机端口（`masquerade fully-random`）。
     Symmetric,
     /// 全局 IPv6 地址，入方向只放行已建立的连接。
     Ipv6Firewall,
@@ -117,6 +117,14 @@ impl Topology {
             for candidate in &link.candidates {
                 match crate::material::relay_of(candidate) {
                     None if candidate == "direct" || candidate == "direct6" => {}
+                    // 打洞：两端都是 dial-only（design/mesh.md 第 6.1 节）
+                    None if candidate == "punch" => ensure!(
+                        link.peers
+                            .iter()
+                            .all(|p| self.nodes.iter().any(|n| &n.name == p
+                                && n.reachability == nett_mesh::config::Reachability::DialOnly)),
+                        "candidate `punch` needs both peers to be dial-only"
+                    ),
                     Some((relay, _)) => ensure!(
                         self.nodes.iter().any(|n| n.name == relay
                             && n.behind.is_none()

@@ -2662,3 +2662,270 @@ pub fn dial_only_pair(
     write_report(out, &report)?;
     Ok(report)
 }
+
+/// 场景 10–13：等待打通直连的时长。
+const PUNCH_WATCH: Duration = Duration::from_secs(40);
+/// 流量离开中继的判定：中继链路持续空闲这么久。
+const PUNCH_QUIET: Duration = Duration::from_secs(3);
+/// 打洞期间不中断：探测流没有丢包，最长的空档小于两个正常间隔（丢一个包就是 200 毫秒；没有丢包时
+/// 调度的抖动也能让空档到 140 毫秒上下）。
+const PUNCH_MAX_GAP_MS: u64 = 190;
+
+/// 打洞一次运行的结果（design/prototype.md 第 6.2 节场景 10–13）。
+#[derive(Debug, Clone, Serialize)]
+pub struct PunchRun {
+    pub system: String,
+    /// 从探测流稳定到流量离开中继（中继链路开始持续空闲）的毫秒数；没有离开为空。
+    pub direct_after_ms: Option<u64>,
+    /// 探测流稳定之后最长的中断。
+    pub max_gap_ms: u64,
+    /// nett：打洞事件。
+    pub punch: Vec<String>,
+    pub tcp_ended: Option<String>,
+}
+
+/// 按拓扑决定的通过标准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PunchExpect {
+    /// 两端锥形，或两端都有全局 IPv6：每次都打通，且不中断。
+    Direct,
+    /// 一端对称型：成功率不低于 Tailscale。
+    AtLeastTailscale,
+    /// 两端都是对称型：不尝试打洞，连接不受影响。
+    Stay,
+}
+
+fn punch_expect(topo: &Topology) -> PunchExpect {
+    use crate::topology::Nat;
+    let nats: Vec<Nat> = topo.routers.iter().map(|r| r.nat).collect();
+    let symmetric = nats.iter().filter(|n| **n == Nat::Symmetric).count();
+    match symmetric {
+        0 => PunchExpect::Direct,
+        1 => PunchExpect::AtLeastTailscale,
+        _ => PunchExpect::Stay,
+    }
+}
+
+/// 开始传输后等探测流稳定，再等流量离开 `relay_links`（打通直连）。
+fn punch_watch(
+    lab: &mut Lab,
+    out: &Path,
+    system: &str,
+    target: std::net::IpAddr,
+    relay_links: Vec<(String, String)>,
+) -> anyhow::Result<PunchRun> {
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+    let monitor = PathMonitor::start(relay_links);
+    let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
+    let deadline = Instant::now() + SETTLE_TIMEOUT;
+    let flowing = || {
+        let now = now_ms();
+        probe_stats(&probe_file, now.saturating_sub(1000), now).is_ok_and(|p| p.received >= 8)
+    };
+    while !flowing() {
+        if Instant::now() >= deadline {
+            anyhow::bail!("{system}: the probe stream did not start within {SETTLE_TIMEOUT:?}");
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let start_ms = now_ms();
+    let end = Instant::now() + PUNCH_WATCH;
+    let mut direct_after_ms = None;
+    while Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(500));
+        if monitor.quiet_for(PUNCH_QUIET, RELAY_QUIET_BYTES_PER_S) {
+            let quiet_since =
+                now_ms().saturating_sub(u64::try_from(PUNCH_QUIET.as_millis()).unwrap_or(0));
+            direct_after_ms = Some(quiet_since.saturating_sub(start_ms));
+            break;
+        }
+    }
+    let end_ms = now_ms();
+    let probe = probe_stats(&probe_file, start_ms, end_ms)?;
+    let tcp = tcp_stats(&tcp_file, start_ms, end_ms)?;
+    drop(monitor);
+    Ok(PunchRun {
+        system: system.to_owned(),
+        direct_after_ms,
+        max_gap_ms: probe.max_gap_ms,
+        punch: Vec::new(),
+        tcp_ended: tcp.ended,
+    })
+}
+
+fn nett_punch_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Result<PunchRun> {
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    let generated = material::generate(topo, &underlay, out, false)?;
+    let mut lab = start(topo, &generated, underlay, nett)?;
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| generated.nodes.iter().find(|n| n.name == name);
+    let (a, b) = (node("a").context("node a")?, node("b").context("node b")?);
+    let links = ["r1", "r2"]
+        .iter()
+        .filter_map(|r| {
+            lab.underlay
+                .node(r)
+                .map(|n| (n.netns.clone(), "eth0".to_owned()))
+        })
+        .collect();
+    let mut run = punch_watch(&mut lab, out, "nett", b.mesh_ipv4.into(), links)
+        .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
+    run.punch = events(a)
+        .iter()
+        .filter(|e| e["event"].as_str().is_some_and(|k| k.starts_with("punch_")))
+        .map(|e| {
+            let mut e = e.clone();
+            if let Some(obj) = e.as_object_mut() {
+                obj.remove("at_ms");
+                obj.remove("node_id");
+            }
+            e.to_string()
+        })
+        .collect();
+    drop(lab);
+    Ok(run)
+}
+
+fn tailscale_punch_once(topo: &Topology, out: &Path) -> anyhow::Result<PunchRun> {
+    use crate::tailscale::{TailscaleLab, derp_netns};
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        relays: Vec::new(),
+        helpers: Vec::new(),
+    };
+    let ts = TailscaleLab::up_with(out, &["a", "b"], 2)?;
+    let ip_b = ts.ipv4("b")?;
+    let links = (1..=2)
+        .map(|i| (derp_netns(i), "eth0".to_owned()))
+        .collect();
+    let run = punch_watch(&mut lab, out, "tailscale", ip_b.into(), links)?;
+    drop(ts);
+    drop(lab);
+    Ok(run)
+}
+
+/// 场景 10–13：两端都在 NAT（或 IPv6 有状态防火墙）之后，开始经中继，看能否打通直连、打洞期间是否
+/// 中断（design/prototype.md 第 6.2 节）。通过标准按拓扑决定。
+pub fn punch(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    repeat: usize,
+    with_tailscale: bool,
+) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let expect = punch_expect(&topo);
+    let stem = topology
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("punch");
+    let mut report = Report::new(stem);
+    let mut runs = Vec::new();
+    for i in 0..repeat {
+        runs.push(nett_punch_once(
+            &topo,
+            nett,
+            &out.join(format!("nett-{i}")),
+        )?);
+        if with_tailscale {
+            runs.push(tailscale_punch_once(
+                &topo,
+                &out.join(format!("tailscale-{i}")),
+            )?);
+        }
+    }
+    for r in &runs {
+        report.record(&format!("run:{}", r.system), format!("{r:?}"));
+    }
+    let of =
+        |system: &str| -> Vec<&PunchRun> { runs.iter().filter(|r| r.system == system).collect() };
+    let (n, t) = (of("nett"), of("tailscale"));
+    let direct = |v: &[&PunchRun]| v.iter().filter(|r| r.direct_after_ms.is_some()).count();
+    let mut after: Vec<u64> = n.iter().filter_map(|r| r.direct_after_ms).collect();
+    let summary = format!(
+        "nett direct in {} of {repeat} runs, p50 {:?} p95 {:?} ms after the stream started; longest gap {:?} ms",
+        direct(&n),
+        percentile(&mut after.clone(), 0.5),
+        percentile(&mut after, 0.95),
+        n.iter().map(|r| r.max_gap_ms).max()
+    );
+    report.record("nett:summary", summary);
+    let resets = n.iter().filter(|r| r.tcp_ended.is_some()).count();
+    report.check(
+        "nett:long-connection-never-reset",
+        resets == 0,
+        format!("{resets} of {repeat} runs reset the connection"),
+    );
+    let gaps_ok = n.iter().all(|r| r.max_gap_ms <= PUNCH_MAX_GAP_MS);
+    match expect {
+        PunchExpect::Direct => {
+            report.check(
+                "nett:punched-every-run",
+                direct(&n) == repeat,
+                format!("{} of {repeat}", direct(&n)),
+            );
+            report.check(
+                "nett:no-interruption-while-punching",
+                gaps_ok,
+                format!("longest gap must stay within {PUNCH_MAX_GAP_MS} ms"),
+            );
+        }
+        PunchExpect::AtLeastTailscale => {
+            if with_tailscale {
+                report.check(
+                    "nett:success-rate-not-below-tailscale",
+                    direct(&n) >= direct(&t),
+                    format!(
+                        "nett {} of {repeat}, tailscale {} of {repeat}",
+                        direct(&n),
+                        direct(&t)
+                    ),
+                );
+            }
+            report.check(
+                "nett:no-interruption-while-punching",
+                gaps_ok,
+                format!("longest gap must stay within {PUNCH_MAX_GAP_MS} ms"),
+            );
+        }
+        PunchExpect::Stay => {
+            let tried = n
+                .iter()
+                .filter(|r| r.punch.iter().any(|e| e.contains("punch_succeeded")))
+                .count();
+            report.check(
+                "nett:does-not-punch",
+                tried == 0 && direct(&n) == 0,
+                format!("{tried} runs punched, {} left the relay", direct(&n)),
+            );
+            report.check(
+                "nett:connection-unaffected",
+                gaps_ok,
+                format!("longest gap must stay within {PUNCH_MAX_GAP_MS} ms"),
+            );
+        }
+    }
+    if with_tailscale {
+        let mut ta: Vec<u64> = t.iter().filter_map(|r| r.direct_after_ms).collect();
+        report.record(
+            "tailscale:summary",
+            format!(
+                "direct in {} of {repeat} runs, p50 {:?} p95 {:?} ms; longest gap {:?} ms",
+                direct(&t),
+                percentile(&mut ta.clone(), 0.5),
+                percentile(&mut ta, 0.95),
+                t.iter().map(|r| r.max_gap_ms).max()
+            ),
+        );
+    }
+    write_report(out, &report)?;
+    Ok(report)
+}

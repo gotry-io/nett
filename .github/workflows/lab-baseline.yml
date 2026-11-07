@@ -40,6 +40,14 @@ jobs:
             run: failover --topology crates/nett-lab/topologies/failover.toml --repeat 20 --with-tailscale
           - name: 7-9-fallback
             run: fallback --topology crates/nett-lab/topologies/fallback.toml --repeat 20 --with-tailscale
+          - name: 10-punch-cone
+            run: punch --topology crates/nett-lab/topologies/punch-cone.toml --repeat 20 --with-tailscale
+          - name: 11-punch-ipv6
+            run: punch --topology crates/nett-lab/topologies/punch-ipv6.toml --repeat 20 --with-tailscale
+          - name: 12-punch-mixed
+            run: punch --topology crates/nett-lab/topologies/punch-mixed.toml --repeat 20 --with-tailscale
+          - name: 13-punch-symmetric
+            run: punch --topology crates/nett-lab/topologies/punch-symmetric.toml --repeat 20 --with-tailscale
           - name: 2-relay-loss
             run: relay-loss --topology crates/nett-lab/topologies/relays.toml --repeat 20 --with-tailscale
           - name: 3-relay-restart

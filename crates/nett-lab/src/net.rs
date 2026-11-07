@@ -33,6 +33,16 @@ pub struct Underlay {
     routers: Vec<(String, u8, Nat)>,
 }
 
+/// IPv6 有状态防火墙路由器的局域网网段 `2001:db8:<200+k>::/64` 中的地址。
+fn lan_ipv6(router: u8, host: u16) -> Ipv6Addr {
+    Ipv6Addr::new(0x2001, 0xdb8, 200 + u16::from(router), 0, 0, 0, 0, host)
+}
+
+/// 路由器在"公网"一侧的 IPv6 地址。
+fn wan_ipv6(router: u8) -> Ipv6Addr {
+    Ipv6Addr::new(0x2001, 0xdb8, 0x100, 0, 0, 0, 0, 200 + u16::from(router))
+}
+
 pub fn netns(name: &str) -> String {
     format!("{NETNS_PREFIX}{name}")
 }
@@ -72,14 +82,16 @@ impl Underlay {
                     switch_ns: INET_NETNS.to_owned(),
                 },
                 Some(router) => {
-                    let (_, k, _) = routers
+                    let (_, k, nat) = routers
                         .iter()
                         .find(|(name, _, _)| name == router)
                         .context("router")?;
                     NodeNet {
                         netns: netns(&node.name),
                         ipv4: Ipv4Addr::new(192, 168, *k, 10 + index),
-                        ipv6: None,
+                        // IPv6 有状态防火墙之后的节点有全局 IPv6 地址
+                        ipv6: (*nat == Nat::Ipv6Firewall)
+                            .then(|| lan_ipv6(*k, 10 + u16::from(index))),
                         public_ipv4: None,
                         switch_ns: netns(router),
                     }
@@ -175,12 +187,55 @@ impl Underlay {
             run_in(&ns, "sysctl", ["-qw", "net.ipv4.ip_forward=1"])?;
             let masquerade = match nat {
                 Nat::Cone => "masquerade",
-                Nat::Symmetric => "masquerade random-fully",
-                Nat::Ipv6Firewall => anyhow::bail!("ipv6-firewall routers are not supported yet"),
+                // IPv6 有状态防火墙之后的 IPv4 用对称型 NAT：这样只能经 IPv6 打通（场景 11）
+                Nat::Symmetric | Nat::Ipv6Firewall => "masquerade fully-random",
             };
+            if *nat == Nat::Ipv6Firewall {
+                let lan = lan_ipv6(*k, 1);
+                for (dev, addr) in [("eth0", wan_ipv6(*k)), ("lan", lan)] {
+                    run(
+                        "ip",
+                        [
+                            "-n",
+                            &ns,
+                            "-6",
+                            "addr",
+                            "add",
+                            &format!("{addr}/64"),
+                            "dev",
+                            dev,
+                            "nodad",
+                        ],
+                    )?;
+                }
+                run_in(&ns, "sysctl", ["-qw", "net.ipv6.conf.all.forwarding=1"])?;
+                // 只放行内部发起的连接与已建立连接的回包；从外面新发起的一律丢弃
+                let rules = "table ip6 firewall {\n\
+                     chain forward {\n\
+                     type filter hook forward priority 0; policy drop;\n\
+                     ct state established,related accept\n\
+                     iifname \"lan\" oifname \"eth0\" accept\n\
+                     }\n\
+                     }\n";
+                run_with_input(
+                    "ip",
+                    ["netns", "exec", &ns, "nft", "-f", "-"],
+                    Some(rules.as_bytes()),
+                    COMMAND_TIMEOUT,
+                )?;
+            }
+            // 外网口丢弃从外面新发起、发给路由器自己的连接，与家用路由器一样：被丢弃的包不在连接跟踪表里
+            // 留下记录。没有这一条时，对方先到的打洞包会留下一条记录，与本端随后的地址转换冲突，路由器只好
+            // 换一个端口，两端都打不通（Tailscale 也是如此）
             let rules = format!(
                 "table ip nat {{\n\
                  chain post {{ type nat hook postrouting priority 100; oifname \"eth0\" {masquerade}; }}\n\
+                 }}\n\
+                 table inet router_input {{\n\
+                 chain input {{\n\
+                 type filter hook input priority 0;\n\
+                 iifname \"eth0\" ct state new drop\n\
+                 }}\n\
                  }}\n"
             );
             run_with_input(
@@ -248,6 +303,46 @@ impl Underlay {
                         "via",
                         &format!("192.168.{k}.1"),
                     ],
+                )?;
+                if net.ipv6.is_some() {
+                    run(
+                        "ip",
+                        [
+                            "-n",
+                            &net.netns,
+                            "-6",
+                            "route",
+                            "add",
+                            "default",
+                            "via",
+                            &lan_ipv6(*k, 1).to_string(),
+                        ],
+                    )?;
+                }
+            }
+        }
+        // "公网"上的节点和其他路由器经路由器的外网地址到达它的局域网 IPv6 网段
+        for (name, k, nat) in &self.routers {
+            if *nat != Nat::Ipv6Firewall {
+                continue;
+            }
+            let prefix = format!("{}/64", lan_ipv6(*k, 0));
+            let via = wan_ipv6(*k).to_string();
+            let public = self
+                .nodes
+                .values()
+                .filter(|n| n.switch_ns == INET_NETNS)
+                .map(|n| n.netns.clone());
+            // 只有 IPv6 有状态防火墙路由器在"公网"一侧有 IPv6 地址
+            let routers = self
+                .routers
+                .iter()
+                .filter(|(other, _, n)| other != name && *n == Nat::Ipv6Firewall)
+                .map(|(other, _, _)| netns(other));
+            for ns in public.chain(routers) {
+                run(
+                    "ip",
+                    ["-n", &ns, "-6", "route", "add", &prefix, "via", &via],
                 )?;
             }
         }
