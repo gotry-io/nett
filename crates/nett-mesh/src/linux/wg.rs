@@ -1,6 +1,7 @@
 //! 内核 WireGuard 的通用 netlink 接口（`include/uapi/linux/wireguard.h`）。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use nett_trust::keys::X25519PublicKey;
 
@@ -29,6 +30,7 @@ const WGPEER_A_PUBLIC_KEY: u16 = 1;
 const WGPEER_A_FLAGS: u16 = 3;
 const WGPEER_A_ENDPOINT: u16 = 4;
 const WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: u16 = 5;
+const WGPEER_A_LAST_HANDSHAKE_TIME: u16 = 6;
 const WGPEER_A_RX_BYTES: u16 = 7;
 const WGPEER_A_TX_BYTES: u16 = 8;
 const WGPEER_A_ALLOWEDIPS: u16 = 9;
@@ -55,6 +57,8 @@ pub(crate) struct PeerState {
     pub allowed_ips: Vec<IpPrefix>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    /// 最近一次完成握手的时刻（墙上时钟）；对端加入以来还没有完成握手时为空。
+    pub last_handshake: Option<SystemTime>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -244,6 +248,7 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
     let mut keepalive = 0;
     let mut allowed_ips = Vec::new();
     let (mut rx_bytes, mut tx_bytes) = (0, 0);
+    let mut last_handshake = None;
     for attr in attrs(buf) {
         let (ty, payload) = attr?;
         match ty {
@@ -252,6 +257,7 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
             WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL => keepalive = parse_u16(payload)?,
             WGPEER_A_RX_BYTES => rx_bytes = parse_u64(payload)?,
             WGPEER_A_TX_BYTES => tx_bytes = parse_u64(payload)?,
+            WGPEER_A_LAST_HANDSHAKE_TIME => last_handshake = parse_timespec(payload)?,
             WGPEER_A_ALLOWEDIPS => {
                 for ip in attrs(payload) {
                     let (_, ip) = ip?;
@@ -268,7 +274,24 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
         allowed_ips,
         rx_bytes,
         tx_bytes,
+        last_handshake,
     })
+}
+
+/// `struct __kernel_timespec`（两个 64 位整数：秒、纳秒）；全零表示还没有握手。
+fn parse_timespec(b: &[u8]) -> Result<Option<SystemTime>, NlError> {
+    let (secs, nanos) = b
+        .split_at_checked(8)
+        .ok_or(NlError::Malformed("timespec attribute"))?;
+    let (secs, nanos) = (parse_u64(secs)?, parse_u64(nanos)?);
+    if secs == 0 && nanos == 0 {
+        return Ok(None);
+    }
+    let nanos = u32::try_from(nanos).map_err(|_| NlError::Malformed("timespec nanoseconds"))?;
+    UNIX_EPOCH
+        .checked_add(Duration::new(secs, nanos))
+        .map(Some)
+        .ok_or(NlError::Malformed("timespec out of range"))
 }
 
 fn parse_allowed_ip(buf: &[u8]) -> Result<IpPrefix, NlError> {
@@ -352,6 +375,19 @@ fn decode_sockaddr(b: &[u8]) -> Result<Option<SocketAddr>, NlError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn handshake_time_is_empty_until_the_first_handshake() {
+        assert_eq!(parse_timespec(&[0u8; 16]).expect("parse"), None);
+        let mut b = Vec::new();
+        b.extend_from_slice(&1_794_000_000u64.to_ne_bytes());
+        b.extend_from_slice(&5_000_000u64.to_ne_bytes());
+        assert_eq!(
+            parse_timespec(&b).expect("parse"),
+            Some(UNIX_EPOCH + Duration::new(1_794_000_000, 5_000_000))
+        );
+        assert!(parse_timespec(&b[..8]).is_err());
+    }
 
     #[test]
     fn sockaddr_round_trip() {

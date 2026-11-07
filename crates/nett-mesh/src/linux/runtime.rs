@@ -27,8 +27,9 @@ use crate::prober::{Incoming, Outgoing};
 use crate::run::Applier;
 
 /// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
-/// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时改为 [`FAST_RECOVERY_INTERVAL`] 的一半（第 7 节）：
-/// 收到探测消息时的立即推进会打乱定时，推进得更密，到期的探测才能及时发出。
+/// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时（第 7 节）、等待重新握手完成时（第 8.4 节）改为
+/// [`FAST_RECOVERY_INTERVAL`] 的一半：收到探测消息时的立即推进会打乱定时，推进得更密，到期的探测和
+/// 确认才能及时进行。
 const TICK: Duration = Duration::from_millis(100);
 /// 检查本机时钟误差的间隔（design/mesh.md 第 8.4 节）。
 const CLOCK_CHECK: Duration = Duration::from_secs(10);
@@ -85,7 +86,7 @@ impl Runtime {
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
                 loop {
-                    let interval = if worker.engine.fast_recovering(Instant::now()) {
+                    let interval = if worker.engine.needs_fine_ticks(Instant::now()) {
                         FAST_RECOVERY_INTERVAL / 2
                     } else {
                         TICK

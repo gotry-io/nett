@@ -281,13 +281,29 @@ impl Prober {
         std::mem::take(&mut self.events)
     }
 
-    /// 有对端在高频探测刚切走的更优路径（design/mesh.md 第 7 节）。
-    pub fn fast_recovering(&self, now: Instant) -> bool {
+    /// 有对端在高频探测刚切走的更优路径（design/mesh.md 第 7 节），或在等待重新握手完成（第 8.4 节）。
+    pub fn needs_fine_ticks(&self, now: Instant) -> bool {
         self.peers.values().any(|p| {
             p.paths
                 .as_ref()
-                .is_some_and(|paths| paths.fast_recovering(now))
+                .is_some_and(|paths| paths.needs_fine_ticks(now))
         })
+    }
+
+    /// 有对端重新握手之后等待确认的期限已到：调用方先读取 WireGuard 的握手状态，再推进。
+    pub fn handshake_due(&self, now: Instant) -> bool {
+        self.peers.values().any(|p| {
+            p.paths
+                .as_ref()
+                .is_some_and(|paths| paths.handshake_due(now))
+        })
+    }
+
+    /// WireGuard 报告这个对端加入（或重新握手时重新加入）以来完成过握手。
+    pub fn on_handshake(&mut self, id: &NodeId) {
+        if let Some(paths) = self.peers.get_mut(id).and_then(|p| p.paths.as_mut()) {
+            paths.on_handshake();
+        }
     }
 
     /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
@@ -628,7 +644,7 @@ impl Prober {
             }
             None => {
                 paths.set_hold(false);
-                let action = paths.adopt(index, reason)?;
+                let action = paths.adopt(index, reason, now)?;
                 switch_of(id, peer.public_key, action)
             }
         }
@@ -654,7 +670,7 @@ impl Prober {
             together.proposal = None;
             paths.set_hold(false);
             if let Some(switch) = paths
-                .adopt(index, reason)
+                .adopt(index, reason, now)
                 .and_then(|a| switch_of(id, peer.public_key, a))
             {
                 self.ready.push(switch);
@@ -702,7 +718,7 @@ impl Prober {
             together.rotation = None;
             paths.set_hold(false);
             return paths
-                .adopt(index, SwitchReason::Proposed)
+                .adopt(index, SwitchReason::Proposed, now)
                 .into_iter()
                 .collect();
         }
@@ -742,7 +758,7 @@ impl Prober {
             relays[usize::try_from(u64::from(random_u32()) % n).unwrap_or(0)]
         };
         paths
-            .adopt(target, SwitchReason::Rotation)
+            .adopt(target, SwitchReason::Rotation, now)
             .into_iter()
             .collect()
     }
@@ -937,7 +953,7 @@ impl Prober {
                 };
                 paths.set_hold(false);
                 if let Some(switch) = paths
-                    .adopt(p.index, p.reason)
+                    .adopt(p.index, p.reason, at)
                     .and_then(|a| switch_of(sender, public_key, a))
                 {
                     self.ready.push(switch);

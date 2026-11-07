@@ -2,6 +2,7 @@
 //! 核心逻辑只通过这个接口操作数据面，测试中使用替身。
 
 use std::net::SocketAddr;
+use std::time::SystemTime;
 
 use nett_trust::keys::X25519PublicKey;
 
@@ -64,6 +65,9 @@ pub struct PeerStat {
     pub endpoint: Option<SocketAddr>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    /// 最近一次完成握手的时刻（墙上时钟）。对端加入以来、以及 [`DataPlane::rehandshake`] 重新加入以来
+    /// 还没有完成握手时为空。
+    pub last_handshake: Option<SystemTime>,
 }
 
 pub trait DataPlane: Send {
@@ -90,6 +94,7 @@ pub trait DataPlane: Send {
     ) -> Result<(), DataPlaneError>;
 
     /// 删除对端再按 `peer` 加回：下一个数据包触发新的握手，让新中继建立索引（design/mesh.md 第 8.4 节）。
+    /// 之后这个对端的 [`PeerStat::last_handshake`] 为空，直到新的握手完成。
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError>;
 
     /// 丢弃从这些闲置的 TLS 回环端口进入 WireGuard 端口的包（design/mesh.md 第 5.3 节），替换之前的设置。

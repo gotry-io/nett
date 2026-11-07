@@ -5,7 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::id::NodeId;
 use nett_trust::admission::Member;
@@ -39,6 +39,9 @@ pub struct Engine<D> {
     /// 已经配置到数据面的对端：经漫游跟随的一方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
     configured: HashSet<X25519PublicKey>,
     bytes: HashMap<X25519PublicKey, (u64, u64)>,
+    /// 最近一次重新握手执行的时刻（Unix 毫秒）：WireGuard 报告的握手时间不早于它，才是这次握手完成
+    /// （第 8.4 节）。决定与执行之间读到的仍是旧对端的握手时间。
+    rehandshaked_at: HashMap<X25519PublicKey, u64>,
     last_stats: Option<Instant>,
     clock_trusted: bool,
     /// TLS 中继在传输适配进程上的回环端点，以及最近一次设置的闲置端口（design/mesh.md 第 5.3 节）。
@@ -58,6 +61,7 @@ impl<D: DataPlane> Engine<D> {
             prober: None,
             configured: HashSet::new(),
             bytes: HashMap::new(),
+            rehandshaked_at: HashMap::new(),
             last_stats: None,
             clock_trusted: false,
             tls_endpoints: BTreeSet::new(),
@@ -200,10 +204,12 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 有对端在高频探测刚因故障切走的更优路径：运行时要推进得比
-    /// [`crate::path::FAST_RECOVERY_INTERVAL`] 更密（design/mesh.md 第 7 节）。
-    pub fn fast_recovering(&self, now: Instant) -> bool {
-        self.prober.as_ref().is_some_and(|p| p.fast_recovering(now))
+    /// 有对端在高频探测刚因故障切走的更优路径（design/mesh.md 第 7 节），或在等待重新握手完成
+    /// （第 8.4 节）：运行时要推进得比 [`crate::path::FAST_RECOVERY_INTERVAL`] 更密。
+    pub fn needs_fine_ticks(&self, now: Instant) -> bool {
+        self.prober
+            .as_ref()
+            .is_some_and(|p| p.needs_fine_ticks(now))
     }
 
     /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
@@ -224,9 +230,12 @@ impl<D: DataPlane> Engine<D> {
         if self.interface.is_none() {
             return Vec::new();
         }
-        if self
-            .last_stats
-            .is_none_or(|t| now.saturating_duration_since(t) >= STATS_INTERVAL)
+        // 重新握手的确认到期时也读一次：按刚读到的握手状态决定是否再握手
+        let handshake_due = self.prober.as_ref().is_some_and(|p| p.handshake_due(now));
+        if handshake_due
+            || self
+                .last_stats
+                .is_none_or(|t| now.saturating_duration_since(t) >= STATS_INTERVAL)
         {
             self.last_stats = Some(now);
             self.check_peers(now, events);
@@ -244,7 +253,11 @@ impl<D: DataPlane> Engine<D> {
                 match self.members.get(&switch.peer) {
                     Some(member) => {
                         let spec = peer_spec(member, self.reachability, Some(switch.to.endpoint()));
-                        self.dataplane.rehandshake(&spec)
+                        let result = self.dataplane.rehandshake(&spec);
+                        if result.is_ok() {
+                            self.rehandshaked_at.insert(switch.public_key, now_ms);
+                        }
+                        result
                     }
                     None => continue,
                 }
@@ -286,6 +299,8 @@ impl<D: DataPlane> Engine<D> {
             .peer_ids()
             .map(|(id, key)| (*key, id.clone()))
             .collect();
+        self.rehandshaked_at
+            .retain(|key, _| stats.iter().any(|s| s.public_key == *key));
         for stat in stats {
             let Some(id) = by_key.get(&stat.public_key) else {
                 continue;
@@ -293,6 +308,12 @@ impl<D: DataPlane> Engine<D> {
             let bytes = (stat.rx_bytes, stat.tx_bytes);
             if self.bytes.insert(stat.public_key, bytes) != Some(bytes) {
                 prober.mark_active(id, now);
+            }
+            if handshake_since(
+                stat.last_handshake,
+                self.rehandshaked_at.get(&stat.public_key).copied(),
+            ) {
+                prober.on_handshake(id);
             }
             let Some(want) = prober.desired_endpoint(id) else {
                 continue;
@@ -351,6 +372,16 @@ fn interface_spec(me: &Member, desired: &DesiredMesh) -> InterfaceSpec {
             },
         ],
     }
+}
+
+/// 最近一次重新握手（`rehandshaked_ms`，Unix 毫秒）之后完成过握手。没有重新握手过就无从确认；
+/// 早于重新握手的握手时间是旧对端的（决定与执行之间读到的状态）。
+fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u64>) -> bool {
+    let done_ms = last_handshake.map(|t| {
+        t.duration_since(UNIX_EPOCH)
+            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+    });
+    matches!((done_ms, rehandshaked_ms), (Some(done), Some(at)) if done >= at)
 }
 
 fn peer_spec(member: &Member, own: Reachability, endpoint: Option<SocketAddr>) -> PeerSpec {
@@ -623,6 +654,18 @@ mod tests {
         e.apply(&validated(mesh.desired(2, vec![])), &mut events);
         assert!(matches!(events.0[..], [Event::ConfigRejected { .. }]));
         assert!(e.dataplane.interfaces.is_empty());
+    }
+
+    #[test]
+    fn only_a_handshake_after_the_rehandshake_confirms_it() {
+        let at = |ms: u64| Some(UNIX_EPOCH + Duration::from_millis(ms));
+        // 重新加入之后还没有握手
+        assert!(!handshake_since(None, Some(1_000)));
+        // 决定之后、执行之前读到的旧对端的握手
+        assert!(!handshake_since(at(900), Some(1_000)));
+        assert!(!handshake_since(at(900), None));
+        assert!(handshake_since(at(1_000), Some(1_000)));
+        assert!(handshake_since(at(1_030), Some(1_000)));
     }
 
     #[test]
