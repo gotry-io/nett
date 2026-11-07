@@ -199,6 +199,7 @@ impl DataPlane for KernelWireGuard {
                 endpoint: p.endpoint,
                 rx_bytes: p.rx_bytes,
                 tx_bytes: p.tx_bytes,
+                last_handshake: p.last_handshake,
             })
             .collect())
     }

@@ -46,6 +46,11 @@ const DISCOVERY_WINDOW: Duration = Duration::from_secs(60);
 /// 恢复后很快切回（ADR 0021）。
 const FAST_RECOVERY_WINDOW: Duration = Duration::from_secs(15);
 pub const FAST_RECOVERY_INTERVAL: Duration = Duration::from_millis(50);
+/// 重新握手之后等它完成：旧路径的往返时间与新路径往返时间的两倍中较大的一个，加上这个余量，最长
+/// 1 秒（第 8.4 节）；新路径还没有测量时按这个往返时间估计。
+const HANDSHAKE_MARGIN: Duration = Duration::from_millis(20);
+const HANDSHAKE_WAIT_MAX: Duration = Duration::from_secs(1);
+const HANDSHAKE_UNKNOWN_RTT_MS: f64 = 150.0;
 /// 一个候选最多同时等待应答的探测数：高频探测时，上一个探测还没超时就发下一个。
 const MAX_CANDIDATE_OUTSTANDING: usize = 32;
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
@@ -231,6 +236,9 @@ pub enum SwitchReason {
     BetterScore,
     /// 当前中继仍能应答探测而隧道不通：它丢了这条连接的索引，在同一中继上重新握手（第 8.4 节）。
     RelayLostSession,
+    /// 重新握手之后到期仍没有完成（例如对端的应答被旧路径上迟到的包带去了旧中继）：在同一中继上
+    /// 再重新握手一次（第 8.4 节）。
+    HandshakeIncomplete,
     /// 双方都是 `dial-only`：跟随方按决定方经隧道发来的提议切换（第 8.4 节）。
     Proposed,
     /// 双方都是 `dial-only`、当前路径中断：按时间片（时钟不可信时按随机间隔）轮换中继（第 8.4 节）。
@@ -278,6 +286,14 @@ pub enum Action {
     Lost,
 }
 
+/// 重新握手之后等待它完成（第 8.4 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct HandshakeCheck {
+    deadline: Instant,
+    /// 已经因为没完成而再握手过一次。
+    retried: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Normal,
@@ -305,6 +321,8 @@ pub struct PeerPaths {
     best_rtt_ms: Option<f64>,
     /// 这次故障中已经在同一中继上重新握手过一次。
     rehandshake_tried: bool,
+    /// 重新握手之后，等待确认它完成。
+    handshake: Option<HandshakeCheck>,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
     /// 两端一起切换的过程中（等待确认、轮换中）：只检测中断，不另行择优。
@@ -334,6 +352,7 @@ impl PeerPaths {
             tunnel_established: false,
             best_rtt_ms: None,
             rehandshake_tried: false,
+            handshake: None,
             high_loss_since: None,
             better_since: None,
             hold: false,
@@ -413,17 +432,73 @@ impl PeerPaths {
 
     /// 由调用方决定的切换（两端一起切换时）：切到第 `index` 个候选；经中继时总是重新握手，
     /// 即使仍是当前中继，好让两端都在它上面发起新的握手。
-    pub fn adopt(&mut self, index: usize, reason: SwitchReason) -> Option<Action> {
+    pub fn adopt(&mut self, index: usize, reason: SwitchReason, now: Instant) -> Option<Action> {
         self.candidates.get(index)?;
-        let Action::Switch { to, .. } = self.switch_to(index, reason) else {
+        let old_rtt_ms = self.tunnel.rtt_ms();
+        let Action::Switch { to, .. } = self.switch_to(index, reason, now) else {
             return None;
         };
         // 立即发一个隧道内探测：它触发新的握手，也尽快确认新路径
         self.last_tunnel_probe = None;
+        let rehandshake = matches!(to, Route::Relay { .. });
+        if rehandshake {
+            self.expect_handshake(now, old_rtt_ms);
+        }
         Some(Action::Switch {
             to,
-            rehandshake: matches!(to, Route::Relay { .. }),
+            rehandshake,
             reason,
+        })
+    }
+
+    /// WireGuard 报告这个对端在重新握手之后完成了握手。
+    pub fn on_handshake(&mut self) {
+        self.handshake = None;
+    }
+
+    /// 重新握手之后等待确认的期限已到：调用方先读取 WireGuard 的握手状态（[`Self::on_handshake`]），
+    /// 再推进。
+    pub fn handshake_due(&self, now: Instant) -> bool {
+        self.handshake.is_some_and(|h| now >= h.deadline)
+    }
+
+    /// 刚重新握手（`old_rtt_ms` 是切换之前那条路径的往返时间）：等旧路径上的包都到达、新路径完成一次
+    /// 握手往返之后确认（第 8.4 节）。
+    fn expect_handshake(&mut self, now: Instant, old_rtt_ms: Option<f64>) {
+        let new_ms = self.tunnel.rtt_ms().unwrap_or(HANDSHAKE_UNKNOWN_RTT_MS);
+        let wait_ms = old_rtt_ms.unwrap_or(0.0).max(2.0 * new_ms);
+        let wait =
+            (Duration::from_secs_f64(wait_ms / 1000.0) + HANDSHAKE_MARGIN).min(HANDSHAKE_WAIT_MAX);
+        self.handshake = Some(HandshakeCheck {
+            deadline: now + wait,
+            retried: false,
+        });
+    }
+
+    /// 重新握手到期还没完成：这个对端有流量时在同一中继上再握手一次，这时旧路径上的包已经到完；
+    /// 再不成就交给疑似故障的检测（第 8.4 节）。
+    fn check_handshake(&mut self, now: Instant, active: bool) -> Option<Action> {
+        let check = self.handshake?;
+        if now < check.deadline {
+            return None;
+        }
+        if check.retried || !active {
+            self.handshake = None;
+            return None;
+        }
+        let route = self.current();
+        let rtt_ms = self.tunnel.rtt_ms();
+        self.tunnel = PathStats::seeded(rtt_ms);
+        self.tunnel_outstanding.clear();
+        self.last_tunnel_probe = None;
+        self.expect_handshake(now, None);
+        if let Some(h) = self.handshake.as_mut() {
+            h.retried = true;
+        }
+        Some(Action::Switch {
+            to: route,
+            rehandshake: true,
+            reason: SwitchReason::HandshakeIncomplete,
         })
     }
 
@@ -460,6 +535,8 @@ impl PeerPaths {
         self.best_rtt_ms = Some(self.best_rtt_ms.map_or(ms, |b| b.min(ms)));
         self.tunnel_established = true;
         self.rehandshake_tried = false;
+        // 隧道内应答说明握手已经完成
+        self.handshake = None;
         self.phase = Phase::Normal;
     }
 
@@ -501,6 +578,10 @@ impl PeerPaths {
         let mut actions = Vec::new();
         self.expire(now);
 
+        if let Some(action) = self.check_handshake(now, active) {
+            actions.push(action);
+            return actions;
+        }
         if let Some(action) = self.check_failure(now) {
             actions.push(action);
             return actions;
@@ -622,9 +703,10 @@ impl PeerPaths {
             && backoff(&c.failures, now).is_zero()
     }
 
-    /// 有候选在高频探测：调用方要推进得比 [`FAST_RECOVERY_INTERVAL`] 更密。
-    pub fn fast_recovering(&self, now: Instant) -> bool {
-        (0..self.candidates.len()).any(|i| i != self.current && self.fast_recovery(i, now))
+    /// 有候选在高频探测，或在等待重新握手完成：调用方要推进得比 [`FAST_RECOVERY_INTERVAL`] 更密。
+    pub fn needs_fine_ticks(&self, now: Instant) -> bool {
+        self.handshake.is_some()
+            || (0..self.candidates.len()).any(|i| i != self.current && self.fast_recovery(i, now))
     }
 
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
@@ -699,10 +781,12 @@ impl PeerPaths {
             {
                 self.rehandshake_tried = true;
                 let route = current.route;
-                self.tunnel = PathStats::seeded(self.tunnel.rtt_ms);
+                let rtt_ms = self.tunnel.rtt_ms;
+                self.tunnel = PathStats::seeded(rtt_ms);
                 self.tunnel_outstanding.clear();
                 self.phase = Phase::Normal;
                 self.high_loss_since = None;
+                self.expect_handshake(now, rtt_ms);
                 return Some(Action::Switch {
                     to: route,
                     rehandshake: true,
@@ -760,11 +844,11 @@ impl PeerPaths {
                 c.healthy_since = None;
             }
         }
-        Some(self.decide(target, reason))
+        Some(self.decide(target, reason, now))
     }
 
     /// 决定切到第 `target` 个候选：两端一起切换时先提议。
-    fn decide(&mut self, target: usize, reason: SwitchReason) -> Action {
+    fn decide(&mut self, target: usize, reason: SwitchReason, now: Instant) -> Action {
         if self.role == Role::DecideTogether {
             self.hold = true;
             return Action::Propose {
@@ -772,7 +856,7 @@ impl PeerPaths {
                 reason,
             };
         }
-        self.switch_to(target, reason)
+        self.switch_to(target, reason, now)
     }
 
     /// 当前路径故障，记入恢复时的退避。从未连通过就失败（例如首次握手还没完成）的第一次不算故障；
@@ -801,7 +885,7 @@ impl PeerPaths {
                     .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
         });
         if let Some((i, _)) = better_type {
-            return Some(self.decide(i, SwitchReason::BetterType));
+            return Some(self.decide(i, SwitchReason::BetterType, now));
         }
         // 同类型的更优路径：持续 30 秒才切换
         let current_score = self.tunnel.score(current_kind)?;
@@ -832,7 +916,7 @@ impl PeerPaths {
                     SAME_TYPE_HOLD
                 };
                 if now.saturating_duration_since(since) >= hold {
-                    return Some(self.decide(i, SwitchReason::BetterScore));
+                    return Some(self.decide(i, SwitchReason::BetterScore, now));
                 }
             }
             (Some(i), _) => self.better_since = Some((i, now)),
@@ -841,15 +925,21 @@ impl PeerPaths {
         None
     }
 
-    fn switch_to(&mut self, target: usize, reason: SwitchReason) -> Action {
+    fn switch_to(&mut self, target: usize, reason: SwitchReason, now: Instant) -> Action {
         let from = self.candidates[self.current].route;
         let to = self.candidates[target].route;
+        let old_rtt_ms = self.tunnel.rtt_ms();
         self.current = target;
         // 新路径的丢包从头统计：候选的窗口里可能还留着它故障期间的丢包；往返时间沿用候选的测量作为起点
         self.reset_tunnel(self.candidates[target].stats.rtt_ms);
+        let rehandshake = matches!(to, Route::Relay { .. }) && from != to;
+        self.handshake = None;
+        if rehandshake {
+            self.expect_handshake(now, old_rtt_ms);
+        }
         Action::Switch {
             to,
-            rehandshake: matches!(to, Route::Relay { .. }) && from != to,
+            rehandshake,
             reason,
         }
     }
@@ -913,6 +1003,10 @@ mod tests {
         tunnel_broken: Vec<bool>,
         /// 在这条路径上重新握手后隧道恢复（中继丢了索引的情形）。
         fix_on_rehandshake: bool,
+        /// 接下来这么多次重新握手没有完成（例如对端的应答被旧路径上迟到的包带去了旧中继）。
+        lose_handshakes: u32,
+        /// WireGuard 报告握手完成的时刻。
+        handshakes: Vec<Instant>,
         /// (送达时刻, 是否隧道内, 下标, 序号)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
@@ -937,6 +1031,8 @@ mod tests {
                 sent: vec![0; n],
                 tunnel_broken: vec![false; n],
                 fix_on_rehandshake: true,
+                lose_handshakes: 0,
+                handshakes: Vec::new(),
                 inflight: Vec::new(),
                 switches: Vec::new(),
                 lost: Vec::new(),
@@ -965,6 +1061,10 @@ mod tests {
                         self.paths.on_candidate_reply(index, seq, at, None);
                     }
                 }
+                if self.handshakes.iter().any(|t| *t <= now) {
+                    self.handshakes.retain(|t| *t > now);
+                    self.paths.on_handshake();
+                }
                 for action in self.paths.tick(now, true) {
                     match action {
                         Action::TunnelProbe { seq } => {
@@ -986,9 +1086,17 @@ mod tests {
                             reason,
                         } => {
                             self.switches.push((now, to, rehandshake, reason));
-                            if rehandshake && self.fix_on_rehandshake {
-                                let i = self.paths.current;
-                                self.tunnel_broken[i] = false;
+                            let i = self.paths.current;
+                            if rehandshake && self.lose_handshakes > 0 {
+                                self.lose_handshakes -= 1;
+                                self.tunnel_broken[i] = true;
+                            } else if rehandshake {
+                                if self.fix_on_rehandshake {
+                                    self.tunnel_broken[i] = false;
+                                }
+                                if self.up[i] && !self.tunnel_broken[i] {
+                                    self.handshakes.push(now + self.rtt[i]);
+                                }
                             }
                             // 切换后，尚在途中的旧路径探测作废
                             self.inflight.retain(|f| !f.1);
@@ -1228,6 +1336,92 @@ mod tests {
         assert_eq!(sim.paths.current(), relay(1));
     }
 
+    /// 换到更快的中继时，旧中继上迟到的包让对端把握手应答发去了旧中继：握手没有完成。等旧路径上的
+    /// 包到完之后在新中继上再握手一次，不等 2 秒多之后的故障检测（第 8.4 节）。
+    #[test]
+    fn retries_a_rehandshake_that_did_not_complete() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.rtt[0] = 42 * MS;
+        sim.lose_handshakes = 1;
+        sim.run(Duration::from_secs(60));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.2, s.3)).collect();
+        assert_eq!(
+            reasons,
+            [
+                (relay(2), true, SwitchReason::BetterScore),
+                (relay(2), true, SwitchReason::HandshakeIncomplete)
+            ]
+        );
+        // 旧路径的往返时间之后、下一次推进时再握手
+        let waited = sim.switches[1]
+            .0
+            .saturating_duration_since(sim.switches[0].0);
+        assert!(
+            waited >= 42 * MS && waited <= 2 * TICK,
+            "retried after {waited:?}"
+        );
+        assert!(sim.paths.tunnel_established());
+        assert_eq!(sim.paths.current(), relay(2));
+    }
+
+    #[test]
+    fn retries_an_incomplete_rehandshake_only_once() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.rtt[0] = 42 * MS;
+        sim.lose_handshakes = 2;
+        sim.run(Duration::from_secs(60));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| s.3).collect();
+        // 第二次也没成：交给疑似故障的检测，它发现中继能应答而隧道不通，再在同一中继上握手
+        assert_eq!(
+            reasons,
+            [
+                SwitchReason::BetterScore,
+                SwitchReason::HandshakeIncomplete,
+                SwitchReason::RelayLostSession
+            ]
+        );
+        assert!(
+            sim.switches[2]
+                .0
+                .saturating_duration_since(sim.switches[1].0)
+                >= Duration::from_secs(1)
+        );
+        assert_eq!(sim.paths.current(), relay(2));
+    }
+
+    #[test]
+    fn a_completed_or_idle_rehandshake_is_not_repeated() {
+        let routes = vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)];
+        let now = Instant::now();
+        // WireGuard 报告握手完成
+        let mut paths = PeerPaths::new(routes.clone(), Role::DecideTogether).expect("routes");
+        assert!(paths.adopt(1, SwitchReason::Rotation, now).is_some());
+        assert!(paths.needs_fine_ticks(now));
+        paths.on_handshake();
+        assert!(!paths.handshake_due(now + Duration::from_secs(1)));
+        let later = paths.tick(now + Duration::from_secs(1), true);
+        assert!(
+            !later.iter().any(|a| matches!(a, Action::Switch { .. })),
+            "{later:?}"
+        );
+        // 没有流量：没有包触发握手，不算没完成
+        let mut idle = PeerPaths::new(routes, Role::DecideTogether).expect("routes");
+        assert!(idle.adopt(1, SwitchReason::Rotation, now).is_some());
+        assert!(idle.handshake_due(now + Duration::from_secs(1)));
+        let later = idle.tick(now + Duration::from_secs(1), false);
+        assert!(
+            !later.iter().any(|a| matches!(a, Action::Switch { .. })),
+            "{later:?}"
+        );
+        assert!(!idle.needs_fine_ticks(now + Duration::from_secs(1)));
+    }
+
     #[test]
     fn moves_on_when_rehandshaking_the_same_relay_does_not_help() {
         let mut sim = Sim::new(vec![
@@ -1244,6 +1438,7 @@ mod tests {
             reasons,
             [
                 (relay(1), SwitchReason::RelayLostSession),
+                (relay(1), SwitchReason::HandshakeIncomplete),
                 (relay(2), SwitchReason::Unreachable)
             ]
         );
@@ -1423,14 +1618,14 @@ mod tests {
         assert_eq!(paths.relays_in_order(), vec![1, 0]);
         assert_eq!(paths.relay_index(KeyId([1; 8])), Some(1));
         assert_eq!(
-            paths.adopt(0, SwitchReason::Rotation),
+            paths.adopt(0, SwitchReason::Rotation, Instant::now()),
             Some(Action::Switch {
                 to: relay(2),
                 rehandshake: true,
                 reason: SwitchReason::Rotation,
             })
         );
-        assert_eq!(paths.adopt(5, SwitchReason::Rotation), None);
+        assert_eq!(paths.adopt(5, SwitchReason::Rotation, Instant::now()), None);
     }
 
     #[test]
@@ -1449,7 +1644,7 @@ mod tests {
         // 在确认之前不再另行提议；确认后切换，之后照常择优
         sim.run(Duration::from_secs(60));
         assert_eq!(sim.proposals.len(), 1);
-        let switched = sim.paths.adopt(index, reason);
+        let switched = sim.paths.adopt(index, reason, sim.now);
         assert!(matches!(
             switched,
             Some(Action::Switch {
