@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -69,10 +69,10 @@ pub async fn serve(
     udp: UdpSocket,
     tls: Option<TlsIngress>,
     mut relay: Relay,
-    state: Option<&Path>,
+    state: Option<PathBuf>,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
-    if let Some(path) = state {
+    if let Some(path) = &state {
         match load(path) {
             Ok(Some(saved)) => {
                 relay.restore(&saved, Instant::now());
@@ -90,6 +90,9 @@ pub async fn serve(
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let mut tick = tokio::time::interval(EXPIRE_INTERVAL);
     let mut last_save = Instant::now();
+    // 写盘可能因磁盘忙卡住几百毫秒（例如 ext4 每 5 秒提交日志时），放在阻塞线程里，不挡住转发；
+    // 同一时间只有一次保存，上一次还没写完时跳过，下一秒保存最新的
+    let mut saving: Option<tokio::task::JoinHandle<()>> = None;
     let mut dropped: u64 = 0;
     tokio::pin!(shutdown);
     loop {
@@ -145,17 +148,21 @@ pub async fn serve(
                 relay.expire(now);
                 // 迟迟没有认证的连接：丢掉发送端，连接任务随之结束
                 conns.retain(|_, c| c.authenticated || now.saturating_duration_since(c.opened) < AUTH_TIMEOUT);
-                if let Some(path) = state
+                if let Some(path) = &state
                     && now.saturating_duration_since(last_save) >= SAVE_INTERVAL
+                    && saving.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
                 {
                     last_save = now;
-                    save_or_warn(path, &relay);
+                    saving = Some(save_in_background(path, relay.snapshot(now)));
                 }
             }
         }
     }
-    if let Some(path) = state {
-        save_or_warn(path, &relay);
+    if let Some(path) = &state {
+        if let Some(previous) = saving.take() {
+            drop(previous.await);
+        }
+        drop(save_in_background(path, relay.snapshot(Instant::now())).await);
     }
     Ok(())
 }
@@ -262,12 +269,16 @@ fn load(path: &Path) -> std::io::Result<Option<RelayState>> {
     }
 }
 
+fn save_in_background(path: &Path, snapshot: RelayState) -> tokio::task::JoinHandle<()> {
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || save_or_warn(&path, &snapshot))
+}
+
 /// 先写临时文件再改名：重启时读到的总是一份完整的状态。
-fn save(path: &Path, relay: &Relay) -> std::io::Result<()> {
+fn save(path: &Path, snapshot: &RelayState) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
-    let bytes =
-        serde_json::to_vec(&relay.snapshot(Instant::now())).map_err(std::io::Error::other)?;
+    let bytes = serde_json::to_vec(snapshot).map_err(std::io::Error::other)?;
     let tmp = path.with_extension("tmp");
     let mut file = std::fs::OpenOptions::new()
         .write(true)
@@ -279,8 +290,8 @@ fn save(path: &Path, relay: &Relay) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-fn save_or_warn(path: &Path, relay: &Relay) {
-    if let Err(error) = save(path, relay) {
+fn save_or_warn(path: &Path, snapshot: &RelayState) {
+    if let Err(error) = save(path, snapshot) {
         tracing::warn!(%error, path = %path.display(), "saving relay state failed");
     }
 }
@@ -336,4 +347,105 @@ pub enum TlsSetupError {
     Key,
     #[error("building the TLS configuration: {0}")]
     Config(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::relay::AssignedMember;
+    use nett_mesh::probe::{KeyId, OuterProbe, OuterReply, ProbeKey, RELAY_PROBE};
+    use nett_trust::keys::X25519PublicKey;
+
+    /// 保存状态的写入卡住时（这里用一个没有读者的命名管道代替忙碌的磁盘），中继照常应答和转发。
+    #[test]
+    fn a_stuck_state_write_does_not_hold_up_forwarding() {
+        let dir = std::env::temp_dir().join(format!("nett-relay-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let state = dir.join("relay-state.json");
+        // 保存时先写的临时文件是一个管道：打开它写入会一直等到有人来读
+        let fifo = state.with_extension("tmp");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success(), "mkfifo failed");
+
+        let (a, b) = ([1; 32], [2; 32]);
+        let member = |k: [u8; 32], address| AssignedMember {
+            public_key: X25519PublicKey::from_bytes(k),
+            address,
+            token: [k[0]; 32],
+        };
+        let relay = Relay::new(
+            &[
+                member(a, Some("198.51.100.1:41820".parse().expect("addr"))),
+                member(b, None),
+            ],
+            &[(
+                X25519PublicKey::from_bytes(a),
+                X25519PublicKey::from_bytes(b),
+            )],
+        )
+        .expect("assignment");
+
+        // 中继端口是双栈的：应答按 IPv6 映射地址发出
+        let socket = std::net::UdpSocket::bind("[::]:0").expect("relay socket");
+        socket.set_nonblocking(true).expect("nonblocking");
+        let relay_addr =
+            SocketAddr::from(([127, 0, 0, 1], socket.local_addr().expect("addr").port()));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server_state = state.clone();
+        // 与 `nett relay` 一样跑在单线程运行时上
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let udp = UdpSocket::from_std(socket).expect("tokio socket");
+                serve(udp, None, relay, Some(server_state), async {
+                    drop(stopped.await);
+                })
+                .await
+            })
+        });
+
+        // 第一次保存在启动约 1 秒后，此后它一直卡在管道上
+        std::thread::sleep(SAVE_INTERVAL + Duration::from_millis(1_500));
+        let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .expect("timeout");
+        let key = ProbeKey::from_token(&[2; 32]);
+        let probe = OuterProbe {
+            kind: RELAY_PROBE,
+            key_id: KeyId::of(&b),
+            seq: 1,
+            sent_ms: now_ms(),
+        };
+        client
+            .send_to(&probe.encode(&key), relay_addr)
+            .expect("send probe");
+        let mut buf = [0u8; MAX_DATAGRAM];
+        let replied = client
+            .recv_from(&mut buf)
+            .map(|(len, _)| OuterReply::verify(&buf[..len], &key).is_some());
+
+        // 放开卡住的写入，中继退出前的保存才能完成
+        let reader = std::thread::spawn(move || std::fs::read(&fifo));
+        stop.send(()).expect("relay still running");
+        server.join().expect("server thread").expect("serve");
+        reader
+            .join()
+            .expect("reader thread")
+            .expect("read the pipe");
+        let saved = load(&state).expect("load");
+        std::fs::remove_dir_all(&dir).expect("clean up");
+
+        assert!(
+            matches!(replied, Ok(true)),
+            "relay did not answer while saving was stuck: {replied:?}"
+        );
+        assert!(saved.is_some(), "state saved on exit");
+    }
 }

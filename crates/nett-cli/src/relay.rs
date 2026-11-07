@@ -64,7 +64,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        serve(udp, tls, relay, state.as_deref(), shutdown)
+        serve(udp, tls, relay, state, shutdown)
             .await
             .context("relay socket")
     })
