@@ -97,6 +97,72 @@ pub fn block_udp(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 在节点的上游拦截它的全部 UDP（场景 7：UDP 全部被拦）：节点在 NAT 之后时拦在 NAT 路由器上，否则拦在
+/// 它接入的"公网"网桥端口上。现实中 UDP 多被上游的防火墙悄悄丢弃，本机发送时不会出错；拦在节点本机上，
+/// 发送会立即失败，一些实现据此即刻改道，测不到真实的情形。
+pub fn block_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
+    let (ns, port) = underlay
+        .switch_port(name)
+        .with_context(|| format!("no link for `{name}`"))?;
+    let rules = if ns == crate::net::INET_NETNS {
+        // "公网"网桥上的包是桥接的：按网桥端口匹配
+        format!(
+            "table bridge {FAULT_TABLE} {{\n\
+             chain drop_udp {{\n\
+             type filter hook forward priority 0;\n\
+             iifname \"{port}\" meta l4proto udp drop\n\
+             oifname \"{port}\" meta l4proto udp drop\n\
+             }}\n\
+             }}\n"
+        )
+    } else {
+        // NAT 路由器上的包是路由的，入接口是局域网网桥：按节点的局域网地址匹配（地址转换之前与还原之后）
+        let ip = underlay.node(name).context("planned node")?.ipv4;
+        format!(
+            "table inet {FAULT_TABLE} {{\n\
+             chain drop_udp {{\n\
+             type filter hook forward priority 0;\n\
+             ip saddr {ip} meta l4proto udp drop\n\
+             ip daddr {ip} meta l4proto udp drop\n\
+             }}\n\
+             }}\n"
+        )
+    };
+    run_with_input(
+        "ip",
+        ["netns", "exec", &ns, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        COMMAND_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+/// 解除 [`block_udp_upstream`]。
+pub fn unblock_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
+    let (ns, _) = underlay
+        .switch_port(name)
+        .with_context(|| format!("no link for `{name}`"))?;
+    let family = if ns == crate::net::INET_NETNS {
+        "bridge"
+    } else {
+        "inet"
+    };
+    run(
+        "ip",
+        [
+            "netns",
+            "exec",
+            &ns,
+            "nft",
+            "delete",
+            "table",
+            family,
+            FAULT_TABLE,
+        ],
+    )?;
+    Ok(())
+}
+
 /// 拦截节点与 `peers` 之间双向的 UDP（IPv4 与 IPv6 地址都要列出）：切断两个节点之间的直连，
 /// 经其他地址的路径（例如中继）不受影响。
 pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<()> {

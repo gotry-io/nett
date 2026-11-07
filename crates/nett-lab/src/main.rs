@@ -39,7 +39,7 @@ const USAGE: &str = "usage:
   nett-lab run wgport --topology <file.toml> --nett <path/to/nett> --out <dir>
   nett-lab run roaming --topology <file.toml> --nett <path/to/nett> --out <dir> [--duration SECONDS]
   nett-lab run <loss|jitter|flap|alternate> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
-  nett-lab run <failover|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
+  nett-lab run <failover|fallback|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
@@ -113,8 +113,13 @@ fn run() -> anyhow::Result<bool> {
                 "admission" => scenario::admission(&topology, &nett()?, &out)?,
                 "selftest" => scenario::selftest(&topology, &nett()?, &out)?,
                 "relay-smoke" => scenario::relay_smoke(&topology, &nett()?, &out)?,
-                "failover" => {
-                    scenario::failover(&topology, &nett()?, &out, repeat, with_tailscale)?
+                "failover" | "fallback" => {
+                    let cut = if *name == "failover" {
+                        scenario::Cut::Direct
+                    } else {
+                        scenario::Cut::AllUdp
+                    };
+                    scenario::failover(&topology, &nett()?, &out, repeat, with_tailscale, cut)?
                 }
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(

@@ -227,6 +227,7 @@ impl Lab {
     fn spawn_with(&mut self, node: &LabNode, nett: &Path, extra: &[String]) -> anyhow::Result<()> {
         let net = self.underlay.node(&node.name).context("planned node")?;
         let dir = &node.dir;
+        let transport_config = dir.join("transport.json");
         let mut args: Vec<std::ffi::OsString> = vec![
             "mesh".into(),
             "--config".into(),
@@ -235,10 +236,26 @@ impl Lab {
             dir.join("mesh.key").into(),
             "--events".into(),
             dir.join("events.jsonl").into(),
+            "--transport-config".into(),
+            transport_config.clone().into(),
         ];
         args.extend(extra.iter().map(Into::into));
         let child = spawn_in(&net.netns, nett, &args, &dir.join("mesh.log"))?;
         self.processes.push((node.name.clone(), child));
+        // 传输适配进程读组网进程写出的配置（design/mesh.md 第 5.3 节）
+        if node.tls {
+            let child = spawn_in(
+                &net.netns,
+                nett,
+                [
+                    "transport".as_ref(),
+                    "--config".as_ref(),
+                    transport_config.as_os_str(),
+                ],
+                &dir.join("transport.log"),
+            )?;
+            self.helpers.push(child);
+        }
         Ok(())
     }
 
@@ -918,11 +935,23 @@ pub struct FailoverRun {
     pub recovery_ms: Option<u64>,
     /// nett：从故障解除到决定方切回直连的事件（毫秒），用来区分决定的快慢与测量的粒度。
     pub switched_back_ms: Option<u64>,
+    /// nett：故障之后第一次切换去了哪里（场景 7 应当是 TLS 传输的回环端口）。
+    pub fell_back_to: Option<String>,
     /// 长连接是否被重置。
     pub tcp_ended: Option<String>,
     pub tcp_kbps: u64,
     #[serde(skip)]
+    fault_at_ms: u64,
+    #[serde(skip)]
     restored_at_ms: u64,
+}
+
+/// 时间的比较中，差距小于这个值视为相同：接收端时间戳的抖动（design/prototype.md 第 6.1 节）。
+const COMPARE_TOLERANCE_MS: u64 = 10;
+
+/// nett 的时间不比 Tailscale 长（容差之内）。
+fn not_worse(nett: Option<u64>, tailscale: Option<u64>) -> bool {
+    matches!((nett, tailscale), (Some(n), Some(t)) if n < t + COMPARE_TOLERANCE_MS)
 }
 
 /// 恢复时间不超过这个值，也算不比 Tailscale 差（design/prototype.md 第 6.1 节）。
@@ -982,13 +1011,23 @@ fn start_workload(
     Ok((probe_file, tcp_file))
 }
 
-/// 场景 1 与 8：切断 a 与 b 之间的直连 UDP，12 秒后恢复。`relay_links` 是中继路径经过的接口。
+/// 故障切掉什么（design/prototype.md 第 6.2 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cut {
+    /// 场景 1 与 8：a 与 b 之间的直连 UDP。
+    Direct,
+    /// 场景 7 与 9：a 的全部 UDP，在它的上游拦截。
+    AllUdp,
+}
+
+/// 场景 1 与 8、7 与 9：切断之后 12 秒恢复。`relay_links` 是较差路径（中继或 DERP）经过的接口。
 fn failover_run(
     lab: &mut Lab,
     out: &Path,
     system: &str,
     target: std::net::IpAddr,
     relay_links: Vec<(String, String)>,
+    cut: Cut,
 ) -> anyhow::Result<FailoverRun> {
     use crate::fault;
     use crate::measure::{now_ms, probe_stats, tcp_stats};
@@ -1013,10 +1052,16 @@ fn failover_run(
     let settled_ms = now_ms();
     let a_egress = lab.underlay.egress_ipv4("a").context("a egress")?;
     let fault_ms = now_ms();
-    fault::block_udp_with("b", &[a_egress.into()])?;
+    match cut {
+        Cut::Direct => fault::block_udp_with("b", &[a_egress.into()])?,
+        Cut::AllUdp => fault::block_udp_upstream(&lab.underlay, "a")?,
+    }
     std::thread::sleep(FAULT_HOLD);
     let restore_ms = now_ms();
-    fault::unblock_udp("b")?;
+    match cut {
+        Cut::Direct => fault::unblock_udp("b")?,
+        Cut::AllUdp => fault::unblock_udp_upstream(&lab.underlay, "a")?,
+    }
     std::thread::sleep(RECOVERY_WAIT);
     let end_ms = now_ms();
     let outage = probe_stats(&probe_file, fault_ms - 1000, restore_ms)?;
@@ -1031,13 +1076,20 @@ fn failover_run(
         outage_ms: outage.max_gap_ms,
         recovery_ms,
         switched_back_ms: None,
+        fell_back_to: None,
         tcp_ended: tcp.ended,
         tcp_kbps: tcp.kbps,
+        fault_at_ms: fault_ms,
         restored_at_ms: restore_ms,
     })
 }
 
-fn nett_failover_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Result<FailoverRun> {
+fn nett_failover_once(
+    topo: &Topology,
+    nett: &Path,
+    out: &Path,
+    cut: Cut,
+) -> anyhow::Result<FailoverRun> {
     let underlay = Underlay::plan(topo)?;
     underlay.down()?;
     let generated = material::generate(topo, &underlay, out, false)?;
@@ -1058,7 +1110,7 @@ fn nett_failover_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Resul
                 .map(|n| (n.netns.clone(), "eth0".to_owned()))
         })
         .collect();
-    let mut run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links)?;
+    let mut run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links, cut)?;
     let a = generated
         .nodes
         .iter()
@@ -1071,11 +1123,16 @@ fn nett_failover_once(topo: &Topology, nett: &Path, out: &Path) -> anyhow::Resul
             && e["to"].as_str().is_some_and(|t| t.starts_with("direct")))
         .then(|| at - run.restored_at_ms)
     });
+    run.fell_back_to = events(a).iter().find_map(|e| {
+        let at = e["at_ms"].as_u64()?;
+        (e["event"] == "path_switched" && at >= run.fault_at_ms && at < run.restored_at_ms)
+            .then(|| e["to"].as_str().unwrap_or_default().to_owned())
+    });
     drop(lab);
     Ok(run)
 }
 
-fn tailscale_failover_once(topo: &Topology, out: &Path) -> anyhow::Result<FailoverRun> {
+fn tailscale_failover_once(topo: &Topology, out: &Path, cut: Cut) -> anyhow::Result<FailoverRun> {
     use crate::tailscale::{CONTROL_NETNS, TailscaleLab};
     let underlay = Underlay::plan(topo)?;
     underlay.down()?;
@@ -1092,7 +1149,7 @@ fn tailscale_failover_once(topo: &Topology, out: &Path) -> anyhow::Result<Failov
     // 等到直连：tailscale ping 在拿到直连应答后停止
     ts.cli("a", &["ping", "-c", "20", &ip_b.to_string()]).ok();
     let links = vec![(CONTROL_NETNS.to_owned(), "eth0".to_owned())];
-    let run = failover_run(&mut lab, out, "tailscale", ip_b.into(), links)?;
+    let run = failover_run(&mut lab, out, "tailscale", ip_b.into(), links, cut)?;
     drop(ts);
     drop(lab);
     Ok(run)
@@ -1115,20 +1172,26 @@ pub fn failover(
     out: &Path,
     repeat: usize,
     with_tailscale: bool,
+    cut: Cut,
 ) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
-    let mut report = Report::new("1-8-failover");
+    let mut report = Report::new(match cut {
+        Cut::Direct => "1-8-failover",
+        Cut::AllUdp => "7-9-fallback",
+    });
     let mut runs = Vec::new();
     for i in 0..repeat {
         runs.push(nett_failover_once(
             &topo,
             nett,
             &out.join(format!("nett-{i}")),
+            cut,
         )?);
         if with_tailscale {
             runs.push(tailscale_failover_once(
                 &topo,
                 &out.join(format!("tailscale-{i}")),
+                cut,
             )?);
         }
     }
@@ -1151,6 +1214,23 @@ pub fn failover(
         )
     };
     let nett_s = summary("nett");
+    if cut == Cut::AllUdp {
+        // UDP 全部被拦：直接改用 TLS，不逐个尝试 UDP 中继（design/mesh.md 第 8.2 节）
+        let fell_back = runs
+            .iter()
+            .filter(|r| r.system == "nett")
+            .filter(|r| {
+                r.fell_back_to
+                    .as_deref()
+                    .is_some_and(|to| to.contains("127.0.0.1"))
+            })
+            .count();
+        report.check(
+            "nett:fell-back-to-tls-directly",
+            fell_back == repeat,
+            format!("{fell_back} of {repeat} runs switched straight to TLS"),
+        );
+    }
     report.check(
         "nett:long-connection-never-reset",
         nett_s.5 == 0,
@@ -1180,8 +1260,6 @@ pub fn failover(
                 ts_s.0, ts_s.1, ts_s.2, ts_s.3, ts_s.5
             ),
         );
-        let not_worse =
-            |n: Option<u64>, t: Option<u64>| matches!((n, t), (Some(n), Some(t)) if n <= t);
         report.check(
             "outage:not-worse-than-tailscale",
             not_worse(nett_s.0, ts_s.0) && not_worse(nett_s.1, ts_s.1),
@@ -1473,8 +1551,6 @@ pub fn relay_fault(
             "tailscale:summary",
             format!("outage p95 {:?} max {:?} ms; resets {}", t.0, t.1, t.2),
         );
-        let not_worse =
-            |a: Option<u64>, b: Option<u64>| matches!((a, b), (Some(a), Some(b)) if a <= b);
         report.check(
             "outage:not-worse-than-tailscale",
             not_worse(n.0, t.0) && not_worse(n.1, t.1),
@@ -1837,7 +1913,10 @@ pub fn wave(
         );
         report.check(
             "outage:not-worse-than-tailscale",
-            max(&n, |r| r.max_gap_ms) <= max(&t, |r| r.max_gap_ms),
+            not_worse(
+                Some(max(&n, |r| r.max_gap_ms)),
+                Some(max(&t, |r| r.max_gap_ms)),
+            ),
             format!(
                 "nett max {} ms, tailscale max {} ms",
                 max(&n, |r| r.max_gap_ms),

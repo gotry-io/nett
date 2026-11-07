@@ -115,9 +115,9 @@ impl Topology {
                 );
             }
             for candidate in &link.candidates {
-                match candidate.strip_prefix("relay:") {
+                match crate::material::relay_of(candidate) {
                     None if candidate == "direct" || candidate == "direct6" => {}
-                    Some(relay) => ensure!(
+                    Some((relay, _)) => ensure!(
                         self.nodes.iter().any(|n| n.name == relay
                             && n.behind.is_none()
                             && n.roles.iter().any(|r| r == "relay")),
