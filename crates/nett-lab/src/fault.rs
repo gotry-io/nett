@@ -10,6 +10,8 @@ use crate::net::Underlay;
 
 /// 拦截规则所在的 nftables 表，与 NAT 规则分开，解除时整表删除。
 const FAULT_TABLE: &str = "nettlab_fault";
+// 入方向的拦截挂在 prerouting、优先级 -300：早于连接跟踪，也早于组网进程拷贝探测包的规则（input、
+// -150）。挂在 input 上时，被拦的探测仍会被拷贝给组网进程并得到应答，与"包没有到达"不符。
 
 /// 一条链路的质量。各项为空时不设置。
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -85,7 +87,7 @@ pub fn block_udp(name: &str) -> anyhow::Result<()> {
     let rules = format!(
         "table inet {FAULT_TABLE} {{\n\
          chain out {{ type filter hook output priority 0; meta l4proto udp drop; }}\n\
-         chain in {{ type filter hook input priority 0; meta l4proto udp drop; }}\n\
+         chain in {{ type filter hook prerouting priority -300; meta l4proto udp drop; }}\n\
          }}\n"
     );
     run_with_input(
@@ -179,7 +181,7 @@ pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<
     let rules = format!(
         "table inet {FAULT_TABLE} {{\n\
          chain out {{ type filter hook output priority 0; {}}}\n\
-         chain in {{ type filter hook input priority 0; {}}}\n\
+         chain in {{ type filter hook prerouting priority -300; {}}}\n\
          }}\n",
         rule("daddr"),
         rule("saddr")
@@ -310,7 +312,7 @@ pub fn block_udp_from(name: &str, src: std::net::Ipv4Addr) -> anyhow::Result<()>
     let ns = crate::net::netns(name);
     let rules = format!(
         "table inet {FAULT_TABLE} {{\n\
-         chain in {{ type filter hook input priority 0; ip saddr {src} meta l4proto udp drop; }}\n\
+         chain in {{ type filter hook prerouting priority -300; ip saddr {src} meta l4proto udp drop; }}\n\
          }}\n"
     );
     run_with_input(
