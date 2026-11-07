@@ -3,7 +3,7 @@
 //!
 //! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -41,6 +41,9 @@ pub struct Engine<D> {
     bytes: HashMap<X25519PublicKey, (u64, u64)>,
     last_stats: Option<Instant>,
     clock_trusted: bool,
+    /// TLS 中继在传输适配进程上的回环端点，以及最近一次设置的闲置端口（design/mesh.md 第 5.3 节）。
+    tls_endpoints: BTreeSet<SocketAddr>,
+    tls_guarded: Option<Vec<u16>>,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -57,6 +60,8 @@ impl<D: DataPlane> Engine<D> {
             bytes: HashMap::new(),
             last_stats: None,
             clock_trusted: false,
+            tls_endpoints: BTreeSet::new(),
+            tls_guarded: None,
         }
     }
 
@@ -129,7 +134,9 @@ impl<D: DataPlane> Engine<D> {
             &self.private_key,
             self.members.members(),
             &desired.paths,
+            desired.tls_endpoints(),
         );
+        self.tls_endpoints = desired.tls_endpoints().values().copied().collect();
         let peers: Vec<PeerSpec> = self
             .members
             .members()
@@ -146,6 +153,39 @@ impl<D: DataPlane> Engine<D> {
             })
             .collect();
         self.sync_peers(peers, events);
+        self.guard_idle_tls(events);
+    }
+
+    /// 没有对端在用的 TLS 回环端口：丢弃从它们进入 WireGuard 端口的包（design/mesh.md 第 5.3 节）。
+    /// 在执行切换之前调用：切到 TLS 的端口先放开，切走的端口再挡住。设置失败时下一次推进重试。
+    fn guard_idle_tls(&mut self, events: &mut impl EventSink) {
+        let (Some(prober), Some(interface)) = (self.prober.as_ref(), self.interface.as_ref())
+        else {
+            return;
+        };
+        let in_use: BTreeSet<SocketAddr> = prober
+            .peer_ids()
+            .filter_map(|(id, _)| prober.endpoint(id))
+            .collect();
+        let idle: Vec<u16> = self
+            .tls_endpoints
+            .difference(&in_use)
+            .map(SocketAddr::port)
+            .collect();
+        if self.tls_guarded.as_ref() == Some(&idle)
+            || (self.tls_guarded.is_none() && self.tls_endpoints.is_empty())
+        {
+            return;
+        }
+        match self.dataplane.guard_tls_ports(interface.listen_port, &idle) {
+            Ok(()) => self.tls_guarded = Some(idle),
+            Err(e) => {
+                self.tls_guarded = None;
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+            }
+        }
     }
 
     fn sync_peers(&mut self, peers: Vec<PeerSpec>, events: &mut impl EventSink) {
@@ -195,6 +235,7 @@ impl<D: DataPlane> Engine<D> {
             return Vec::new();
         };
         let (out, switches) = prober.tick(now, now_ms);
+        self.guard_idle_tls(events);
         for switch in switches {
             let result = if switch.rehandshake {
                 match self.members.get(&switch.peer) {
@@ -579,5 +620,44 @@ mod tests {
         e.apply(&validated(mesh.desired(2, vec![])), &mut events);
         assert!(matches!(events.0[..], [Event::ConfigRejected { .. }]));
         assert!(e.dataplane.interfaces.is_empty());
+    }
+
+    #[test]
+    fn guards_tls_ports_nobody_uses() {
+        use crate::config::{Candidate, PathDoc, ProbeToken};
+        use nett_core::transport::CertFingerprint;
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        let tls = Candidate::RelayTls {
+            relay: node_id(9),
+            address: "198.51.100.9:443".parse().expect("addr"),
+            fingerprint: CertFingerprint([1; 32]),
+            token: ProbeToken([9; 32]),
+        };
+        let direct = Candidate::Direct {
+            endpoint: "192.0.2.2:41820".parse().expect("addr"),
+        };
+        // 当前路径是直连：TLS 端口闲置，挡住
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::Public,
+            candidates: vec![direct.clone(), tls.clone()],
+        }];
+        e.apply(&validated(doc.clone()), &mut events);
+        assert_eq!(
+            e.dataplane.tls_guards,
+            vec![vec![crate::config::TLS_LOOPBACK_BASE]]
+        );
+        // 只剩 TLS 候选：它就是当前路径，放开
+        doc.paths[0].candidates = vec![tls];
+        e.apply(&validated(doc.clone()), &mut events);
+        assert_eq!(e.dataplane.tls_guards.last(), Some(&vec![]));
+        // 没有 TLS 候选的节点不设置
+        let mut plain = engine(1);
+        doc.paths[0].candidates = vec![direct];
+        plain.apply(&validated(doc), &mut events);
+        assert!(plain.dataplane.tls_guards.is_empty());
     }
 }

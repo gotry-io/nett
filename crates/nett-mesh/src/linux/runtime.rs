@@ -39,7 +39,7 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_DATAGRAM: usize = 2048;
 
 enum Msg {
-    Desired(Result<DesiredMesh, ConfigError>),
+    Desired(Box<Result<DesiredMesh, ConfigError>>),
     Packet {
         kind: Incoming,
         from: SocketAddr,
@@ -58,7 +58,7 @@ pub struct Runtime {
 impl Applier for Runtime {
     fn apply(&mut self, desired: Result<DesiredMesh, ConfigError>) {
         // 后台线程退出时（只在 bug 时发生）发送失败，由 shutdown 报告
-        let _ = self.tx.send(Msg::Desired(desired));
+        let _ = self.tx.send(Msg::Desired(Box::new(desired)));
     }
 }
 
@@ -93,13 +93,15 @@ impl Runtime {
                     // 收到探测消息后立即推进：高频探测时应答一到就处理，不等下一次定时推进
                     let mut tick_now = false;
                     match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
-                        Ok(Msg::Desired(Ok(desired))) => {
-                            worker.engine.apply(&desired, &mut worker.events);
-                            worker.ensure_sockets(&desired);
-                        }
-                        Ok(Msg::Desired(Err(e))) => worker.events.emit(Event::ConfigRejected {
-                            reason: e.to_string(),
-                        }),
+                        Ok(Msg::Desired(desired)) => match *desired {
+                            Ok(desired) => {
+                                worker.engine.apply(&desired, &mut worker.events);
+                                worker.ensure_sockets(&desired);
+                            }
+                            Err(e) => worker.events.emit(Event::ConfigRejected {
+                                reason: e.to_string(),
+                            }),
+                        },
                         Ok(Msg::Packet {
                             kind,
                             from,

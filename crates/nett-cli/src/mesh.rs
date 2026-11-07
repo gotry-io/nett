@@ -8,7 +8,7 @@ use nett_core::id::NodeId;
 use nett_mesh::engine::Engine;
 use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
-use nett_mesh::lab::{FileSource, JsonLinesSink, LabClock};
+use nett_mesh::lab::{FileSource, JsonLinesSink, LabClock, TransportConfigWriter};
 use nett_mesh::linux::runtime::Runtime;
 use nett_mesh::linux::{KernelWireGuard, SystemClock};
 use tokio::signal::unix::{SignalKind, signal};
@@ -20,20 +20,27 @@ struct Args {
     /// 模拟时钟误差（design/prototype.md 场景 17）。
     clock_offset_ms: i64,
     clock_trusted: Option<bool>,
+    /// 传输适配进程的配置写到这里（design/mesh.md 第 5.3 节）。
+    transport_config: Option<PathBuf>,
 }
 
 const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> \
-[--events <events.jsonl>] [--clock-offset-ms <ms>] [--clock-trusted <yes|no>]";
+[--events <events.jsonl>] [--transport-config <transport.json>] [--clock-offset-ms <ms>] \
+[--clock-trusted <yes|no>]";
 
 fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
     use lexopt::ValueExt as _;
     let (mut config, mut key, mut events) = (None, None, None);
     let (mut clock_offset_ms, mut clock_trusted) = (0, None);
+    let mut transport_config = None;
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("events") => events = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("transport-config") => {
+                transport_config = Some(PathBuf::from(parser.value()?));
+            }
             lexopt::Arg::Long("clock-offset-ms") => clock_offset_ms = parser.value()?.parse()?,
             lexopt::Arg::Long("clock-trusted") => {
                 clock_trusted = Some(match parser.value()?.string()?.as_str() {
@@ -52,6 +59,7 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
             events,
             clock_offset_ms,
             clock_trusted,
+            transport_config,
         }),
         _ => bail!(USAGE),
     }
@@ -109,7 +117,15 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        let worker = nett_mesh::run::run(source, worker, shutdown).await?;
+        let worker = match args.transport_config {
+            Some(path) => {
+                let writer = TransportConfigWriter::new(worker, path);
+                nett_mesh::run::run(source, writer, shutdown)
+                    .await?
+                    .into_inner()
+            }
+            None => nett_mesh::run::run(source, worker, shutdown).await?,
+        };
         tokio::task::spawn_blocking(move || worker.shutdown())
             .await
             .context("stopping the mesh worker")?
