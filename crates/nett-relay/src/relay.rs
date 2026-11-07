@@ -1,4 +1,5 @@
 //! 单端口转发（design/mesh.md 第 5.1、5.2 节）：按 `mac1` 和会话索引判断去向，按握手应答更新成员地址。
+//! 成员的地址是 UDP 来源，或已认证的 TLS 连接（第 5.3 节）。
 //!
 //! 纯逻辑：时间由调用方传入，返回要做的事；收发由 [`crate::server`] 负责。
 
@@ -6,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use nett_mesh::probe::{KeyId, OuterProbe, ProbeKey, RELAY_PROBE};
+use nett_mesh::probe::{self, KeyId, OuterProbe, ProbeKey, RELAY_PROBE};
 use nett_trust::keys::X25519PublicKey;
 
 use crate::wg::{self, Index, Mac1Key, Message};
@@ -26,6 +27,17 @@ const SESSION_IDLE: Duration = Duration::from_secs(180);
 const BIND_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// 新绑定后这么久收不到来自新地址的数据，恢复旧绑定。
 const BIND_CONFIRM: Duration = Duration::from_secs(10);
+
+/// 一条 TLS 连接（design/mesh.md 第 5.3 节），由收发循环编号。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ConnId(pub u64);
+
+/// 成员的地址：UDP 来源，或已认证的 TLS 连接。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PeerAddr {
+    Udp(SocketAddr),
+    Tls(ConnId),
+}
 
 /// 保存状态的格式版本。
 const STATE_V1: u32 = 1;
@@ -93,9 +105,9 @@ pub enum Drop {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
     /// 原样转发到这个地址。
-    Forward(SocketAddr),
+    Forward(PeerAddr),
     /// 接收方还没有地址：原样转发到每个候选地址（design/mesh.md 第 5.2 节）。
-    ForwardEach(Vec<SocketAddr>),
+    ForwardEach(Vec<PeerAddr>),
     /// 回给来源一份应答（探测）。
     Reply(Vec<u8>),
     Drop(Drop),
@@ -106,17 +118,17 @@ struct Member {
     mac1: Mac1Key,
     key_id: KeyId,
     probe_key: ProbeKey,
-    bound: Option<SocketAddr>,
+    bound: Option<PeerAddr>,
     /// 绑定变化后尚未被新地址上的数据确认：变化前的地址与变化时刻。
-    unconfirmed: Option<(Option<SocketAddr>, Instant)>,
+    unconfirmed: Option<(Option<PeerAddr>, Instant)>,
     last_change: Option<Instant>,
 }
 
 struct Pending {
-    src: SocketAddr,
+    src: PeerAddr,
     receiver: usize,
     /// 接收方还没有地址时，握手发起转发到的候选地址：应答必须来自其中之一。
-    candidates: Vec<SocketAddr>,
+    candidates: Vec<PeerAddr>,
     at: Instant,
 }
 
@@ -168,7 +180,7 @@ impl Relay {
                     mac1: Mac1Key::for_public_key(m.public_key.as_bytes()),
                     key_id: KeyId::of(m.public_key.as_bytes()),
                     probe_key: ProbeKey::from_token(&m.token),
-                    bound: m.address,
+                    bound: m.address.map(PeerAddr::Udp),
                     unconfirmed: None,
                     last_change: None,
                 })
@@ -179,14 +191,9 @@ impl Relay {
         })
     }
 
-    /// 处理一个来自 `from` 的 UDP 负载。`from` 中的 IPv4 映射地址由调用方先还原为 IPv4。
-    pub fn handle(
-        &mut self,
-        from: SocketAddr,
-        packet: &[u8],
-        now: Instant,
-        now_ms: u64,
-    ) -> Outcome {
+    /// 处理一个来自 `from` 的负载。UDP 来源中的 IPv4 映射地址由调用方先还原为 IPv4；TLS 连接上的消息
+    /// 只在连接认证之后交给这里（[`Relay::authenticate`]）。
+    pub fn handle(&mut self, from: PeerAddr, packet: &[u8], now: Instant, now_ms: u64) -> Outcome {
         if packet.first() == Some(&RELAY_PROBE) {
             return self.probe(from, packet, now_ms);
         }
@@ -225,13 +232,13 @@ impl Relay {
             .position(|m| m.mac1.matches(signed, mac1))
     }
 
-    fn index_taken(&self, index: Index, src: SocketAddr) -> bool {
+    fn index_taken(&self, index: Index, src: PeerAddr) -> bool {
         self.sessions.contains_key(&index) || self.pending.get(&index).is_some_and(|p| p.src != src)
     }
 
     fn initiation(
         &mut self,
-        from: SocketAddr,
+        from: PeerAddr,
         sender: Index,
         signed: &[u8],
         mac1: &[u8],
@@ -273,7 +280,7 @@ impl Relay {
 
     /// 还没有地址的 `receiver` 可能在哪里：它发出的握手发起的来源。它的握手发起以它的某个已分配对端为
     /// 接收方，仍在待定表中。
-    fn candidates_for(&self, receiver: usize, from: SocketAddr) -> Vec<SocketAddr> {
+    fn candidates_for(&self, receiver: usize, from: PeerAddr) -> Vec<PeerAddr> {
         let mut out = Vec::new();
         for p in self.pending.values() {
             if out.len() >= MAX_CANDIDATES {
@@ -292,7 +299,7 @@ impl Relay {
 
     fn response(
         &mut self,
-        from: SocketAddr,
+        from: PeerAddr,
         sender: Index,
         receiver: Index,
         signed: &[u8],
@@ -349,7 +356,7 @@ impl Relay {
         Outcome::Forward(new_addr)
     }
 
-    fn may_bind(&self, member: usize, addr: SocketAddr, now: Instant) -> bool {
+    fn may_bind(&self, member: usize, addr: PeerAddr, now: Instant) -> bool {
         let m = &self.members[member];
         m.bound == Some(addr)
             || !m
@@ -357,7 +364,7 @@ impl Relay {
                 .is_some_and(|t| now.saturating_duration_since(t) < BIND_MIN_INTERVAL)
     }
 
-    fn bind(&mut self, member: usize, addr: SocketAddr, now: Instant) {
+    fn bind(&mut self, member: usize, addr: PeerAddr, now: Instant) {
         let m = &mut self.members[member];
         if m.bound != Some(addr) {
             m.unconfirmed = Some((m.bound, now));
@@ -378,7 +385,7 @@ impl Relay {
     }
 
     /// 新地址上来了数据：绑定得到确认。
-    fn confirm_binding(&mut self, from: SocketAddr) {
+    fn confirm_binding(&mut self, from: PeerAddr) {
         for m in &mut self.members {
             if m.unconfirmed.is_some() && m.bound == Some(from) {
                 m.unconfirmed = None;
@@ -386,20 +393,59 @@ impl Relay {
         }
     }
 
-    fn probe(&self, from: SocketAddr, packet: &[u8], now_ms: u64) -> Outcome {
-        let Some(head) = OuterProbe::peek(packet) else {
-            return Outcome::Drop(Drop::BadProbe);
-        };
-        let Some(member) = self.members.iter().find(|m| m.key_id == head.key_id) else {
-            return Outcome::Drop(Drop::BadProbe);
-        };
-        match OuterProbe::verify(packet, &member.probe_key, now_ms) {
-            Some(probe) if probe.kind == RELAY_PROBE => {
-                let reply = probe.reply(member.key_id, from).encode(&member.probe_key);
-                Outcome::Reply(reply.to_vec())
-            }
-            _ => Outcome::Drop(Drop::BadProbe),
+    fn probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Outcome {
+        match self.verify_probe(from, packet, now_ms) {
+            Some((_, reply)) => Outcome::Reply(reply),
+            None => Outcome::Drop(Drop::BadProbe),
         }
+    }
+
+    /// 验证一个中继探测，返回发出它的成员和应答。应答中回显的来源地址：经 TLS 时没有映射地址可言。
+    fn verify_probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Option<(usize, Vec<u8>)> {
+        let head = OuterProbe::peek(packet)?;
+        let index = self.members.iter().position(|m| m.key_id == head.key_id)?;
+        let member = &self.members[index];
+        let probe = OuterProbe::verify(packet, &member.probe_key, now_ms)?;
+        if probe.kind != RELAY_PROBE {
+            return None;
+        }
+        let observed = match from {
+            PeerAddr::Udp(addr) => addr,
+            PeerAddr::Tls(_) => probe::UNSPECIFIED,
+        };
+        let reply = probe
+            .reply(member.key_id, observed)
+            .encode(&member.probe_key);
+        Some((index, reply.to_vec()))
+    }
+
+    /// TLS 连接上的第一条消息（design/mesh.md 第 5.3 节）：必须是带认证的中继探测，据此认出成员。
+    /// 认证通过时返回探测应答；这个成员还没有地址时，地址就是这条连接（令牌已经证明了它的身份）。
+    pub fn authenticate(&mut self, conn: ConnId, packet: &[u8], now_ms: u64) -> Option<Vec<u8>> {
+        if packet.first() != Some(&RELAY_PROBE) {
+            return None;
+        }
+        let (index, reply) = self.verify_probe(PeerAddr::Tls(conn), packet, now_ms)?;
+        let member = &mut self.members[index];
+        if member.bound.is_none() {
+            member.bound = Some(PeerAddr::Tls(conn));
+        }
+        Some(reply)
+    }
+
+    /// TLS 连接关闭：绑定在它上面的成员没有地址了，重新连上并认证、或经握手应答时再绑定。
+    pub fn closed(&mut self, conn: ConnId) {
+        let gone = Some(PeerAddr::Tls(conn));
+        for m in &mut self.members {
+            if m.bound == gone {
+                m.bound = None;
+                m.unconfirmed = None;
+            }
+            if m.unconfirmed.is_some_and(|(previous, _)| previous == gone) {
+                m.unconfirmed = None;
+            }
+        }
+        self.pending.retain(|_, p| p.src != PeerAddr::Tls(conn));
     }
 
     /// 定期调用：清理过期的表项，恢复未被确认的绑定。
@@ -425,11 +471,13 @@ impl Relay {
             bindings: self
                 .members
                 .iter()
-                .filter_map(|m| {
-                    m.bound.map(|addr| Binding {
+                // TLS 连接在重启后不复存在，只保存 UDP 地址
+                .filter_map(|m| match m.bound {
+                    Some(PeerAddr::Udp(addr)) => Some(Binding {
                         public_key: m.public_key,
                         address: addr,
-                    })
+                    }),
+                    _ => None,
                 })
                 .collect(),
             sessions: self
@@ -455,7 +503,7 @@ impl Relay {
         };
         for b in &state.bindings {
             if let Some(i) = find(&self.members, &b.public_key) {
-                self.members[i].bound = Some(b.address);
+                self.members[i].bound = Some(PeerAddr::Udp(b.address));
             }
         }
         for saved in &state.sessions {
@@ -491,15 +539,19 @@ mod tests {
     const D: [u8; 32] = [4; 32];
     const E: [u8; 32] = [5; 32];
 
-    fn addr(s: &str) -> SocketAddr {
+    fn sock(s: &str) -> SocketAddr {
         s.parse().expect("addr")
+    }
+
+    fn addr(s: &str) -> PeerAddr {
+        PeerAddr::Udp(sock(s))
     }
 
     /// A 是 `public`（地址随分配下发），B、C 是 `dial-only`；只分配了 A–B。
     fn relay() -> Relay {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: X25519PublicKey::from_bytes(k),
-            address: a.map(addr),
+            address: a.map(sock),
             token: [k[0]; 32],
         };
         Relay::new(
@@ -751,7 +803,7 @@ mod tests {
         let decoded = OuterReply::verify(&reply, &key).expect("valid reply");
         assert_eq!(
             (decoded.kind, decoded.seq, decoded.observed),
-            (RELAY_REPLY, 4, from)
+            (RELAY_REPLY, 4, sock("203.0.113.5:40000"))
         );
         // 用另一个成员的令牌
         let wrong = probe.encode(&ProbeKey::from_token(&[3; 32]));
@@ -760,6 +812,63 @@ mod tests {
         assert_eq!(
             r.probe(from, &probe.encode(&key), 100_000),
             Outcome::Drop(Drop::BadProbe)
+        );
+    }
+
+    #[test]
+    fn tls_connection_authenticates_with_the_first_probe() {
+        let mut r = relay();
+        let now = Instant::now();
+        let conn = ConnId(7);
+        let key = ProbeKey::from_token(&[2; 32]);
+        let probe = OuterProbe {
+            kind: RELAY_PROBE,
+            key_id: KeyId::of(&B),
+            seq: 1,
+            sent_ms: 1_000,
+        };
+        // 不是探测、令牌不对：都不认证
+        assert_eq!(r.authenticate(conn, &initiation(11, &A), 1_000), None);
+        let wrong = probe.encode(&ProbeKey::from_token(&[9; 32]));
+        assert_eq!(r.authenticate(conn, &wrong, 1_000), None);
+        // B 认证后，连接就是 B 的地址：A 发给 B 的握手经这条连接送达
+        let reply = r
+            .authenticate(conn, &probe.encode(&key), 1_000)
+            .expect("authenticated");
+        let decoded = OuterReply::verify(&reply, &key).expect("valid reply");
+        assert_eq!(decoded.observed, probe::UNSPECIFIED);
+        let tls = PeerAddr::Tls(conn);
+        assert_eq!(
+            r.handle(tls, &initiation(11, &A), now, 0),
+            Outcome::Forward(addr("198.51.100.1:41820"))
+        );
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &response(22, 11, &B), now, 0),
+            Outcome::Forward(tls)
+        );
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Forward(tls)
+        );
+        // 连接关闭：B 没有地址了，发给它的数据丢弃；重新连上并认证后恢复
+        r.closed(conn);
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Drop(Drop::ReceiverUnbound)
+        );
+        let again = ConnId(8);
+        r.authenticate(again, &probe.encode(&key), 1_000)
+            .expect("authenticated");
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Forward(PeerAddr::Tls(again))
+        );
+        // 只保存 UDP 地址
+        assert!(
+            r.snapshot(now)
+                .bindings
+                .iter()
+                .all(|b| b.public_key != X25519PublicKey::from_bytes(B))
         );
     }
 }

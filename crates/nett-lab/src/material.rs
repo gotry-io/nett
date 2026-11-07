@@ -466,6 +466,7 @@ fn write_relay_configs(
         }
         let config = RelayConfig {
             listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
+            tls: None,
             members,
             connections,
         };
