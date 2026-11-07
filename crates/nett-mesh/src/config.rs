@@ -4,9 +4,10 @@
 //! 签名产物在这里只解析格式，签名和准入由 [`crate::members`] 逐项验证，不因来源而跳过。
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use nett_core::id::NodeId;
+use nett_core::transport::{CertFingerprint, MAX_TARGETS, TlsTarget, TransportConfig};
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::{AnchorsError, TrustAnchors, TrustAnchorsDoc};
 use nett_trust::revocation::Revocation;
@@ -66,7 +67,18 @@ pub enum Candidate {
         endpoint: SocketAddr,
         token: ProbeToken,
     },
+    /// 经中继的 TLS 传输（design/mesh.md 第 5.3 节）：中继的 TLS 地址与证书指纹；令牌与 UDP 中继相同，
+    /// 用来认证 WebSocket 连接上的第一条探测。WireGuard 中的 endpoint 是传输适配进程的回环端口。
+    RelayTls {
+        relay: NodeId,
+        address: SocketAddr,
+        fingerprint: CertFingerprint,
+        token: ProbeToken,
+    },
 }
+
+/// 传输适配进程的回环端口从这里起，按中继的节点 ID 排序依次分配（ADR 0013：由组网进程分配）。
+pub const TLS_LOOPBACK_BASE: u16 = 41830;
 
 /// 成员与中继之间的探测令牌。`Debug` 不输出内容（硬性规则 10）。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +110,10 @@ pub enum ConfigError {
     Prefix(IpPrefix),
     #[error("paths list peer {0} more than once")]
     DuplicatePath(NodeId),
+    #[error("TLS relay {0} is listed with different addresses or fingerprints")]
+    TlsTargetConflict(NodeId),
+    #[error("paths list more than {MAX_TARGETS} TLS relays")]
+    TooManyTlsRelays,
 }
 
 /// 已校验的期望状态。
@@ -111,9 +127,17 @@ pub struct DesiredMesh {
     pub members: Vec<AdmissionMaterial>,
     pub revocations: Vec<Revocation>,
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
+    /// 交给传输适配进程的配置，与 [`DesiredMesh::tls_endpoints`] 同出一处。
+    pub transport: TransportConfig,
+    tls_endpoints: BTreeMap<NodeId, SocketAddr>,
 }
 
 impl DesiredMesh {
+    /// 各 TLS 中继在 WireGuard 中的 endpoint：传输适配进程为它开的回环端口。
+    pub fn tls_endpoints(&self) -> &BTreeMap<NodeId, SocketAddr> {
+        &self.tls_endpoints
+    }
+
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         let doc: DesiredMeshDoc =
             serde_json::from_slice(bytes).map_err(|e| ConfigError::Document(e.to_string()))?;
@@ -128,6 +152,35 @@ impl DesiredMesh {
             if !is_sensible_mesh_prefix(&prefix) {
                 return Err(ConfigError::Prefix(prefix));
             }
+        }
+        let mut tls: BTreeMap<NodeId, (SocketAddr, CertFingerprint)> = BTreeMap::new();
+        for c in doc.paths.iter().flat_map(|p| &p.candidates) {
+            if let Candidate::RelayTls {
+                relay,
+                address,
+                fingerprint,
+                ..
+            } = c
+                && tls
+                    .insert(relay.clone(), (*address, *fingerprint))
+                    .is_some_and(|prev| prev != (*address, *fingerprint))
+            {
+                return Err(ConfigError::TlsTargetConflict(relay.clone()));
+            }
+        }
+        if tls.len() > MAX_TARGETS {
+            return Err(ConfigError::TooManyTlsRelays);
+        }
+        let mut tls_endpoints = BTreeMap::new();
+        let mut targets = Vec::new();
+        for (port, (relay, (connect, fingerprint))) in (TLS_LOOPBACK_BASE..).zip(tls) {
+            let listen = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+            tls_endpoints.insert(relay, listen);
+            targets.push(TlsTarget {
+                listen,
+                connect,
+                fingerprint,
+            });
         }
         let mut paths = BTreeMap::new();
         for path in doc.paths {
@@ -148,6 +201,11 @@ impl DesiredMesh {
             members: doc.members,
             revocations: doc.revocations,
             paths,
+            transport: TransportConfig {
+                wireguard_port: doc.listen_port,
+                targets,
+            },
+            tls_endpoints,
         })
     }
 }
@@ -198,5 +256,45 @@ mod tests {
             let p: IpPrefix = s.parse().expect(s);
             assert_eq!(is_sensible_mesh_prefix(&p), ok, "{s}");
         }
+    }
+
+    #[test]
+    fn tls_relays_get_loopback_ports_in_relay_order() {
+        use crate::testutil::{Mesh, node_id};
+        let tls = |relay: u8, fp: u8| Candidate::RelayTls {
+            relay: node_id(relay),
+            address: format!("198.51.100.{relay}:443").parse().expect("addr"),
+            fingerprint: CertFingerprint([fp; 32]),
+            token: ProbeToken([relay; 32]),
+        };
+        let mesh = Mesh::new(&[1]);
+        let mut doc = mesh.desired(1, vec![]);
+        doc.paths = vec![
+            PathDoc {
+                peer: node_id(2),
+                peer_reachability: Reachability::Public,
+                candidates: vec![tls(9, 1), tls(8, 2)],
+            },
+            PathDoc {
+                peer: node_id(3),
+                peer_reachability: Reachability::Public,
+                candidates: vec![tls(9, 1)],
+            },
+        ];
+        let desired = DesiredMesh::from_doc(doc.clone()).expect("valid");
+        let port = |relay: u8| desired.tls_endpoints()[&node_id(relay)].port();
+        assert_eq!(
+            (port(8), port(9)),
+            (TLS_LOOPBACK_BASE, TLS_LOOPBACK_BASE + 1)
+        );
+        assert_eq!(desired.transport.targets.len(), 2);
+        assert_eq!(desired.transport.wireguard_port, 41820);
+        assert_eq!(desired.transport.validate(), Ok(()));
+        // 同一个中继给了两个不同的指纹
+        doc.paths[1].candidates = vec![tls(9, 7)];
+        assert!(matches!(
+            DesiredMesh::from_doc(doc),
+            Err(ConfigError::TlsTargetConflict(_))
+        ));
     }
 }

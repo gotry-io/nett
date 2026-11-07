@@ -1,8 +1,9 @@
 //! 经 netlink 管理 nftables（`include/uapi/linux/netfilter/nf_tables.h`），以及经 nfnetlink_log 接收
 //! 规则拷贝出来的包。组网进程不调用 `nft` 命令（硬性规则 1）。
 //!
-//! 这里只有一条规则：把发往 WireGuard 端口、负载首字节为直连探测类型的 UDP 包的副本交给组网进程
-//! （design/mesh.md 第 7.1 节）。其他包只多一次规则匹配，不复制；`log` 只是拷贝，不影响连接跟踪。
+//! 这里有两条链：一条把发往 WireGuard 端口、负载首字节为直连探测类型的 UDP 包的副本交给组网进程
+//! （design/mesh.md 第 7.1 节），其他包只多一次规则匹配，不复制；`log` 只是拷贝，不影响连接跟踪。另一条
+//! 丢弃从闲置的 TLS 回环端口进入 WireGuard 端口的包（第 5.3 节）。
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -24,6 +25,7 @@ const NFT_MSG_NEWTABLE: u16 = 0;
 const NFT_MSG_DELTABLE: u16 = 2;
 const NFT_MSG_NEWCHAIN: u16 = 3;
 const NFT_MSG_NEWRULE: u16 = 6;
+const NFT_MSG_DELRULE: u16 = 8;
 const NLM_F_APPEND: u16 = 0x800;
 
 const NFPROTO_INET: u8 = 1;
@@ -49,6 +51,16 @@ const NFTA_EXPR_DATA: u16 = 2;
 const NFTA_META_DREG: u16 = 1;
 const NFTA_META_KEY: u16 = 2;
 const NFT_META_L4PROTO: u32 = 16;
+const NFT_META_IIF: u32 = 4;
+const NFTA_IMMEDIATE_DREG: u16 = 1;
+const NFTA_IMMEDIATE_DATA: u16 = 2;
+const NFTA_DATA_VERDICT: u16 = 2;
+const NFTA_VERDICT_CODE: u16 = 1;
+const NFT_REG_VERDICT: u32 = 0;
+const NF_DROP: u32 = 0;
+/// 网络命名空间中回环接口的编号总是 1。
+const LOOPBACK_IFINDEX: u32 = 1;
+const GUARD_CHAIN: &str = "tls_guard";
 const NFTA_CMP_SREG: u16 = 1;
 const NFTA_CMP_OP: u16 = 2;
 const NFTA_CMP_DATA: u16 = 3;
@@ -192,6 +204,71 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
         rule,
         batch(NFNL_MSG_BATCH_END),
     ])
+}
+
+/// 重建 TLS 保护链（design/mesh.md 第 5.3 节）：对每个闲置的回环端口，丢弃
+/// `iif lo udp sport <端口> udp dport <WireGuard 端口>` 的包。一个事务中清空旧规则、写入新规则。
+pub(crate) fn set_tls_guard(wg_port: u16, idle: &[u16]) -> Result<(), NlError> {
+    let mut sock = Socket::open(Some(NETFILTER))?;
+    let mut table = Message::new(nft_type(NFT_MSG_NEWTABLE), NLM_F_ACK | NLM_F_CREATE);
+    table.fixed(&nfgen(NFPROTO_INET, 0));
+    table.attr_str(NFTA_TABLE_NAME, TABLE);
+
+    let mut chain = Message::new(nft_type(NFT_MSG_NEWCHAIN), NLM_F_ACK | NLM_F_CREATE);
+    chain.fixed(&nfgen(NFPROTO_INET, 0));
+    chain.attr_str(NFTA_CHAIN_TABLE, TABLE);
+    chain.attr_str(NFTA_CHAIN_NAME, GUARD_CHAIN);
+    let hook = chain.begin_nested(NFTA_CHAIN_HOOK);
+    chain.attr(NFTA_HOOK_HOOKNUM, &NF_INET_LOCAL_IN.to_be_bytes());
+    chain.attr(NFTA_HOOK_PRIORITY, &0i32.to_be_bytes());
+    chain.end_nested(hook);
+    chain.attr(NFTA_CHAIN_POLICY, &NF_ACCEPT.to_be_bytes());
+    chain.attr_str(NFTA_CHAIN_TYPE, "filter");
+
+    // 不带规则编号的删除：清空这条链
+    let mut flush = Message::new(nft_type(NFT_MSG_DELRULE), NLM_F_ACK);
+    flush.fixed(&nfgen(NFPROTO_INET, 0));
+    flush.attr_str(NFTA_RULE_TABLE, TABLE);
+    flush.attr_str(NFTA_RULE_CHAIN, GUARD_CHAIN);
+
+    let mut messages = vec![batch(NFNL_MSG_BATCH_BEGIN), table, chain, flush];
+    for port in idle {
+        let mut rule = Message::new(
+            nft_type(NFT_MSG_NEWRULE),
+            NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
+        );
+        rule.fixed(&nfgen(NFPROTO_INET, 0));
+        rule.attr_str(NFTA_RULE_TABLE, TABLE);
+        rule.attr_str(NFTA_RULE_CHAIN, GUARD_CHAIN);
+        let exprs = rule.begin_nested(NFTA_RULE_EXPRESSIONS);
+        expr(&mut rule, "meta", |m| {
+            m.attr(NFTA_META_KEY, &NFT_META_IIF.to_be_bytes());
+            m.attr(NFTA_META_DREG, &NFT_REG_1.to_be_bytes());
+        });
+        // 接口编号以主机字节序比较
+        cmp(&mut rule, NFT_CMP_EQ, &LOOPBACK_IFINDEX.to_ne_bytes());
+        expr(&mut rule, "meta", |m| {
+            m.attr(NFTA_META_KEY, &NFT_META_L4PROTO.to_be_bytes());
+            m.attr(NFTA_META_DREG, &NFT_REG_1.to_be_bytes());
+        });
+        cmp(&mut rule, NFT_CMP_EQ, &[IPPROTO_UDP]);
+        load_transport(&mut rule, 0, 2);
+        cmp(&mut rule, NFT_CMP_EQ, &port.to_be_bytes());
+        load_transport(&mut rule, 2, 2);
+        cmp(&mut rule, NFT_CMP_EQ, &wg_port.to_be_bytes());
+        expr(&mut rule, "immediate", |m| {
+            m.attr(NFTA_IMMEDIATE_DREG, &NFT_REG_VERDICT.to_be_bytes());
+            let data = m.begin_nested(NFTA_IMMEDIATE_DATA);
+            let verdict = m.begin_nested(NFTA_DATA_VERDICT);
+            m.attr(NFTA_VERDICT_CODE, &NF_DROP.to_be_bytes());
+            m.end_nested(verdict);
+            m.end_nested(data);
+        });
+        rule.end_nested(exprs);
+        messages.push(rule);
+    }
+    messages.push(batch(NFNL_MSG_BATCH_END));
+    sock.request_batch(messages)
 }
 
 /// nfnetlink_log 的订阅：接收探测规则拷贝出来的包。

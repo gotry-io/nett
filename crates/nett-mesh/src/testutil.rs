@@ -137,6 +137,8 @@ pub struct FakeDataPlane {
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
     pub rehandshakes: Vec<PeerSpec>,
+    /// 每次设置的闲置 TLS 端口。
+    pub tls_guards: Vec<Vec<u16>>,
 }
 
 impl FakeDataPlane {
@@ -147,6 +149,7 @@ impl FakeDataPlane {
             peers: None,
             fail_peers: false,
             rehandshakes: Vec::new(),
+            tls_guards: Vec::new(),
         }
     }
 }
@@ -205,5 +208,10 @@ impl DataPlane for FakeDataPlane {
             &peer.public_key,
             peer.endpoint.unwrap_or(crate::probe::UNSPECIFIED),
         )
+    }
+
+    fn guard_tls_ports(&mut self, _wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError> {
+        self.tls_guards.push(idle.to_vec());
+        Ok(())
     }
 }

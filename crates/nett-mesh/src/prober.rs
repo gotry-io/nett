@@ -10,7 +10,7 @@ use nett_core::id::NodeId;
 use nett_trust::admission::Member;
 use nett_trust::keys::X25519PublicKey;
 
-use crate::config::{Candidate, PeerPathConfig, Reachability};
+use crate::config::{Candidate, PeerPathConfig, ProbeToken, Reachability};
 use crate::key::PrivateKey;
 use crate::path::{Action, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason};
 use crate::probe::{
@@ -71,7 +71,12 @@ pub struct Switch {
 
 enum CandidateMeta {
     Direct,
-    Relay { relay: KeyId, key: ProbeKey },
+    /// `tls`：经传输适配进程的 TLS 传输；测量不计入本机到这个中继的 UDP 测量。
+    Relay {
+        relay: KeyId,
+        key: ProbeKey,
+        tls: bool,
+    },
 }
 
 struct Peer {
@@ -177,36 +182,57 @@ pub fn is_decider(
     }
 }
 
-fn routes(candidates: &[Candidate]) -> (Vec<(Route, PathKind)>, Vec<CandidateMeta>) {
+/// 候选在 WireGuard 中的 endpoint 与测量用的信息。TLS 候选的 endpoint 是传输适配进程的回环端口，
+/// 由 `tls` 给出；没有分到端口的 TLS 候选不用。
+fn routes(
+    candidates: &[Candidate],
+    tls: &BTreeMap<NodeId, SocketAddr>,
+) -> (Vec<(Route, PathKind)>, Vec<CandidateMeta>) {
     candidates
         .iter()
-        .map(|c| match c {
-            Candidate::Direct { endpoint } => (
+        .filter_map(|c| match c {
+            Candidate::Direct { endpoint } => Some((
                 (Route::Direct(*endpoint), PathKind::Direct),
                 CandidateMeta::Direct,
-            ),
+            )),
             Candidate::Relay {
                 relay,
                 endpoint,
                 token,
-            } => {
-                let id = KeyId::of(relay.as_str().as_bytes());
-                (
-                    (
-                        Route::Relay {
-                            relay: id,
-                            endpoint: *endpoint,
-                        },
-                        PathKind::Relay,
-                    ),
-                    CandidateMeta::Relay {
-                        relay: id,
-                        key: ProbeKey::from_token(&token.0),
-                    },
-                )
+            } => Some(relay_route(relay, *endpoint, token, false)),
+            Candidate::RelayTls { relay, token, .. } => {
+                Some(relay_route(relay, *tls.get(relay)?, token, true))
             }
         })
         .unzip()
+}
+
+fn relay_route(
+    relay: &NodeId,
+    endpoint: SocketAddr,
+    token: &ProbeToken,
+    tls: bool,
+) -> ((Route, PathKind), CandidateMeta) {
+    let id = KeyId::of(relay.as_str().as_bytes());
+    let kind = if tls {
+        PathKind::RelayTls
+    } else {
+        PathKind::Relay
+    };
+    (
+        (
+            Route::Relay {
+                relay: id,
+                endpoint,
+            },
+            kind,
+        ),
+        CandidateMeta::Relay {
+            relay: id,
+            key: ProbeKey::from_token(&token.0),
+            tls,
+        },
+    )
 }
 
 impl Prober {
@@ -240,7 +266,8 @@ impl Prober {
         self.clock_trusted = trusted;
     }
 
-    /// 按已准入的成员和期望状态中的候选路径更新。候选列表没有变化的对端保留选路状态。
+    /// 按已准入的成员和期望状态中的候选路径更新。候选列表没有变化的对端保留选路状态。`tls` 是各 TLS
+    /// 中继在传输适配进程上的回环端口（[`crate::config::DesiredMesh::tls_endpoints`]）。
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -249,13 +276,14 @@ impl Prober {
         private_key: &PrivateKey,
         members: &BTreeMap<NodeId, Member>,
         paths: &BTreeMap<NodeId, PeerPathConfig>,
+        tls: &BTreeMap<NodeId, SocketAddr>,
     ) {
         let mut next = BTreeMap::new();
         self.monitored.clear();
         for (id, member) in members.iter().filter(|(id, _)| *id != own_id) {
             let config = paths.get(id);
             let candidates = config.map(|c| c.candidates.as_slice()).unwrap_or_default();
-            let (routes, meta) = routes(candidates);
+            let (routes, meta) = routes(candidates, tls);
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
             let previous = self
                 .peers
@@ -274,7 +302,13 @@ impl Prober {
                 (None, None) => (None, None),
             };
             for m in &meta {
-                if let CandidateMeta::Relay { relay, key } = m {
+                // 跟随方只测 UDP 中继：测量供对端估算经中继路径的另一段
+                if let CandidateMeta::Relay {
+                    relay,
+                    key,
+                    tls: false,
+                } = m
+                {
                     let endpoint = routes
                         .iter()
                         .find_map(|(r, _)| match r {
@@ -835,14 +869,14 @@ impl Prober {
         let Some((owner, pending, sent)) = self.outstanding.get(&seq).cloned() else {
             return;
         };
-        let (relay, key) = match pending {
+        let (relay, key, tls) = match pending {
             Pending::Monitor { relay } => match self.monitored.get(&relay) {
-                Some((_, key, _)) => (relay, key),
+                Some((_, key, _)) => (relay, key, false),
                 None => return,
             },
             Pending::Candidate { index, .. } => {
                 match self.peers.get(&owner).and_then(|p| p.meta.get(index)) {
-                    Some(CandidateMeta::Relay { relay, key }) => (*relay, key),
+                    Some(CandidateMeta::Relay { relay, key, tls }) => (*relay, key, *tls),
                     _ => return,
                 }
             }
@@ -853,7 +887,10 @@ impl Prober {
         }
         self.outstanding.remove(&seq);
         let rtt = at.saturating_duration_since(sent);
-        self.relay_stats.entry(relay).or_default().record_reply(rtt);
+        // 随隧道内应答带给对端的是本机到中继的 UDP 测量
+        if !tls {
+            self.relay_stats.entry(relay).or_default().record_reply(rtt);
+        }
         if let Pending::Candidate { index, local } = pending
             && let Some(peer) = self.peers.get_mut(&owner)
         {
@@ -1013,6 +1050,7 @@ mod tests {
                 &a_priv,
                 &members,
                 &paths(2, Reachability::Public, TOKEN_A, "198.51.100.2:41820"),
+                &BTreeMap::new(),
             );
             b.prober.update(
                 &b.id,
@@ -1020,6 +1058,7 @@ mod tests {
                 &b_priv,
                 &members,
                 &paths(1, Reachability::DialOnly, TOKEN_B, "203.0.113.1:41820"),
+                &BTreeMap::new(),
             );
             for node in [&mut a, &mut b] {
                 let peer = if node.id == node_id(1) {
@@ -1293,6 +1332,7 @@ mod tests {
                 &a_priv,
                 &members,
                 &paths(2, vec![relay(0, TOKEN_A), relay(1, TOKEN_A)]),
+                &BTreeMap::new(),
             );
             b.prober.update(
                 &b.id,
@@ -1300,6 +1340,7 @@ mod tests {
                 &b_priv,
                 &members,
                 &paths(1, vec![relay(1, TOKEN_B), relay(0, TOKEN_B)]),
+                &BTreeMap::new(),
             );
             let now = Instant::now();
             for (node, peer) in [(&mut a, node_id(2)), (&mut b, node_id(1))] {

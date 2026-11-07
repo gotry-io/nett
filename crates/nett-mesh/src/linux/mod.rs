@@ -220,6 +220,10 @@ impl DataPlane for KernelWireGuard {
             .map_err(kernel("set peer endpoint"))
     }
 
+    fn guard_tls_ports(&mut self, wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError> {
+        nft::set_tls_guard(wg_port, idle).map_err(kernel("guard idle TLS ports"))
+    }
+
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {
         let ifindex = self.ifindex.ok_or_else(|| DataPlaneError::Protocol {
             op: "re-handshake",

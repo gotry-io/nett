@@ -58,16 +58,25 @@ const LOSS_WINDOW: usize = 10;
 const RTT_ALPHA: f64 = 0.25;
 /// 得分中的丢包惩罚：每 1% 丢包相当于 5 毫秒。
 const LOSS_PENALTY_MS: f64 = 500.0;
-/// 路径类型偏好（毫秒），越小越优（第 8.1 节）。
+/// 路径类型偏好与传输惩罚（毫秒），越小越优（第 8.1 节）：TLS 在经中继的偏好之上再加 20 毫秒。
 const RELAY_PENALTY_MS: f64 = 10.0;
+const TLS_PENALTY_MS: f64 = 20.0;
 
-/// 路径类型，从优到劣（第 8.2 节）。
+/// 路径类型，从优到劣（第 8.2 节）：同一路径上 UDP 优于 TLS。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Lan,
     Direct,
     Relay,
+    /// 经中继的 TLS 传输（design/mesh.md 第 5.3 节）。
+    RelayTls,
+}
+
+impl PathKind {
+    pub fn via_relay(self) -> bool {
+        matches!(self, PathKind::Relay | PathKind::RelayTls)
+    }
 }
 
 /// 一条路径在 WireGuard 中对应的 endpoint。
@@ -147,10 +156,10 @@ impl PathStats {
 
     /// 得分（毫秒，越小越好）：往返时间 + 丢包惩罚 + 抖动 + 路径类型偏好（第 8.1 节）。
     pub fn score(&self, kind: PathKind) -> Option<f64> {
-        let type_penalty = if kind == PathKind::Relay {
-            RELAY_PENALTY_MS
-        } else {
-            0.0
+        let type_penalty = match kind {
+            PathKind::Lan | PathKind::Direct => 0.0,
+            PathKind::Relay => RELAY_PENALTY_MS,
+            PathKind::RelayTls => RELAY_PENALTY_MS + TLS_PENALTY_MS,
         };
         self.rtt_ms
             .map(|rtt| rtt + self.loss_rate() * LOSS_PENALTY_MS + self.jitter_ms + type_penalty)
@@ -483,7 +492,7 @@ impl PeerPaths {
                         since: now,
                     };
                     // 当前路径经中继时也探测这个中继：它若还能应答，说明是它丢了这条连接的索引
-                    let current_is_relay = self.current_kind() == PathKind::Relay;
+                    let current_is_relay = self.current_kind().via_relay();
                     for index in 0..self.candidates.len() {
                         if self.role != Role::FollowTogether
                             && (index != self.current || current_is_relay)
@@ -637,7 +646,7 @@ impl PeerPaths {
                 return Some(Action::Lost);
             }
             let current = &self.candidates[self.current];
-            if current.kind == PathKind::Relay
+            if current.kind.via_relay()
                 && !self.rehandshake_tried
                 && current.last_reply.is_some_and(|t| t >= since)
             {
@@ -696,6 +705,14 @@ impl PeerPaths {
             .map(|(i, _)| i);
         let target = best?;
         self.record_failure(now);
+        // 疑似故障以来没有应答的候选，之前的连续应答已经作废：否则还没超时的探测会让一条刚刚不通的
+        // 更优路径看起来仍然健康，切走之后立刻又被切回
+        for c in &mut self.candidates {
+            if !c.last_reply.is_some_and(|t| t >= fresh_since) {
+                c.stats.consecutive_successes = 0;
+                c.healthy_since = None;
+            }
+        }
         Some(self.decide(target, reason))
     }
 
@@ -1429,5 +1446,34 @@ mod tests {
         sim.up[0] = true;
         sim.run(Duration::from_secs(60));
         assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+    }
+
+    fn relay_tls(n: u8) -> Route {
+        Route::Relay {
+            relay: KeyId([n; 8]),
+            endpoint: format!("127.0.0.1:{}", 41830 + u16::from(n))
+                .parse()
+                .expect("addr"),
+        }
+    }
+
+    #[test]
+    fn falls_back_to_tls_and_stays_while_udp_is_blocked() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+            (relay_tls(1), PathKind::RelayTls),
+        ]);
+        sim.run(Duration::from_secs(40));
+        // UDP 全部被拦：直连和 UDP 中继都不通，只剩 TLS
+        sim.up[0] = false;
+        sim.up[1] = false;
+        sim.run(Duration::from_secs(10));
+        let after: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(
+            after,
+            vec![(relay_tls(1), SwitchReason::Unreachable)],
+            "{after:?}"
+        );
     }
 }

@@ -91,4 +91,7 @@ pub trait DataPlane: Send {
 
     /// 删除对端再按 `peer` 加回：下一个数据包触发新的握手，让新中继建立索引（design/mesh.md 第 8.4 节）。
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError>;
+
+    /// 丢弃从这些闲置的 TLS 回环端口进入 WireGuard 端口的包（design/mesh.md 第 5.3 节），替换之前的设置。
+    fn guard_tls_ports(&mut self, wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError>;
 }
