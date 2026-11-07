@@ -1,13 +1,11 @@
 //! `nett relay`（实验构建）：中继分配读自本地文件，收到 `SIGTERM` 或 `SIGINT` 时退出。
 
 use std::io::IsTerminal as _;
-use std::net::UdpSocket;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, bail};
 use nett_relay::lab::RelayConfig;
+use nett_relay::server::{TlsIngress, serve, tls_acceptor, tls_listener};
 use tokio::signal::unix::{SignalKind, signal};
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
@@ -32,35 +30,42 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let config: RelayConfig =
         serde_json::from_slice(&text).context("parsing the relay assignment")?;
     let relay = config.relay().context("relay assignment")?;
-    let socket =
-        UdpSocket::bind(config.listen).with_context(|| format!("binding {}", config.listen))?;
-    tracing::info!(listen = %config.listen, members = config.members.len(), "relay started");
-
-    let stop = Arc::new(AtomicBool::new(false));
-    let worker_stop = stop.clone();
-    let worker = std::thread::Builder::new()
-        .name("nett-relay".into())
-        .spawn(move || nett_relay::server::serve(&socket, relay, &worker_stop, state.as_deref()))
-        .context("starting the relay thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting the async runtime")?;
-    runtime.block_on(async {
+    runtime.block_on(async move {
+        let udp = tokio::net::UdpSocket::bind(config.listen)
+            .await
+            .with_context(|| format!("binding {}", config.listen))?;
+        let tls = match &config.tls {
+            Some(doc) => {
+                let acceptor = tls_acceptor(&doc.cert, &doc.key).context("TLS ingress")?;
+                let listener =
+                    tls_listener(doc.listen).with_context(|| format!("binding {}", doc.listen))?;
+                Some(TlsIngress { listener, acceptor })
+            }
+            None => None,
+        };
+        tracing::info!(
+            listen = %config.listen,
+            tls = ?config.tls.as_ref().map(|t| t.listen),
+            members = config.members.len(),
+            "relay started"
+        );
         let mut terminate =
             signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
         let mut interrupt =
             signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
-        tokio::select! {
-            _ = terminate.recv() => {}
-            _ = interrupt.recv() => {}
-        }
-        anyhow::Ok(())
-    })?;
-    stop.store(true, Ordering::Relaxed);
-    match worker.join() {
-        Ok(result) => result.context("relay socket"),
-        Err(_) => bail!("the relay thread panicked; this is a bug"),
-    }
+        let shutdown = async move {
+            tokio::select! {
+                _ = terminate.recv() => {}
+                _ = interrupt.recv() => {}
+            }
+        };
+        serve(udp, tls, relay, state.as_deref(), shutdown)
+            .await
+            .context("relay socket")
+    })
 }

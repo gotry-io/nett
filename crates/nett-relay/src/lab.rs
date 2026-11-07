@@ -2,6 +2,7 @@
 //! 组网进程提供（design/mesh.md 第 5.2 节）。
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use nett_trust::keys::X25519PublicKey;
 use serde::{Deserialize, Serialize};
@@ -12,8 +13,20 @@ use crate::relay::{AssignedMember, AssignmentError, Relay};
 #[serde(deny_unknown_fields)]
 pub struct RelayConfig {
     pub listen: SocketAddr,
+    /// TLS（WebSocket）入口（design/mesh.md 第 5.3 节）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsDoc>,
     pub members: Vec<MemberDoc>,
     pub connections: Vec<[X25519PublicKey; 2]>,
+}
+
+/// TLS 入口的监听地址与 PEM 格式的证书链、私钥文件。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsDoc {
+    pub listen: SocketAddr,
+    pub cert: PathBuf,
+    pub key: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
