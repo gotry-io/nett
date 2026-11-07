@@ -339,6 +339,7 @@ dependencies = [
  "nett-core",
  "nett-mesh",
  "nett-relay",
+ "nett-transport",
  "serde_json",
  "tokio",
  "tracing",
@@ -423,6 +424,18 @@ dependencies = [
 [[package]]
 name = "nett-transport"
 version = "0.0.0"
+dependencies = [
+ "futures-util",
+ "nett-core",
+ "ring",
+ "rustls",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tracing",
+]
 
 [[package]]
 name = "nett-trust"
