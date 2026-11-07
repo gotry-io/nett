@@ -115,6 +115,46 @@ fn events(node: &LabNode) -> Vec<Value> {
         .collect()
 }
 
+/// 出错时的现场：各节点最近的事件与日志、WireGuard 对端的状态（endpoint、最近一次握手、收发字节），
+/// 附在错误信息里，CI 的日志中就能看到。
+fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
+    let tail = |path: &Path, n: usize| -> String {
+        let text = std::fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(n)..].join("\n    ")
+    };
+    let mut out = String::from("lab state:");
+    for node in nodes {
+        out.push_str(&format!("\n  [{}]", node.name));
+        for (file, n) in [
+            ("events.jsonl", 8),
+            ("mesh.log", 4),
+            ("relay.log", 4),
+            ("transport.log", 4),
+        ] {
+            let path = node.dir.join(file);
+            if path.exists() {
+                out.push_str(&format!("\n   {file}:\n    {}", tail(&path, n)));
+            }
+        }
+        // 只读不含密钥的字段：`wg show ... dump` 的第一行有接口私钥（硬性规则 10）
+        if let Some(net) = lab.underlay.node(&node.name) {
+            for field in ["endpoints", "latest-handshakes", "transfer"] {
+                if let Ok(text) = run(
+                    "ip",
+                    ["netns", "exec", &net.netns, "wg", "show", "nett0", field],
+                ) {
+                    out.push_str(&format!(
+                        "\n   wg {field}:\n    {}",
+                        text.trim().replace('\n', "\n    ")
+                    ));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn count(events: &[Value], kind: &str) -> usize {
     events.iter().filter(|e| e["event"] == kind).count()
 }
@@ -1110,7 +1150,8 @@ fn nett_failover_once(
                 .map(|n| (n.netns.clone(), "eth0".to_owned()))
         })
         .collect();
-    let mut run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links, cut)?;
+    let mut run = failover_run(&mut lab, out, "nett", b.mesh_ipv4.into(), links, cut)
+        .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
     let a = generated
         .nodes
         .iter()
@@ -1405,7 +1446,8 @@ fn nett_relay_fault_once(
             ),
             RelayFault::Restart => lab.restart_relay(relays[i], nett),
         },
-    )?;
+    );
+    let run = run.map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
     drop(lab);
     Ok(run)
 }
@@ -1796,18 +1838,21 @@ pub fn wave(
             (Some(a), Some(b)) => Some([a, b]),
             _ => None,
         };
-        runs.push(wave_run(
-            &mut lab,
-            &dir,
-            "nett",
-            b.mesh_ipv4.into(),
-            &links,
-            (wave, duration, relay_addrs),
-            |lab, i, netem| match netem {
-                Some(n) => crate::fault::set_link(&lab.underlay, relays[i], n),
-                None => crate::fault::clear_link(&lab.underlay, relays[i]),
-            },
-        )?);
+        runs.push(
+            wave_run(
+                &mut lab,
+                &dir,
+                "nett",
+                b.mesh_ipv4.into(),
+                &links,
+                (wave, duration, relay_addrs),
+                |lab, i, netem| match netem {
+                    Some(n) => crate::fault::set_link(&lab.underlay, relays[i], n),
+                    None => crate::fault::clear_link(&lab.underlay, relays[i]),
+                },
+            )
+            .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?,
+        );
         drop(lab);
         if !with_tailscale {
             continue;
@@ -2399,7 +2444,8 @@ fn nett_pair_once(
         .collect();
     let monitor = PathMonitor::start(links);
     let (probe_file, tcp_file) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
-    let current = settle_on_relay(&monitor, &probe_file, "nett")?;
+    let current = settle_on_relay(&monitor, &probe_file, "nett")
+        .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
     let fault_ms = now_ms();
     let (watch, netem) = match fault {
         PairFault::Slow => (
