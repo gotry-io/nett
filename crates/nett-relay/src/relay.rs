@@ -400,7 +400,9 @@ impl Relay {
         }
     }
 
-    /// 验证一个中继探测，返回发出它的成员和应答。应答中回显的来源地址：经 TLS 时没有映射地址可言。
+    /// 验证一个中继探测，返回发出它的成员和应答。应答中回显这个成员绑定的 WireGuard 地址，即它的映射
+    /// 地址（design/mesh.md 第 6.1 节）：探测本身从组网进程自己的端口发出，来源不是 WireGuard 的映射。
+    /// 还没有绑定 UDP 地址时回显探测的来源；经 TLS 时没有映射地址可言。
     fn verify_probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Option<(usize, Vec<u8>)> {
         let head = OuterProbe::peek(packet)?;
         let index = self.members.iter().position(|m| m.key_id == head.key_id)?;
@@ -409,9 +411,10 @@ impl Relay {
         if probe.kind != RELAY_PROBE {
             return None;
         }
-        let observed = match from {
-            PeerAddr::Udp(addr) => addr,
-            PeerAddr::Tls(_) => probe::UNSPECIFIED,
+        let observed = match (member.bound, from) {
+            (Some(PeerAddr::Udp(bound)), _) => bound,
+            (_, PeerAddr::Udp(addr)) => addr,
+            (_, PeerAddr::Tls(_)) => probe::UNSPECIFIED,
         };
         let reply = probe
             .reply(member.key_id, observed)
@@ -813,6 +816,27 @@ mod tests {
             r.probe(from, &probe.encode(&key), 100_000),
             Outcome::Drop(Drop::BadProbe)
         );
+    }
+
+    #[test]
+    fn probe_replies_echo_the_bound_wireguard_address() {
+        let mut r = relay();
+        let now = Instant::now();
+        handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
+        let key = ProbeKey::from_token(&[2; 32]);
+        let probe = OuterProbe {
+            kind: RELAY_PROBE,
+            key_id: KeyId::of(&B),
+            seq: 1,
+            sent_ms: 1_000,
+        };
+        // 探测从组网进程自己的端口发出；回显的是握手时绑定的 WireGuard 映射
+        let Outcome::Reply(reply) = r.probe(addr("203.0.113.5:40999"), &probe.encode(&key), 1_000)
+        else {
+            panic!("expected a reply");
+        };
+        let decoded = OuterReply::verify(&reply, &key).expect("valid reply");
+        assert_eq!(decoded.observed, sock("203.0.113.5:50000"));
     }
 
     #[test]
