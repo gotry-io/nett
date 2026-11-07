@@ -103,6 +103,24 @@ jobs:
           --topology crates/nett-lab/topologies/fallback.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-fallback"
+      - name: 场景 10：两端锥形 NAT，打洞
+        run: >-
+          sudo ./target/debug/nett-lab run punch
+          --topology crates/nett-lab/topologies/punch-cone.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-punch-cone"
+      - name: 场景 11：两端 IPv6 有状态防火墙，打洞
+        run: >-
+          sudo ./target/debug/nett-lab run punch
+          --topology crates/nett-lab/topologies/punch-ipv6.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-punch-ipv6"
+      - name: 场景 13：两端对称型 NAT，不尝试打洞
+        run: >-
+          sudo ./target/debug/nett-lab run punch
+          --topology crates/nett-lab/topologies/punch-symmetric.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-punch-symmetric"
       - name: 场景 16：双方都是 dial-only，经隧道提议后两端一起切换
         run: >-
           sudo ./target/debug/nett-lab run dial-only-switch
