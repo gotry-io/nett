@@ -1,12 +1,17 @@
 # 与对比对象 Tailscale 的验收对比（design/prototype.md 第 5.1、6、7 节）：手动触发，不在每次推送时运行。
 # 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类每种 5 分钟、各 3 次；场景 17 的时钟误差
 # 分 1.5 秒（按时间片）与 5 秒（随机间隔重试）两组。
-# 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。
+# 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。手动触发时可以只选一个场景。
 
 name: Lab baseline
 
 on:
   workflow_dispatch:
+    inputs:
+      scenario:
+        description: 只跑这一个场景（矩阵中的名称，例如 2-relay-loss）；留空跑全部
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -62,17 +67,23 @@ jobs:
           - name: 17-dial-only-outage-skewed
             run: dial-only-outage --clock-skew 5000 --topology crates/nett-lab/topologies/dial-pair.toml --repeat 20
     name: ${{ matrix.name }}
+    env:
+      SELECTED: ${{ inputs.scenario == '' || inputs.scenario == matrix.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.SELECTED == 'true'
         with:
           persist-credentials: false
       - name: 安装 rust-toolchain.toml 指定的工具链
+        if: env.SELECTED == 'true'
         run: rustup toolchain install
       - name: 安装实验网络用到的工具
+        if: env.SELECTED == 'true'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 openssl tcpdump
       - name: 安装 Tailscale、Headscale 与 derper（固定版本，校验哈希）
+        if: env.SELECTED == 'true'
         run: |
           bin="$RUNNER_TEMP/baseline-bin"
           mkdir -p "$bin"
@@ -93,11 +104,14 @@ jobs:
           GOBIN="$bin" "$RUNNER_TEMP/go/bin/go" install "tailscale.com/cmd/derper@v${TAILSCALE_VERSION}"
           echo "$bin" >> "$GITHUB_PATH"
       - name: 确认内核 WireGuard 可用
+        if: env.SELECTED == 'true'
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
       - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
+        if: env.SELECTED == 'true'
       - name: ${{ matrix.name }}
+        if: env.SELECTED == 'true'
         run: >-
           sudo env "PATH=$PATH" ./target/debug/nett-lab run ${{ matrix.run }}
           --nett ./target/debug/nett
