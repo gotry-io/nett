@@ -15,6 +15,7 @@ pub mod path;
 pub mod prefix;
 pub mod probe;
 pub mod prober;
+pub mod punch;
 pub mod run;
 #[cfg(test)]
 mod testutil;

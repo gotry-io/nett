@@ -11,12 +11,15 @@ use nett_trust::admission::Member;
 use nett_trust::keys::X25519PublicKey;
 
 use crate::config::{Candidate, PeerPathConfig, ProbeToken, Reachability};
+use crate::event::Event;
 use crate::key::PrivateKey;
 use crate::path::{Action, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason};
 use crate::probe::{
-    self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, ProbeKey, RELAY_PROBE,
-    RelayReport, SWITCH_ACK, SWITCH_PROPOSAL, SwitchMessage, TUNNEL_PROBE_PORT,
+    self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, PUNCH_ACK, PUNCH_PROPOSAL,
+    ProbeKey, PunchMessage, RELAY_PROBE, RelayReport, SWITCH_ACK, SWITCH_PROPOSAL, SwitchMessage,
+    SwitchTarget, TUNNEL_PROBE_PORT,
 };
+use crate::punch::{Observations, Punch, PunchEvent};
 
 /// 发出的探测等待应答的上限，过后从对照表中删除（各状态机自己判定丢失）。
 const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
@@ -83,12 +86,16 @@ struct Peer {
     public_key: X25519PublicKey,
     mesh_addrs: [IpAddr; 2],
     direct_key: Option<ProbeKey>,
+    /// 前 `configured` 条来自期望状态，之后是打通的直连。
     routes: Vec<(Route, PathKind)>,
     meta: Vec<CandidateMeta>,
+    configured: usize,
     /// 决定方，以及双方都是 `dial-only` 时的两端，才有选路状态。
     paths: Option<PeerPaths>,
     /// 双方都是 `dial-only` 时两端一起切换的状态。
     together: Option<Together>,
+    /// 双方都是 `dial-only`、配置了打洞候选时的打洞状态（design/mesh.md 第 6.1 节）。
+    punch: Option<Punch>,
     reports: HashMap<KeyId, (Duration, f64)>,
     last_activity: Option<Instant>,
 }
@@ -109,7 +116,7 @@ struct Together {
 #[derive(Debug, Clone)]
 struct Proposal {
     round: u32,
-    relay: KeyId,
+    target: SwitchTarget,
     index: usize,
     reason: SwitchReason,
     next_send: Instant,
@@ -126,9 +133,18 @@ struct Rotation {
 
 #[derive(Debug, Clone, Copy)]
 enum Pending {
-    Tunnel { local: u32 },
-    Candidate { index: usize, local: u32 },
-    Monitor { relay: KeyId },
+    Tunnel {
+        local: u32,
+    },
+    Candidate {
+        index: usize,
+        local: u32,
+    },
+    Monitor {
+        relay: KeyId,
+    },
+    /// 打洞探测。
+    Punch,
 }
 
 pub struct Prober {
@@ -149,6 +165,10 @@ pub struct Prober {
     ready: Vec<Switch>,
     /// 本机时钟误差在 2 秒以内：轮换按时间片，否则按随机间隔（第 8.4 节）。
     clock_trusted: bool,
+    /// `public` 节点告诉本机的映射地址（design/mesh.md 第 6.1 节）。
+    observations: Observations,
+    /// 交给调用方上报的事件。
+    events: Vec<Event>,
 }
 
 /// 这一端在这一对中的角色（design/mesh.md 第 8.3、8.4 节）；`None` 表示经漫游跟随的一方。
@@ -203,6 +223,8 @@ fn routes(
             Candidate::RelayTls { relay, token, .. } => {
                 Some(relay_route(relay, *tls.get(relay)?, token, true))
             }
+            // 打洞的地址在打洞时交换，打通之后才成为一条候选
+            Candidate::Punch => None,
         })
         .unzip()
 }
@@ -249,7 +271,14 @@ impl Prober {
             round: 0,
             ready: Vec::new(),
             clock_trusted: false,
+            observations: Observations::default(),
+            events: Vec::new(),
         }
+    }
+
+    /// 取走要上报的事件。
+    pub fn take_events(&mut self) -> Vec<Event> {
+        std::mem::take(&mut self.events)
     }
 
     /// 有对端在高频探测刚切走的更优路径（design/mesh.md 第 7 节）。
@@ -283,18 +312,36 @@ impl Prober {
         for (id, member) in members.iter().filter(|(id, _)| *id != own_id) {
             let config = paths.get(id);
             let candidates = config.map(|c| c.candidates.as_slice()).unwrap_or_default();
-            let (routes, meta) = routes(candidates, tls);
+            let (mut routes, mut meta) = routes(candidates, tls);
+            let configured = routes.len();
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
-            let previous = self
-                .peers
-                .remove(id)
-                .filter(|p| p.routes == routes && p.public_key == member.mesh_public_key);
+            let punch_wanted =
+                role.is_some_and(Role::together) && candidates.contains(&Candidate::Punch);
+            let previous = self.peers.remove(id).filter(|p| {
+                p.routes[..p.configured] == routes[..] && p.public_key == member.mesh_public_key
+            });
             let kept = previous
                 .as_ref()
-                .and_then(|p| p.paths.as_ref().map(|paths| (paths, &p.together)))
-                .filter(|(paths, _)| Some(paths.role()) == role);
+                .and_then(|p| p.paths.as_ref().map(|paths| (paths, &p.together, &p.punch)))
+                .filter(|(paths, _, _)| Some(paths.role()) == role);
+            // 保留选路状态时，打通的直连也留下
+            if kept.is_some()
+                && let Some(prev) = &previous
+            {
+                for extra in &prev.routes[prev.configured..] {
+                    routes.push(*extra);
+                    meta.push(CandidateMeta::Direct);
+                }
+            }
+            let punch = match kept {
+                Some((_, _, punch)) if punch_wanted => {
+                    punch.clone().or_else(|| Some(Punch::new(Instant::now())))
+                }
+                _ if punch_wanted => Some(Punch::new(Instant::now())),
+                _ => None,
+            };
             let (paths, together) = match (kept, role) {
-                (Some((paths, together)), _) => (Some(paths.clone()), together.clone()),
+                (Some((paths, together, _)), _) => (Some(paths.clone()), together.clone()),
                 (None, Some(role)) => (
                     PeerPaths::new(routes.clone(), role),
                     role.together().then(Together::default),
@@ -335,8 +382,10 @@ impl Prober {
                     direct_key: ProbeKey::direct(private_key, &member.mesh_public_key),
                     routes,
                     meta,
+                    configured,
                     paths,
                     together,
+                    punch,
                     reports: previous
                         .as_ref()
                         .map(|p| p.reports.clone())
@@ -504,6 +553,7 @@ impl Prober {
             }
             // 新的提议立即发出，等待中的按间隔重发
             out.extend(self.send_proposal(&id, now));
+            out.extend(self.punch_tick(&id, now, now_ms));
         }
 
         // 跟随方也测中继，供对端估算经中继路径的另一段
@@ -545,7 +595,7 @@ impl Prober {
         self.round
     }
 
-    /// 决定方要切到第 `index` 个候选：目标是中继时开始提议；否则（直连）直接切换。
+    /// 决定方要切到第 `index` 个候选：目标是中继或打通的直连时开始提议；其他直连直接切换。
     fn propose(
         &mut self,
         id: &NodeId,
@@ -557,11 +607,18 @@ impl Prober {
         let peer = self.peers.get_mut(id)?;
         let paths = peer.paths.as_mut()?;
         let together = peer.together.as_mut()?;
-        match peer.routes.get(index) {
-            Some((Route::Relay { relay, .. }, _)) => {
+        let target = match peer.routes.get(index) {
+            Some((Route::Relay { relay, .. }, _)) => Some(SwitchTarget::Relay(*relay)),
+            Some((Route::Direct(_), _)) if paths.punched_index() == Some(index) => {
+                Some(SwitchTarget::Punched)
+            }
+            _ => None,
+        };
+        match target {
+            Some(target) => {
                 together.proposal = Some(Proposal {
                     round,
-                    relay: *relay,
+                    target,
                     index,
                     reason,
                     next_send: now,
@@ -569,7 +626,7 @@ impl Prober {
                 });
                 None
             }
-            _ => {
+            None => {
                 paths.set_hold(false);
                 let action = paths.adopt(index, reason)?;
                 switch_of(id, peer.public_key, action)
@@ -609,7 +666,7 @@ impl Prober {
         let message = SwitchMessage {
             kind: SWITCH_PROPOSAL,
             round: p.round,
-            relay: p.relay,
+            target: p.target,
         };
         vec![Outgoing::Tunnel {
             to,
@@ -739,6 +796,15 @@ impl Prober {
                 }
                 vec![]
             }
+            (Incoming::Tunnel, Some(PUNCH_PROPOSAL | PUNCH_ACK)) => {
+                let Some(message) = PunchMessage::decode(data) else {
+                    return vec![];
+                };
+                let Some(sender) = self.by_mesh_addr.get(&from.ip()).cloned() else {
+                    return vec![];
+                };
+                self.on_punch_message(&sender, from, message, at)
+            }
             (Incoming::Tunnel, Some(SWITCH_PROPOSAL | SWITCH_ACK)) => {
                 let Some(message) = SwitchMessage::decode(data) else {
                     return vec![];
@@ -763,6 +829,15 @@ impl Prober {
                     return vec![];
                 };
                 let reply = probe.reply(self.own_key_id, from).encode(key);
+                // 打洞期间：对方到本机这个方向通了（design/mesh.md 第 6.1 节）
+                if let Some(peer) = self
+                    .by_key_id
+                    .get(&head.key_id)
+                    .and_then(|id| self.peers.get_mut(id))
+                    && let (Some(punch), Some(paths)) = (peer.punch.as_mut(), peer.paths.as_ref())
+                {
+                    punch.on_probe_from(from, paths.role() == Role::FollowTogether);
+                }
                 vec![Outgoing::Direct {
                     to: from,
                     data: reply.to_vec(),
@@ -782,12 +857,24 @@ impl Prober {
                 else {
                     return vec![];
                 };
-                if let Some((owner, Pending::Candidate { index, local }, _)) =
-                    self.outstanding.remove(&reply.seq)
-                    && owner == id
-                    && let Some(paths) = self.peers.get_mut(&owner).and_then(|p| p.paths.as_mut())
-                {
-                    paths.on_candidate_reply(index, local, at, None);
+                match self.outstanding.remove(&reply.seq) {
+                    Some((owner, Pending::Candidate { index, local }, _)) if owner == id => {
+                        // 对方看到的来源就是本机 WireGuard 端口的映射地址（design/mesh.md 第 6.1 节）
+                        self.observations.record(from.ip(), reply.observed, at);
+                        if let Some(paths) =
+                            self.peers.get_mut(&owner).and_then(|p| p.paths.as_mut())
+                        {
+                            paths.on_candidate_reply(index, local, at, None);
+                        }
+                    }
+                    Some((owner, Pending::Punch, _)) if owner == id => {
+                        if let Some(punch) =
+                            self.peers.get_mut(&owner).and_then(|p| p.punch.as_mut())
+                        {
+                            punch.on_reply_from(from, at);
+                        }
+                    }
+                    _ => {}
                 }
                 vec![]
             }
@@ -817,7 +904,11 @@ impl Prober {
         };
         match (message.kind, paths.role()) {
             (SWITCH_PROPOSAL, Role::FollowTogether) => {
-                let Some(index) = paths.relay_index(message.relay) else {
+                let index = match message.target {
+                    SwitchTarget::Relay(relay) => paths.relay_index(relay),
+                    SwitchTarget::Punched => paths.punched_index(),
+                };
+                let Some(index) = index else {
                     return vec![];
                 };
                 if message.round < together.accepted_round {
@@ -840,7 +931,7 @@ impl Prober {
             (SWITCH_ACK, Role::DecideTogether) => {
                 let Some(p) = together
                     .proposal
-                    .take_if(|p| p.round == message.round && p.relay == message.relay)
+                    .take_if(|p| p.round == message.round && p.target == message.target)
                 else {
                     return vec![];
                 };
@@ -855,6 +946,135 @@ impl Prober {
             }
             _ => vec![],
         }
+    }
+
+    /// 打洞提议与确认（design/mesh.md 第 6.1 节）。来源已由 WireGuard 认证；只接受这一对中对方角色的消息。
+    fn on_punch_message(
+        &mut self,
+        sender: &NodeId,
+        from: SocketAddr,
+        message: PunchMessage,
+        at: Instant,
+    ) -> Vec<Outgoing> {
+        let own = self.observations.own(at);
+        let Some(peer) = self.peers.get_mut(sender) else {
+            return vec![];
+        };
+        let (Some(paths), Some(punch)) = (peer.paths.as_ref(), peer.punch.as_mut()) else {
+            return vec![];
+        };
+        match (message.kind, paths.role()) {
+            (PUNCH_PROPOSAL, Role::FollowTogether) => punch
+                .on_proposal(&message, &own, at)
+                .map(|ack| Outgoing::Tunnel {
+                    to: from,
+                    data: ack.encode().to_vec(),
+                })
+                .into_iter()
+                .collect(),
+            (PUNCH_ACK, Role::DecideTogether) => {
+                punch.on_ack(&message, &own, at);
+                vec![]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// 打洞的推进：决定方在适合时提议；打洞期间每 200 毫秒从 WireGuard 端口向对方的地址发探测；打通的
+    /// 地址作为一条直连候选加入选路状态（design/mesh.md 第 6.1 节）。
+    fn punch_tick(&mut self, id: &NodeId, now: Instant, now_ms: u64) -> Vec<Outgoing> {
+        let own = self.observations.own(now);
+        let next_round = self
+            .round
+            .wrapping_add(1)
+            .max(u32::try_from(now_ms / 1000).unwrap_or(u32::MAX));
+        let mut round_used = false;
+        let Some(peer) = self.peers.get_mut(id) else {
+            return vec![];
+        };
+        let to = SocketAddr::new(peer.mesh_addrs[0], TUNNEL_PROBE_PORT);
+        let (Some(paths), Some(punch), Some(together)) = (
+            peer.paths.as_mut(),
+            peer.punch.as_mut(),
+            peer.together.as_ref(),
+        ) else {
+            return vec![];
+        };
+        let mut out = Vec::new();
+        if paths.role() == Role::DecideTogether {
+            let eligible = paths.tunnel_established()
+                && paths.current_kind().via_relay()
+                && together.proposal.is_none()
+                && together.rotation.is_none();
+            if let Some(proposal) = punch.decider_tick(now, eligible, &own, || {
+                round_used = true;
+                next_round
+            }) {
+                out.push(Outgoing::Tunnel {
+                    to,
+                    data: proposal.encode().to_vec(),
+                });
+            }
+        }
+        let targets = punch.probe_targets(now);
+        if let Some(addr) = punch.punched() {
+            let index = paths.set_punched(addr);
+            let route = (Route::Direct(addr), PathKind::Direct);
+            if index < peer.routes.len() {
+                peer.routes[index] = route;
+            } else {
+                peer.routes.push(route);
+                peer.meta.push(CandidateMeta::Direct);
+            }
+        }
+        let events = punch.take_events();
+        let key = peer.direct_key.clone();
+        if round_used {
+            self.round = next_round;
+        }
+        for event in events {
+            self.events.push(match event {
+                PunchEvent::Started {
+                    round,
+                    own,
+                    peer,
+                    targets,
+                } => Event::PunchStarted {
+                    node_id: id.clone(),
+                    round,
+                    nat: own,
+                    peer_nat: peer,
+                    targets,
+                },
+                PunchEvent::Succeeded { address } => Event::PunchSucceeded {
+                    node_id: id.clone(),
+                    address,
+                },
+                PunchEvent::Failed { reason } => Event::PunchFailed {
+                    node_id: id.clone(),
+                    reason: reason.to_owned(),
+                },
+            });
+        }
+        let Some(key) = key else {
+            return out;
+        };
+        for target in targets {
+            let Some(wire) = self.remember(id, Pending::Punch, now) else {
+                break;
+            };
+            let probe = OuterProbe {
+                kind: DIRECT_PROBE,
+                key_id: self.own_key_id,
+                seq: wire,
+                sent_ms: now_ms,
+            };
+            out.push(Outgoing::Direct {
+                to: target,
+                data: probe.encode(&key).to_vec(),
+            });
+        }
+        out
     }
 
     fn on_relay_reply(&mut self, data: &[u8], at: Instant) {
@@ -880,7 +1100,7 @@ impl Prober {
                     _ => return,
                 }
             }
-            Pending::Tunnel { .. } => return,
+            Pending::Tunnel { .. } | Pending::Punch => return,
         };
         if OuterReply::verify(data, key).is_none() {
             return;
@@ -1276,10 +1496,39 @@ mod tests {
         now: Instant,
         now_ms: u64,
         switches: Vec<(Instant, bool, Switch)>,
+        /// 两端各在一个端口受限的锥形 NAT 之后：映射地址固定；只有本机先向对方的地址发过包，对方的包
+        /// 才进得来。
+        mapped: [SocketAddr; 2],
+        opened: [std::collections::HashSet<SocketAddr>; 2],
+        direct_sent: [usize; 2],
     }
 
     impl Pair {
         fn new() -> Self {
+            Self::build(false)
+        }
+
+        /// 配置了打洞候选；两端都从两个 `public` 节点得知了自己的映射地址（`symmetric` 时两个观察者看到的
+        /// 端口不同）。
+        fn with_punch(symmetric: bool) -> Self {
+            let mut pair = Self::build(true);
+            let now = pair.now;
+            for (i, node) in [&mut pair.a, &mut pair.b].into_iter().enumerate() {
+                let m = pair.mapped[i];
+                let r1: IpAddr = "198.51.100.9".parse().expect("ip");
+                let r2: IpAddr = "198.51.100.10".parse().expect("ip");
+                node.prober.observations.record(r1, m, now);
+                let other = if symmetric {
+                    SocketAddr::new(m.ip(), m.port() + 1)
+                } else {
+                    m
+                };
+                node.prober.observations.record(r2, other, now);
+            }
+            pair
+        }
+
+        fn build(punch: bool) -> Self {
             let mesh = Mesh::new(&[1, 2]);
             let (a_priv, a_pub) = keypair(1);
             let (b_priv, b_pub) = keypair(2);
@@ -1331,7 +1580,11 @@ mod tests {
                 Reachability::DialOnly,
                 &a_priv,
                 &members,
-                &paths(2, vec![relay(0, TOKEN_A), relay(1, TOKEN_A)]),
+                &paths(2, {
+                    let mut c = vec![relay(0, TOKEN_A), relay(1, TOKEN_A)];
+                    c.extend(punch.then_some(Candidate::Punch));
+                    c
+                }),
                 &BTreeMap::new(),
             );
             b.prober.update(
@@ -1339,7 +1592,11 @@ mod tests {
                 Reachability::DialOnly,
                 &b_priv,
                 &members,
-                &paths(1, vec![relay(1, TOKEN_B), relay(0, TOKEN_B)]),
+                &paths(1, {
+                    let mut c = vec![relay(1, TOKEN_B), relay(0, TOKEN_B)];
+                    c.extend(punch.then_some(Candidate::Punch));
+                    c
+                }),
                 &BTreeMap::new(),
             );
             let now = Instant::now();
@@ -1358,6 +1615,9 @@ mod tests {
                 // 时间片边界之后 1 秒
                 now_ms: 1_800_000_001_000 - 1_800_000_001_000 % ROTATION_SLOT_MS + 1_000,
                 switches: Vec::new(),
+                mapped: [addr("198.51.100.201:41820"), addr("198.51.100.202:41820")],
+                opened: Default::default(),
+                direct_sent: [0, 0],
             }
         }
 
@@ -1370,6 +1630,10 @@ mod tests {
 
         fn tunnel_up(&mut self, lossy: bool) -> bool {
             let (a, b) = self.endpoints();
+            // 打通的直连：两端都指向对方的映射地址
+            if a == Some(self.mapped[1]) && b == Some(self.mapped[0]) {
+                return true;
+            }
             let shared = a.filter(|_| a == b);
             let Some(i) = self.relays.iter().position(|r| Some(*r) == shared) else {
                 return false;
@@ -1438,7 +1702,39 @@ mod tests {
                         }
                     }
                 }
-                Outgoing::Direct { .. } => {}
+                Outgoing::Direct { to, data } => {
+                    let (src, dst) = if from_a { (0, 1) } else { (1, 0) };
+                    self.direct_sent[src] += 1;
+                    // 发出即在本机的 NAT 上打开到这个地址的映射
+                    self.opened[src].insert(to);
+                    if to != self.mapped[dst] || !self.opened[dst].contains(&self.mapped[src]) {
+                        return;
+                    }
+                    let from = self.mapped[src];
+                    let (sender, receiver) = if from_a {
+                        (&mut self.a, &mut self.b)
+                    } else {
+                        (&mut self.b, &mut self.a)
+                    };
+                    let replies =
+                        receiver
+                            .prober
+                            .on_packet(Incoming::Direct, from, &data, now, now_ms);
+                    for reply in replies {
+                        if let Outgoing::Direct { to, data } = reply
+                            && to == from
+                            && self.opened[src].contains(&self.mapped[dst])
+                        {
+                            sender.prober.on_packet(
+                                Incoming::Direct,
+                                self.mapped[dst],
+                                &data,
+                                now,
+                                now_ms,
+                            );
+                        }
+                    }
+                }
             }
         }
 
@@ -1560,7 +1856,7 @@ mod tests {
             SwitchMessage {
                 kind: SWITCH_PROPOSAL,
                 round,
-                relay,
+                target: SwitchTarget::Relay(relay),
             }
             .encode()
         };
@@ -1630,5 +1926,62 @@ mod tests {
                 "gap {gap:?}"
             );
         }
+    }
+
+    #[test]
+    fn dial_only_pair_punches_through_cone_nats_and_switches_together() {
+        let mut pair = Pair::with_punch(false);
+        pair.run(Duration::from_secs(15));
+        let (a, b) = pair.endpoints();
+        assert_eq!(
+            (a, b),
+            (Some(pair.mapped[1]), Some(pair.mapped[0])),
+            "{:?}",
+            pair.switches
+        );
+        let reasons: Vec<(bool, SwitchReason, bool)> = pair
+            .switches
+            .iter()
+            .map(|(_, from_a, s)| (*from_a, s.reason, s.rehandshake))
+            .collect();
+        // 决定方择优切过去，跟随方按提议切换；直连不需要重新握手
+        assert!(
+            reasons.contains(&(true, SwitchReason::BetterType, false)),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.contains(&(false, SwitchReason::Proposed, false)),
+            "{reasons:?}"
+        );
+        let events = pair.a.prober.take_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::PunchStarted { .. })),
+            "{events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::PunchSucceeded { .. })),
+            "{events:?}"
+        );
+        // 之后停在直连上
+        let before = pair.switches.len();
+        pair.run(Duration::from_secs(60));
+        assert_eq!(pair.switches.len(), before);
+    }
+
+    #[test]
+    fn both_symmetric_do_not_punch() {
+        let mut pair = Pair::with_punch(true);
+        pair.run(Duration::from_secs(20));
+        assert!(pair.switches.is_empty(), "{:?}", pair.switches);
+        assert_eq!(pair.direct_sent, [0, 0], "no punch probes");
+        let events = pair.a.prober.take_events();
+        assert!(
+            events.iter().any(|e| matches!(e, Event::PunchFailed { reason, .. } if reason == "both behind symmetric NAT")),
+            "{events:?}"
+        );
     }
 }

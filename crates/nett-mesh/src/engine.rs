@@ -235,6 +235,9 @@ impl<D: DataPlane> Engine<D> {
             return Vec::new();
         };
         let (out, switches) = prober.tick(now, now_ms);
+        for event in prober.take_events() {
+            events.emit(event);
+        }
         self.guard_idle_tls(events);
         for switch in switches {
             let result = if switch.rehandshake {

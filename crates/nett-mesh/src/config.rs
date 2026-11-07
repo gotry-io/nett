@@ -75,6 +75,8 @@ pub enum Candidate {
         fingerprint: CertFingerprint,
         token: ProbeToken,
     },
+    /// 尝试打洞直连（design/mesh.md 第 6.1 节）：双方都是 `dial-only`。地址在打洞时交换，不在这里。
+    Punch,
 }
 
 /// 传输适配进程的回环端口从这里起，按中继的节点 ID 排序依次分配（ADR 0013：由组网进程分配）。

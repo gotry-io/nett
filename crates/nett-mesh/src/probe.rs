@@ -3,7 +3,7 @@
 //! 首个字节是类型，与 WireGuard 的四种消息（1–4）都不同。隧道外的消息都是 64 字节、末尾 16 字节为
 //! 校验码；应答与探测等长，不能用来放大流量。格式不对或认证不过的包由调用方丢弃，不作任何响应。
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use nett_trust::keys::X25519PublicKey;
 use ring::{hkdf, hmac};
@@ -21,6 +21,8 @@ pub const DIRECT_PROBE: u8 = 0x82;
 pub const DIRECT_REPLY: u8 = 0x83;
 pub const SWITCH_PROPOSAL: u8 = 0x84;
 pub const SWITCH_ACK: u8 = 0x85;
+pub const PUNCH_PROPOSAL: u8 = 0x86;
+pub const PUNCH_ACK: u8 = 0x87;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 
 /// 隧道外消息的长度。
@@ -33,6 +35,7 @@ pub const MAX_CLOCK_SKEW_MS: u64 = 30_000;
 pub const MAX_RELAY_REPORTS: usize = 16;
 const TUNNEL_PROBE_LEN: usize = 8;
 const SWITCH_LEN: usize = 16;
+const PUNCH_LEN: usize = 32;
 const RELAY_REPORT_LEN: usize = 12;
 
 const DIRECT_KEY_LABEL: &[u8] = b"nett direct probe v1";
@@ -248,35 +251,131 @@ pub fn decode_tunnel_probe(b: &[u8]) -> Option<u32> {
         .then(|| u32::from_be_bytes([b[4], b[5], b[6], b[7]]))
 }
 
-/// 切换提议与确认（design/mesh.md 第 8.4 节）：`类型 | 0 | 0 | 0 | 轮次 | 目标中继的编号`。
-/// 经隧道收发，来源已由 WireGuard 认证。
+/// 切换的目标（design/mesh.md 第 8.4 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitchTarget {
+    /// 经这个中继（中继节点 ID 的编号）。
+    Relay(KeyId),
+    /// 这一对打通的直连（第 6.1 节）。
+    Punched,
+}
+
+/// 切换提议与确认：`类型 | 目标种类 | 0 | 0 | 轮次 | 目标中继的编号`。目标种类 0 为中继，1 为打通的
+/// 直连（中继编号为 0）。经隧道收发，来源已由 WireGuard 认证。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchMessage {
     pub kind: u8,
     pub round: u32,
-    pub relay: KeyId,
+    pub target: SwitchTarget,
 }
 
 impl SwitchMessage {
     pub fn encode(&self) -> [u8; SWITCH_LEN] {
         let mut b = [0u8; SWITCH_LEN];
         b[0] = self.kind;
+        if let SwitchTarget::Relay(relay) = self.target {
+            b[8..16].copy_from_slice(&relay.0);
+        } else {
+            b[1] = 1;
+        }
         b[4..8].copy_from_slice(&self.round.to_be_bytes());
-        b[8..16].copy_from_slice(&self.relay.0);
         b
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
         let b: &[u8; SWITCH_LEN] = b.try_into().ok()?;
-        if !matches!(b[0], SWITCH_PROPOSAL | SWITCH_ACK) || b[1..4] != [0; 3] {
+        if !matches!(b[0], SWITCH_PROPOSAL | SWITCH_ACK) || b[2..4] != [0; 2] {
             return None;
         }
         let mut relay = [0u8; 8];
         relay.copy_from_slice(&b[8..16]);
+        let target = match b[1] {
+            0 => SwitchTarget::Relay(KeyId(relay)),
+            1 if relay == [0; 8] => SwitchTarget::Punched,
+            _ => return None,
+        };
         Some(Self {
             kind: b[0],
             round: u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
-            relay: KeyId(relay),
+            target,
+        })
+    }
+}
+
+/// 本机所在 NAT 的类型（design/mesh.md 第 6.1 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NatType {
+    Unknown,
+    /// 映射与目的地址无关：两个 `public` 节点看到同一个映射地址。
+    Cone,
+    /// 每个目的地址一个映射。
+    Symmetric,
+}
+
+/// 打洞提议与确认（design/mesh.md 第 6.1 节）：
+/// `类型 | NAT 类型 | 地址标志 | 0 | 轮次 | IPv4 地址 | IPv4 端口 | IPv6 地址 | IPv6 端口`，共 32 字节。
+/// 地址标志的第 0 位表示有 IPv4 映射地址，第 1 位表示有 IPv6 地址；没有的字段为 0。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PunchMessage {
+    pub kind: u8,
+    pub round: u32,
+    pub nat: NatType,
+    pub v4: Option<SocketAddrV4>,
+    pub v6: Option<SocketAddrV6>,
+}
+
+impl PunchMessage {
+    pub fn encode(&self) -> [u8; PUNCH_LEN] {
+        let mut b = [0u8; PUNCH_LEN];
+        b[0] = self.kind;
+        b[1] = match self.nat {
+            NatType::Unknown => 0,
+            NatType::Cone => 1,
+            NatType::Symmetric => 2,
+        };
+        b[4..8].copy_from_slice(&self.round.to_be_bytes());
+        if let Some(v4) = self.v4 {
+            b[2] |= 1;
+            b[8..12].copy_from_slice(&v4.ip().octets());
+            b[12..14].copy_from_slice(&v4.port().to_be_bytes());
+        }
+        if let Some(v6) = self.v6 {
+            b[2] |= 2;
+            b[14..30].copy_from_slice(&v6.ip().octets());
+            b[30..32].copy_from_slice(&v6.port().to_be_bytes());
+        }
+        b
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        let b: &[u8; PUNCH_LEN] = b.try_into().ok()?;
+        if !matches!(b[0], PUNCH_PROPOSAL | PUNCH_ACK) || b[2] & !3 != 0 || b[3] != 0 {
+            return None;
+        }
+        let nat = match b[1] {
+            0 => NatType::Unknown,
+            1 => NatType::Cone,
+            2 => NatType::Symmetric,
+            _ => return None,
+        };
+        let v4 = (b[2] & 1 != 0).then(|| {
+            SocketAddrV4::new(
+                Ipv4Addr::new(b[8], b[9], b[10], b[11]),
+                u16::from_be_bytes([b[12], b[13]]),
+            )
+        });
+        let v6 = (b[2] & 2 != 0).then(|| {
+            let mut ip = [0u8; 16];
+            ip.copy_from_slice(&b[14..30]);
+            SocketAddrV6::new(Ipv6Addr::from(ip), u16::from_be_bytes([b[30], b[31]]), 0, 0)
+        });
+        Some(Self {
+            kind: b[0],
+            round: u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+            nat,
+            v4,
+            v6,
         })
     }
 }
@@ -410,9 +509,33 @@ mod tests {
         let proposal = SwitchMessage {
             kind: SWITCH_PROPOSAL,
             round: 7,
-            relay: KeyId([9; 8]),
+            target: SwitchTarget::Relay(KeyId([9; 8])),
         };
         assert_eq!(SwitchMessage::decode(&proposal.encode()), Some(proposal));
+        let punched = SwitchMessage {
+            kind: SWITCH_ACK,
+            round: 8,
+            target: SwitchTarget::Punched,
+        };
+        assert_eq!(SwitchMessage::decode(&punched.encode()), Some(punched));
+        let punch = PunchMessage {
+            kind: PUNCH_PROPOSAL,
+            round: 9,
+            nat: NatType::Cone,
+            v4: Some("198.51.100.201:41820".parse().expect("v4")),
+            v6: Some("[2001:db8::1]:41820".parse().expect("v6")),
+        };
+        assert_eq!(PunchMessage::decode(&punch.encode()), Some(punch));
+        let none = PunchMessage {
+            v4: None,
+            v6: None,
+            nat: NatType::Symmetric,
+            ..punch
+        };
+        assert_eq!(PunchMessage::decode(&none.encode()), Some(none));
+        let mut bad = punch.encode();
+        bad[1] = 9;
+        assert_eq!(PunchMessage::decode(&bad), None);
         let mut bad = proposal.encode();
         bad[0] = TUNNEL_PROBE;
         assert_eq!(SwitchMessage::decode(&bad), None);

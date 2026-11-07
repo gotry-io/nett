@@ -39,6 +39,9 @@ const LOSSY_HOLD: Duration = Duration::from_secs(5);
 const CANDIDATE_INTERVAL: Duration = Duration::from_secs(15);
 const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(1);
 const DEGRADED_INTERVAL: Duration = Duration::from_secs(3);
+/// 从未应答过的候选，第一次探测后的这段时间内与更优类型一样每 1 秒探测：启动时对端可能还没起来，
+/// 不必等 15 秒才得知它能不能通、本机的映射地址是什么（design/mesh.md 第 6.1、7 节）。
+const DISCOVERY_WINDOW: Duration = Duration::from_secs(60);
 /// 刚因第一次故障从一条更优类型的路径切走时，这么久之内每 [`FAST_RECOVERY_INTERVAL`] 探测它一次，
 /// 恢复后很快切回（ADR 0021）。
 const FAST_RECOVERY_WINDOW: Duration = Duration::from_secs(15);
@@ -188,10 +191,30 @@ struct Candidate {
     failures: VecDeque<Instant>,
     /// 最近一次作为当前路径故障而被切走的时刻（不论是否计入退避）。
     left_at: Option<Instant>,
+    /// 第一次探测的时刻。
+    first_probe: Option<Instant>,
     /// 最近一次连续有应答的开始时刻。
     healthy_since: Option<Instant>,
     /// 已经用过一次"从未连通过就失败不算故障"。
     grace_used: bool,
+}
+
+impl Candidate {
+    fn new(route: Route, kind: PathKind) -> Self {
+        Self {
+            route,
+            kind,
+            stats: PathStats::default(),
+            outstanding: VecDeque::new(),
+            last_probe: None,
+            last_reply: None,
+            failures: VecDeque::new(),
+            left_at: None,
+            first_probe: None,
+            healthy_since: None,
+            grace_used: false,
+        }
+    }
 }
 
 /// 切换的原因，写入路径切换事件。
@@ -286,6 +309,8 @@ pub struct PeerPaths {
     better_since: Option<(usize, Instant)>,
     /// 两端一起切换的过程中（等待确认、轮换中）：只检测中断，不另行择优。
     hold: bool,
+    /// 打洞打通的直连候选（design/mesh.md 第 6.1 节），排在配置的候选之后。
+    punched: Option<usize>,
     seq: u32,
 }
 
@@ -299,18 +324,7 @@ impl PeerPaths {
             role,
             candidates: routes
                 .into_iter()
-                .map(|(route, kind)| Candidate {
-                    route,
-                    kind,
-                    stats: PathStats::default(),
-                    outstanding: VecDeque::new(),
-                    last_probe: None,
-                    last_reply: None,
-                    failures: VecDeque::new(),
-                    left_at: None,
-                    healthy_since: None,
-                    grace_used: false,
-                })
+                .map(|(route, kind)| Candidate::new(route, kind))
                 .collect(),
             current: 0,
             tunnel: PathStats::default(),
@@ -323,6 +337,7 @@ impl PeerPaths {
             high_loss_since: None,
             better_since: None,
             hold: false,
+            punched: None,
             seq: 0,
         })
         .map(|mut paths| {
@@ -351,6 +366,27 @@ impl PeerPaths {
     /// 切到当前路径以来收到过隧道内应答：本端发出的探测得到了对端的应答，双向都通。
     pub fn tunnel_established(&self) -> bool {
         self.tunnel_established
+    }
+
+    /// 打洞打通的直连：作为一条直连候选加入（已有时换成新的地址，测量从头开始），返回它的序号。
+    pub fn set_punched(&mut self, endpoint: SocketAddr) -> usize {
+        let route = Route::Direct(endpoint);
+        if let Some(i) = self.punched {
+            let c = &mut self.candidates[i];
+            if c.route != route {
+                *c = Candidate::new(route, PathKind::Direct);
+            }
+            return i;
+        }
+        self.candidates
+            .push(Candidate::new(route, PathKind::Direct));
+        let i = self.candidates.len() - 1;
+        self.punched = Some(i);
+        i
+    }
+
+    pub fn punched_index(&self) -> Option<usize> {
+        self.punched
     }
 
     /// 经中继 `relay` 的候选。
@@ -521,6 +557,12 @@ impl PeerPaths {
                         actions.extend(self.probe_candidate(index, now, stack));
                     }
                 }
+                // 当前路径是直连时也从 WireGuard 端口探测它：应答带回本机的映射地址（design/mesh.md 第 6.1 节）
+                if matches!(self.current_kind(), PathKind::Lan | PathKind::Direct)
+                    && self.candidate_due(self.current, now, active)
+                {
+                    actions.extend(self.probe_candidate(self.current, now, false));
+                }
                 if !self.hold
                     && let Some(action) = self.check_improvement(now)
                 {
@@ -548,6 +590,7 @@ impl PeerPaths {
         }
         c.outstanding.push_back((seq, now));
         c.last_probe = Some(now);
+        c.first_probe.get_or_insert(now);
         Some(Action::CandidateProbe {
             index,
             route: c.route,
@@ -600,7 +643,11 @@ impl PeerPaths {
         } else if better && first_reply {
             // 更优类型的候选刚有一次应答：很快再探测一次确认，不等下一个间隔
             CONFIRM_INTERVAL
-        } else if better {
+        } else if better
+            || (c.last_reply.is_none()
+                && c.first_probe
+                    .is_some_and(|t| now.saturating_duration_since(t) < DISCOVERY_WINDOW))
+        {
             BETTER_TYPE_INTERVAL
         } else if c.kind == self.current_kind() && self.degraded() {
             DEGRADED_INTERVAL
