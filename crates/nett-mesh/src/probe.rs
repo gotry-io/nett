@@ -21,8 +21,7 @@ pub const DIRECT_PROBE: u8 = 0x82;
 pub const DIRECT_REPLY: u8 = 0x83;
 pub const SWITCH_PROPOSAL: u8 = 0x84;
 pub const SWITCH_ACK: u8 = 0x85;
-pub const RELAY_PROBE: u8 = 0x90;
-pub const RELAY_REPLY: u8 = 0x91;
+pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 
 /// 隧道外消息的长度。
 pub const OUTER_LEN: usize = 64;
