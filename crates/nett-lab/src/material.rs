@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use nett_core::id::NodeId;
+use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken};
-use nett_relay::lab::{MemberDoc, RelayConfig};
+use nett_relay::lab::{MemberDoc, RelayConfig, TlsDoc};
 use nett_trust::admission::{
     AdmissionMaterial, AdmissionProof, AdmissionProofDoc, AdmissionProofKind,
 };
@@ -32,6 +33,16 @@ use crate::topology::Topology;
 pub const LISTEN_PORT: u16 = 41820;
 /// 实验中 nett-relay 的中继端口。
 pub const RELAY_PORT: u16 = 41900;
+/// nett-relay 的 TLS 入口（design/mesh.md 第 5.3 节）。
+pub const RELAY_TLS_PORT: u16 = 443;
+
+/// 候选 `relay:<中继>` 与 `relay-tls:<中继>`：中继的名称，以及是否经 TLS。
+pub fn relay_of(candidate: &str) -> Option<(&str, bool)> {
+    candidate
+        .strip_prefix("relay:")
+        .map(|r| (r, false))
+        .or_else(|| candidate.strip_prefix("relay-tls:").map(|r| (r, true)))
+}
 
 /// 实验材料中记录的节点信息，供场景检查使用。
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -42,6 +53,9 @@ pub struct LabNode {
     pub mesh_ipv4: Ipv4Addr,
     pub mesh_ipv6: Ipv6Addr,
     pub dir: PathBuf,
+    /// 有经 TLS 的候选：需要传输适配进程。
+    #[serde(default)]
+    pub tls: bool,
 }
 
 /// 场景 14 的反例（design/prototype.md 第 4 节第 5 项），加入第一个节点的期望状态。
@@ -213,6 +227,14 @@ pub fn generate(
             let older = policy(node_id.clone(), 1, addresses, &node.roles, &enrollment);
             lower_version_of_second = Some(signer.material(&older, &enrollment, public)?);
         }
+        // 只有 dial-only 成员经 TLS 传输（design/mesh.md 第 5.3 节）
+        let tls = node.reachability == nett_mesh::config::Reachability::DialOnly
+            && topo.links.iter().any(|l| {
+                l.peers.contains(&node.name)
+                    && l.candidates
+                        .iter()
+                        .any(|c| relay_of(c).is_some_and(|(_, t)| t))
+            });
         nodes.push(LabNode {
             name: node.name.clone(),
             node_id,
@@ -220,6 +242,7 @@ pub fn generate(
             mesh_ipv4: addresses.ipv4,
             mesh_ipv6: addresses.ipv6,
             dir,
+            tls,
         });
     }
 
@@ -243,11 +266,7 @@ pub fn generate(
     // 每个（成员，中继）一个探测令牌（design/mesh.md 第 5.2 节）
     let mut tokens: BTreeMap<(String, String), [u8; 32]> = BTreeMap::new();
     for link in &topo.links {
-        for relay in link
-            .candidates
-            .iter()
-            .filter_map(|c| c.strip_prefix("relay:"))
-        {
+        for (relay, _) in link.candidates.iter().filter_map(|c| relay_of(c)) {
             for member in &link.peers {
                 tokens
                     .entry((member.clone(), relay.to_owned()))
@@ -255,7 +274,28 @@ pub fn generate(
             }
         }
     }
-    write_relay_configs(topo, underlay, &nodes, &tokens)?;
+    // 有 TLS 入口的中继：自签证书，指纹随候选下发（design/mesh.md 第 5.3 节）
+    let mut fingerprints: BTreeMap<String, CertFingerprint> = BTreeMap::new();
+    for (relay, _) in topo
+        .links
+        .iter()
+        .flat_map(|l| &l.candidates)
+        .filter_map(|c| relay_of(c))
+        .filter(|(_, tls)| *tls)
+    {
+        if fingerprints.contains_key(relay) {
+            continue;
+        }
+        let dir = nodes
+            .iter()
+            .find(|n| n.name == relay)
+            .context("relay node")?
+            .dir
+            .clone();
+        let ip = underlay.public_ipv4(relay).context("relay address")?;
+        fingerprints.insert(relay.to_owned(), self_signed(ip, &dir)?);
+    }
+    write_relay_configs(topo, underlay, &nodes, &tokens, &fingerprints)?;
 
     let mut first_desired = None;
     for (i, node) in topo.nodes.iter().enumerate() {
@@ -280,14 +320,24 @@ pub fn generate(
                 let candidates = link
                     .candidates
                     .iter()
-                    .filter_map(|c| match c.strip_prefix("relay:") {
+                    .filter_map(|c| match relay_of(c) {
                         // 经中继：中继端口在中继节点的公网地址上
-                        Some(relay) => Some(Candidate::Relay {
+                        Some((relay, false)) => Some(Candidate::Relay {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             endpoint: SocketAddr::new(
                                 underlay.public_ipv4(relay)?.into(),
                                 RELAY_PORT,
                             ),
+                            token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
+                        }),
+                        // 经中继的 TLS 传输：TLS 入口与证书指纹，令牌与 UDP 中继相同
+                        Some((relay, true)) => Some(Candidate::RelayTls {
+                            relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
+                            address: SocketAddr::new(
+                                underlay.public_ipv4(relay)?.into(),
+                                RELAY_TLS_PORT,
+                            ),
+                            fingerprint: *fingerprints.get(relay)?,
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
                         // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址
@@ -425,6 +475,7 @@ fn write_relay_configs(
     underlay: &Underlay,
     nodes: &[LabNode],
     tokens: &BTreeMap<(String, String), [u8; 32]>,
+    fingerprints: &BTreeMap<String, CertFingerprint>,
 ) -> anyhow::Result<()> {
     let key_of = |name: &str| {
         nodes
@@ -442,7 +493,7 @@ fn write_relay_configs(
         for link in topo.links.iter().filter(|l| {
             l.candidates
                 .iter()
-                .any(|c| c.strip_prefix("relay:") == Some(relay.name.as_str()))
+                .any(|c| relay_of(c).is_some_and(|(r, _)| r == relay.name))
         }) {
             for member in &link.peers {
                 if members
@@ -464,21 +515,76 @@ fn write_relay_configs(
                 key_of(&link.peers[1]).context("member key")?,
             ]);
         }
-        let config = RelayConfig {
-            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
-            tls: None,
-            members,
-            connections,
-        };
         let dir = nodes
             .iter()
             .find(|n| n.name == relay.name)
             .context("relay node")?
             .dir
             .clone();
+        let tls = fingerprints.contains_key(&relay.name).then(|| TlsDoc {
+            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_TLS_PORT),
+            cert: dir.join(TLS_CERT),
+            key: dir.join(TLS_KEY),
+        });
+        let config = RelayConfig {
+            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
+            tls,
+            members,
+            connections,
+        };
         write_json(&dir.join("relay.json"), &config)?;
     }
     Ok(())
+}
+
+const TLS_CERT: &str = "tls-cert.pem";
+const TLS_KEY: &str = "tls-key.pem";
+
+/// 中继的自签证书（只用于实验；正式部署中由中继节点自己生成，私钥不离开节点）。返回叶证书 DER 的
+/// SHA-256。
+fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFingerprint> {
+    let (cert, key) = (dir.join(TLS_CERT), dir.join(TLS_KEY));
+    cmd::run(
+        "openssl",
+        [
+            "req",
+            "-x509",
+            "-newkey",
+            "ec",
+            "-pkeyopt",
+            "ec_paramgen_curve:prime256v1",
+            "-nodes",
+            "-days",
+            "7",
+            "-subj",
+            "/CN=nett-lab-relay",
+            "-addext",
+            &format!("subjectAltName=IP:{ip}"),
+            "-keyout",
+            &key.to_string_lossy(),
+            "-out",
+            &cert.to_string_lossy(),
+        ],
+    )?;
+    std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("restricting {}", key.display()))?;
+    let pem =
+        std::fs::read_to_string(&cert).with_context(|| format!("reading {}", cert.display()))?;
+    let body: String = pem
+        .lines()
+        .skip_while(|l| !l.starts_with("-----BEGIN CERTIFICATE-----"))
+        .skip(1)
+        .take_while(|l| !l.starts_with("-----END CERTIFICATE-----"))
+        .collect();
+    use base64::Engine as _;
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(body)
+        .ok()
+        .context("certificate PEM is not base64")?;
+    let digest = ring::digest::digest(&ring::digest::SHA256, &der);
+    let mut fp = [0u8; 32];
+    fp.copy_from_slice(digest.as_ref());
+    Ok(CertFingerprint(fp))
 }
 
 /// WireGuard 工具使用的公钥文本（标准 base64）。

@@ -33,6 +33,8 @@ jobs:
             run: tailscale --topology crates/nett-lab/topologies/direct.toml
           - name: 1-8-failover
             run: failover --topology crates/nett-lab/topologies/failover.toml --repeat 20 --with-tailscale
+          - name: 7-9-fallback
+            run: fallback --topology crates/nett-lab/topologies/fallback.toml --repeat 20 --with-tailscale
           - name: 2-relay-loss
             run: relay-loss --topology crates/nett-lab/topologies/relays.toml --repeat 20 --with-tailscale
           - name: 3-relay-restart

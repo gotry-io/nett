@@ -97,6 +97,12 @@ jobs:
           --topology crates/nett-lab/topologies/cone-nat.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-14-nat"
+      - name: 场景 7、9：UDP 全部被拦时改用 TLS，恢复后回到直连
+        run: >-
+          sudo ./target/debug/nett-lab run fallback
+          --topology crates/nett-lab/topologies/fallback.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-fallback"
       - name: 场景 16：双方都是 dial-only，经隧道提议后两端一起切换
         run: >-
           sudo ./target/debug/nett-lab run dial-only-switch
