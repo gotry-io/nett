@@ -7,9 +7,13 @@ use serde::Serialize;
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
     /// 期望状态整份被拒绝，继续使用上一份。
-    ConfigRejected { reason: String },
+    ConfigRejected {
+        reason: String,
+    },
     /// 本机不在已准入的成员中，组网接口不启用。
-    SelfNotAdmitted { node_id: NodeId },
+    SelfNotAdmitted {
+        node_id: NodeId,
+    },
     MemberAdmitted {
         node_id: NodeId,
         policy_version: u64,
@@ -20,17 +24,41 @@ pub enum Event {
         reason: String,
     },
     /// 因撤销记录删除成员。
-    MemberRemoved { node_id: NodeId },
+    MemberRemoved {
+        node_id: NodeId,
+    },
     /// WireGuard 对端已与已准入的成员一致。
-    PeersApplied { peers: usize },
+    PeersApplied {
+        peers: usize,
+    },
     /// 数据面操作失败，保持现状并在下一份期望状态时重试。
-    DataPlaneFailed { reason: String },
+    DataPlaneFailed {
+        reason: String,
+    },
     /// 决定方切换了到某个对端的路径（design/mesh.md 第 8.2 节）。
     PathSwitched {
         node_id: NodeId,
         to: String,
         reason: crate::path::SwitchReason,
         rehandshake: bool,
+    },
+    /// 开始一次打洞（design/mesh.md 第 6.1 节）：双方的 NAT 类型。
+    PunchStarted {
+        node_id: NodeId,
+        round: u32,
+        nat: crate::probe::NatType,
+        peer_nat: crate::probe::NatType,
+        /// 要发探测的对方地址。
+        targets: Vec<std::net::SocketAddr>,
+    },
+    /// 打洞打通：对方的地址。
+    PunchSucceeded {
+        node_id: NodeId,
+        address: std::net::SocketAddr,
+    },
+    PunchFailed {
+        node_id: NodeId,
+        reason: String,
     },
     /// endpoint 被 WireGuard 的漫游改回了旧路径，决定方把它改回期望的路径（第 8.3 节）。
     EndpointCorrected {
@@ -83,6 +111,19 @@ pub fn log_event(event: &Event) {
             reason,
             rehandshake,
         } => tracing::info!(%node_id, %to, ?reason, rehandshake, "path switched"),
+        Event::PunchStarted {
+            node_id,
+            round,
+            nat,
+            peer_nat,
+            targets,
+        } => tracing::info!(%node_id, round, ?nat, ?peer_nat, ?targets, "hole punching started"),
+        Event::PunchSucceeded { node_id, address } => {
+            tracing::info!(%node_id, %address, "hole punched")
+        }
+        Event::PunchFailed { node_id, reason } => {
+            tracing::info!(%node_id, %reason, "hole punching failed")
+        }
         Event::EndpointCorrected { node_id, from, to } => {
             tracing::debug!(%node_id, ?from, %to, "endpoint corrected")
         }
