@@ -9,3 +9,18 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+nett-core.workspace = true
+futures-util.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }

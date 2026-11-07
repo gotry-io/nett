@@ -6,6 +6,8 @@ use std::process::ExitCode;
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
+#[cfg(all(feature = "lab", target_os = "linux"))]
+mod transport;
 
 fn main() -> ExitCode {
     match run() {
@@ -28,6 +30,8 @@ fn run() -> anyhow::Result<()> {
         lexopt::Arg::Value(cmd) if cmd == "mesh" => mesh::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
         lexopt::Arg::Value(cmd) if cmd == "relay" => relay::run(parser),
+        #[cfg(all(feature = "lab", target_os = "linux"))]
+        lexopt::Arg::Value(cmd) if cmd == "transport" => transport::run(parser),
         lexopt::Arg::Long("version") => {
             println!("nett {}", env!("CARGO_PKG_VERSION"));
             Ok(())
