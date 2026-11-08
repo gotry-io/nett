@@ -64,6 +64,11 @@ const DEGRADED_MIN_MS: f64 = 10.0;
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
 /// 候选探测等待应答的上限。
 const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(1);
+/// 超时的隧道内探测再等这么久：迟到的应答说明路径通、只是在排队，照常计入往返时间；对端的包仍在到达、
+/// 这么久却没有任何应答（只有一个方向通），照常判为故障（design/mesh.md 第 7、8.2 节）。
+pub const LATE_HORIZON: Duration = Duration::from_secs(10);
+/// 同时等待迟到应答的隧道内探测数上限：每秒一个加上加探，10 秒内不到 20 个。
+const MAX_LATE: usize = 32;
 /// 丢包率的滑动窗口（探测次数）。
 const LOSS_WINDOW: usize = 10;
 /// 往返时间指数滑动平均的权重。
@@ -143,6 +148,11 @@ impl PathStats {
 
     pub fn record_loss(&mut self) {
         self.push(false);
+        self.record_miss();
+    }
+
+    /// 超时未应答：计入连续丢失（用来进入疑似故障），丢包率等确定丢失后再计（design/mesh.md 第 7 节）。
+    fn record_miss(&mut self) {
         self.consecutive_losses += 1;
         self.consecutive_successes = 0;
     }
@@ -319,6 +329,14 @@ pub struct PeerPaths {
     current: usize,
     tunnel: PathStats,
     tunnel_outstanding: VecDeque<(u32, Instant)>,
+    /// 已经超时、还在等迟到应答的隧道内探测（[`LATE_HORIZON`]）。
+    tunnel_late: VecDeque<(u32, Instant)>,
+    /// 当前路径上最近一次收到隧道内应答（包括迟到的）。
+    last_tunnel_reply: Option<Instant>,
+    /// 当前路径上最近一次收到迟到的隧道内应答：在排队。
+    last_late_reply: Option<Instant>,
+    /// 最近一次看到对端的包到达（WireGuard 对它的接收字节数有变化）。
+    last_rx: Option<Instant>,
     last_tunnel_probe: Option<Instant>,
     phase: Phase,
     /// 当前路径切换以来收到过隧道内应答。
@@ -355,6 +373,10 @@ impl PeerPaths {
             current: 0,
             tunnel: PathStats::default(),
             tunnel_outstanding: VecDeque::new(),
+            tunnel_late: VecDeque::new(),
+            last_tunnel_reply: None,
+            last_late_reply: None,
+            last_rx: None,
             last_tunnel_probe: None,
             phase: Phase::Normal,
             tunnel_established: false,
@@ -469,9 +491,14 @@ impl PeerPaths {
         self.cookie_rounds = 0;
         let rtt_ms = self.tunnel.rtt_ms();
         self.tunnel = PathStats::seeded(rtt_ms);
-        self.tunnel_outstanding.clear();
+        self.clear_tunnel_probes();
         self.phase = Phase::Normal;
         self.last_tunnel_probe = None;
+    }
+
+    /// WireGuard 对这个对端的接收字节数有变化：对端的包到达了（调用方每次读取状态时报告）。
+    pub fn on_receive(&mut self, now: Instant) {
+        self.last_rx = Some(now);
     }
 
     /// 从当前路径收到了对端的 cookie 应答，而隧道还没建立：对端处于负载状态，WireGuard 会在约 5 秒后
@@ -529,7 +556,7 @@ impl PeerPaths {
         let route = self.current();
         let rtt_ms = self.tunnel.rtt_ms();
         self.tunnel = PathStats::seeded(rtt_ms);
-        self.tunnel_outstanding.clear();
+        self.clear_tunnel_probes();
         self.last_tunnel_probe = None;
         self.expect_handshake(now, None);
         if let Some(h) = self.handshake.as_mut() {
@@ -557,18 +584,32 @@ impl PeerPaths {
     }
 
     pub fn on_tunnel_reply(&mut self, seq: u32, now: Instant) {
-        let Some(pos) = self.tunnel_outstanding.iter().position(|(s, _)| *s == seq) else {
+        // 更早发出、还没有应答的探测（包括超时之后还在等的）已经被这个应答越过，算作丢失
+        let sent = if let Some(pos) = self.tunnel_outstanding.iter().position(|(s, _)| *s == seq) {
+            for _ in 0..self.tunnel_late.len() {
+                self.tunnel.push(false);
+            }
+            self.tunnel_late.clear();
+            for _ in 0..pos {
+                self.tunnel_outstanding.pop_front();
+                self.tunnel.record_loss();
+            }
+            self.tunnel_outstanding.pop_front()
+        } else if let Some(pos) = self.tunnel_late.iter().position(|(s, _)| *s == seq) {
+            // 迟到的应答：路径通，只是在排队（design/mesh.md 第 7 节）
+            for _ in 0..pos {
+                self.tunnel_late.pop_front();
+                self.tunnel.push(false);
+            }
+            self.last_late_reply = Some(now);
+            self.tunnel_late.pop_front()
+        } else {
             return;
         };
-        let (_, sent) = self
-            .tunnel_outstanding
-            .remove(pos)
-            .expect("position is in range");
-        // 更早发出、还没有应答的探测已经被这个应答越过，算作丢失
-        for _ in 0..pos {
-            self.tunnel_outstanding.pop_front();
-            self.tunnel.record_loss();
-        }
+        let Some((_, sent)) = sent else {
+            return;
+        };
+        self.last_tunnel_reply = Some(now);
         let rtt = now.saturating_duration_since(sent);
         self.tunnel.record_reply(rtt);
         let ms = rtt.as_secs_f64() * 1000.0;
@@ -782,15 +823,28 @@ impl PeerPaths {
             .is_none_or(|t| now.saturating_duration_since(t) >= interval)
     }
 
-    /// 超时未应答的探测记为丢失。
+    /// 超时未应答的候选探测记为丢失。隧道内探测超时只计入连续丢失（用来进入疑似故障），再等
+    /// [`LATE_HORIZON`] 仍没有应答才记为丢失（design/mesh.md 第 7 节）。
     fn expire(&mut self, now: Instant) {
         let timeout = self.tunnel.timeout();
-        while let Some((_, sent)) = self.tunnel_outstanding.front() {
-            if now.saturating_duration_since(*sent) < timeout {
+        while let Some(&(seq, sent)) = self.tunnel_outstanding.front() {
+            if now.saturating_duration_since(sent) < timeout {
                 break;
             }
             self.tunnel_outstanding.pop_front();
-            self.tunnel.record_loss();
+            self.tunnel.record_miss();
+            if self.tunnel_late.len() >= MAX_LATE {
+                self.tunnel_late.pop_front();
+                self.tunnel.push(false);
+            }
+            self.tunnel_late.push_back((seq, sent));
+        }
+        while let Some((_, sent)) = self.tunnel_late.front() {
+            if now.saturating_duration_since(*sent) < LATE_HORIZON {
+                break;
+            }
+            self.tunnel_late.pop_front();
+            self.tunnel.push(false);
         }
         for c in &mut self.candidates {
             while let Some((_, sent)) = c.outstanding.front() {
@@ -814,6 +868,12 @@ impl PeerPaths {
             && sent >= BURST_COUNT
             && self.tunnel_outstanding.is_empty()
         {
+            if self.queueing(since, now) {
+                // 路径通，只是在排队：所有路径都要过同一个瓶颈，切换和重新握手都无济于事（第 8.2 节）
+                self.phase = Phase::Normal;
+                self.tunnel.consecutive_losses = 0;
+                return None;
+            }
             if self.role.together() {
                 // 两端一起恢复：记下这次故障，交给调用方；之后重新开始一轮检测
                 self.record_failure(now);
@@ -829,7 +889,7 @@ impl PeerPaths {
                 let route = current.route;
                 let rtt_ms = self.tunnel.rtt_ms;
                 self.tunnel = PathStats::seeded(rtt_ms);
-                self.tunnel_outstanding.clear();
+                self.clear_tunnel_probes();
                 self.phase = Phase::Normal;
                 self.high_loss_since = None;
                 self.expect_handshake(now, rtt_ms);
@@ -851,7 +911,13 @@ impl PeerPaths {
         if self.role == Role::FollowTogether || self.hold {
             return None;
         }
-        if self.tunnel.window.len() >= LOSS_WINDOW / 2
+        // 排队时的丢包是队列满了被丢弃：换一条要过同一瓶颈的路径无济于事；没有共享瓶颈的路径往返时间
+        // 短得多，按得分切过去（第 8.2 节）
+        let queueing = self
+            .last_late_reply
+            .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON);
+        if !queueing
+            && self.tunnel.window.len() >= LOSS_WINDOW / 2
             && self.tunnel.loss_rate() > LOSS_FAILURE_RATE
         {
             let since = *self.high_loss_since.get_or_insert(now);
@@ -862,6 +928,15 @@ impl PeerPaths {
             self.high_loss_since = None;
         }
         None
+    }
+
+    /// 疑似故障以来对端的包仍在到达，且 [`LATE_HORIZON`] 内收到过隧道内应答（包括迟到的）：路径通，
+    /// 只是在排队。完全断开时对端的包也到不了；只有一个方向通时，最多晚这么久判为故障。
+    fn queueing(&self, since: Instant, now: Instant) -> bool {
+        self.last_rx.is_some_and(|t| t > since)
+            && self
+                .last_tunnel_reply
+                .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON)
     }
 
     /// 当前路径故障：切到 `fresh_since` 之后测通、得分最好的候选；没有时返回 `None`，保持现状。
@@ -995,12 +1070,20 @@ impl PeerPaths {
 impl PeerPaths {
     fn reset_tunnel(&mut self, rtt_ms: Option<f64>) {
         self.tunnel = PathStats::seeded(rtt_ms);
-        self.tunnel_outstanding.clear();
+        self.clear_tunnel_probes();
+        self.last_tunnel_reply = None;
+        self.last_late_reply = None;
         self.tunnel_established = false;
         self.best_rtt_ms = None;
         self.phase = Phase::Normal;
         self.high_loss_since = None;
         self.better_since = None;
+    }
+
+    /// 丢弃等待应答的隧道内探测：统计从头开始之后，它们的结果不再计入。
+    fn clear_tunnel_probes(&mut self) {
+        self.tunnel_outstanding.clear();
+        self.tunnel_late.clear();
     }
 }
 
@@ -1043,9 +1126,15 @@ mod tests {
         now: Instant,
         up: Vec<bool>,
         rtt: Vec<Duration>,
-        /// 每 n 个探测丢 1 个（0 表示不丢）。
+        /// 隧道内的包另外排队这么久（对端的上行被自己的流量塞满、队列很深）；隧道外的候选探测不受影响。
+        queue: Vec<Duration>,
+        /// 本端发出的包到不了对端，对端的包仍在到达（只有一个方向通）。
+        one_way: Vec<bool>,
+        /// 隧道内探测与候选探测各自每 n 个丢 1 个（0 表示不丢）。
         drop_every: Vec<u32>,
         sent: Vec<u32>,
+        /// 各路径上隧道内探测与候选探测各自的计数，用于按 `drop_every` 丢包。
+        sent_by_kind: Vec<[u32; 2]>,
         /// 候选探测能通，但隧道内的流量不通（例如 WireGuard 握手失败）。
         tunnel_broken: Vec<bool>,
         /// 在这条路径上重新握手后隧道恢复（中继丢了索引的情形）。
@@ -1079,8 +1168,11 @@ mod tests {
                 now: Instant::now(),
                 up: vec![true; n],
                 rtt: vec![2 * MS; n],
+                queue: vec![Duration::ZERO; n],
+                one_way: vec![false; n],
                 drop_every: vec![0; n],
                 sent: vec![0; n],
+                sent_by_kind: vec![[0; 2]; n],
                 tunnel_broken: vec![false; n],
                 fix_on_rehandshake: true,
                 lose_handshakes: 0,
@@ -1131,17 +1223,28 @@ mod tests {
                     self.tunnel_broken[i] = false;
                     self.paths.on_handshake();
                 }
+                // 有流量：当前路径通时对端的包一直在到达
+                let i = self.paths.current;
+                if self.up[i] && !self.tunnel_broken[i] {
+                    self.paths.on_receive(now);
+                }
                 for action in self.paths.tick(now, true) {
                     match action {
                         Action::TunnelProbe { seq } => {
                             let i = self.paths.current;
-                            if !self.tunnel_broken[i] && self.delivers(i) {
-                                self.inflight.push((now + self.rtt[i], true, i, seq));
+                            if !self.tunnel_broken[i] && !self.one_way[i] && self.delivers(i, true)
+                            {
+                                self.inflight.push((
+                                    now + self.rtt[i] + self.queue[i],
+                                    true,
+                                    i,
+                                    seq,
+                                ));
                             }
                         }
                         Action::CandidateProbe { index, seq, .. } => {
                             self.candidate_probes += 1;
-                            if self.delivers(index) {
+                            if self.delivers(index, false) {
                                 self.inflight
                                     .push((now + self.rtt[index], false, index, seq));
                             }
@@ -1192,10 +1295,11 @@ mod tests {
     }
 
     impl Sim {
-        fn delivers(&mut self, i: usize) -> bool {
+        fn delivers(&mut self, i: usize, tunnel: bool) -> bool {
             self.sent[i] += 1;
-            self.up[i]
-                && (self.drop_every[i] == 0 || !self.sent[i].is_multiple_of(self.drop_every[i]))
+            let n = &mut self.sent_by_kind[i][usize::from(tunnel)];
+            *n += 1;
+            self.up[i] && (self.drop_every[i] == 0 || !n.is_multiple_of(self.drop_every[i]))
         }
     }
 
@@ -1237,6 +1341,66 @@ mod tests {
         sim.run(Duration::from_secs(120));
         assert!(sim.switches.is_empty());
         assert!(sim.paths.tunnel_stats().loss_rate() < 0.01);
+    }
+
+    #[test]
+    fn stays_on_a_congested_relay_path() {
+        // 对端的上行被自己的流量塞满：隧道内的应答迟到 4 秒，中继本身照常应答
+        let mut sim = Sim::new(vec![(relay(1), PathKind::Relay)]);
+        sim.run(Duration::from_secs(20));
+        sim.queue[0] = Duration::from_secs(4);
+        sim.run(Duration::from_secs(120));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+    }
+
+    #[test]
+    fn stays_on_a_congested_direct_path() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        sim.queue[0] = Duration::from_secs(4);
+        sim.run(Duration::from_secs(120));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        assert!(
+            sim.paths.tunnel_stats().loss_rate() < 0.01,
+            "late replies are not losses"
+        );
+    }
+
+    #[test]
+    fn tail_drops_while_queueing_do_not_switch() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        // 队列满了：应答迟到 4 秒，一半被丢弃。中继也要过同一个瓶颈，换过去无济于事
+        sim.queue[0] = Duration::from_secs(4);
+        sim.drop_every[0] = 2;
+        sim.run(Duration::from_secs(120));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        assert!(sim.paths.tunnel_stats().loss_rate() > LOSS_FAILURE_RATE);
+    }
+
+    #[test]
+    fn fails_over_when_only_the_peers_packets_arrive() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        let broke = sim.now;
+        sim.one_way[0] = true;
+        sim.run(Duration::from_secs(20));
+        let (at, to, _, reason) = sim.switches[0];
+        assert_eq!((to, reason), (relay(1), SwitchReason::Unreachable));
+        let took = at.saturating_duration_since(broke);
+        assert!(
+            took <= LATE_HORIZON + Duration::from_secs(4),
+            "detection took {took:?}"
+        );
     }
 
     #[test]

@@ -306,8 +306,12 @@ impl<D: DataPlane> Engine<D> {
                 continue;
             };
             let bytes = (stat.rx_bytes, stat.tx_bytes);
-            if self.bytes.insert(stat.public_key, bytes) != Some(bytes) {
+            let before = self.bytes.insert(stat.public_key, bytes);
+            if before != Some(bytes) {
                 prober.mark_active(id, now);
+            }
+            if before.is_some_and(|(rx, _)| rx != stat.rx_bytes) {
+                prober.on_receive(id, now);
             }
             if handshake_since(
                 stat.last_handshake,

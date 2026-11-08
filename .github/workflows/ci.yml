@@ -168,6 +168,20 @@ jobs:
           --topology crates/nett-lab/topologies/relays.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-20bd"
+      - name: 场景 24：拥塞（经中继，短版本，与 Tailscale 的对比在验收中跑）
+        run: >-
+          sudo ./target/debug/nett-lab run congestion
+          --duration 60
+          --topology crates/nett-lab/topologies/relay-only.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-24-relay"
+      - name: 场景 24：拥塞（直连，短版本）
+        run: >-
+          sudo ./target/debug/nett-lab run congestion
+          --duration 60
+          --topology crates/nett-lab/topologies/fallback.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-24-direct"
 
   deny:
     runs-on: ubuntu-24.04

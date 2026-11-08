@@ -13,7 +13,9 @@ use nett_trust::keys::X25519PublicKey;
 use crate::config::{Candidate, PeerPathConfig, ProbeToken, Reachability};
 use crate::event::Event;
 use crate::key::PrivateKey;
-use crate::path::{Action, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason};
+use crate::path::{
+    Action, LATE_HORIZON, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason,
+};
 use crate::probe::{
     self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, PUNCH_ACK, PUNCH_PROPOSAL,
     ProbeKey, PunchMessage, RELAY_PROBE, RelayReport, SWITCH_ACK, SWITCH_PROPOSAL, SwitchMessage,
@@ -21,9 +23,10 @@ use crate::probe::{
 };
 use crate::punch::{Observations, Punch, PunchEvent};
 
-/// 发出的探测等待应答的上限，过后从对照表中删除（各状态机自己判定丢失）。
+/// 发出的探测等待应答的上限，过后从对照表中删除（各状态机自己判定丢失）。隧道内探测保留
+/// [`LATE_HORIZON`]：排队几秒的迟到应答也要交给选路状态机（design/mesh.md 第 7 节）。
 const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
-/// 对照表的上限。
+/// 对照表的上限：每个有流量的对端 10 秒内的隧道内探测不到 20 个，加上候选与中继的探测。
 const MAX_OUTSTANDING: usize = 4096;
 /// 跟随方测量中继的间隔：只为向决定方提供"中继 → 本机"这一段。
 const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
@@ -461,6 +464,13 @@ impl Prober {
         }
     }
 
+    /// WireGuard 对这个对端的接收字节数有变化：对端的包仍在到达（design/mesh.md 第 8.2 节）。
+    pub fn on_receive(&mut self, peer: &NodeId, now: Instant) {
+        if let Some(paths) = self.peers.get_mut(peer).and_then(|p| p.paths.as_mut()) {
+            paths.on_receive(now);
+        }
+    }
+
     pub fn peer_ids(&self) -> impl Iterator<Item = (&NodeId, &X25519PublicKey)> {
         self.peers.iter().map(|(id, p)| (id, &p.public_key))
     }
@@ -487,7 +497,13 @@ impl Prober {
         let expired: Vec<u32> = self
             .outstanding
             .iter()
-            .filter(|(_, (_, _, at))| now.saturating_duration_since(*at) >= OUTSTANDING_TTL)
+            .filter(|(_, (_, pending, at))| {
+                let ttl = match pending {
+                    Pending::Tunnel { .. } => LATE_HORIZON,
+                    _ => OUTSTANDING_TTL,
+                };
+                now.saturating_duration_since(*at) >= ttl
+            })
             .map(|(seq, _)| *seq)
             .collect();
         for seq in expired {
@@ -1231,6 +1247,10 @@ mod tests {
         relay: SocketAddr,
         direct_up: bool,
         relay_up: bool,
+        /// B 发回 A 的隧道内包另外排队这么久（B 的上行被塞满、队列很深）。
+        tunnel_queue: Duration,
+        /// 排队中的隧道内应答：（送达时刻，内容）。
+        queued: Vec<(Instant, Vec<u8>)>,
         now: Instant,
         switches: Vec<(Instant, Switch)>,
     }
@@ -1329,6 +1349,8 @@ mod tests {
                 relay,
                 direct_up: true,
                 relay_up: true,
+                tunnel_queue: Duration::ZERO,
+                queued: Vec::new(),
                 now: Instant::now(),
                 switches: Vec::new(),
             }
@@ -1376,8 +1398,12 @@ mod tests {
                         .on_packet(Incoming::Tunnel, src.mesh, &data, now, 0)
                     {
                         if let Outgoing::Tunnel { data, .. } = reply {
-                            src.prober
-                                .on_packet(Incoming::Tunnel, dst.mesh, &data, now, 0);
+                            if from_a && !self.tunnel_queue.is_zero() {
+                                self.queued.push((now + self.tunnel_queue, data));
+                            } else {
+                                src.prober
+                                    .on_packet(Incoming::Tunnel, dst.mesh, &data, now, 0);
+                            }
                         }
                     }
                 }
@@ -1408,6 +1434,21 @@ mod tests {
             let end = self.now + d;
             while self.now < end {
                 self.now += Duration::from_millis(100);
+                let now = self.now;
+                let (due, rest) = std::mem::take(&mut self.queued)
+                    .into_iter()
+                    .partition::<Vec<_>, _>(|(at, _)| *at <= now);
+                self.queued = rest;
+                for (at, data) in due {
+                    self.a
+                        .prober
+                        .on_packet(Incoming::Tunnel, self.b.mesh, &data, at, 0);
+                }
+                // 有流量：当前路径通时 B 的包一直在到达
+                if self.current_up() {
+                    let b = self.b.id.clone();
+                    self.a.prober.on_receive(&b, now);
+                }
                 let (a_out, a_switches) = self.a.prober.tick(self.now, 0);
                 let (b_out, b_switches) = self.b.prober.tick(self.now, 0);
                 assert!(b_switches.is_empty(), "the follower never switches");
@@ -1481,6 +1522,16 @@ mod tests {
         // 切走后的 15 秒内高频探测；模拟每 100 毫秒推进一次
         let took = at.saturating_duration_since(restored);
         assert!(took <= Duration::from_millis(300), "took {took:?}");
+    }
+
+    #[test]
+    fn late_tunnel_replies_keep_a_congested_path() {
+        let mut net = Net::new();
+        net.run(Duration::from_secs(10));
+        // B 的上行被塞满：隧道内应答迟到 4 秒，超过对照表平常的保留时间
+        net.tunnel_queue = Duration::from_secs(4);
+        net.run(Duration::from_secs(60));
+        assert!(net.switches.is_empty(), "{:?}", net.switches);
     }
 
     #[test]

@@ -43,6 +43,7 @@ const USAGE: &str = "usage:
   nett-lab run punch --topology <punch-*.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run mtu --topology <mtu4.toml|mtu6.toml> --nett <path/to/nett> --out <dir> [--bytes N]
   nett-lab run <wg-rehandshake|wg-cookie|wg-rekey> --topology relays.toml --nett <path/to/nett> --out <dir> [--repeat N] [--duration SECONDS]
+  nett-lab run congestion --topology <relay-only.toml|fallback.toml> --nett <path/to/nett> --out <dir> [--level KBIT] [--duration SECONDS] [--repeat N] [--with-tailscale]
   nett-lab run resources --topology fallback.toml --nett <path/to/release/nett> --out <dir> [--duration IDLE_SECONDS]
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
@@ -224,6 +225,14 @@ fn run() -> anyhow::Result<bool> {
                     &topology,
                     &nett()?,
                     &out,
+                    std::time::Duration::from_secs(duration_s),
+                )?,
+                "congestion" => scenario::congestion(
+                    &topology,
+                    &nett()?,
+                    &out,
+                    (repeat, with_tailscale),
+                    level.map_or(2000, |l| l as u32),
                     std::time::Duration::from_secs(duration_s),
                 )?,
                 "tailscale" => scenario::tailscale(&topology, &out)?,

@@ -1,5 +1,5 @@
 # 与对比对象 Tailscale 的验收对比（design/prototype.md 第 5.1、6、7 节）：手动触发，不在每次推送时运行。
-# 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类每种 5 分钟、各 3 次；场景 17 的时钟误差
+# 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类（含拥塞）每种 5 分钟、各 3 次；场景 17 的时钟误差
 # 分 1.5 秒（按时间片）与 5 秒（随机间隔重试）两组；场景 19–21 只对 nett（第 6.3 节）。
 # 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。手动触发时可以只选一个场景。
 
@@ -66,6 +66,10 @@ jobs:
             run: alternate --level 40 --duration 600 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
           - name: 6-flap
             run: flap --duration 300 --topology crates/nett-lab/topologies/relays.toml --repeat 3 --with-tailscale
+          - name: 24-congestion-relay
+            run: congestion --duration 300 --topology crates/nett-lab/topologies/relay-only.toml --repeat 3 --with-tailscale
+          - name: 24-congestion-direct
+            run: congestion --duration 300 --topology crates/nett-lab/topologies/fallback.toml --repeat 3 --with-tailscale
           - name: 15-roaming
             run: roaming --duration 600 --topology crates/nett-lab/topologies/failover.toml
           - name: 16-dial-only-switch

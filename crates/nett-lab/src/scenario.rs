@@ -3884,3 +3884,263 @@ pub fn resources(
     write_report(out, &report)?;
     Ok(report)
 }
+
+/// 拥塞场景中 b 的上行队列长度（包）：2 Mbit/s 时约 5 秒，相当于限速的 VPS 或上传缓冲很深的家庭宽带。
+const CONGESTION_QUEUE_PACKETS: u32 = 1000;
+/// 拥塞开始之前，等路径稳定的时间。
+const CONGESTION_SETTLE: Duration = Duration::from_secs(10);
+/// 解除限速之后继续观察的时间：队列排空、迟到的应答回来。
+const CONGESTION_DRAIN: Duration = Duration::from_secs(8);
+
+/// 拥塞一次运行的结果。
+#[derive(Debug, Clone, Serialize)]
+pub struct CongestionRun {
+    pub system: String,
+    /// 期间的路径变化：nett 为切换事件，Tailscale 为 `tailscale status` 中对端地址的变化（每秒采样）。
+    pub changes: Vec<String>,
+    pub tcp_kbps: u64,
+    pub tcp_ended: Option<String>,
+    /// 探测流（b 到 a）最长的中断。
+    pub max_gap_ms: u64,
+}
+
+/// b 的上行限速到 `rate_kbit`、队列很深，b 向 a 的 `target` 持续发送长连接与探测流 `duration`。
+/// `sample` 每秒调用一次，返回当前路径的描述（nett 用事件，不需要采样）。
+fn congestion_run(
+    lab: &mut Lab,
+    out: &Path,
+    system: &str,
+    target: std::net::IpAddr,
+    (rate_kbit, duration): (u32, Duration),
+    mut sample: impl FnMut() -> Option<String>,
+) -> anyhow::Result<(CongestionRun, u64, u64)> {
+    use crate::measure::{now_ms, probe_stats, tcp_stats};
+    let ns_b = lab.underlay.node("b").context("node b")?.netns.clone();
+    let (probe_file, tcp_file) = start_workload(lab, "b", "a", target, out)?;
+    std::thread::sleep(WARMUP);
+    let rate = format!("{rate_kbit}kbit");
+    let limit = CONGESTION_QUEUE_PACKETS.to_string();
+    run(
+        "tc",
+        [
+            "-n", &ns_b, "qdisc", "replace", "dev", "eth0", "root", "netem", "rate", &rate,
+            "limit", &limit,
+        ],
+    )?;
+    let start_ms = now_ms();
+    let mut changes = Vec::new();
+    let mut last = sample();
+    let mut watch = |until: Instant, changes: &mut Vec<String>| {
+        while Instant::now() < until {
+            std::thread::sleep(Duration::from_secs(1));
+            let now = sample();
+            if now.is_some() && now != last {
+                changes.push(format!(
+                    "@{:.1}s {}",
+                    now_ms().saturating_sub(start_ms) as f64 / 1000.0,
+                    now.as_deref().unwrap_or("?")
+                ));
+                last = now;
+            }
+        }
+    };
+    watch(Instant::now() + duration, &mut changes);
+    let end_ms = now_ms();
+    run("tc", ["-n", &ns_b, "qdisc", "del", "dev", "eth0", "root"]).ok();
+    watch(Instant::now() + CONGESTION_DRAIN, &mut changes);
+    lab.stop_load();
+    let tcp = tcp_stats(&tcp_file, start_ms, end_ms)?;
+    let probe = probe_stats(&probe_file, start_ms, end_ms)?;
+    Ok((
+        CongestionRun {
+            system: system.to_owned(),
+            changes,
+            tcp_kbps: tcp.kbps,
+            tcp_ended: tcp.ended,
+            max_gap_ms: probe.max_gap_ms,
+        },
+        start_ms,
+        end_ms,
+    ))
+}
+
+/// Tailscale 当前到 `peer` 的路径：直连的地址，或经 DERP。
+fn tailscale_path(ts: &crate::tailscale::TailscaleLab, peer: std::net::Ipv4Addr) -> Option<String> {
+    let status: Value = serde_json::from_str(&ts.cli("a", &["status", "--json"]).ok()?).ok()?;
+    let ip = peer.to_string();
+    status["Peer"].as_object()?.values().find_map(|p| {
+        p["TailscaleIPs"]
+            .as_array()?
+            .iter()
+            .any(|a| a.as_str() == Some(ip.as_str()))
+            .then(|| match p["CurAddr"].as_str() {
+                Some(addr) if !addr.is_empty() => format!("direct {addr}"),
+                _ => "derp".to_owned(),
+            })
+    })
+}
+
+/// 场景 24 的 nett 一次运行：期间的路径变化取各节点的切换事件。
+fn nett_congestion_once(
+    topo: &Topology,
+    nett: &Path,
+    out: &Path,
+    shape: (u32, Duration),
+) -> anyhow::Result<CongestionRun> {
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    let generated = material::generate(topo, &underlay, out, false)?;
+    let mut lab = start(topo, &generated, underlay, nett)?;
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| {
+        generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .with_context(|| format!("node {name}"))
+    };
+    let (a, b) = (node("a")?, node("b")?);
+    let ns_a = lab.underlay.node("a").context("node a")?.netns.clone();
+    ping(&ns_a, &b.mesh_ipv4.to_string())?;
+    std::thread::sleep(CONGESTION_SETTLE);
+    let (mut run, start_ms, end_ms) =
+        congestion_run(&mut lab, out, "nett", a.mesh_ipv4.into(), shape, || None)
+            .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
+    let until_ms = end_ms + u64::try_from(CONGESTION_DRAIN.as_millis()).unwrap_or(u64::MAX);
+    run.changes = generated
+        .nodes
+        .iter()
+        .flat_map(|node| {
+            events(node).into_iter().filter_map(move |e| {
+                let at = e["at_ms"].as_u64()?;
+                (e["event"] == "path_switched" && (start_ms..=until_ms).contains(&at)).then(|| {
+                    format!(
+                        "{}@{:.1}s {} {}",
+                        node.name,
+                        at.saturating_sub(start_ms) as f64 / 1000.0,
+                        e["reason"].as_str().unwrap_or("?"),
+                        e["to"].as_str().unwrap_or("?")
+                    )
+                })
+            })
+        })
+        .collect();
+    Ok(run)
+}
+
+/// 场景 24 的 Tailscale 一次运行。没有直连候选的拓扑拦掉两端之间的直连 UDP，经 DERP。
+fn tailscale_congestion_once(
+    topo: &Topology,
+    out: &Path,
+    direct: bool,
+    shape: (u32, Duration),
+) -> anyhow::Result<CongestionRun> {
+    use crate::tailscale::TailscaleLab;
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        relays: Vec::new(),
+        helpers: Vec::new(),
+    };
+    if !direct {
+        let (a_egress, b_egress) = (
+            lab.underlay.egress_ipv4("a").context("a egress")?,
+            lab.underlay.egress_ipv4("b").context("b egress")?,
+        );
+        crate::fault::block_udp_with("a", &[b_egress.into()])?;
+        crate::fault::block_udp_with("b", &[a_egress.into()])?;
+    }
+    let ts = TailscaleLab::up_with(out, &["a", "b"], 1)?;
+    let (ip_a, ip_b) = (ts.ipv4("a")?, ts.ipv4("b")?);
+    ts.cli(
+        "a",
+        &["ping", "-c", "5", "--until-direct=false", &ip_b.to_string()],
+    )
+    .ok();
+    std::thread::sleep(CONGESTION_SETTLE);
+    let (run, _, _) = congestion_run(&mut lab, out, "tailscale", ip_a.into(), shape, || {
+        tailscale_path(&ts, ip_b)
+    })?;
+    Ok(run)
+}
+
+/// 场景 24（design/prototype.md 第 6.2 节）：拥塞。路径没有断，只是排队：nett 不切换、不重新握手，
+/// 长连接不断；吞吐与最长中断不比 Tailscale 差。
+pub fn congestion(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    (repeat, with_tailscale): (usize, bool),
+    rate_kbit: u32,
+    duration: Duration,
+) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let direct = topo
+        .links
+        .iter()
+        .any(|l| l.candidates.iter().any(|c| c.starts_with("direct")));
+    let mut report = Report::new(if direct {
+        "24-congestion-direct"
+    } else {
+        "24-congestion-relay"
+    });
+    let shape = (rate_kbit, duration);
+    let (mut n, mut t) = (Vec::new(), Vec::new());
+    for i in 0..repeat {
+        n.push(nett_congestion_once(
+            &topo,
+            nett,
+            &out.join(format!("nett-{i}")),
+            shape,
+        )?);
+        if with_tailscale {
+            let dir = out.join(format!("tailscale-{i}"));
+            t.push(tailscale_congestion_once(&topo, &dir, direct, shape)?);
+        }
+    }
+    for r in n.iter().chain(&t) {
+        report.record(&format!("run:{}", r.system), format!("{r:?}"));
+    }
+    report.check(
+        "nett:steady-path",
+        n.iter().all(|r| r.changes.is_empty()),
+        format!(
+            "switches per run {:?}",
+            n.iter().map(|r| r.changes.len()).collect::<Vec<_>>()
+        ),
+    );
+    report.check(
+        "nett:long-connection-never-reset",
+        n.iter().all(|r| r.tcp_ended.is_none()),
+        format!(
+            "kbit/s on a {rate_kbit} kbit/s uplink {:?}",
+            n.iter().map(|r| r.tcp_kbps).collect::<Vec<_>>()
+        ),
+    );
+    if with_tailscale {
+        let min = |v: &[CongestionRun]| v.iter().map(|r| r.tcp_kbps).min().unwrap_or(0);
+        let max_gap = |v: &[CongestionRun]| v.iter().map(|r| r.max_gap_ms).max().unwrap_or(0);
+        report.check(
+            "throughput:at-least-95-percent",
+            min(&n) * 100 >= min(&t) * 95,
+            format!("nett min {} kbit/s, tailscale min {}", min(&n), min(&t)),
+        );
+        report.check(
+            "outage:not-worse-than-tailscale",
+            not_worse(Some(max_gap(&n)), Some(max_gap(&t))),
+            format!(
+                "nett max {} ms, tailscale max {} ms",
+                max_gap(&n),
+                max_gap(&t)
+            ),
+        );
+    }
+    write_report(out, &report)?;
+    Ok(report)
+}
