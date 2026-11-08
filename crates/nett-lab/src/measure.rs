@@ -151,6 +151,51 @@ pub fn forge(to: SocketAddr, count: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 洪泛预先生成的握手发起数。WireGuard 不对握手发起去重，同样的包每次都要做一次 Diffie-Hellman 才知道
+/// 解不开，所以反复发送这几个就能占满对端处理握手的能力。
+const FLOOD_DISTINCT: usize = 64;
+
+/// 场景 20(c) 的洪泛：向 `to` 尽快发送 `mac1` 正确、其余内容随机的握手发起，持续 `secs` 秒。`public_key`
+/// 是对端的组网公钥（`mac1` 的密钥由它导出）。超过对端处理握手的能力时，它的握手队列积压、进入负载
+/// 状态，改为回 cookie。
+pub fn flood(to: SocketAddr, public_key: &[u8; 32], secs: u64) -> anyhow::Result<()> {
+    let bind: SocketAddr = if to.is_ipv4() {
+        "0.0.0.0:0".parse()?
+    } else {
+        "[::]:0".parse()?
+    };
+    let socket = UdpSocket::bind(bind).context("binding flooder")?;
+    let mac1 = nett_relay::wg::Mac1Key::for_public_key(public_key);
+    let mut state: u64 = 0x2545_f491_4f6c_dd1d ^ now_ms();
+    let packets: Vec<[u8; 148]> = (0..FLOOD_DISTINCT)
+        .map(|_| {
+            let mut init = [0u8; 148];
+            for b in init.iter_mut() {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *b = (state & 0xff) as u8;
+            }
+            init[0] = 1;
+            init[1..4].fill(0);
+            let tag = mac1.compute(&init[..116]);
+            init[116..132].copy_from_slice(&tag);
+            init[132..].fill(0);
+            init
+        })
+        .collect();
+    let end = std::time::Instant::now() + Duration::from_secs(secs);
+    let mut sent: u64 = 0;
+    while std::time::Instant::now() < end {
+        for p in &packets {
+            socket.send_to(p, to).ok();
+        }
+        sent += packets.len() as u64;
+    }
+    println!("sent {sent} initiations in {secs} s");
+    Ok(())
+}
+
 /// 长连接的发送端：连接后持续写入，直到出错或进程被结束。出错时以非 0 退出，原因写入标准错误。
 pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
     let mut stream =
@@ -201,6 +246,116 @@ pub fn tcp_sink(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 大块传输（场景 19）的写入块大小，以及接收端判定传输停住的时间。
+const BULK_CHUNK: usize = 64 * 1024;
+const BULK_STALL: Duration = Duration::from_secs(30);
+
+/// 大块传输的内容：第 `offset` 个字节，取自按 8 字节一组编号的 splitmix64 序列。发送端和接收端各自
+/// 生成，不用传递种子；错位、缺失、重复都会让后面的字节对不上。
+fn bulk_fill(offset: u64, buf: &mut [u8]) {
+    let (mut at, mut i) = (offset, 0);
+    while i < buf.len() {
+        let mut z = (at / 8).wrapping_add(0x9e37_79b9_7f4a_7c15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        z ^= z >> 31;
+        let word = z.to_le_bytes();
+        let start = usize::try_from(at % 8).unwrap_or(0);
+        let n = (8 - start).min(buf.len() - i);
+        buf[i..i + n].copy_from_slice(&word[start..start + n]);
+        i += n;
+        at += n as u64;
+    }
+}
+
+/// 大块传输的发送端：连接后写入 `bytes` 个字节，关闭写方向，等接收端关闭连接。
+pub fn bulk_send(to: SocketAddr, bytes: u64) -> anyhow::Result<()> {
+    let mut stream =
+        TcpStream::connect_timeout(&to, Duration::from_secs(10)).context("connecting")?;
+    let mut buf = vec![0u8; BULK_CHUNK];
+    let mut sent: u64 = 0;
+    while sent < bytes {
+        let n = usize::try_from((bytes - sent).min(BULK_CHUNK as u64)).unwrap_or(BULK_CHUNK);
+        bulk_fill(sent, &mut buf[..n]);
+        stream
+            .write_all(&buf[..n])
+            .context("writing the bulk stream")?;
+        sent += n as u64;
+    }
+    stream.shutdown(std::net::Shutdown::Write)?;
+    let mut rest = [0u8; 16];
+    while stream.read(&mut rest).context("waiting for the receiver")? > 0 {}
+    Ok(())
+}
+
+/// 大块传输的结果。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkResult {
+    pub expected: u64,
+    pub received: u64,
+    /// 第一个对不上的字节的位置。
+    pub mismatch_at: Option<u64>,
+    pub ms: u64,
+    /// `eof`、`stalled`（[`BULK_STALL`] 内没有收到数据）或错误。
+    pub ended: String,
+}
+
+impl BulkResult {
+    pub fn complete(&self) -> bool {
+        self.received == self.expected && self.mismatch_at.is_none() && self.ended == "eof"
+    }
+
+    pub fn mbps(&self) -> u64 {
+        self.received * 8 / 1000 / self.ms.max(1)
+    }
+}
+
+/// 大块传输的接收端：接受一个连接，逐字节校验内容，结束时把 [`BulkResult`] 写成 JSON。
+pub fn bulk_recv(listen: SocketAddr, bytes: u64, out: &Path) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(listen).context("binding bulk receiver")?;
+    let (mut stream, _) = listener.accept().context("accepting the bulk stream")?;
+    stream.set_read_timeout(Some(BULK_STALL))?;
+    let started = std::time::Instant::now();
+    let mut buf = vec![0u8; BULK_CHUNK];
+    let mut want = vec![0u8; BULK_CHUNK];
+    let (mut received, mut mismatch_at) = (0u64, None);
+    let ended = loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break "eof".to_owned(),
+            Ok(n) => {
+                if mismatch_at.is_none() {
+                    bulk_fill(received, &mut want[..n]);
+                    if let Some(i) = buf[..n].iter().zip(&want[..n]).position(|(a, b)| a != b) {
+                        mismatch_at = Some(received + i as u64);
+                    }
+                }
+                received += n as u64;
+            }
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                break "stalled".to_owned();
+            }
+            Err(e) => break format!("{:?}", e.kind()),
+        }
+    };
+    let result = BulkResult {
+        expected: bytes,
+        received,
+        mismatch_at,
+        ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        ended,
+    };
+    let tmp = out.with_extension("tmp");
+    std::fs::write(&tmp, serde_json::to_vec(&result)?)
+        .with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::rename(&tmp, out).with_context(|| format!("writing {}", out.display()))?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpStats {
     /// 连接被重置或出错；`None` 表示测量结束时连接仍然正常。
@@ -244,6 +399,20 @@ pub fn tcp_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<TcpSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bulk_content_does_not_depend_on_chunking() {
+        let mut whole = vec![0u8; 100];
+        bulk_fill(5, &mut whole);
+        let (mut left, mut right) = (vec![0u8; 37], vec![0u8; 63]);
+        bulk_fill(5, &mut left);
+        bulk_fill(42, &mut right);
+        assert_eq!([left, right].concat(), whole);
+        // 错开一个字节就对不上
+        let mut shifted = vec![0u8; 100];
+        bulk_fill(6, &mut shifted);
+        assert_ne!(shifted, whole);
+    }
 
     #[test]
     fn probe_gaps_include_window_edges() {

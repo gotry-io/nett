@@ -2929,3 +2929,943 @@ pub fn punch(
     write_report(out, &report)?;
     Ok(report)
 }
+
+/// 分片的计数（各命名空间 `/proc/net/snmp`、`/proc/net/snmp6` 之和）：生成的分片，以及为重组收到的分片。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Fragments {
+    created: u64,
+    reassembly: u64,
+}
+
+fn fragments(netns: &[String]) -> anyhow::Result<Fragments> {
+    let mut total = Fragments::default();
+    for ns in netns {
+        // `Ip:` 一行字段名、一行数值
+        let snmp = run_in(ns, "cat", ["/proc/net/snmp"])?;
+        let ip: Vec<&str> = snmp.lines().filter(|l| l.starts_with("Ip:")).collect();
+        if let [names, values] = ip.as_slice() {
+            for (name, value) in names.split_whitespace().zip(values.split_whitespace()) {
+                let value: u64 = value.parse().unwrap_or(0);
+                match name {
+                    "FragCreates" => total.created += value,
+                    "ReasmReqds" => total.reassembly += value,
+                    _ => {}
+                }
+            }
+        }
+        let snmp6 = run_in(ns, "cat", ["/proc/net/snmp6"])?;
+        for line in snmp6.lines() {
+            let mut parts = line.split_whitespace();
+            let (Some(name), Some(value)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            let value: u64 = value.parse().unwrap_or(0);
+            match name {
+                "Ip6FragCreates" => total.created += value,
+                "Ip6ReasmReqds" => total.reassembly += value,
+                _ => {}
+            }
+        }
+    }
+    Ok(total)
+}
+
+/// 大块传输最慢的速率（字节/秒）：低于它就算传不完，按它定出等待的上限。
+const BULK_MIN_RATE: u64 = 4 * 1024 * 1024;
+
+/// 经隧道从 `from` 向 `to` 传 `bytes` 个字节并校验内容（`port` 区分每一次传输）。
+fn bulk_transfer(
+    lab: &mut Lab,
+    from: &LabNode,
+    to: &LabNode,
+    bytes: u64,
+    port: u16,
+    out: &Path,
+) -> anyhow::Result<crate::measure::BulkResult> {
+    let addr = std::net::SocketAddr::new(to.mesh_ipv4.into(), port).to_string();
+    let result_file = out.join(format!("bulk-{port}.json"));
+    let bytes_arg = bytes.to_string();
+    lab.helper(
+        &to.name,
+        &[
+            "bulk-recv",
+            "--listen",
+            &addr,
+            "--bytes",
+            &bytes_arg,
+            "--out",
+            &result_file.to_string_lossy(),
+        ],
+        &out.join(format!("bulk-{port}-recv.log")),
+    )?;
+    std::thread::sleep(Duration::from_millis(300));
+    lab.helper(
+        &from.name,
+        &["bulk-send", "--to", &addr, "--bytes", &bytes_arg],
+        &out.join(format!("bulk-{port}-send.log")),
+    )?;
+    let deadline = Instant::now() + Duration::from_secs(bytes / BULK_MIN_RATE + 60);
+    loop {
+        if let Ok(text) = std::fs::read(&result_file) {
+            return serde_json::from_slice(&text).context("parsing the bulk transfer result");
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "bulk transfer {} -> {} did not finish within the deadline",
+                from.name,
+                to.name
+            );
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// 场景 19（design/prototype.md 第 6.3 节）：外层路径的 MTU 依次为 1500、1360、1300，经直连在两个方向
+/// 上各传 `bytes` 个字节并校验内容，统计期间外层的分片。`nett0` 的 MTU 固定为 1280：外层包 IPv4 为
+/// 1340 字节，IPv6 为 1360 字节。
+pub fn mtu(topology: &Path, nett: &Path, out: &Path, bytes: u64) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let ipv6 = topo
+        .links
+        .iter()
+        .any(|l| l.candidates.iter().any(|c| c == "direct6"));
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let mut lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new(if ipv6 { "19-mtu-ipv6" } else { "19-mtu-ipv4" });
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| {
+        generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .with_context(|| format!("node {name}"))
+    };
+    let (a, b) = (node("a")?, node("b")?);
+    let ns_a = lab.underlay.node("a").context("node a")?.netns.clone();
+    report.record("tunnel", ping(&ns_a, &b.mesh_ipv4.to_string())?);
+    let netns = lab.underlay.ip_netns();
+    let mut port = 7100u16;
+    for mtu in [1500u16, 1360, 1300] {
+        lab.underlay.set_internet_mtu(mtu)?;
+        for (from, to) in [(a, b), (b, a)] {
+            let before = fragments(&netns)?;
+            let result = bulk_transfer(&mut lab, from, to, bytes, port, out)
+                .map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
+            port += 1;
+            let after = fragments(&netns)?;
+            let detail = format!(
+                "{result:?}; {} Mbit/s; outer fragments created {}, received for reassembly {}",
+                result.mbps(),
+                after.created - before.created,
+                after.reassembly - before.reassembly
+            );
+            let name = format!("mtu-{mtu}:{}-to-{}", from.name, to.name);
+            let unfragmented = after == before;
+            match (mtu, ipv6) {
+                // 外层包装得下：完整，且没有分片
+                (1500 | 1360, _) => report.check(&name, result.complete() && unfragmented, detail),
+                // IPv4 的 1300：靠分片传输完整
+                (_, false) => report.check(&name, result.complete(), detail),
+                // IPv6 的 1300：记录（design/prototype.md 第 6.3 节）
+                (_, true) => report.record(&name, detail),
+            }
+        }
+    }
+    lab.underlay.set_internet_mtu(1500)?;
+    write_report(out, &report)?;
+    Ok(report)
+}
+
+/// 场景 20 中 a 抓到的一个 WireGuard 握手消息。
+#[derive(Debug, Clone, Copy, Serialize)]
+struct Handshake {
+    at_ms: u64,
+    /// 1 握手发起、2 握手应答、3 cookie 应答（按长度区分：148、92、64 字节）。
+    kind: u8,
+    /// a 发出的（否则是 a 收到的）。
+    outgoing: bool,
+    /// 另一端的地址（中继）。
+    remote: std::net::IpAddr,
+}
+
+/// 解析 `tcpdump -n -tt` 的输出：`1794049442.233309 IP 192.168.1.11.41820 > 198.51.100.4.41900: UDP, length 148`。
+fn handshakes(capture: &Path, own: std::net::Ipv4Addr) -> Vec<Handshake> {
+    let host = |s: &str| -> Option<std::net::IpAddr> {
+        let s = s.trim_end_matches(':');
+        s.rsplit_once('.')?.0.parse().ok()
+    };
+    std::fs::read_to_string(capture)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let [time, "IP", src, ">", dst, .., "length", len] = parts.as_slice() else {
+                return None;
+            };
+            let at_ms = (time.parse::<f64>().ok()? * 1000.0) as u64;
+            let kind = match *len {
+                "148" => 1,
+                "92" => 2,
+                "64" => 3,
+                _ => return None,
+            };
+            let (src, dst) = (host(src)?, host(dst)?);
+            let outgoing = src == std::net::IpAddr::V4(own);
+            Some(Handshake {
+                at_ms,
+                kind,
+                outgoing,
+                remote: if outgoing { dst } else { src },
+            })
+        })
+        .collect()
+}
+
+/// 场景 20 的公共部分：relays.toml 的拓扑，a 经中继向 b 发探测流和长连接，在 a 上抓握手消息。
+struct WgRun {
+    lab: Lab,
+    generated: Generated,
+    probe_file: PathBuf,
+    tcp_file: PathBuf,
+    capture: PathBuf,
+    a_ipv4: std::net::Ipv4Addr,
+}
+
+impl WgRun {
+    /// `delay`：先在 a 上建好延迟队列（[`crate::fault::prepare_delay`]），之后只改过滤器。
+    fn start(topology: &Path, nett: &Path, out: &Path, delay: bool) -> anyhow::Result<Self> {
+        let topo = Topology::load(topology)?;
+        let underlay = Underlay::plan(&topo)?;
+        underlay.down()?;
+        let generated = material::generate(&topo, &underlay, out, false)?;
+        let mut lab = start(&topo, &generated, underlay, nett)?;
+        for node in &generated.nodes {
+            wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+        }
+        let a_net = lab.underlay.node("a").context("node a")?.clone();
+        let capture = out.join("cap-a-handshakes.txt");
+        lab.tool(
+            &a_net.netns,
+            "tcpdump",
+            &[
+                "-n",
+                "-tt",
+                "-l",
+                "-i",
+                "eth0",
+                "udp and (udp[8] = 1 or udp[8] = 2 or udp[8] = 3)",
+            ],
+            &capture,
+        )?;
+        let b = generated
+            .nodes
+            .iter()
+            .find(|n| n.name == "b")
+            .context("node b")?
+            .clone();
+        if delay {
+            crate::fault::prepare_delay("a", &["delay".into(), "40ms".into()])?;
+        }
+        let (probe_file, tcp_file) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
+        let run = Self {
+            lab,
+            generated,
+            probe_file,
+            tcp_file,
+            capture,
+            a_ipv4: a_net.ipv4,
+        };
+        run.wait_flowing(SETTLE_TIMEOUT)
+            .map_err(|e| e.context(diagnose(&run.lab, &run.generated.nodes)))?;
+        Ok(run)
+    }
+
+    fn node(&self, name: &str) -> anyhow::Result<&LabNode> {
+        self.generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .with_context(|| format!("node {name}"))
+    }
+
+    /// 等到探测流连续 3 秒正常。
+    fn wait_flowing(&self, limit: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + limit;
+        loop {
+            let now = crate::measure::now_ms();
+            if crate::measure::probe_stats(&self.probe_file, now.saturating_sub(3000), now)
+                .is_ok_and(|p| p.received >= 25)
+            {
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                anyhow::bail!("the probe stream did not flow within {limit:?}");
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
+
+    /// a 当前经哪个中继：最近一次路径切换的目标，还没有切换过时是第一个候选。
+    fn current_relay(&self) -> anyhow::Result<String> {
+        let a = self.node("a")?;
+        let to = events(a)
+            .iter()
+            .rev()
+            .find(|e| e["event"] == "path_switched")
+            .and_then(|e| e["to"].as_str().map(str::to_owned));
+        let Some(to) = to else {
+            return Ok("r1".to_owned());
+        };
+        ["r1", "r2"]
+            .into_iter()
+            .find(|r| {
+                self.lab
+                    .underlay
+                    .public_ipv4(r)
+                    .is_some_and(|ip| to.contains(&format!("{ip}:")))
+            })
+            .map(str::to_owned)
+            .with_context(|| format!("path `{to}` is not via r1 or r2"))
+    }
+
+    /// 让当前中继失效，等 a 切到另一个中继、探测流恢复，再恢复这个中继。返回失效的时刻。
+    fn fail_current_relay(&self, limit: Duration) -> anyhow::Result<(u64, Option<u64>)> {
+        let relay = self.current_relay()?;
+        let at = crate::measure::now_ms();
+        crate::fault::set_link(
+            &self.lab.underlay,
+            &relay,
+            &crate::fault::Netem::loss(100.0),
+        )?;
+        let deadline = Instant::now() + limit;
+        let resumed = loop {
+            std::thread::sleep(Duration::from_millis(200));
+            let now = crate::measure::now_ms();
+            if let Some(t) = resumed_at(&self.probe_file, at, now)?
+                && t > at
+            {
+                break Some(t);
+            }
+            if Instant::now() >= deadline {
+                break None;
+            }
+        };
+        crate::fault::clear_link(&self.lab.underlay, &relay)?;
+        Ok((at, resumed))
+    }
+
+    /// a 在 `from_ms` 之后的路径切换：（时刻，原因，目标）。
+    fn switches_since(&self, from_ms: u64) -> anyhow::Result<Vec<(u64, String, String)>> {
+        Ok(events(self.node("a")?)
+            .iter()
+            .filter_map(|e| {
+                let at = e["at_ms"].as_u64()?;
+                (e["event"] == "path_switched" && at >= from_ms).then(|| {
+                    (
+                        at,
+                        e["reason"].as_str().unwrap_or_default().to_owned(),
+                        e["to"].as_str().unwrap_or_default().to_owned(),
+                    )
+                })
+            })
+            .collect())
+    }
+}
+
+impl WgRun {
+    /// 中继保存的会话索引数（它每秒写一次状态文件）。
+    fn relay_sessions(&self, relay: &str) -> anyhow::Result<usize> {
+        let path = self.node(relay)?.dir.join("relay-state.json");
+        let text = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let state: nett_relay::relay::RelayState =
+            serde_json::from_slice(&text).context("parsing the relay state")?;
+        Ok(state.sessions.len())
+    }
+
+    /// 在中继上丢掉接下来一个来自 a 的握手发起（代替中继因索引冲突丢弃一次握手，design/mesh.md 第 5.1 节）。
+    fn drop_next_initiation(&self, relay: &str) -> anyhow::Result<()> {
+        let from = self
+            .lab
+            .underlay
+            .egress_ipv4("a")
+            .context("a egress address")?;
+        let rules = format!(
+            "table inet drop_once {{\n chain input {{\n  type filter hook input priority -10;\n  ip saddr {from} udp dport 41900 @th,64,8 1 quota until 200 bytes counter drop\n }}\n}}\n"
+        );
+        let ns = crate::net::netns(relay);
+        run_in(&ns, "nft", ["delete", "table", "inet", "drop_once"]).ok();
+        crate::cmd::run_with_input(
+            "ip",
+            ["netns", "exec", &ns, "nft", "-f", "-"],
+            Some(rules.as_bytes()),
+            crate::cmd::COMMAND_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    /// a 在 `from_ms` 之后发出的握手发起与收到的应答。
+    fn handshakes_since(&self, from_ms: u64) -> Vec<Handshake> {
+        handshakes(&self.capture, self.a_ipv4)
+            .into_iter()
+            .filter(|h| h.at_ms >= from_ms)
+            .collect()
+    }
+}
+
+/// 场景 20(a)、(b)：删除再添加对端之后的握手时间，以及新中继丢掉第一个握手发起时的重试。每次让当前中继
+/// 失效，a 切到另一个中继并重新握手。
+pub fn wg_rehandshake(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    repeat: usize,
+) -> anyhow::Result<Report> {
+    let run_ = WgRun::start(topology, nett, out, false)?;
+    let mut report = Report::new("20ab-wg-rehandshake");
+    let mut timings = Vec::new();
+    for i in 0..repeat + 1 {
+        // 最后一次在目标中继上丢掉第一个握手发起
+        let dropped = i == repeat;
+        let relay = run_.current_relay()?;
+        let target = if relay == "r1" { "r2" } else { "r1" };
+        if dropped {
+            run_.drop_next_initiation(target)?;
+        }
+        let (failed_at, resumed) = run_
+            .fail_current_relay(Duration::from_secs(30))
+            .map_err(|e| e.context(diagnose(&run_.lab, &run_.generated.nodes)))?;
+        let switched = run_.switches_since(failed_at)?;
+        let Some((switch_at, _, _)) = switched.first().cloned() else {
+            anyhow::bail!("a did not switch away from {relay}");
+        };
+        // 内核在加回对端时立即发出握手发起，可能比组网进程记下切换事件早一毫秒
+        let seen = run_.handshakes_since(switch_at.saturating_sub(100));
+        let inits: Vec<u64> = seen
+            .iter()
+            .filter(|h| h.kind == 1 && h.outgoing)
+            .map(|h| h.at_ms)
+            .collect();
+        let response = seen
+            .iter()
+            .find(|h| h.kind == 2 && !h.outgoing)
+            .map(|h| h.at_ms);
+        let first_init = inits.first().copied();
+        let detail = format!(
+            "switch -> first initiation {:?} ms; first initiation -> response {:?} ms; initiations {}; probe stream back {:?} ms after the switch; switches {:?}",
+            first_init.map(|t| t.saturating_sub(switch_at)),
+            response.zip(first_init).map(|(r, f)| r.saturating_sub(f)),
+            inits.len(),
+            resumed.map(|t| t.saturating_sub(switch_at)),
+            switched
+                .iter()
+                .map(|(t, r, _)| (t - switch_at, r.as_str()))
+                .collect::<Vec<_>>()
+        );
+        if dropped {
+            let retry = inits.get(1).zip(first_init).map(|(b, a)| b - a);
+            report.check(
+                "b:dropped-initiation-is-retried",
+                retry.is_some() && response.is_some() && resumed.is_some(),
+                format!("retried after {retry:?} ms; {detail}"),
+            );
+        } else {
+            report.record(&format!("a:run-{}", i + 1), detail);
+            if let (Some(f), Some(r)) = (first_init, response) {
+                timings.push((f.saturating_sub(switch_at), r.saturating_sub(f)));
+            }
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
+    report.check(
+        "a:handshake-after-readding",
+        timings.len() == repeat,
+        format!("(switch -> initiation, initiation -> response) ms: {timings:?}"),
+    );
+    let tcp = crate::measure::tcp_stats(&run_.tcp_file, 0, crate::measure::now_ms())?;
+    report.check(
+        "long-connection-never-reset",
+        tcp.ended.is_none(),
+        format!("{tcp:?}"),
+    );
+    drop(run_);
+    write_report(out, &report)?;
+    Ok(report)
+}
+
+/// 场景 20(b)、(d)：经中继连续运行 `duration`，跨过多次密钥轮换（发起方每 2 分钟一次）。第一次轮换的握手
+/// 发起在中继上被丢掉，WireGuard 约 5 秒后自己重试，期间旧会话照常使用。每分钟记录中继的会话索引数。
+pub fn wg_rekey(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    duration: Duration,
+) -> anyhow::Result<Report> {
+    let run_ = WgRun::start(topology, nett, out, false)?;
+    let mut report = Report::new("20bd-wg-rekey");
+    let relay = run_.current_relay()?;
+    let started = crate::measure::now_ms();
+    run_.drop_next_initiation(&relay)?;
+    let mut sessions = Vec::new();
+    let end = Instant::now() + duration;
+    while Instant::now() < end {
+        std::thread::sleep(
+            Duration::from_secs(60).min(end.saturating_duration_since(Instant::now())),
+        );
+        sessions.push(run_.relay_sessions(&relay)?);
+    }
+    let finished = crate::measure::now_ms();
+    let inits: Vec<u64> = run_
+        .handshakes_since(started)
+        .iter()
+        .filter(|h| h.kind == 1 && h.outgoing)
+        .map(|h| h.at_ms - started)
+        .collect();
+    let switches = run_.switches_since(started)?;
+    let probe = crate::measure::probe_stats(&run_.probe_file, started, finished)?;
+    let tcp = crate::measure::tcp_stats(&run_.tcp_file, started, finished)?;
+    let retry = inits.get(1).zip(inits.first()).map(|(b, a)| b - a);
+    report.check(
+        "b:dropped-rekey-is-retried",
+        retry.is_some_and(|ms| (4_000..=7_000).contains(&ms)),
+        format!("initiation times (ms since start): {inits:?}; retry after {retry:?} ms"),
+    );
+    let rekeys = inits.len();
+    report.check(
+        "d:rekeys-happen",
+        u64::try_from(rekeys).unwrap_or(0) >= duration.as_secs() / 150,
+        format!("{rekeys} initiations in {} s", duration.as_secs()),
+    );
+    report.check(
+        "d:traffic-never-interrupted",
+        switches.is_empty()
+            && probe.max_gap_ms < 2 * crate::measure::PROBE_INTERVAL.as_millis() as u64
+            && tcp.ended.is_none(),
+        format!(
+            "switches {switches:?}; longest probe gap {} ms; {tcp:?}",
+            probe.max_gap_ms
+        ),
+    );
+    let half = sessions.len() / 2;
+    let early = sessions[..half].iter().max().copied().unwrap_or(0);
+    let late = sessions[half..].iter().max().copied().unwrap_or(0);
+    // 每次握手留下两个索引，空闲 180 秒后删除；每 2 分钟轮换一次时最多三次握手的索引同时在表中
+    report.check(
+        "d:relay-index-table-stable",
+        late <= early.max(6),
+        format!("sessions at {relay} each minute: {sessions:?}"),
+    );
+    drop(run_);
+    write_report(out, &report)?;
+    Ok(report)
+}
+
+/// 把"陌生人"命名空间接到"公网"上（198.51.100.99）。
+fn add_outsider() -> anyhow::Result<()> {
+    use crate::net::{INET_NETNS, OUTSIDER_NETNS, add_netns, attach};
+    add_netns(OUTSIDER_NETNS)?;
+    attach(OUTSIDER_NETNS, INET_NETNS, "v-x", "br0")?;
+    run(
+        "ip",
+        [
+            "-n",
+            OUTSIDER_NETNS,
+            "addr",
+            "add",
+            "198.51.100.99/24",
+            "dev",
+            "eth0",
+        ],
+    )?;
+    Ok(())
+}
+
+/// 一个命名空间中 nft 计数器的包数（`nft list table` 输出中第一个 `packets N`）。
+fn nft_packets(ns: &str, table: &str) -> anyhow::Result<u64> {
+    let text = run_in(ns, "nft", ["list", "table", table])?;
+    let n = text
+        .split_whitespace()
+        .skip_while(|w| *w != "packets")
+        .nth(1)
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    Ok(n)
+}
+
+/// 洪泛持续的时间：足够 a 换中继（计划内的切换要等同类更优路径持续 30 秒），并让 WireGuard 带着 cookie
+/// 重试几轮。
+const COOKIE_FLOOD: Duration = Duration::from_secs(90);
+
+/// a 换中继的方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CookieCase {
+    /// 当前中继失效。
+    Failover,
+    /// 当前中继变慢（加 40 毫秒延迟），旧中继仍然可用。
+    Planned,
+}
+
+/// 场景 20(c) 的一次运行：b 被大量握手发起压到负载状态，a 换到另一个中继、重新握手。
+fn cookie_once(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    case: CookieCase,
+    report: &mut Report,
+) -> anyhow::Result<()> {
+    let label = match case {
+        CookieCase::Failover => "failover",
+        CookieCase::Planned => "planned",
+    };
+    let run_ = WgRun::start(topology, nett, out, case == CookieCase::Planned)?;
+    let b = run_.node("b")?.clone();
+    let b_wg = std::net::SocketAddr::new(
+        run_.lab
+            .underlay
+            .public_ipv4("b")
+            .context("b address")?
+            .into(),
+        material::LISTEN_PORT,
+    );
+    let ns_b = crate::net::netns("b");
+    let counter = "table inet cookies {\n chain out {\n  type filter hook output priority 0;\n  udp sport 41820 @th,64,8 3 counter\n }\n}\n";
+    crate::cmd::run_with_input(
+        "ip",
+        ["netns", "exec", &ns_b, "nft", "-f", "-"],
+        Some(counter.as_bytes()),
+        crate::cmd::COMMAND_TIMEOUT,
+    )?;
+    add_outsider()?;
+    let key_hex: String = b
+        .mesh_public_key
+        .as_bytes()
+        .iter()
+        .map(|x| format!("{x:02x}"))
+        .collect();
+    let flood_s = COOKIE_FLOOD.as_secs().to_string();
+    let flood_until = crate::measure::now_ms() + COOKIE_FLOOD.as_millis() as u64;
+    let me = std::env::current_exe().context("locating nett-lab")?;
+    let mut run_ = run_;
+    let flooder = crate::cmd::spawn_in(
+        crate::net::OUTSIDER_NETNS,
+        &me,
+        [
+            "flood",
+            "--to",
+            &b_wg.to_string(),
+            "--key",
+            &key_hex,
+            "--duration",
+            &flood_s,
+        ],
+        &out.join("flood.log"),
+    )?;
+    run_.lab.helpers.push(flooder);
+    std::thread::sleep(Duration::from_secs(3));
+    let cookies = nft_packets(&ns_b, "inet cookies")?;
+    report.check(
+        &format!("{label}:peer-under-load"),
+        cookies > 0,
+        format!("b answered {cookies} flooded initiations with cookies in 3 s"),
+    );
+    let relay = run_.current_relay()?;
+    let changed_at = crate::measure::now_ms();
+    match case {
+        CookieCase::Failover => crate::fault::set_link(
+            &run_.lab.underlay,
+            &relay,
+            &crate::fault::Netem::loss(100.0),
+        )?,
+        CookieCase::Planned => {
+            let ip = run_
+                .lab
+                .underlay
+                .public_ipv4(&relay)
+                .context("relay address")?;
+            crate::fault::route_delay("a", ip)?;
+        }
+    }
+    // 看完整个洪泛期：换中继之后是否来回切换、隧道是否恢复
+    std::thread::sleep(Duration::from_millis(
+        flood_until.saturating_sub(crate::measure::now_ms()),
+    ));
+    match case {
+        CookieCase::Failover => crate::fault::clear_link(&run_.lab.underlay, &relay)?,
+        CookieCase::Planned => crate::fault::clear_eth0("a")?,
+    }
+    let switches = run_.switches_since(changed_at)?;
+    let first_switch = switches.first().map(|s| s.0);
+    let seen: Vec<Handshake> = handshakes(&run_.capture, run_.a_ipv4)
+        .into_iter()
+        .filter(|h| first_switch.is_some_and(|t| h.at_ms >= t))
+        .collect();
+    let cookies_to_a = seen.iter().filter(|h| h.kind == 3 && !h.outgoing).count();
+    let initiations = seen.iter().filter(|h| h.kind == 1 && h.outgoing).count();
+    let completed = seen
+        .iter()
+        .find(|h| h.kind == 2 && !h.outgoing)
+        .map(|h| h.at_ms);
+    report.record(
+        &format!("{label}:switches"),
+        format!(
+            "{:?}",
+            switches
+                .iter()
+                .map(|(t, r, to)| (t.saturating_sub(changed_at), r.as_str(), to.as_str()))
+                .collect::<Vec<_>>()
+        ),
+    );
+    report.record(
+        &format!("{label}:handshakes"),
+        format!(
+            "after the first switch: {initiations} initiations sent, {cookies_to_a} cookie replies received, first response after {:?} ms",
+            completed.zip(first_switch).map(|(c, s)| c - s)
+        ),
+    );
+    report.check(
+        &format!("{label}:cookie-reaches-a-through-the-relay"),
+        cookies_to_a > 0,
+        format!("{cookies_to_a} cookie replies"),
+    );
+    // 来回切换：回到了之前离开过的中继
+    let mut visited: Vec<&str> = vec![];
+    let mut returned = false;
+    for (_, _, to) in &switches {
+        if visited.last() != Some(&to.as_str()) {
+            returned |= visited.contains(&to.as_str());
+            visited.push(to);
+        }
+    }
+    report.check(
+        &format!("{label}:no-flapping"),
+        !returned && first_switch.is_some(),
+        format!("relays in order: {visited:?}"),
+    );
+    let probe = crate::measure::probe_stats(
+        &run_.probe_file,
+        first_switch.unwrap_or(changed_at),
+        flood_until,
+    )?;
+    let tail = crate::measure::probe_stats(
+        &run_.probe_file,
+        flood_until.saturating_sub(5_000),
+        flood_until,
+    )?;
+    report.check(
+        &format!("{label}:tunnel-recovers-under-load"),
+        completed.is_some_and(|c| c < flood_until) && tail.received >= 40,
+        format!(
+            "longest gap after the first switch {} ms; {} probes in the last 5 s of the flood",
+            probe.max_gap_ms, tail.received
+        ),
+    );
+    let tcp = crate::measure::tcp_stats(&run_.tcp_file, changed_at, crate::measure::now_ms())?;
+    report.check(
+        &format!("{label}:long-connection-never-reset"),
+        tcp.ended.is_none(),
+        format!("{tcp:?}"),
+    );
+    std::fs::write(
+        out.join(format!("handshakes-{label}.json")),
+        serde_json::to_vec_pretty(&seen)?,
+    )?;
+    Ok(())
+}
+
+/// 场景 20(c)：b 被大量握手发起压到负载状态时，a 换中继、重新握手。经中继送回的 cookie 应答要能到达 a，
+/// 握手要在负载持续期间完成。分两种：当前中继失效；当前中继变慢、旧中继仍然可用（计划内的切换）。
+pub fn wg_cookie(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+    let mut report = Report::new("20c-wg-cookie");
+    for (case, dir) in [
+        (CookieCase::Failover, "failover"),
+        (CookieCase::Planned, "planned"),
+    ] {
+        let out = out.join(dir);
+        std::fs::create_dir_all(&out)?;
+        cookie_once(topology, nett, &out, case, &mut report)?;
+    }
+    write_report(out, &report)?;
+    Ok(report)
+}
+
+/// 测量用的辅助子命令：静置之前结束它们，组网和中继的进程照常运行。
+const LOAD_HELPERS: [&str; 6] = [
+    "probe-send",
+    "probe-recv",
+    "tcp-source",
+    "tcp-sink",
+    "bulk-send",
+    "bulk-recv",
+];
+
+fn cmdline(pid: u32) -> Vec<String> {
+    std::fs::read(format!("/proc/{pid}/cmdline"))
+        .unwrap_or_default()
+        .split(|b| *b == 0)
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
+impl Lab {
+    /// 结束探测流、长连接和大块传输的辅助进程。
+    fn stop_load(&mut self) {
+        for child in &mut self.helpers {
+            let args = cmdline(child.id());
+            if args.iter().any(|a| LOAD_HELPERS.contains(&a.as_str())) {
+                child.kill().ok();
+                child.wait().ok();
+            }
+        }
+    }
+
+    /// 要测内存的进程：（名称，pid）。
+    fn measured(&self) -> Vec<(String, u32)> {
+        let mut out: Vec<(String, u32)> = self
+            .processes
+            .iter()
+            .map(|(n, c)| (format!("mesh@{n}"), c.id()))
+            .chain(
+                self.relays
+                    .iter()
+                    .map(|(n, c)| (format!("relay@{n}"), c.id())),
+            )
+            .collect();
+        for child in &self.helpers {
+            if cmdline(child.id()).iter().any(|a| a == "transport") {
+                out.push(("transport".to_owned(), child.id()));
+            }
+        }
+        out
+    }
+}
+
+/// 进程的 RSS、PSS（KiB）与线程数。
+fn memory_kib(pid: u32) -> Option<(u64, u64, u64)> {
+    let field = |file: &str, key: &str| -> Option<u64> {
+        std::fs::read_to_string(format!("/proc/{pid}/{file}"))
+            .ok()?
+            .lines()
+            .find(|l| l.starts_with(key))?[key.len()..]
+            .split_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    };
+    Some((
+        field("status", "VmRSS:")?,
+        field("smaps_rollup", "Pss:")?,
+        field("status", "Threads:")?,
+    ))
+}
+
+fn mem_available_kib() -> Option<u64> {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find(|l| l.starts_with("MemAvailable:"))?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// 空闲预算（硬性规则 14）：组网进程、传输适配进程、nett-relay 各 5 MB。
+const IDLE_BUDGET_KIB: u64 = 5 * 1024;
+/// 每段负载传输的数据量。
+const RESOURCE_BULK: u64 = 128 * 1024 * 1024;
+
+/// 场景 21（design/prototype.md 第 6.3 节）：先有负载地运行——直连、切到 UDP 中继、再切到 TLS，经中继和
+/// TLS 各传一块数据，再回到直连——然后停掉负载、静置 `idle`，测各进程的 RSS 与 PSS。用 release 构建。
+pub fn resources(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    idle: Duration,
+) -> anyhow::Result<Report> {
+    use crate::fault;
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let available_before = mem_available_kib();
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let mut lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new("21-resources");
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| {
+        generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .cloned()
+            .with_context(|| format!("node {name}"))
+    };
+    let (a, b) = (node("a")?, node("b")?);
+    let (_probe, _tcp) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
+    let a_egress = lab.underlay.egress_ipv4("a").context("a egress address")?;
+    let mut port = 7200u16;
+    let mut load = |lab: &mut Lab, what: &str| -> anyhow::Result<()> {
+        // 让切换完成，再传一块数据
+        std::thread::sleep(Duration::from_secs(8));
+        let result = bulk_transfer(lab, &a, &b, RESOURCE_BULK, port, out)
+            .map_err(|e| e.context(diagnose(lab, &generated.nodes)))?;
+        port += 1;
+        report.record(
+            &format!("load:{what}"),
+            format!("{result:?}; {} Mbit/s", result.mbps()),
+        );
+        Ok(())
+    };
+    load(&mut lab, "direct")?;
+    fault::block_udp_with("b", &[a_egress.into()])?;
+    load(&mut lab, "relay")?;
+    fault::block_udp_upstream(&lab.underlay, "a")?;
+    load(&mut lab, "tls")?;
+    fault::unblock_udp_upstream(&lab.underlay, "a")?;
+    fault::unblock_udp("b")?;
+    load(&mut lab, "direct-again")?;
+    lab.stop_load();
+    std::thread::sleep(idle);
+    let mut over = Vec::new();
+    for (name, pid) in lab.measured() {
+        let Some((rss, pss, threads)) = memory_kib(pid) else {
+            report.check(
+                &format!("{name}:measured"),
+                false,
+                format!("pid {pid} is gone"),
+            );
+            continue;
+        };
+        if rss > IDLE_BUDGET_KIB {
+            over.push(name.clone());
+        }
+        report.record(
+            &name,
+            format!(
+                "RSS {rss} KiB, PSS {pss} KiB, {threads} threads after {} s idle",
+                idle.as_secs()
+            ),
+        );
+    }
+    report.record(
+        "machine",
+        format!(
+            "MemAvailable before {:?} KiB, after {:?} KiB",
+            available_before,
+            mem_available_kib()
+        ),
+    );
+    // 超过预算的进入下一阶段之前要查明原因（design/prototype.md 第 6.3 节）
+    report.check(
+        "idle-rss-within-5-mb",
+        over.is_empty(),
+        format!("over budget: {over:?}"),
+    );
+    drop(lab);
+    write_report(out, &report)?;
+    Ok(report)
+}

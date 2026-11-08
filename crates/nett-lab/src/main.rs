@@ -41,6 +41,9 @@ const USAGE: &str = "usage:
   nett-lab run <loss|jitter|flap|alternate> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
   nett-lab run <failover|fallback|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run punch --topology <punch-*.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
+  nett-lab run mtu --topology <mtu4.toml|mtu6.toml> --nett <path/to/nett> --out <dir> [--bytes N]
+  nett-lab run <wg-rehandshake|wg-cookie|wg-rekey> --topology relays.toml --nett <path/to/nett> --out <dir> [--repeat N] [--duration SECONDS]
+  nett-lab run resources --topology fallback.toml --nett <path/to/release/nett> --out <dir> [--duration IDLE_SECONDS]
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
@@ -49,7 +52,10 @@ measurement helpers (started by the scenarios inside a node's network namespace)
   nett-lab probe-recv --listen <addr:port> --out <file>
   nett-lab tcp-source --to <addr:port>
   nett-lab tcp-sink --listen <addr:port> --out <file>
-  nett-lab forge --to <addr:port>";
+  nett-lab bulk-send --to <addr:port> --bytes N
+  nett-lab bulk-recv --listen <addr:port> --bytes N --out <file>
+  nett-lab forge --to <addr:port>
+  nett-lab flood --to <addr:port> --key <hex public key> [--duration SECONDS]";
 
 #[cfg(not(target_os = "linux"))]
 fn run() -> anyhow::Result<bool> {
@@ -73,6 +79,8 @@ fn run() -> anyhow::Result<bool> {
     let (mut repeat, mut with_tailscale) = (1usize, false);
     let (mut level, mut duration_s) = (None::<u64>, 300u64);
     let mut clock_skew_ms = 0i64;
+    let mut bytes = None::<u64>;
+    let mut key = None::<String>;
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -88,6 +96,8 @@ fn run() -> anyhow::Result<bool> {
             Long("level") => level = Some(parser.value()?.string()?.parse()?),
             Long("duration") => duration_s = parser.value()?.string()?.parse()?,
             Long("clock-skew") => clock_skew_ms = parser.value()?.string()?.parse()?,
+            Long("bytes") => bytes = Some(parser.value()?.string()?.parse()?),
+            Long("key") => key = Some(parser.value()?.string()?),
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -103,6 +113,31 @@ fn run() -> anyhow::Result<bool> {
         }
         ["tcp-source"] => measure::tcp_source(to.context(USAGE)?).map(|()| true),
         ["forge"] => measure::forge(to.context(USAGE)?, 300).map(|()| true),
+        ["flood"] => {
+            let hex = key.context(USAGE)?;
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| {
+                    hex.get(i..i + 2)
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                })
+                .collect::<Option<_>>()
+                .context("--key must be 64 hex digits")?;
+            let key: [u8; 32] = bytes
+                .try_into()
+                .ok()
+                .context("--key must be 64 hex digits")?;
+            measure::flood(to.context(USAGE)?, &key, duration_s).map(|()| true)
+        }
+        ["bulk-send"] => {
+            measure::bulk_send(to.context(USAGE)?, bytes.context(USAGE)?).map(|()| true)
+        }
+        ["bulk-recv"] => measure::bulk_recv(
+            listen.context(USAGE)?,
+            bytes.context(USAGE)?,
+            &out.context(USAGE)?,
+        )
+        .map(|()| true),
         ["tcp-sink"] => {
             measure::tcp_sink(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
         }
@@ -175,6 +210,21 @@ fn run() -> anyhow::Result<bool> {
                     )?
                 }
                 "punch" => scenario::punch(&topology, &nett()?, &out, repeat, with_tailscale)?,
+                "mtu" => scenario::mtu(&topology, &nett()?, &out, bytes.unwrap_or(1 << 30))?,
+                "wg-cookie" => scenario::wg_cookie(&topology, &nett()?, &out)?,
+                "wg-rehandshake" => scenario::wg_rehandshake(&topology, &nett()?, &out, repeat)?,
+                "resources" => scenario::resources(
+                    &topology,
+                    &nett()?,
+                    &out,
+                    std::time::Duration::from_secs(duration_s),
+                )?,
+                "wg-rekey" => scenario::wg_rekey(
+                    &topology,
+                    &nett()?,
+                    &out,
+                    std::time::Duration::from_secs(duration_s),
+                )?,
                 "tailscale" => scenario::tailscale(&topology, &out)?,
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
             };

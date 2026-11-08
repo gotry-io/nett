@@ -1,6 +1,6 @@
 # 与对比对象 Tailscale 的验收对比（design/prototype.md 第 5.1、6、7 节）：手动触发，不在每次推送时运行。
 # 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类每种 5 分钟、各 3 次；场景 17 的时钟误差
-# 分 1.5 秒（按时间片）与 5 秒（随机间隔重试）两组。
+# 分 1.5 秒（按时间片）与 5 秒（随机间隔重试）两组；场景 19–21 只对 nett（第 6.3 节）。
 # 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。手动触发时可以只选一个场景。
 
 name: Lab baseline
@@ -74,6 +74,20 @@ jobs:
             run: dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml --repeat 20 --with-tailscale
           - name: 17-dial-only-outage-skewed
             run: dial-only-outage --clock-skew 5000 --topology crates/nett-lab/topologies/dial-pair.toml --repeat 20
+          - name: 19-mtu-ipv4
+            run: mtu --topology crates/nett-lab/topologies/mtu4.toml
+          - name: 19-mtu-ipv6
+            run: mtu --topology crates/nett-lab/topologies/mtu6.toml
+          - name: 20ab-wg-rehandshake
+            run: wg-rehandshake --topology crates/nett-lab/topologies/relays.toml --repeat 20
+          - name: 20c-wg-cookie
+            run: wg-cookie --topology crates/nett-lab/topologies/relays.toml
+          - name: 20bd-wg-rekey
+            run: wg-rekey --duration 1800 --topology crates/nett-lab/topologies/relays.toml
+          # 资源预算针对 release 构建（硬性规则 14）
+          - name: 21-resources
+            run: resources --duration 600 --topology crates/nett-lab/topologies/fallback.toml
+            profile: release
     name: ${{ matrix.name }}
     env:
       SELECTED: ${{ inputs.scenario == '' || inputs.scenario == matrix.name }}
@@ -116,11 +130,11 @@ jobs:
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
-      - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
+      - run: cargo build --locked ${{ matrix.profile == 'release' && '--release' || '' }} -p nett-cli -p nett-lab --features nett-cli/lab
         if: env.SELECTED == 'true'
       - name: ${{ matrix.name }}
         if: env.SELECTED == 'true'
         run: >-
-          sudo env "PATH=$PATH" ./target/debug/nett-lab run ${{ matrix.run }}
-          --nett ./target/debug/nett
+          sudo env "PATH=$PATH" ./target/${{ matrix.profile || 'debug' }}/nett-lab run ${{ matrix.run }}
+          --nett ./target/${{ matrix.profile || 'debug' }}/nett
           --out "$RUNNER_TEMP/lab"

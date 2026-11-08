@@ -95,7 +95,8 @@ impl Mac1Key {
         mac.finalize().into_bytes().as_slice() == mac1
     }
 
-    #[cfg(test)]
+    /// 计算 `mac1`：测试和实验工具（场景 20 的洪泛）用来构造握手发起。
+    #[cfg(any(test, feature = "lab"))]
     pub fn compute(&self, signed: &[u8]) -> [u8; 16] {
         let mut mac = Blake2sMac::<U16>::new_from_slice(&self.0).expect("32-byte key");
         mac.update(signed);

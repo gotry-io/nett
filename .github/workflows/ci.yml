@@ -134,6 +134,40 @@ jobs:
           --topology crates/nett-lab/topologies/dial-pair.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-17"
+      - name: 场景 19：外层路径 MTU 为 1500、1360、1300（IPv4）
+        run: >-
+          sudo ./target/debug/nett-lab run mtu
+          --bytes 268435456
+          --topology crates/nett-lab/topologies/mtu4.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-19-v4"
+      - name: 场景 19：外层路径 MTU 为 1500、1360、1300（IPv6）
+        run: >-
+          sudo ./target/debug/nett-lab run mtu
+          --bytes 268435456
+          --topology crates/nett-lab/topologies/mtu6.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-19-v6"
+      - name: 场景 20(a)(b)：删除再添加对端后的握手，丢掉第一个握手发起后的重试
+        run: >-
+          sudo ./target/debug/nett-lab run wg-rehandshake
+          --repeat 3
+          --topology crates/nett-lab/topologies/relays.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-20ab"
+      - name: 场景 20(c)：对端处于负载状态时经中继的 cookie
+        run: >-
+          sudo ./target/debug/nett-lab run wg-cookie
+          --topology crates/nett-lab/topologies/relays.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-20c"
+      - name: 场景 20(b)(d)：密钥轮换（短版本，完整的 30 分钟在验收中跑）
+        run: >-
+          sudo ./target/debug/nett-lab run wg-rekey
+          --duration 150
+          --topology crates/nett-lab/topologies/relays.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-20bd"
 
   deny:
     runs-on: ubuntu-24.04

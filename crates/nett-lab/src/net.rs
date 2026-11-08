@@ -349,6 +349,39 @@ impl Underlay {
         Ok(())
     }
 
+    /// 把"公网"这一段的 MTU 设为 `mtu`（场景 19）：网桥、它的各个端口，以及接在上面的成员和路由器的
+    /// `eth0`。veth 收到超过本端 MTU 的帧时直接丢弃，所以一条链路的两端一起设置；瓶颈落在路由器转发
+    /// 进"公网"的那一跳（IPv4 分片，IPv6 回 ICMPv6"包太大"），"公网"上的成员按自己接口的 MTU 发送。
+    pub fn set_internet_mtu(&self, mtu: u16) -> anyhow::Result<()> {
+        let mtu = mtu.to_string();
+        let attached = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.switch_ns == INET_NETNS)
+            .map(|(name, n)| (name.clone(), n.netns.clone()))
+            .chain(
+                self.routers
+                    .iter()
+                    .map(|(name, _, _)| (name.clone(), netns(name))),
+            );
+        for (name, ns) in attached {
+            let port = format!("v-{name}");
+            run("ip", ["-n", INET_NETNS, "link", "set", &port, "mtu", &mtu])?;
+            run("ip", ["-n", &ns, "link", "set", "eth0", "mtu", &mtu])?;
+        }
+        run("ip", ["-n", INET_NETNS, "link", "set", "br0", "mtu", &mtu])?;
+        Ok(())
+    }
+
+    /// 成员与路由器的命名空间：做 IP 处理（分片、重组）的地方。
+    pub fn ip_netns(&self) -> Vec<String> {
+        self.nodes
+            .values()
+            .map(|n| n.netns.clone())
+            .chain(self.routers.iter().map(|(name, _, _)| netns(name)))
+            .collect()
+    }
+
     /// 拆除底层网络：先结束命名空间中的进程，再删除命名空间。命名空间不存在时跳过。
     pub fn down(&self) -> anyhow::Result<()> {
         let existing = run("ip", ["netns", "list"])?;

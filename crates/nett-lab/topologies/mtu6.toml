@@ -1,0 +1,23 @@
+# 场景 19（IPv6）：a 是 dial-only，在 IPv6 有状态防火墙之后，与"公网"上的 b 经 IPv6 直连；MTU 的设置同
+# mtu4.toml
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "fw-a"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[router]]
+name = "fw-a"
+nat = "ipv6-firewall"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct6"]
