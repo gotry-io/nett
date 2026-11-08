@@ -35,6 +35,11 @@ pub struct Node {
     pub behind: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// 实验 B（真实机器，design/prototype.md 第 5.2 节）：SSH 主机名，以及公网 IPv4（`public` 节点）与
+    /// 全局 IPv6 地址。实验 A 的地址由本机的网络规划决定，不写这几项。
+    pub ssh: Option<String>,
+    pub ipv4: Option<std::net::Ipv4Addr>,
+    pub ipv6: Option<std::net::Ipv6Addr>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

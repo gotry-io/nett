@@ -29,6 +29,38 @@ use crate::cmd;
 use crate::net::Underlay;
 use crate::topology::Topology;
 
+/// 生成配置时用到的地址：实验 A 取自本机的网络规划（[`Underlay`]），实验 B 取自拓扑中写明的真实
+/// 地址（[`Topology`]，design/prototype.md 第 5.2 节）。
+pub trait Addresses {
+    /// 节点的公网 IPv4 地址；`dial-only` 的节点没有。
+    fn public_ipv4(&self, name: &str) -> Option<Ipv4Addr>;
+    /// 节点的全局 IPv6 地址。
+    fn ipv6(&self, name: &str) -> Option<Ipv6Addr>;
+}
+
+impl Addresses for Underlay {
+    fn public_ipv4(&self, name: &str) -> Option<Ipv4Addr> {
+        Underlay::public_ipv4(self, name)
+    }
+
+    fn ipv6(&self, name: &str) -> Option<Ipv6Addr> {
+        self.node(name)?.ipv6
+    }
+}
+
+impl Addresses for Topology {
+    fn public_ipv4(&self, name: &str) -> Option<Ipv4Addr> {
+        let node = self.node(name)?;
+        (node.reachability == nett_mesh::config::Reachability::Public)
+            .then_some(node.ipv4)
+            .flatten()
+    }
+
+    fn ipv6(&self, name: &str) -> Option<Ipv6Addr> {
+        self.node(name)?.ipv6
+    }
+}
+
 /// 组网进程的 WireGuard 端口（design/mesh.md 第 4 节的默认值）。
 pub const LISTEN_PORT: u16 = 41820;
 /// 实验中 nett-relay 的中继端口。
@@ -182,7 +214,7 @@ fn policy(
 
 pub fn generate(
     topo: &Topology,
-    underlay: &Underlay,
+    addresses: &dyn Addresses,
     out: &Path,
     negatives: bool,
 ) -> anyhow::Result<Generated> {
@@ -292,10 +324,10 @@ pub fn generate(
             .context("relay node")?
             .dir
             .clone();
-        let ip = underlay.public_ipv4(relay).context("relay address")?;
+        let ip = addresses.public_ipv4(relay).context("relay address")?;
         fingerprints.insert(relay.to_owned(), self_signed(ip, &dir)?);
     }
-    write_relay_configs(topo, underlay, &nodes, &tokens, &fingerprints)?;
+    write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints)?;
 
     let mut first_desired = None;
     for (i, node) in topo.nodes.iter().enumerate() {
@@ -325,7 +357,7 @@ pub fn generate(
                         Some((relay, false)) => Some(Candidate::Relay {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             endpoint: SocketAddr::new(
-                                underlay.public_ipv4(relay)?.into(),
+                                addresses.public_ipv4(relay)?.into(),
                                 RELAY_PORT,
                             ),
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
@@ -334,7 +366,7 @@ pub fn generate(
                         Some((relay, true)) => Some(Candidate::RelayTls {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             address: SocketAddr::new(
-                                underlay.public_ipv4(relay)?.into(),
+                                addresses.public_ipv4(relay)?.into(),
                                 RELAY_TLS_PORT,
                             ),
                             fingerprint: *fingerprints.get(relay)?,
@@ -343,14 +375,11 @@ pub fn generate(
                         None if c == "punch" => Some(Candidate::Punch),
                         // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址
                         None if c == "direct6" => Some(Candidate::Direct {
-                            endpoint: SocketAddr::new(
-                                underlay.node(other)?.ipv6?.into(),
-                                LISTEN_PORT,
-                            ),
+                            endpoint: SocketAddr::new(addresses.ipv6(other)?.into(), LISTEN_PORT),
                         }),
                         None => Some(Candidate::Direct {
                             endpoint: SocketAddr::new(
-                                underlay.public_ipv4(other)?.into(),
+                                addresses.public_ipv4(other)?.into(),
                                 LISTEN_PORT,
                             ),
                         }),
@@ -473,7 +502,7 @@ fn random_token() -> [u8; 32] {
 /// 每个中继节点一份中继分配：经它的连接两端的组网公钥、`public` 一端的地址、各成员的令牌。
 fn write_relay_configs(
     topo: &Topology,
-    underlay: &Underlay,
+    addresses: &dyn Addresses,
     nodes: &[LabNode],
     tokens: &BTreeMap<(String, String), [u8; 32]>,
     fingerprints: &BTreeMap<String, CertFingerprint>,
@@ -505,7 +534,7 @@ fn write_relay_configs(
                 }
                 members.push(MemberDoc {
                     public_key: key_of(member).context("member key")?,
-                    address: underlay
+                    address: addresses
                         .public_ipv4(member)
                         .map(|ip| SocketAddr::new(ip.into(), LISTEN_PORT)),
                     token: tokens[&(member.clone(), relay.name.clone())],
@@ -603,4 +632,32 @@ pub fn key_from_wg_text(text: &str) -> anyhow::Result<X25519PublicKey> {
         .context("not a base64 WireGuard key")?;
     let bytes: [u8; 32] = bytes.try_into().ok().context("key length")?;
     Ok(X25519PublicKey::from_bytes(bytes))
+}
+
+/// 实验 B（design/prototype.md 第 5.2 节）：按拓扑中写明的真实地址生成各节点的配置，分发到各自的机器上
+/// 运行。每个节点都要有 SSH 主机名，`public` 节点要有公网地址；中继的 TLS 入口不在这里生成（配置中
+/// 的证书路径是本机路径）。
+pub fn generate_remote(topo: &Topology, out: &Path) -> anyhow::Result<Generated> {
+    for node in &topo.nodes {
+        ensure!(
+            node.ssh.is_some() && node.behind.is_none(),
+            "node `{}` needs `ssh` and no `behind` in a real-machine topology",
+            node.name
+        );
+        ensure!(
+            node.reachability != nett_mesh::config::Reachability::Public
+                || node.ipv4.is_some()
+                || node.ipv6.is_some(),
+            "public node `{}` needs `ipv4` or `ipv6`",
+            node.name
+        );
+    }
+    ensure!(
+        topo.links
+            .iter()
+            .flat_map(|l| &l.candidates)
+            .all(|c| !relay_of(c).is_some_and(|(_, tls)| tls)),
+        "real-machine topologies do not support `relay-tls:` candidates yet"
+    );
+    generate(topo, topo, out, false)
 }

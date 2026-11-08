@@ -3742,8 +3742,16 @@ impl Lab {
     }
 }
 
-/// 进程的 RSS、PSS（KiB）与线程数。
-fn memory_kib(pid: u32) -> Option<(u64, u64, u64)> {
+/// 进程的内存（KiB）：RSS 及其中的匿名页与文件页（可执行文件的代码页等，多个进程共享），PSS，线程数。
+struct Memory {
+    rss: u64,
+    anon: u64,
+    file: u64,
+    pss: u64,
+    threads: u64,
+}
+
+fn memory_kib(pid: u32) -> Option<Memory> {
     let field = |file: &str, key: &str| -> Option<u64> {
         std::fs::read_to_string(format!("/proc/{pid}/{file}"))
             .ok()?
@@ -3754,11 +3762,13 @@ fn memory_kib(pid: u32) -> Option<(u64, u64, u64)> {
             .parse()
             .ok()
     };
-    Some((
-        field("status", "VmRSS:")?,
-        field("smaps_rollup", "Pss:")?,
-        field("status", "Threads:")?,
-    ))
+    Some(Memory {
+        rss: field("status", "VmRSS:")?,
+        anon: field("status", "RssAnon:")?,
+        file: field("status", "RssFile:")?,
+        pss: field("smaps_rollup", "Pss:")?,
+        threads: field("status", "Threads:")?,
+    })
 }
 
 fn mem_available_kib() -> Option<u64> {
@@ -3832,7 +3842,7 @@ pub fn resources(
     std::thread::sleep(idle);
     let mut over = Vec::new();
     for (name, pid) in lab.measured() {
-        let Some((rss, pss, threads)) = memory_kib(pid) else {
+        let Some(m) = memory_kib(pid) else {
             report.check(
                 &format!("{name}:measured"),
                 false,
@@ -3840,13 +3850,18 @@ pub fn resources(
             );
             continue;
         };
-        if rss > IDLE_BUDGET_KIB {
+        if m.rss > IDLE_BUDGET_KIB {
             over.push(name.clone());
         }
         report.record(
             &name,
             format!(
-                "RSS {rss} KiB, PSS {pss} KiB, {threads} threads after {} s idle",
+                "RSS {} KiB (anonymous {}, file {}), PSS {} KiB, {} threads after {} s idle",
+                m.rss,
+                m.anon,
+                m.file,
+                m.pss,
+                m.threads,
                 idle.as_secs()
             ),
         );

@@ -47,6 +47,7 @@ const USAGE: &str = "usage:
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab down --topology <file.toml>
+  nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
   nett-lab probe-send --to <addr:port>
   nett-lab probe-recv --listen <addr:port> --out <file>
@@ -242,6 +243,24 @@ fn run() -> anyhow::Result<bool> {
                 if report.passed { "PASS" } else { "FAIL" }
             );
             Ok(report.passed)
+        }
+        ["material"] => {
+            let topo = topology::Topology::load(&topology.context(USAGE)?)?;
+            let out = out.context(USAGE)?;
+            let generated = material::generate_remote(&topo, &out)?;
+            for node in &generated.nodes {
+                let ssh = topo
+                    .node(&node.name)
+                    .and_then(|n| n.ssh.clone())
+                    .unwrap_or_default();
+                println!(
+                    "{} {ssh} {} {}",
+                    node.name,
+                    node.mesh_ipv4,
+                    node.dir.display()
+                );
+            }
+            Ok(true)
         }
         ["down"] => {
             let topo = topology::Topology::load(&topology.context(USAGE)?)?;
