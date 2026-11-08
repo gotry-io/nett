@@ -88,10 +88,10 @@ jobs:
             run: wg-cookie --topology crates/nett-lab/topologies/relays.toml
           - name: 20bd-wg-rekey
             run: wg-rekey --duration 1800 --topology crates/nett-lab/topologies/relays.toml
-          # 资源预算针对 release 构建（硬性规则 14）
+          # 资源预算针对发布构建：release，静态链接 musl（硬性规则 14，architecture.md 第 13.1 节）
           - name: 21-resources
             run: resources --duration 600 --topology crates/nett-lab/topologies/fallback.toml
-            profile: release
+            musl: true
     name: ${{ matrix.name }}
     env:
       SELECTED: ${{ inputs.scenario == '' || inputs.scenario == matrix.name }}
@@ -134,11 +134,18 @@ jobs:
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
-      - run: cargo build --locked ${{ matrix.profile == 'release' && '--release' || '' }} -p nett-cli -p nett-lab --features nett-cli/lab
+      - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
         if: env.SELECTED == 'true'
+      - name: 发布构建的 nett（release，静态链接 musl）
+        if: env.SELECTED == 'true' && matrix.musl
+        run: |
+          sudo apt-get install -y --no-install-recommends musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --locked --release --target x86_64-unknown-linux-musl -p nett-cli --features lab
+          file target/x86_64-unknown-linux-musl/release/nett
       - name: ${{ matrix.name }}
         if: env.SELECTED == 'true'
         run: >-
-          sudo env "PATH=$PATH" ./target/${{ matrix.profile || 'debug' }}/nett-lab run ${{ matrix.run }}
-          --nett ./target/${{ matrix.profile || 'debug' }}/nett
+          sudo env "PATH=$PATH" ./target/debug/nett-lab run ${{ matrix.run }}
+          --nett ${{ matrix.musl && './target/x86_64-unknown-linux-musl/release/nett' || './target/debug/nett' }}
           --out "$RUNNER_TEMP/lab"

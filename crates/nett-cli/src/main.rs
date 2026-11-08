@@ -10,6 +10,11 @@ mod relay;
 mod transport;
 
 fn main() -> ExitCode {
+    // 各进程的内存都很小，用不上透明大页。系统设为 always 时（例如 Linux 6.1），一个线程栈会被整块换成
+    // 2 MB 的大页，RSS 随之多出 2 MB（architecture.md 第 13.1 节）。在启动任何线程之前关闭；不支持时
+    // 只是内存多一些
+    #[cfg(target_os = "linux")]
+    rustix::thread::disable_transparent_huge_pages(true).ok();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

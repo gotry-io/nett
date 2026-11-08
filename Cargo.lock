@@ -340,6 +340,7 @@ dependencies = [
  "nett-mesh",
  "nett-relay",
  "nett-transport",
+ "rustix",
  "serde_json",
  "tokio",
  "tracing",
