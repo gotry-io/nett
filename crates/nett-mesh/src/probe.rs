@@ -25,6 +25,11 @@ pub const PUNCH_PROPOSAL: u8 = 0x86;
 pub const PUNCH_ACK: u8 = 0x87;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 
+/// WireGuard 的 cookie 应答：类型与长度（WireGuard 协议）。组网进程从 WireGuard 端口拿到它的副本，据此
+/// 知道对端处于负载状态、WireGuard 会带着 cookie 重试（design/mesh.md 第 8.4 节）。
+pub const WG_COOKIE_REPLY: u8 = 3;
+pub const WG_COOKIE_LEN: usize = 64;
+
 /// 隧道外消息的长度。
 pub const OUTER_LEN: usize = 64;
 const MAC_LEN: usize = 16;

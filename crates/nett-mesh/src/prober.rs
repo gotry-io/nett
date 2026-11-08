@@ -299,6 +299,19 @@ impl Prober {
         })
     }
 
+    /// WireGuard 端口上来了一个 cookie 应答（只读副本）：交给当前路径就是 `from`、隧道还没建立的对端
+    /// （design/mesh.md 第 8.4 节）。cookie 应答本身无法验证，作用只是推迟一次故障切换。
+    fn on_cookie_reply(&mut self, from: SocketAddr, at: Instant) {
+        for peer in self.peers.values_mut() {
+            if let Some(paths) = peer.paths.as_mut()
+                && paths.current().endpoint() == from
+                && !paths.tunnel_established()
+            {
+                paths.on_cookie(at);
+            }
+        }
+    }
+
     /// WireGuard 报告这个对端加入（或重新握手时重新加入）以来完成过握手。
     pub fn on_handshake(&mut self, id: &NodeId) {
         if let Some(paths) = self.peers.get_mut(id).and_then(|p| p.paths.as_mut()) {
@@ -858,6 +871,12 @@ impl Prober {
                     to: from,
                     data: reply.to_vec(),
                 }]
+            }
+            (Incoming::Direct, Some(probe::WG_COOKIE_REPLY))
+                if data.len() == probe::WG_COOKIE_LEN =>
+            {
+                self.on_cookie_reply(from, at);
+                vec![]
             }
             (Incoming::Direct, Some(DIRECT_REPLY)) => {
                 let Some(key_id) = OuterReply::peek(data) else {

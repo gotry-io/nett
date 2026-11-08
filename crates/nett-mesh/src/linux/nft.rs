@@ -11,7 +11,7 @@ use std::time::Duration;
 use rustix::net::netlink::NETFILTER;
 
 use super::netlink::{Message, NLM_F_ACK, NLM_F_CREATE, NlError, Socket, attrs, split_message};
-use crate::probe::{DIRECT_PROBE, DIRECT_REPLY};
+use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, WG_COOKIE_LEN, WG_COOKIE_REPLY};
 
 /// 探测规则所在的表，与访问控制的规则分开，可以整表重建。
 const TABLE: &str = "nett_probe";
@@ -140,7 +140,8 @@ fn load_transport(m: &mut Message, offset: u32, len: u32) {
     });
 }
 
-/// 重建探测规则：`udp dport <port> @th,64,8 0x82-0x83 log group <group>`（IPv4 与 IPv6）。
+/// 重建探测规则（IPv4 与 IPv6）：`udp dport <port> @th,64,8 0x82-0x83 log group <group>`，以及 WireGuard 的
+/// cookie 应答 `udp dport <port> udp length 72 @th,64,8 3 log group <group>`（design/mesh.md 第 7.1 节）。
 pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     let mut sock = Socket::open(Some(NETFILTER))?;
     // 先删除旧表（不存在时忽略），再在一个事务中重建
@@ -173,6 +174,32 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     chain.attr(NFTA_CHAIN_POLICY, &NF_ACCEPT.to_be_bytes());
     chain.attr_str(NFTA_CHAIN_TYPE, "filter");
 
+    // UDP 头 8 字节之后的第一个字节是消息类型
+    let probes = copy_rule(port, group, |rule| {
+        load_transport(rule, 8, 1);
+        cmp(rule, NFT_CMP_GTE, &[DIRECT_PROBE]);
+        cmp(rule, NFT_CMP_LTE, &[DIRECT_REPLY]);
+    });
+    let udp_len = u16::try_from(8 + WG_COOKIE_LEN).expect("cookie reply fits in a UDP datagram");
+    let cookies = copy_rule(port, group, |rule| {
+        load_transport(rule, 4, 2);
+        cmp(rule, NFT_CMP_EQ, &udp_len.to_be_bytes());
+        load_transport(rule, 8, 1);
+        cmp(rule, NFT_CMP_EQ, &[WG_COOKIE_REPLY]);
+    });
+
+    sock.request_batch(vec![
+        batch(NFNL_MSG_BATCH_BEGIN),
+        table,
+        chain,
+        probes,
+        cookies,
+        batch(NFNL_MSG_BATCH_END),
+    ])
+}
+
+/// 发往 WireGuard 端口、再满足 `matches` 的 UDP 包，副本交给日志组 `group`。
+fn copy_rule(port: u16, group: u16, matches: impl FnOnce(&mut Message)) -> Message {
     let mut rule = Message::new(
         nft_type(NFT_MSG_NEWRULE),
         NLM_F_ACK | NLM_F_CREATE | NLM_F_APPEND,
@@ -188,22 +215,13 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     cmp(&mut rule, NFT_CMP_EQ, &[IPPROTO_UDP]);
     load_transport(&mut rule, 2, 2);
     cmp(&mut rule, NFT_CMP_EQ, &port.to_be_bytes());
-    load_transport(&mut rule, 8, 1);
-    cmp(&mut rule, NFT_CMP_GTE, &[DIRECT_PROBE]);
-    cmp(&mut rule, NFT_CMP_LTE, &[DIRECT_REPLY]);
+    matches(&mut rule);
     expr(&mut rule, "log", |m| {
         m.attr(NFTA_LOG_GROUP, &group.to_be_bytes());
         m.attr(NFTA_LOG_SNAPLEN, &SNAPLEN.to_be_bytes());
     });
     rule.end_nested(exprs);
-
-    sock.request_batch(vec![
-        batch(NFNL_MSG_BATCH_BEGIN),
-        table,
-        chain,
-        rule,
-        batch(NFNL_MSG_BATCH_END),
-    ])
+    rule
 }
 
 /// 重建 TLS 保护链（design/mesh.md 第 5.3 节）：对每个闲置的回环端口，丢弃

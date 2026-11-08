@@ -51,6 +51,10 @@ pub const FAST_RECOVERY_INTERVAL: Duration = Duration::from_millis(50);
 const HANDSHAKE_MARGIN: Duration = Duration::from_millis(20);
 const HANDSHAKE_WAIT_MAX: Duration = Duration::from_secs(1);
 const HANDSHAKE_UNKNOWN_RTT_MS: f64 = 150.0;
+/// WireGuard 收到 cookie 应答后带着它重试的时间：`REKEY_TIMEOUT` 5 秒，加最多 1/3 秒的抖动。期间
+/// 不再重新握手、不按疑似故障切走；每换到一条路径最多等这么多轮（第 8.4 节）。
+const COOKIE_RETRY: Duration = Duration::from_millis(5_400);
+const COOKIE_ROUNDS: u32 = 2;
 /// 一个候选最多同时等待应答的探测数：高频探测时，上一个探测还没超时就发下一个。
 const MAX_CANDIDATE_OUTSTANDING: usize = 32;
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
@@ -292,6 +296,8 @@ struct HandshakeCheck {
     deadline: Instant,
     /// 已经因为没完成而再握手过一次。
     retried: bool,
+    /// 对端回了 cookie 应答，在等 WireGuard 带着它重试。
+    cookie: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,6 +329,8 @@ pub struct PeerPaths {
     rehandshake_tried: bool,
     /// 重新握手之后，等待确认它完成。
     handshake: Option<HandshakeCheck>,
+    /// 换到当前路径以来，因 cookie 应答等过几轮。
+    cookie_rounds: u32,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
     /// 两端一起切换的过程中（等待确认、轮换中）：只检测中断，不另行择优。
@@ -353,6 +361,7 @@ impl PeerPaths {
             best_rtt_ms: None,
             rehandshake_tried: false,
             handshake: None,
+            cookie_rounds: 0,
             high_loss_since: None,
             better_since: None,
             hold: false,
@@ -451,9 +460,39 @@ impl PeerPaths {
         })
     }
 
-    /// WireGuard 报告这个对端在重新握手之后完成了握手。
+    /// WireGuard 报告这个对端在重新握手之后完成了握手（调用方每次读取状态都会报告，只有在等待确认时才
+    /// 起作用）。等待期间隧道内探测必然丢失，不算作这条路径的故障：从头检测，并立即探测一次确认新路径。
     pub fn on_handshake(&mut self) {
-        self.handshake = None;
+        if self.handshake.take().is_none() {
+            return;
+        }
+        self.cookie_rounds = 0;
+        let rtt_ms = self.tunnel.rtt_ms();
+        self.tunnel = PathStats::seeded(rtt_ms);
+        self.tunnel_outstanding.clear();
+        self.phase = Phase::Normal;
+        self.last_tunnel_probe = None;
+    }
+
+    /// 从当前路径收到了对端的 cookie 应答，而隧道还没建立：对端处于负载状态，WireGuard 会在约 5 秒后
+    /// 带着 cookie 重试。重新握手会丢掉 cookie，所以等这次重试，期间也不按疑似故障切走（第 8.4 节）。
+    pub fn on_cookie(&mut self, now: Instant) {
+        if self.tunnel_established || self.cookie_rounds >= COOKIE_ROUNDS {
+            return;
+        }
+        self.cookie_rounds += 1;
+        let new_ms = self.tunnel.rtt_ms().unwrap_or(HANDSHAKE_UNKNOWN_RTT_MS);
+        let wait = COOKIE_RETRY + Duration::from_secs_f64(2.0 * new_ms / 1000.0) + HANDSHAKE_MARGIN;
+        self.handshake = Some(HandshakeCheck {
+            deadline: now + wait,
+            retried: true,
+            cookie: true,
+        });
+    }
+
+    /// 在等 WireGuard 带着 cookie 重试。
+    fn awaiting_cookie_retry(&self, now: Instant) -> bool {
+        self.handshake.is_some_and(|h| h.cookie && now < h.deadline)
     }
 
     /// 重新握手之后等待确认的期限已到：调用方先读取 WireGuard 的握手状态（[`Self::on_handshake`]），
@@ -472,6 +511,7 @@ impl PeerPaths {
         self.handshake = Some(HandshakeCheck {
             deadline: now + wait,
             retried: false,
+            cookie: false,
         });
     }
 
@@ -537,6 +577,7 @@ impl PeerPaths {
         self.rehandshake_tried = false;
         // 隧道内应答说明握手已经完成
         self.handshake = None;
+        self.cookie_rounds = 0;
         self.phase = Phase::Normal;
     }
 
@@ -703,9 +744,10 @@ impl PeerPaths {
             && backoff(&c.failures, now).is_zero()
     }
 
-    /// 有候选在高频探测，或在等待重新握手完成：调用方要推进得比 [`FAST_RECOVERY_INTERVAL`] 更密。
+    /// 有候选在高频探测，或在等待重新握手完成（等 cookie 重试的几秒不算）：调用方要推进得比
+    /// [`FAST_RECOVERY_INTERVAL`] 更密。
     pub fn needs_fine_ticks(&self, now: Instant) -> bool {
-        self.handshake.is_some()
+        self.handshake.is_some_and(|h| !h.cookie)
             || (0..self.candidates.len()).any(|i| i != self.current && self.fast_recovery(i, now))
     }
 
@@ -763,6 +805,10 @@ impl PeerPaths {
     }
 
     fn check_failure(&mut self, now: Instant) -> Option<Action> {
+        // 对端回了 cookie：路径是通的，等 WireGuard 带着 cookie 重试（第 8.4 节）
+        if self.awaiting_cookie_retry(now) {
+            return None;
+        }
         // 加探全部丢失：最后一次加探也已超时，且期间没有任何应答
         if let Phase::Suspect { sent, since, .. } = self.phase
             && sent >= BURST_COUNT
@@ -934,6 +980,7 @@ impl PeerPaths {
         self.reset_tunnel(self.candidates[target].stats.rtt_ms);
         let rehandshake = matches!(to, Route::Relay { .. }) && from != to;
         self.handshake = None;
+        self.cookie_rounds = 0;
         if rehandshake {
             self.expect_handshake(now, old_rtt_ms);
         }
@@ -1007,6 +1054,11 @@ mod tests {
         lose_handshakes: u32,
         /// WireGuard 报告握手完成的时刻。
         handshakes: Vec<Instant>,
+        /// 对端处于负载状态：每次握手先回 cookie，最后一次重新握手 5 秒之后 WireGuard 带着 cookie 重试才
+        /// 完成（`None` 表示那次重试也不成）。
+        under_load: Option<Duration>,
+        cookies: Vec<Instant>,
+        load_completion: Option<(Instant, usize)>,
         /// (送达时刻, 是否隧道内, 下标, 序号)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
@@ -1033,6 +1085,9 @@ mod tests {
                 fix_on_rehandshake: true,
                 lose_handshakes: 0,
                 handshakes: Vec::new(),
+                under_load: None,
+                cookies: Vec::new(),
+                load_completion: None,
                 inflight: Vec::new(),
                 switches: Vec::new(),
                 lost: Vec::new(),
@@ -1065,6 +1120,17 @@ mod tests {
                     self.handshakes.retain(|t| *t > now);
                     self.paths.on_handshake();
                 }
+                if self.cookies.iter().any(|t| *t <= now) {
+                    self.cookies.retain(|t| *t > now);
+                    self.paths.on_cookie(now);
+                }
+                if let Some((at, i)) = self.load_completion
+                    && at <= now
+                {
+                    self.load_completion = None;
+                    self.tunnel_broken[i] = false;
+                    self.paths.on_handshake();
+                }
                 for action in self.paths.tick(now, true) {
                     match action {
                         Action::TunnelProbe { seq } => {
@@ -1087,7 +1153,21 @@ mod tests {
                         } => {
                             self.switches.push((now, to, rehandshake, reason));
                             let i = self.paths.current;
-                            if rehandshake && self.lose_handshakes > 0 {
+                            if rehandshake && let Some(retry) = self.under_load {
+                                // 删除再加回对端丢掉了之前的 cookie：从这一次重新算。WireGuard 每 5 秒
+                                // 重试一次，重试不成时每次又换来一个 cookie
+                                self.tunnel_broken[i] = true;
+                                self.cookies.clear();
+                                self.cookies.push(now + self.rtt[i]);
+                                if retry == Duration::MAX {
+                                    for k in 1..4u32 {
+                                        self.cookies
+                                            .push(now + Duration::from_secs(5) * k + self.rtt[i]);
+                                    }
+                                }
+                                self.load_completion =
+                                    (retry < Duration::MAX).then(|| (now + retry + self.rtt[i], i));
+                            } else if rehandshake && self.lose_handshakes > 0 {
                                 self.lose_handshakes -= 1;
                                 self.tunnel_broken[i] = true;
                             } else if rehandshake {
@@ -1365,6 +1445,52 @@ mod tests {
         );
         assert!(sim.paths.tunnel_established());
         assert_eq!(sim.paths.current(), relay(2));
+    }
+
+    /// 对端处于负载状态：换到更快的中继时，握手先换来 cookie，WireGuard 5 秒后带着它重试才完成。期间
+    /// 不再重新握手（会丢掉 cookie），也不按疑似故障来回切换（第 8.4 节）。
+    #[test]
+    fn waits_for_the_cookie_retry_when_the_peer_is_under_load() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.rtt[0] = 42 * MS;
+        sim.under_load = Some(Duration::from_secs(5));
+        sim.run(Duration::from_secs(60));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(reasons, [(relay(2), SwitchReason::BetterScore)]);
+        assert!(sim.paths.tunnel_established());
+        // 当前中继失效、另一个中继可用：同样只切一次
+        sim.switches.clear();
+        sim.up[1] = false;
+        sim.run(Duration::from_secs(30));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(reasons, [(relay(1), SwitchReason::Unreachable)]);
+        assert!(sim.paths.tunnel_established());
+    }
+
+    #[test]
+    fn waits_for_at_most_two_cookie_rounds() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.rtt[0] = 42 * MS;
+        // 带着 cookie 的重试也不成（例如 cookie 是伪造的）：两轮之后照常处理故障
+        sim.under_load = Some(Duration::MAX);
+        sim.run(Duration::from_secs(60));
+        let (first, _, _, reason) = sim.switches[0];
+        assert_eq!(reason, SwitchReason::BetterScore);
+        let next = sim.switches.get(1).expect("failure handling resumes");
+        let waited = next.0.saturating_duration_since(first);
+        // 第二个 cookie 在第一轮结束前到达（WireGuard 5 秒后的重试），再等一轮；第三个不再延长
+        assert!(
+            waited >= Duration::from_secs(5) + COOKIE_RETRY
+                && waited <= 2 * COOKIE_RETRY + Duration::from_secs(1),
+            "resumed after {waited:?}: {:?}",
+            sim.switches
+        );
     }
 
     #[test]
