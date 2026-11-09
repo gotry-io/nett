@@ -18,6 +18,7 @@ pub mod prober;
 pub mod punch;
 pub mod routes;
 pub mod run;
+pub mod runtime;
 pub mod source;
 #[cfg(test)]
 mod testutil;

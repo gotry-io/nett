@@ -1,7 +1,7 @@
 //! 数据面接口：WireGuard 接口、对端、地址与路由由各平台的后端实现（ADR 0018）。
 //! 核心逻辑只通过这个接口操作数据面，测试中使用替身。
 
-use std::net::SocketAddr;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::SystemTime;
 
 use nett_trust::keys::X25519PublicKey;
@@ -57,6 +57,27 @@ pub enum DataPlaneError {
     Protocol { op: &'static str, detail: String },
     #[error("interface {0} exists but is not a WireGuard interface")]
     NotWireGuard(String),
+    #[error("{0} is not available on this platform")]
+    Unsupported(&'static str),
+    #[error("data plane thread: {0}")]
+    Worker(&'static str),
+}
+
+/// 以 WireGuard 端口为源端口发出直连探测（design/mesh.md 第 7.1 节），走的就是 WireGuard 自己的 NAT 映射。
+pub trait DirectSend: Send {
+    fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()>;
+}
+
+/// WireGuard 端口上收到的直连探测与 cookie 应答的副本。
+pub trait DirectRecv: Send {
+    /// 一批（来源地址，UDP 负载）。最多等待半秒，超时返回空：调用方据此定期检查是否该退出。
+    fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>>;
+}
+
+/// WireGuard 端口上的直连探测：发送的一端交给引擎所在的线程，接收的一端交给接收线程。
+pub struct DirectProbes {
+    pub send: Box<dyn DirectSend>,
+    pub recv: Box<dyn DirectRecv>,
 }
 
 /// 接口上一个对端的当前状态。
@@ -114,4 +135,10 @@ pub trait DataPlane: Send {
 
     /// 让组网接口上的路由恰好是 `routes`：其他成员宣告的网段（design/mesh.md 第 10 节）。
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
+
+    /// 打开 WireGuard 端口上的直连探测收发。接口就绪之后调用一次。
+    fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError>;
+
+    /// 绑定到本机组网地址、只收发经组网接口的套接字（隧道内探测，design/mesh.md 第 7 节）。
+    fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket>;
 }

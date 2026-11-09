@@ -1,24 +1,19 @@
-//! Linux 上组网进程的运行时：一个后台线程持有引擎，推进选路、执行切换；每个套接字一个接收线程，把收到的
+//! 组网进程的运行时：一个后台线程持有引擎，推进选路、执行切换；每个套接字一个接收线程，把收到的
 //! 探测消息交给后台线程。队列有上限，满了丢弃测量消息（只影响一次测量）。
 //!
-//! 套接字：组网地址上的探测端口（绑定到 `nett0`）；发往中继的探测从组网进程自己的端口发出；直连探测
-//! 以 WireGuard 端口为源端口发出（[`super::wgport`]），由 nftables 拷贝收到的探测（[`super::nft`]）。
+//! 套接字：组网地址上的探测端口（只收发经组网接口的包）；发往中继的探测从组网进程自己的端口发出；直连
+//! 探测以 WireGuard 端口为源端口收发，由数据面提供（[`DataPlane::direct_probes`]）。
 
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::os::fd::AsFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use super::KernelWireGuard;
-use super::nft::{ProbeLog, install_probe_copy};
-use super::sys::bind_to_device;
-use super::wgport::WgPort;
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
-use crate::dataplane::INTERFACE_NAME;
+use crate::dataplane::{DataPlane, DirectProbes, DirectSend};
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
 use crate::path::FAST_RECOVERY_INTERVAL;
@@ -64,8 +59,8 @@ impl Applier for Runtime {
 }
 
 impl Runtime {
-    pub fn spawn<E: EventSink + Send + 'static, C: Clock + 'static>(
-        engine: Engine<KernelWireGuard>,
+    pub fn spawn<D: DataPlane + 'static, E: EventSink + Send + 'static, C: Clock + 'static>(
+        engine: Engine<D>,
         events: E,
         clock: C,
     ) -> std::io::Result<Self> {
@@ -156,11 +151,11 @@ struct Sockets {
     tunnel_v4: UdpSocket,
     tunnel_v6: UdpSocket,
     relay: UdpSocket,
-    wg_port: Arc<WgPort>,
+    direct: Box<dyn DirectSend>,
 }
 
-struct Worker<E> {
-    engine: Engine<KernelWireGuard>,
+struct Worker<D, E> {
+    engine: Engine<D>,
     events: E,
     tx: SyncSender<Msg>,
     sockets: Option<Sockets>,
@@ -169,7 +164,7 @@ struct Worker<E> {
     receivers: Vec<JoinHandle<()>>,
 }
 
-impl<E: EventSink> Worker<E> {
+impl<D: DataPlane, E: EventSink> Worker<D, E> {
     /// 组网接口就绪后创建探测用的套接字和接收线程（只创建一次）。
     fn ensure_sockets(&mut self, desired: &DesiredMesh) {
         if self.sockets.is_some() {
@@ -188,21 +183,21 @@ impl<E: EventSink> Worker<E> {
     }
 
     fn open(&mut self, addrs: &[IpAddr], listen_port: u16) -> std::io::Result<Sockets> {
+        let dataplane = self.engine.dataplane_mut();
         let tunnel = |ip: Option<&IpAddr>| -> std::io::Result<UdpSocket> {
             let ip =
                 ip.ok_or_else(|| std::io::Error::other("interface has no address of this family"))?;
-            let s = UdpSocket::bind(SocketAddr::new(*ip, TUNNEL_PROBE_PORT))?;
-            // 只在 nett0 上收发：其他接口上发往组网地址的包不交给这个套接字
-            bind_to_device(s.as_fd(), INTERFACE_NAME)?;
-            Ok(s)
+            dataplane.bind_tunnel(SocketAddr::new(*ip, TUNNEL_PROBE_PORT))
         };
         let tunnel_v4 = tunnel(addrs.iter().find(|a| a.is_ipv4()))?;
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;
         let relay = UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))?;
-        let wg_port = Arc::new(WgPort::open(listen_port)?);
-        // 日志组取 WireGuard 端口号：同一台主机上每个组网进程一个
-        install_probe_copy(listen_port, listen_port).map_err(std::io::Error::other)?;
-        let mut log = ProbeLog::bind(listen_port, listen_port).map_err(std::io::Error::other)?;
+        let DirectProbes {
+            send: direct,
+            recv: mut log,
+        } = dataplane
+            .direct_probes(listen_port)
+            .map_err(std::io::Error::other)?;
 
         for (socket, kind) in [
             (tunnel_v4.try_clone()?, Incoming::Tunnel),
@@ -234,7 +229,7 @@ impl<E: EventSink> Worker<E> {
             tunnel_v4,
             tunnel_v6,
             relay,
-            wg_port,
+            direct,
         })
     }
 
@@ -254,7 +249,7 @@ impl<E: EventSink> Worker<E> {
                     socket.send_to(&data, to).map(drop)
                 }
                 Outgoing::Relay { to, data } => s.relay.send_to(&data, map_v6(to)).map(drop),
-                Outgoing::Direct { to, data } => s.wg_port.send(to, &data),
+                Outgoing::Direct { to, data } => s.direct.send(to, &data),
             };
         }
     }

@@ -12,8 +12,8 @@ use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
 use nett_mesh::lab::{JsonLinesSink, LabClock, TransportConfigWriter};
-use nett_mesh::linux::runtime::Runtime;
 use nett_mesh::linux::{KernelWireGuard, SystemClock};
+use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
 use tokio::signal::unix::{SignalKind, signal};
 

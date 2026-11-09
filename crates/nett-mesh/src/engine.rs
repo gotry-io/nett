@@ -89,6 +89,11 @@ impl<D: DataPlane> Engine<D> {
         &self.members
     }
 
+    /// 运行时经数据面打开探测用的套接字（[`DataPlane::direct_probes`]、[`DataPlane::bind_tunnel`]）。
+    pub fn dataplane_mut(&mut self) -> &mut D {
+        &mut self.dataplane
+    }
+
     /// 组网接口已经就绪（探测套接字可以绑定到组网地址上）。
     pub fn interface(&self) -> Option<&InterfaceSpec> {
         self.interface.as_ref()

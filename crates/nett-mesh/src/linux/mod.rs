@@ -5,20 +5,25 @@ mod filter;
 mod netlink;
 mod nft;
 mod rtnl;
-pub mod runtime;
 mod sys;
 mod wg;
 mod wgport;
 
 use std::collections::BTreeMap;
+use std::net::{SocketAddr, UdpSocket};
+use std::os::fd::AsFd;
 
 use nett_trust::keys::X25519PublicKey;
 use rustix::net::netlink::GENERIC;
 
 use self::netlink::{NlError, Socket};
 use self::wg::PeerChange;
+use self::wgport::WgPort;
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
-use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
+use crate::dataplane::{
+    DataPlane, DataPlaneError, DirectProbes, DirectRecv, DirectSend, INTERFACE_NAME, InterfaceSpec,
+    PeerSpec, PeerStat,
+};
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
@@ -297,5 +302,38 @@ impl DataPlane for KernelWireGuard {
         ];
         wg::apply_peers(&mut self.generic, self.family, ifindex, &changes)
             .map_err(kernel("re-handshake peer"))
+    }
+
+    fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
+        let os = |op| move |source| DataPlaneError::Os { op, source };
+        let send = WgPort::open(listen_port).map_err(os("open raw sockets for direct probes"))?;
+        // 日志组取 WireGuard 端口号：同一台主机上每个组网进程一个
+        nft::install_probe_copy(listen_port, listen_port)
+            .map_err(kernel("install the nftables rules that copy direct probes"))?;
+        let log = nft::ProbeLog::bind(listen_port, listen_port)
+            .map_err(kernel("subscribe to copied direct probes"))?;
+        Ok(DirectProbes {
+            send: Box::new(send),
+            recv: Box::new(log),
+        })
+    }
+
+    fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket> {
+        let socket = UdpSocket::bind(addr)?;
+        // 只在 nett0 上收发：其他接口上发往组网地址的包不交给这个套接字
+        sys::bind_to_device(socket.as_fd(), INTERFACE_NAME)?;
+        Ok(socket)
+    }
+}
+
+impl DirectSend for WgPort {
+    fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()> {
+        WgPort::send(self, to, data)
+    }
+}
+
+impl DirectRecv for nft::ProbeLog {
+    fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>> {
+        nft::ProbeLog::recv(self).map_err(std::io::Error::other)
     }
 }

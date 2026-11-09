@@ -1,6 +1,7 @@
 //! 测试用的期望状态与替身数据面。
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 
 use nett_core::id::NodeId;
 use nett_trust::admission::{AdmissionMaterial, AdmissionProofDoc, AdmissionProofKind};
@@ -15,7 +16,9 @@ use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
-use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
+use crate::dataplane::{
+    DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, PeerSpec, PeerStat,
+};
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
@@ -318,5 +321,17 @@ impl DataPlane for FakeDataPlane {
         self.calls.push("sync_routes");
         self.routes = routes.to_vec();
         Ok(())
+    }
+
+    fn direct_probes(&mut self, _listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
+        Err(DataPlaneError::Unsupported(
+            "direct probes in the fake data plane",
+        ))
+    }
+
+    fn bind_tunnel(&self, _addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+        Err(std::io::Error::other(
+            "no tunnel sockets in the fake data plane",
+        ))
     }
 }
