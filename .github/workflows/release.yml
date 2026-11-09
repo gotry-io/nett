@@ -1,0 +1,173 @@
+# 推送 v* 标签时发布（design/release.md 第 3 节，ADR 0020）：构建各平台的 nett，在 release 环境中用主钥匙
+# 签名，发布 GitHub Release，更新 gotry-io/homebrew-tap 的配方。v* 标签受规则集保护，主私钥只对它可见。
+# 第三方 action 固定到提交哈希；下载的工具固定版本并校验哈希。
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  # minisign 0.12，用作者的公钥核对过（RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3）
+  MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+  MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { runner: macos-15, target: aarch64-apple-darwin }
+          - { runner: macos-15, target: x86_64-apple-darwin }
+          - { runner: ubuntu-24.04, target: x86_64-unknown-linux-musl }
+          - { runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 rust-toolchain.toml 指定的工具链与目标
+        run: |
+          rustup toolchain install
+          rustup target add ${{ matrix.target }}
+      - name: 标签与工作区版本一致
+        id: version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 --locked \
+            | jq -r '.packages[] | select(.name == "nett-cli") | .version')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the workspace version $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: musl 工具链
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p nett-cli
+      - name: 打包
+        run: |
+          mkdir dist
+          tar -czf "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" nett \
+            -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # 只接收构建产出的压缩包：不检出代码、不安装其他依赖，构建任务拿不到私钥
+  sign:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: 固定版本的 minisign
+        run: |
+          curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
+          echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
+          tar -xzf minisign.tar.gz minisign-linux/x86_64/minisign
+      - name: 签名
+        env:
+          NETT_RELEASE_PRIMARY_KEY: ${{ secrets.NETT_RELEASE_PRIMARY_KEY }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/release.key"
+          printf '%s\n' "$NETT_RELEASE_PRIMARY_KEY" > "$key"
+          minisign="$PWD/minisign-linux/x86_64/minisign"
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          for f in *.tar.gz SHA256SUMS; do
+            "$minisign" -S -s "$key" -m "$f" -t "nett $GITHUB_REF_NAME $f"
+          done
+          rm -f "$key"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: dist
+      - name: 用仓库中的公钥核对签名
+        run: |
+          curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
+          echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
+          tar -xzf minisign.tar.gz minisign-linux/x86_64/minisign
+          for f in dist/*.tar.gz dist/SHA256SUMS; do
+            minisign-linux/x86_64/minisign -V -p keys/nett-release-primary.pub -m "$f"
+          done
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: 发布说明取 CHANGELOG.md 中这个版本的一节
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="## [$version]" 'index($0, v) == 1 { on = 1; next } /^## \[/ { on = 0 } on' \
+            CHANGELOG.md > notes.md
+          test -s notes.md
+      - name: 创建 GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "nett ${GITHUB_REF_NAME#v}" --notes-file notes.md
+
+  tap:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: dist
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: gotry-io/homebrew-tap
+          token: ${{ secrets.TAP_PUSH_TOKEN }}
+          path: tap
+      - name: 按模板生成配方并推送
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          sha() { awk -v f="nett-$version-$1.tar.gz" '$2 == f { print $1 }' dist/SHA256SUMS; }
+          arm=$(sha aarch64-apple-darwin)
+          intel=$(sha x86_64-apple-darwin)
+          test -n "$arm" && test -n "$intel"
+          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256_AARCH64@/$arm/" -e "s/@SHA256_X86_64@/$intel/" \
+            packaging/homebrew/nett.rb > tap/Formula/nett.rb
+          cd tap
+          git config user.name "nett release"
+          git config user.email "release@nett.gotry.io"
+          git add Formula/nett.rb
+          git commit -m "nett $version"
+          git push
