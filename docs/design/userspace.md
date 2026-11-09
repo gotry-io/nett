@@ -16,7 +16,7 @@ Mac 以原生成员加入组网：本机有自己的组网地址，其他成员�
 | 用户态数据面：WireGuard 会话、按 `AllowedIPs` 选择对端并校验来源、进程内的状态过滤、WireGuard 端口上的分流 | DNS 与 `/etc/resolver`（随主机名与 DNS 一起做） |
 | macOS 后端：utun、地址、路由、出站套接字绑定物理接口、网络变化 | macOS 上的 Edge 角色与宣告网段 |
 | Linux 的 TUN 后端：实验场景和 CI 用它验证用户态数据面，也是 DSM 和旧内核的基础 | DSM 的打包与开机任务；批量收发与卸载（GSO、GRO）等性能优化 |
-| launchd 运行方式（`packaging/launchd/`）；本地签名部署中的 macOS 节点 | 笔记本休眠、频繁换网络的专门优化（基本的网络变化处理见第 6.4 节） |
+| launchd 运行方式（安装见 design/release.md 第 4 节）；本地签名部署中的 macOS 节点 | 笔记本休眠、频繁换网络的专门优化（基本的网络变化处理见第 6.4 节） |
 | 与代理类 VPN 应用（Surge 增强模式）共存的实测 | |
 
 候选路径与本地签名部署相同（local-signing.md）。
@@ -95,9 +95,9 @@ Mac 以原生成员加入组网：本机有自己的组网地址，其他成员�
 
 ### 6.3 运行方式
 
-- launchd 以 root 运行组网进程（创建 utun 需要 root）。plist 放在 `/Library/LaunchDaemons/`，开机启动，退出后自动重启；`packaging/launchd/` 提供 plist；
-- 文件放在 `/Library/Application Support/nett/`（属主 root，权限 `0700`）：组网私钥和身份私钥（`0600`），以及期望状态文件。`nett mesh keys --dir` 在这里生成密钥；
-- 重新加载：`sudo launchctl kill HUP system/<label>`，读取新的期望状态，与 Linux 上的 `systemctl reload` 相同；
+- launchd 以 root 运行组网进程（创建 utun 需要 root），开机启动，退出后自动重启。`sudo nett mesh install` 安装服务（design/release.md 第 4 节）：服务运行 root 专属目录中的副本，不运行 Homebrew 目录中的程序；
+- 文件放在 `/Library/Application Support/nett/`（属主 root，权限 `0700`）：程序的副本、组网私钥和身份私钥（`0600`），以及期望状态文件。`nett mesh keys --dir` 在这里生成密钥；
+- 重新加载：`sudo launchctl kill HUP system/io.gotry.nett.mesh`，读取新的期望状态，与 Linux 上的 `systemctl reload` 相同；
 - 日志：以服务运行时经 syslog 写进系统日志（info 记为 notice，系统默认持久保存），大小由系统管理；launchd 的标准错误文件只记录启动失败。交互运行时写标准错误。
 
 ### 6.4 网络变化

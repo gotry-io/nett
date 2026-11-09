@@ -287,7 +287,7 @@ nett/
 │   └── nett-lab/       # 实验工具：生成实验配置、搭建拓扑、注入故障、采集测量（只用于开发和测试，不进发布包）
 ├── web/                # React SPA；src/api 由 OpenAPI 生成
 ├── keys/               # 发布签名公钥（ADR 0020）
-├── packaging/          # 服务管理器的单元文件（systemd、launchd）与容器镜像（第 13.2 节）
+├── packaging/          # systemd 单元、容器镜像与 Homebrew 配方模板（第 13.2 节）
 └── docs/
 ```
 

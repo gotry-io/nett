@@ -14,8 +14,20 @@
   - `nett-mesh`：组网进程，负责 WireGuard、选路与切换、DNS 和访问规则
   - `nett-transport`：按需运行的低权限传输适配进程，UDP 不可用时把流量转成 TLS
   - `nett-relay`：能被外部连入的节点上的中继与公网传输入口
-- 状态：**设计阶段**，尚无可用代码
+- 状态：**M1 开发中**。接入 Hub 之前，可以用本地签名部署组网（[design/local-signing.md](docs/design/local-signing.md)）：Linux 使用内核 WireGuard，macOS 以原生成员加入，Mac 上需要访客真实 IP 的容器服务另用容器内成员；Hub 与控制台尚未完成
 - 许可证：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)（双许可，任选其一）
+
+## 安装
+
+- **macOS**（原生成员与签名工具 `nett site`）：
+  ```bash
+  brew install gotry-io/tap/nett
+  sudo nett mesh keys --dir "/Library/Application Support/nett"   # 输出的一行写进站点描述
+  # 把 nett site build 为这个节点生成的 desired.json 放进同一个目录
+  sudo nett mesh install                                         # 安装并启动组网服务
+  ```
+  组网服务以 root 运行（创建 utun 需要 root），运行的是 `sudo nett mesh install` 复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett mesh install`（[design/release.md](docs/design/release.md) 第 4 节）。
+- **Linux**：从 [Releases](https://github.com/gotry-io/nett/releases) 下载对应架构的静态版本，核对签名（[keys/](keys/README.md)）后安装到 `/usr/local/bin`，使用 [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service)。
 
 ## 文档
 

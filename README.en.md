@@ -14,8 +14,20 @@ nett is for individuals and small teams with a few scattered machines, for examp
   - `nett-mesh`: the mesh process; handles WireGuard, path selection and switching, DNS, and access rules
   - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
   - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
-- Status: **design phase**, no usable code yet
+- Status: **M1 in development**. Before the Hub is ready, you can deploy a mesh with local signing ([design/local-signing.md](docs/design/local-signing.md), in Chinese): Linux uses kernel WireGuard, macOS joins as a native member, and container services on a Mac that need real client IPs use a container member. The Hub and the console are not done yet
 - License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
+
+## Install
+
+- **macOS** (native member and the signing tool `nett site`):
+  ```bash
+  brew install gotry-io/tap/nett
+  sudo nett mesh keys --dir "/Library/Application Support/nett"   # add the printed line to the site description
+  # put the desired.json that nett site build generated for this node into the same directory
+  sudo nett mesh install                                         # install and start the mesh service
+  ```
+  The mesh service runs as root (creating the utun interface needs root) and runs a copy that `sudo nett mesh install` places in a root-only directory, so run `sudo nett mesh install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
+- **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service).
 
 ## Documentation
 
