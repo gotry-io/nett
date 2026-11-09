@@ -42,6 +42,28 @@ impl crate::clock::Clock for SystemClock {
     }
 }
 
+/// 以 launchd 服务运行时的日志（design/userspace.md 第 6.3 节）：经 syslog 进入系统日志，大小由系统管理，
+/// 用 `log show --predicate 'process == "nett"'` 查看。
+pub struct SystemLog;
+
+impl SystemLog {
+    pub fn open() -> Self {
+        sys::openlog();
+        Self
+    }
+
+    /// info 记为 notice：系统日志默认只持久保存 notice 及以上，状态变化要留下来。
+    pub fn write(&self, level: tracing::Level, line: &str) {
+        let priority = match level {
+            tracing::Level::ERROR => libc::LOG_ERR,
+            tracing::Level::WARN => libc::LOG_WARNING,
+            tracing::Level::INFO => libc::LOG_NOTICE,
+            _ => libc::LOG_DEBUG,
+        };
+        sys::syslog(priority, line.trim_end());
+    }
+}
+
 /// utun 的控制套接字：每次收发一个带 4 字节地址族头的 IP 包。
 pub struct Utun(OwnedFd);
 
@@ -367,17 +389,18 @@ mod tests {
         ] {
             probe.send_to(b"nett", to).expect("send");
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            // 接口启用 IPv6 后系统自己会发组播的控制包（MLD、路由器请求），跳过它们
             let packet = loop {
                 match tun.recv(&mut buf) {
-                    Ok(n) => break buf[..n].to_vec(),
+                    Ok(n) if buf[0] >> 4 == 4 && buf[16..20] == want => break buf[..n].to_vec(),
+                    Ok(_) => {}
                     Err(_) if std::time::Instant::now() < deadline => {
                         std::thread::sleep(Duration::from_millis(10));
                     }
                     Err(e) => panic!("nothing arrived on {name} for {to}: {e}"),
                 }
             };
-            assert_eq!(packet[0] >> 4, 4);
-            assert_eq!(&packet[16..20], &want);
+            assert_eq!(packet[9], crate::userspace::packet::PROTO_UDP);
         }
 
         // 写进 TUN、发往本机组网地址的包交给本机的套接字

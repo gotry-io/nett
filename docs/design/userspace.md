@@ -96,7 +96,8 @@ Mac 以原生成员加入组网：本机有自己的组网地址，其他成员�
 
 - launchd 以 root 运行组网进程（创建 utun 需要 root）。plist 放在 `/Library/LaunchDaemons/`，开机启动，退出后自动重启；`packaging/launchd/` 提供 plist；
 - 文件放在 `/Library/Application Support/nett/`（属主 root，权限 `0700`）：组网私钥和身份私钥（`0600`），以及期望状态文件。`nett mesh keys --dir` 在这里生成密钥；
-- 重新加载：`sudo launchctl kill HUP system/<label>`，读取新的期望状态，与 Linux 上的 `systemctl reload` 相同。
+- 重新加载：`sudo launchctl kill HUP system/<label>`，读取新的期望状态，与 Linux 上的 `systemctl reload` 相同；
+- 日志：以服务运行时经 syslog 写进系统日志（info 记为 notice，系统默认持久保存），大小由系统管理；launchd 的标准错误文件只记录启动失败。交互运行时写标准错误。
 
 ### 6.4 网络变化
 

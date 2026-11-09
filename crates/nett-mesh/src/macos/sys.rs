@@ -322,6 +322,21 @@ pub(crate) fn max_clock_error() -> io::Result<Duration> {
     Ok(Duration::from_micros(micros))
 }
 
+/// 打开系统日志：之后的 [`syslog`] 以 `nett-mesh` 和进程号标记。
+pub(crate) fn openlog() {
+    // SAFETY: 标识是静态的、以 NUL 结尾的字符串，在进程的整个生命期内有效
+    unsafe { libc::openlog(c"nett-mesh".as_ptr(), libc::LOG_PID, libc::LOG_DAEMON) };
+}
+
+/// 写一条系统日志。消息中的 NUL 去掉（C 字符串不能包含它）。
+pub(crate) fn syslog(priority: c_int, message: &str) {
+    let Ok(message) = CString::new(message.replace('\0', "")) else {
+        return;
+    };
+    // SAFETY: 格式串是静态的 "%s"，唯一的参数是以 NUL 结尾的字符串
+    unsafe { libc::syslog(priority, c"%s".as_ptr(), message.as_ptr()) };
+}
+
 /// 一个路由套接字（`PF_ROUTE`）：写入路由消息、接收路由表变化。
 pub(crate) fn route_socket() -> io::Result<OwnedFd> {
     let fd = socket(libc::PF_ROUTE, libc::SOCK_RAW, 0)?;

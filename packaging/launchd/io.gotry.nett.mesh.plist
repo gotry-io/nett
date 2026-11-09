@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS 原生成员的组网进程（design/userspace.md 第 6.3 节）：launchd 以 root 运行（创建 utun 需要 root），
+  开机启动，退出后自动重启。utun 随进程退出删除，重启后按本地保存的期望状态恢复。
+
+  安装：
+    sudo install -m 0755 nett /usr/local/bin/nett
+    sudo install -d -m 0700 "/Library/Application Support/nett" /Library/Logs/nett
+    sudo nett mesh keys --dir "/Library/Application Support/nett"   # 输出的一行写进站点描述
+    # nett site build 生成的 desired.json 放进 "/Library/Application Support/nett/"
+    sudo install -m 0644 io.gotry.nett.mesh.plist /Library/LaunchDaemons/
+    sudo install -m 0644 newsyslog.conf /etc/newsyslog.d/nett.conf
+    sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.mesh.plist
+  更新期望状态后重新加载：sudo launchctl kill HUP system/io.gotry.nett.mesh
+  日志：log show --last 1h --predicate 'process == "nett"'
+  停止并卸载：sudo launchctl bootout system/io.gotry.nett.mesh
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.gotry.nett.mesh</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/nett</string>
+    <string>mesh</string>
+    <string>--config</string>
+    <string>/Library/Application Support/nett/desired.json</string>
+    <string>--key</string>
+    <string>/Library/Application Support/nett/mesh.key</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <!-- 连续崩溃时最快 5 秒重启一次 -->
+  <key>ThrottleInterval</key>
+  <integer>5</integer>
+  <!-- 不合并定时器：路径层按 100 毫秒推进，切换时间取决于它 -->
+  <key>ProcessType</key>
+  <string>Interactive</string>
+  <!-- 077：进程创建的文件只有 root 能读 -->
+  <key>Umask</key>
+  <integer>63</integer>
+  <!-- 运行日志写进系统日志；这个文件只记录启动失败，launchd 每次启动进程时重新打开它，
+       大小由 newsyslog.conf 限制 -->
+  <key>StandardErrorPath</key>
+  <string>/Library/Logs/nett/mesh.log</string>
+</dict>
+</plist>

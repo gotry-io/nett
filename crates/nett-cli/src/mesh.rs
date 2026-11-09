@@ -129,6 +129,83 @@ fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 日志写到标准错误（Linux 上由 systemd 收进日志）。macOS 上以 launchd 服务运行时（标准错误不是终端）
+/// 写进系统日志：标准错误的文件只记录启动失败，launchd 每次启动进程时重新打开它，轮转才有效。
+fn init_logging() {
+    let builder = tracing_subscriber::fmt()
+        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
+        .with_ansi(std::io::stderr().is_terminal());
+    #[cfg(target_os = "macos")]
+    if !std::io::stderr().is_terminal() {
+        builder
+            .without_time()
+            .with_ansi(false)
+            .with_writer(syslog::Syslog(std::sync::Arc::new(
+                nett_mesh::macos::SystemLog::open(),
+            )))
+            .init();
+        return;
+    }
+    builder.with_writer(std::io::stderr).init();
+}
+
+#[cfg(target_os = "macos")]
+mod syslog {
+    use std::sync::Arc;
+
+    use nett_mesh::macos::SystemLog;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// 每条日志一个写入器，丢弃时作为一条系统日志写出。
+    pub struct Syslog(pub Arc<SystemLog>);
+
+    pub struct Line {
+        log: Arc<SystemLog>,
+        level: tracing::Level,
+        buf: Vec<u8>,
+    }
+
+    impl std::io::Write for Line {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.buf.extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for Line {
+        fn drop(&mut self) {
+            if !self.buf.is_empty() {
+                self.log
+                    .write(self.level, &String::from_utf8_lossy(&self.buf));
+            }
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Syslog {
+        type Writer = Line;
+
+        fn make_writer(&'a self) -> Line {
+            Line {
+                log: Arc::clone(&self.0),
+                level: tracing::Level::INFO,
+                buf: Vec::new(),
+            }
+        }
+
+        fn make_writer_for(&'a self, meta: &tracing::Metadata<'_>) -> Line {
+            Line {
+                log: Arc::clone(&self.0),
+                level: *meta.level(),
+                buf: Vec::new(),
+            }
+        }
+    }
+}
+
 /// 本机的节点 ID：引擎据此确认每份期望状态都是给本机的。
 fn node_id(config: &PathBuf) -> anyhow::Result<NodeId> {
     let bytes = std::fs::read(config).with_context(|| format!("reading {}", config.display()))?;
@@ -148,11 +225,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         return keys(parser);
     }
     let args = parse(parser)?;
-    tracing_subscriber::fmt()
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .init();
+    init_logging();
 
     let node_id = node_id(&args.config)?;
     let key = PrivateKey::load(&args.key)?;
