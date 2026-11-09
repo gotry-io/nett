@@ -13,7 +13,7 @@ use nett_trust::anchors::{AnchorsError, TrustAnchors, TrustAnchorsDoc};
 use nett_trust::revocation::Revocation;
 use serde::{Deserialize, Serialize};
 
-use crate::prefix::IpPrefix;
+use nett_core::prefix::IpPrefix;
 
 /// 期望状态的文档形式。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -7,7 +7,7 @@ use std::time::SystemTime;
 use nett_trust::keys::X25519PublicKey;
 
 use crate::key::PrivateKey;
-use crate::prefix::IpPrefix;
+use nett_core::prefix::IpPrefix;
 
 /// `nett0` 的 MTU 固定为 1280（design/mesh.md 第 4 节）。
 pub const MESH_MTU: u32 = 1280;

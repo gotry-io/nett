@@ -12,7 +12,6 @@ pub mod lab;
 pub mod linux;
 pub mod members;
 pub mod path;
-pub mod prefix;
 pub mod probe;
 pub mod prober;
 pub mod punch;

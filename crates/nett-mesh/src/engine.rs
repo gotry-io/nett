@@ -19,8 +19,8 @@ use crate::event::{Event, EventSink};
 use crate::key::PrivateKey;
 use crate::members::MemberSet;
 use crate::path::Route;
-use crate::prefix::IpPrefix;
 use crate::prober::{Incoming, Outgoing, Prober};
+use nett_core::prefix::IpPrefix;
 
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
 pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;

@@ -3,8 +3,8 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Context as _, bail, ensure};
+use nett_core::prefix::IpPrefix;
 use nett_mesh::config::Reachability;
-use nett_mesh::prefix::IpPrefix;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize)]

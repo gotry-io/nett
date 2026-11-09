@@ -8,7 +8,7 @@ use nett_trust::keys::X25519PublicKey;
 use super::netlink::{
     Message, NLM_F_ACK, NLM_F_DUMP, NlError, Socket, attrs, parse_u16, parse_u32, parse_u64,
 };
-use crate::prefix::IpPrefix;
+use nett_core::prefix::IpPrefix;
 
 const GENL_ID_CTRL: u16 = 0x10;
 const CTRL_CMD_GETFAMILY: u8 = 3;
