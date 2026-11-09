@@ -3,6 +3,17 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
+## [0.1.1] - 2026-11-09
+
+- macOS：`sudo nett mesh install` 一个命令完成安装：生成本机密钥并打印写进站点描述的一行；
+  `--config <desired.json>` 核对期望状态是给本机的再导入，然后启动服务；只有期望状态变化时重新加载、不重启。
+  macOS: `sudo nett mesh install` does the whole setup: it creates this machine's keys and prints the line
+  for the site description; with `--config <desired.json>` it checks that the desired state belongs to this
+  machine, imports it and starts the service, and reloads without a restart when only the desired state changed.
+- `nett mesh keys --dir` 沿用已有的密钥，打印同一行公钥。
+  `nett mesh keys --dir` keeps existing keys and prints the same line again.
+- Homebrew 的安装提示只用英文。The Homebrew caveats are in English only.
+
 ## [0.1.0] - 2026-11-09
 
 第一个发布版本：接入 Hub 之前，用本地签名部署组网（design/local-signing.md）。
