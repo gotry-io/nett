@@ -242,7 +242,7 @@ Edge 是用户自己在入口节点上运行的反向代理，任何实现都可
 |---|---|---|
 | 组网成员上（Linux，容器或原生进程） | Edge → 组网 → 成员的组网地址:端口。Linux 上 Docker 的端口映射对外部流量做目的地址转换，保留来源 | 入口节点的 Edge 专用地址 |
 | 智能入口后面的局域网主机 | Edge → 组网 → 智能入口（按来源分类转换）→ 局域网主机 | 智能入口的入口地址（只用于转换来自 Edge 专用地址的流量） |
-| macOS 上 Docker 中的容器 | Edge → 组网 → 容器内成员 → 容器网络（发布端口会丢掉来源，第 17 节事实 1） | 容器内成员在该容器网络中的地址（ADR 0016） |
+| macOS 上 Docker 中的容器 | Edge → 组网 → 容器内成员，服务与它共用网络命名空间（发布端口会丢掉来源，第 17 节事实 1） | 入口节点的 Edge 专用地址（ADR 0016） |
 
 **按来源信任的服务**：
 
@@ -387,6 +387,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <一次性 
 | `nett trust reset` | 恢复密钥也丢失时，重置本机的信任锚（需要 root） |
 | `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
 | `nett whois <地址>` | 按本机已验证的准入材料，查询一个组网地址属于哪个节点、设备或 Edge |
+| `nett mesh keys`、`nett site` | 接入 Hub 之前：在节点上生成密钥；在用户电脑上签名并生成各节点的期望状态文件（design/local-signing.md） |
 
 ### 13.5 节点形态
 
@@ -397,7 +398,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <一次性 
 | NAT 节点 | NAT 型 VPS | nett-node、组网进程、传输适配进程 | 内核 WireGuard，`dial-only` | 至少连接两个 `public` 节点 |
 | 智能入口 | 家里常开的 NAS 或小主机 | nett-node、组网进程、可选 nett-relay | 内核或用户态（在组网进程中） | 宣告局域网段；路由器映射端口后为 `public` |
 | 局域网主机 | 家里的其他机器 | 不运行 nett | 经智能入口 | 需要名字时添加别名（design/mesh.md 第 11 节） |
-| macOS 主机 | Mac（含笔记本） | 原生 nett-node、组网进程；可选容器内成员 | 原生成员：用户态 WireGuard + utun（ADR 0018）；容器内成员用内核 WireGuard（ADR 0016） | 开了容器内成员时，同一台主机对应两个节点身份 |
+| macOS 主机 | Mac（含笔记本） | 原生 nett-node、组网进程；可选容器内成员 | 原生成员：用户态 WireGuard + utun（ADR 0018）；容器内成员用内核 WireGuard（ADR 0016） | 开了容器内成员时，同一台主机对应多个节点身份 |
 | HAOS 设备 | 运行 Home Assistant OS 的设备 | 加载项内的 nett-node 与组网进程，可选 nett-relay | 内核 WireGuard（ADR 0017） | 可做智能入口 |
 | 设备 | 手机 | 标准 WireGuard 客户端，或 Surge、mihomo、sing-box | 双路径（ADR 0008）；代理客户端自动回落（ADR 0018） | 不运行 nett；App 在 M3 |
 

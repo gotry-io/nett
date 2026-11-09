@@ -25,9 +25,10 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 
 ## M1：组网
 
-按顺序推进：先过原型关卡，再接入 Hub，最后铺开平台和功能。
+按顺序推进：先过原型关卡，再用本地签名部署替换已有的手工隧道，然后接入 Hub，最后铺开平台和功能（ADR 0022）。
 
-- **原型关卡**（第一步，只在 Linux 上，用静态配置代替 Hub）：签名准入、UDP 中继与切换到新中继、双方都是 `dial-only` 时的切换与时间片汇合、漫游纠正、中继重启、MTU（大包 TCP）、TLS 回退、打洞（在 WireGuard 端口上探测，成功率），断开、波动、回退、恢复与 Tailscale 的对比（ADR 0021），以及所选 WireGuard 实现的实际行为（索引冲突重试、删除再添加对端后的握手时间）；**性能基准**：在同一组机器上与原生 WireGuard、Tailscale 对比吞吐、延迟和 CPU 占用。切换时间和性能达到下面的验收标准后，再做其他平台、CONNECT 和智能入口。场景与通过标准见 [design/prototype.md](design/prototype.md)
+- **原型关卡**（第一步，只在 Linux 上，用静态配置代替 Hub）：签名准入、UDP 中继与切换到新中继、双方都是 `dial-only` 时的切换与时间片汇合、漫游纠正、中继重启、MTU（大包 TCP）、TLS 回退、打洞（在 WireGuard 端口上探测，成功率），断开、波动、回退、恢复与 Tailscale 的对比（ADR 0021），以及所选 WireGuard 实现的实际行为（索引冲突重试、删除再添加对端后的握手时间）；**性能基准**：在同一组机器上与原生 WireGuard、Tailscale 对比吞吐、延迟和 CPU 占用。切换时间和性能达到下面的验收标准后，再做其他平台、CONNECT 和智能入口。场景与通过标准见 [design/prototype.md](design/prototype.md)。已通过；跨公网直连的满速对比和 1 vCPU 中继的最大转发吞吐留到下面的验收（prototype.md 第 9 节）
+- **本地签名部署**（第二步，接入 Hub 之前）：用户电脑上的签名工具 `nett site`（恢复密钥是唯一的信任锚）、节点本机生成密钥、正式构建读本地的期望状态文件；访问控制、Edge 专用地址、容器内成员；用它替换已有的手工 WireGuard 隧道。见 [design/local-signing.md](design/local-signing.md)
 - **组网离不开的基础**：
   - Hub 与 nett-node（原生运行）：入网、能力探测（WireGuard、TUN、包过滤、能否被外部连入）；node 经公网 HTTPS 连接 Hub，不依赖组网；node 把 `trust` 和 `mesh` 分区转交组网进程
   - 认证：passkey 登录、恢复密钥与备份密钥、API token、node 密钥与准入证明、信任锚；变更集最小版本与浏览器内 passkey 签名

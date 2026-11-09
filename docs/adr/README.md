@@ -27,6 +27,7 @@
 | [0019](0019-mesh-only.md) | nett 只做组网 | 已采纳 |
 | [0020](0020-release-signing.md) | 发布签名：主备两把钥匙，公钥是构建参数 | 已采纳 |
 | [0021](0021-tailscale-parity.md) | 组网体验以 Tailscale 为基线 | 已采纳 |
+| [0022](0022-local-signing-before-hub.md) | 接入 Hub 之前，用本地签名部署替换已有的隧道 | 已采纳 |
 
 模板：
 

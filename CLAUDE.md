@@ -3,7 +3,7 @@
 nett 是用户所有机器之间的那张网：连回家、管服务器、访问服务都要经过它。组网出错时，用来修它的通路可能也一起断了；权限出错时，一台被攻破的机器就能走到所有机器。下面的规则都由此而来：**拿不准时，访问保持拒绝，连接保持现状；拿不准就先问。**
 
 - 项目：开源、自托管、单用户的组网基础设施，只做组网（ADR 0019）。组件：`nett-hub`（组网的控制面与 Web 控制台）、每台机器上的 `nett-node`（控制代理）、组网进程 `nett-mesh`、按需运行的传输适配进程 `nett-transport`、可被外部连入的节点上的 `nett-relay`；命令行 `nett`。入口节点上的反向代理（Edge）由用户自己运行，不是 nett 的组件。
-- 当前阶段：**M1 原型关卡**（`docs/design/prototype.md` 第 8 节）：设计文档为草案；代码结构见 `docs/architecture.md` 第 11 节；进度见 `docs/roadmap.md`。
+- 当前阶段：**M1 本地签名部署**（`docs/design/local-signing.md`，ADR 0022；原型关卡已通过，结果见 `docs/design/prototype.md` 第 9 节）：设计文档为草案；代码结构见 `docs/architecture.md` 第 11 节；进度见 `docs/roadmap.md`。
 - 总体设计：`docs/architecture.md`；详细设计：`docs/design/`；决定的理由：`docs/adr/`。实现必须符合设计；要改设计，先改文档并经用户确认。没有设计文档的功能先写设计文档，架构层面的变化先写 ADR。
 - 本地的 `private/`（不进 Git）存放机器信息、盘点数据、调研材料和决策过程：可以读来了解背景（决策过程先读 `private/decision-log.md`，部署到用户自己的机器先读 `private/fleet/plan.md`），但**绝不提交，也不在代码和已提交的文档中引用**。
 
