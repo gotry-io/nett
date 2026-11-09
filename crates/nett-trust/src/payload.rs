@@ -18,6 +18,8 @@ pub const MAX_RULE_PREFIXES: usize = 256;
 pub const MAX_RULE_PORTS: usize = 64;
 /// Edge 所在容器的网段数的上限。
 pub const MAX_EDGE_CONTAINERS: usize = 16;
+/// 一个节点宣告的网段数的上限。
+pub const MAX_ADVERTISED_ROUTES: usize = 64;
 
 /// 签名载荷的文档形式。控制台（以及实验工具）按它生成，验证方按它解析。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,7 @@ pub enum PayloadDoc {
 pub enum Artifact {
     NodePolicy(NodePolicy),
     AccessRuleSet(AccessRuleSet),
+    AdvertisedRoutes(AdvertisedRoutes),
 }
 
 /// 节点策略，字段与 `node-policies` 资源一致（design/api-resources.md 第 5.2 节）。
@@ -71,6 +74,8 @@ pub enum Module {
 pub enum Role {
     Relay,
     Edge,
+    /// 智能入口：宣告网段并转发（design/mesh.md 第 10 节）。
+    SubnetRouter,
 }
 
 /// Edge 发出的流量从哪里来：Edge 所在容器的网段。
@@ -87,6 +92,16 @@ pub struct NodeAddresses {
     /// Edge 专用地址，只在有 `edge` 角色时出现。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<MeshAddresses>,
+}
+
+/// 一个智能入口宣告的网段（design/mesh.md 第 10 节），版本号只增不减。只有节点策略中有 `subnet_router`
+/// 角色的节点，它的宣告才被接受。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdvertisedRoutes {
+    pub node_id: NodeId,
+    pub version: u64,
+    pub routes: Vec<IpPrefix>,
 }
 
 /// 访问规则集（design/mesh.md 第 12 节）：选择器展开后的网段和端口，按数组顺序匹配。
@@ -161,6 +176,10 @@ pub enum PayloadError {
     AccessRules(&'static str),
     #[error("payload: carries more than one access rule set")]
     DuplicateRuleSet,
+    #[error("payload: advertised routes of {0}: {1}")]
+    Routes(NodeId, &'static str),
+    #[error("payload: carries more than one set of advertised routes for {0}")]
+    DuplicateRoutes(NodeId),
 }
 
 /// 已解析、已校验格式的签名载荷（签名由 [`crate::signed`] 验证）。
@@ -211,6 +230,15 @@ impl Payload {
                         return Err(PayloadError::DuplicateRuleSet);
                     }
                 }
+                Artifact::AdvertisedRoutes(routes) => {
+                    routes.validate()?;
+                    let duplicate = artifacts[..i].iter().any(|other| {
+                        matches!(other, Artifact::AdvertisedRoutes(o) if o.node_id == routes.node_id)
+                    });
+                    if duplicate {
+                        return Err(PayloadError::DuplicateRoutes(routes.node_id.clone()));
+                    }
+                }
             }
             artifact_hashes.push(artifact_hash(artifact)?);
         }
@@ -254,7 +282,16 @@ impl Payload {
         self.artifacts()
             .find_map(|(hash, artifact)| match artifact {
                 Artifact::AccessRuleSet(rules) => Some((hash, rules)),
-                Artifact::NodePolicy(_) => None,
+                _ => None,
+            })
+    }
+
+    /// 载荷中的全部宣告网段产物。
+    pub fn advertised_routes(&self) -> impl Iterator<Item = (&Sha256Digest, &AdvertisedRoutes)> {
+        self.artifacts()
+            .filter_map(|(hash, artifact)| match artifact {
+                Artifact::AdvertisedRoutes(routes) => Some((hash, routes)),
+                _ => None,
             })
     }
 }
@@ -319,6 +356,38 @@ impl MeshAddresses {
             || ipv4.is_broadcast());
         let ipv6_ok = !(ipv6.is_unspecified() || ipv6.is_loopback() || ipv6.is_multicast());
         ipv4_ok && ipv6_ok
+    }
+}
+
+impl AdvertisedRoutes {
+    fn validate(&self) -> Result<(), PayloadError> {
+        let err = |why| Err(PayloadError::Routes(self.node_id.clone(), why));
+        if self.version == 0 {
+            return err("the version starts at 1");
+        }
+        if self.routes.is_empty() || self.routes.len() > MAX_ADVERTISED_ROUTES {
+            return err("needs between 1 and 64 prefixes");
+        }
+        for route in &self.routes {
+            // 默认路由会把对端的全部流量引进组网；回环、组播、链路本地地址不是可以宣告的网段
+            let special = match route.addr() {
+                std::net::IpAddr::V4(a) => {
+                    a.is_loopback() || a.is_multicast() || a.is_link_local() || a.is_unspecified()
+                }
+                std::net::IpAddr::V6(a) => {
+                    a.is_loopback()
+                        || a.is_multicast()
+                        || a.is_unspecified()
+                        || (a.segments()[0] & 0xffc0) == 0xfe80
+                }
+            };
+            if route.prefix_len() == 0 || special {
+                return err(
+                    "a default route, loopback, multicast or link-local prefix cannot be advertised",
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -576,6 +645,38 @@ pub(crate) mod tests {
             (
                 payload_value(vec![rule_set_value(), rule_set_value()]),
                 "DuplicateRuleSet",
+            ),
+        ] {
+            let err = Payload::parse(&bytes(&v)).expect_err(want);
+            assert!(format!("{err:?}").starts_with(want), "{v}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_and_validates_advertised_routes() {
+        let routes = json!({ "kind": "advertised_routes", "node_id": NODE_A, "version": 2, "routes": ["192.0.2.10/32", "198.51.100.0/24"] });
+        let p = Payload::parse(&bytes(&payload_value(vec![routes.clone()]))).expect("valid");
+        let (_, r) = p.advertised_routes().next().expect("routes");
+        assert_eq!(r.version, 2);
+        assert_eq!(r.routes.len(), 2);
+        let mut role = policy_value();
+        role["roles"] = json!(["subnet_router"]);
+        assert!(Payload::parse(&bytes(&payload_value(vec![role]))).is_ok());
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut v = routes.clone();
+            f(&mut v);
+            payload_value(vec![v])
+        };
+        for (v, want) in [
+            (with(&|v| v["version"] = json!(0)), "Routes"),
+            (with(&|v| v["routes"] = json!([])), "Routes"),
+            (with(&|v| v["routes"] = json!(["0.0.0.0/0"])), "Routes"),
+            (with(&|v| v["routes"] = json!(["127.0.0.0/8"])), "Routes"),
+            (with(&|v| v["routes"] = json!(["fe80::/64"])), "Routes"),
+            (with(&|v| v["routes"] = json!(["224.0.0.0/4"])), "Routes"),
+            (
+                payload_value(vec![routes.clone(), routes.clone()]),
+                "DuplicateRoutes",
             ),
         ] {
             let err = Payload::parse(&bytes(&v)).expect_err(want);
