@@ -21,3 +21,4 @@ pub mod run;
 pub mod source;
 #[cfg(test)]
 mod testutil;
+pub mod userspace;
