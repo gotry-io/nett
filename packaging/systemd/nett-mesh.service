@@ -1,0 +1,31 @@
+# nett 的组网进程（architecture.md 第 13.2 节，design/local-signing.md 第 5 节）。期望状态在
+# /etc/nett/desired.json（不含私钥），组网私钥在 /etc/nett/mesh.key（root 所有，权限 0600），由
+# LoadCredential 交给服务；更新期望状态后 `systemctl reload nett-mesh`。
+[Unit]
+Description=nett mesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key
+ExecReload=/bin/kill -HUP $MAINPID
+LoadCredential=mesh.key:/etc/nett/mesh.key
+# 专用的身份，只有配置 WireGuard、nftables 与发送探测需要的两项能力
+DynamicUser=yes
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6 AF_UNIX
+# 空闲时约 3 MB（硬性规则 14）；上限留出工作时的峰值余量。组网比其他进程更晚被 OOM 结束
+MemoryMax=64M
+OOMScoreAdjust=-500
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

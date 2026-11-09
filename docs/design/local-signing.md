@@ -17,7 +17,7 @@
 | 正式构建的 `nett mesh --config`：读本地的期望状态文件，`SIGHUP` 时重新加载 | 设备凭据、移动网关、主机名与 DNS、CONNECT |
 | 节点上生成密钥的 `nett mesh keys` | 原生 macOS 成员、DSM、Home Assistant OS |
 | 访问控制（mesh.md 第 12 节）、Edge 专用地址（ADR 0015）、以边车运行的容器内成员（ADR 0016） | |
-| 运行方式：Linux 上的 systemd 单元；容器内成员的容器镜像 | |
+| 运行方式：Linux 上的 systemd 单元（`packaging/systemd/nett-mesh.service`）；容器内成员的容器镜像与边车示例（`packaging/container/`） | |
 
 候选路径、中继和传输与原型相同（mesh.md 第 5–9 节）。
 
