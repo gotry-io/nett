@@ -12,7 +12,7 @@ use nett_core::id::NodeId;
 use nett_trust::admission::Member;
 use nett_trust::keys::X25519PublicKey;
 
-use crate::access::{AccessRules, EdgeSpec, FilterSpec};
+use crate::access::{AccessRules, EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
@@ -22,6 +22,7 @@ use crate::key::PrivateKey;
 use crate::members::MemberSet;
 use crate::path::Route;
 use crate::prober::{Incoming, Outgoing, Prober};
+use crate::routes::Routes;
 use nett_core::prefix::IpPrefix;
 
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
@@ -50,9 +51,12 @@ pub struct Engine<D> {
     tls_endpoints: BTreeSet<SocketAddr>,
     tls_guarded: Option<Vec<u16>>,
     access: AccessRules,
-    /// 已经安装到数据面的过滤规则与 Edge 设置。
+    routes: Routes,
+    /// 已经安装到数据面的过滤规则、Edge 设置、智能入口的转发规则与其他成员网段的路由。
     filter: Option<FilterSpec>,
     edge: Option<Option<EdgeSpec>>,
+    ingress: Option<Option<IngressSpec>>,
+    installed_routes: Option<Vec<IpPrefix>>,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -73,8 +77,11 @@ impl<D: DataPlane> Engine<D> {
             tls_endpoints: BTreeSet::new(),
             tls_guarded: None,
             access: AccessRules::default(),
+            routes: Routes::default(),
             filter: None,
             edge: None,
+            ingress: None,
+            installed_routes: None,
         }
     }
 
@@ -98,6 +105,7 @@ impl<D: DataPlane> Engine<D> {
             return;
         }
         self.members.apply(desired, events);
+        self.routes.apply(desired, self.members.members(), events);
 
         let Some(me) = self.members.get(&self.node_id) else {
             events.emit(Event::SelfNotAdmitted {
@@ -106,6 +114,7 @@ impl<D: DataPlane> Engine<D> {
             // 本机已被撤销：不再与任何对端通信
             if self.interface.is_some() {
                 self.sync_peers(Vec::new(), events);
+                self.sync_routes(Vec::new(), events);
             }
             self.prober = None;
             return;
@@ -140,6 +149,7 @@ impl<D: DataPlane> Engine<D> {
             self.sync_peers(Vec::new(), events);
             return;
         }
+        self.apply_ingress(events);
 
         self.reachability = desired.reachability;
         let trusted = self.clock_trusted;
@@ -169,11 +179,51 @@ impl<D: DataPlane> Engine<D> {
                         .then(|| prober.endpoint(&m.node_id))
                         .flatten()
                 });
-                peer_spec(m, desired.reachability, endpoint)
+                peer_spec(
+                    m,
+                    self.routes.of(&m.node_id),
+                    desired.reachability,
+                    endpoint,
+                )
             })
             .collect();
         self.sync_peers(peers, events);
+        let others: Vec<IpPrefix> = self.routes.of_others(&self.node_id).collect();
+        self.sync_routes(others, events);
         self.guard_idle_tls(events);
+    }
+
+    /// 本机宣告了网段时，安装智能入口的转发规则（design/mesh.md 第 10 节）。失败时下一份期望状态重试。
+    fn apply_ingress(&mut self, events: &mut impl EventSink) {
+        let ingress = IngressSpec::of(self.routes.of(&self.node_id), self.members.members());
+        if self.ingress.as_ref() == Some(&ingress) {
+            return;
+        }
+        match self.dataplane.apply_ingress(ingress.as_ref()) {
+            Ok(()) => self.ingress = Some(ingress),
+            Err(e) => {
+                self.ingress = None;
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    /// 其他成员宣告的网段：在组网接口上加路由。失败时下一份期望状态重试。
+    fn sync_routes(&mut self, routes: Vec<IpPrefix>, events: &mut impl EventSink) {
+        if self.installed_routes.as_ref() == Some(&routes) {
+            return;
+        }
+        match self.dataplane.sync_routes(&routes) {
+            Ok(()) => self.installed_routes = Some(routes),
+            Err(e) => {
+                self.installed_routes = None;
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+            }
+        }
     }
 
     /// 验证规则集，安装本机的过滤规则和 Edge 设置（design/mesh.md 第 12 节，ADR 0015）。规则无法展开或
@@ -203,6 +253,7 @@ impl<D: DataPlane> Engine<D> {
             .filter(
                 &self.node_id,
                 self.members.members(),
+                self.routes.of(&self.node_id),
                 desired.container_member,
             )
             .unwrap_or_else(|e| {
@@ -331,7 +382,12 @@ impl<D: DataPlane> Engine<D> {
             let result = if switch.rehandshake {
                 match self.members.get(&switch.peer) {
                     Some(member) => {
-                        let spec = peer_spec(member, self.reachability, Some(switch.to.endpoint()));
+                        let spec = peer_spec(
+                            member,
+                            self.routes.of(&switch.peer),
+                            self.reachability,
+                            Some(switch.to.endpoint()),
+                        );
                         let result = self.dataplane.rehandshake(&spec);
                         if result.is_ok() {
                             self.rehandshaked_at.insert(switch.public_key, now_ms);
@@ -467,8 +523,13 @@ fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u
     matches!((done_ms, rehandshaked_ms), (Some(done), Some(at)) if done >= at)
 }
 
-fn peer_spec(member: &Member, own: Reachability, endpoint: Option<SocketAddr>) -> PeerSpec {
-    // 组网地址，以及有 `edge` 角色时的 Edge 专用地址（design/mesh.md 第 4 节）
+fn peer_spec(
+    member: &Member,
+    routes: &[IpPrefix],
+    own: Reachability,
+    endpoint: Option<SocketAddr>,
+) -> PeerSpec {
+    // 组网地址，有 `edge` 角色时的 Edge 专用地址，以及它宣告的网段（design/mesh.md 第 4 节）
     let edge = member.edge.iter().map(|e| e.addresses);
     PeerSpec {
         public_key: member.mesh_public_key,
@@ -476,6 +537,7 @@ fn peer_spec(member: &Member, own: Reachability, endpoint: Option<SocketAddr>) -
             .chain(edge)
             .flat_map(|a| [IpAddr::V4(a.ipv4), IpAddr::V6(a.ipv6)])
             .map(IpPrefix::host)
+            .chain(routes.iter().copied())
             .collect(),
         endpoint,
         persistent_keepalive: (own == Reachability::DialOnly).then_some(DIAL_ONLY_KEEPALIVE_SECS),
@@ -570,7 +632,13 @@ mod tests {
         e.apply(&validated(doc.clone()), &mut VecSink::default());
         assert_eq!(
             e.dataplane.calls,
-            ["apply_edge", "apply_filter", "sync_peers"]
+            [
+                "apply_edge",
+                "apply_filter",
+                "apply_ingress",
+                "sync_peers",
+                "sync_routes"
+            ]
         );
         // 成员 2 发往本机隧道内探测端口的包放行（IPv4、IPv6），没有别的规则
         assert_eq!(e.dataplane.filter.as_ref().map(|f| f.rules.len()), Some(2));
@@ -579,7 +647,14 @@ mod tests {
         e.apply(&validated(doc), &mut VecSink::default());
         assert_eq!(
             e.dataplane.calls,
-            ["apply_edge", "apply_filter", "sync_peers", "sync_peers"]
+            [
+                "apply_edge",
+                "apply_filter",
+                "apply_ingress",
+                "sync_peers",
+                "sync_routes",
+                "sync_peers"
+            ]
         );
     }
 
@@ -652,6 +727,53 @@ mod tests {
                 == [crate::access::Match::Source(
                     "100.88.1.1/32".parse().expect("prefix")
                 )]));
+    }
+
+    #[test]
+    fn advertised_routes_reach_peers_routes_filter_and_forwarding() {
+        let mesh = Mesh::new(&[1, 2, 3]);
+        let members = vec![
+            mesh.edge_material(1, 1),
+            mesh.router_material(2, 1),
+            mesh.material(3, 1),
+        ];
+        let with_routes = |me: u8| {
+            let mut d = mesh.desired(me, members.clone());
+            d.advertised_routes = vec![mesh.sign(&mesh.routes_doc(2, 1, &["192.0.2.10/32"]))];
+            d.container_member = me == 2;
+            validated(d)
+        };
+        let route: IpPrefix = "192.0.2.10/32".parse().expect("prefix");
+        // 其他成员：对端的 AllowedIPs 和组网接口上的路由都有这个网段
+        let mut edge = engine(1);
+        edge.apply(&with_routes(1), &mut VecSink::default());
+        let peer2 = edge
+            .dataplane
+            .peers
+            .as_ref()
+            .and_then(|p| p.iter().find(|p| p.public_key == mesh_key(2)).cloned())
+            .expect("peer 2");
+        assert!(peer2.allowed_ips.contains(&route));
+        assert_eq!(edge.dataplane.routes, [route]);
+        assert_eq!(edge.dataplane.ingress, None);
+
+        // 智能入口本身：转发 Edge 的流量，宣告的网段默认拒绝，自己的网段不加路由
+        let mut router = engine(2);
+        router.apply(&with_routes(2), &mut VecSink::default());
+        let ingress = router.dataplane.ingress.as_ref().expect("ingress");
+        assert!(
+            ingress
+                .edge_sources
+                .contains(&"100.88.1.1".parse().expect("ip"))
+        );
+        assert!(router.dataplane.routes.is_empty());
+        let filter = router.dataplane.filter.as_ref().expect("filter");
+        assert!(
+            filter
+                .rules
+                .iter()
+                .any(|r| !r.accept && r.matches == [crate::access::Match::Destination(route)])
+        );
     }
 
     #[test]

@@ -13,10 +13,11 @@ use nett_trust::payload::{
 use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 
-use crate::access::{EdgeSpec, FilterSpec};
+use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
 use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
+use nett_core::prefix::IpPrefix;
 
 pub fn node_id(n: u8) -> NodeId {
     format!("node_01J9Z3K8Q2T7V4X6Y8A0B2C4{n:02}")
@@ -113,6 +114,28 @@ impl Mesh {
         self.material_for(self.edge_policy(n, version), mesh_key(n))
     }
 
+    /// 带 `subnet_router` 角色的节点（智能入口）。
+    pub fn router_material(&self, n: u8, version: u64) -> AdmissionMaterial {
+        let mut policy = self.policy(n, version);
+        policy.roles.push(Role::SubnetRouter);
+        self.material_for(policy, mesh_key(n))
+    }
+
+    /// 节点 `n` 宣告网段的载荷。
+    pub fn routes_doc(&self, n: u8, version: u64, routes: &[&str]) -> PayloadDoc {
+        PayloadDoc::EnrollmentPolicy {
+            v: 1,
+            artifacts: vec![Artifact::AdvertisedRoutes(
+                nett_trust::payload::AdvertisedRoutes {
+                    node_id: node_id(n),
+                    version,
+                    routes: routes.iter().map(|r| r.parse().expect("prefix")).collect(),
+                },
+            )],
+            expires_at: Timestamp::from_unix_seconds(0),
+        }
+    }
+
     /// 用这组节点的恢复密钥签一份载荷。
     pub fn sign(&self, doc: &PayloadDoc) -> SignedPayload {
         self.recovery
@@ -152,6 +175,7 @@ impl Mesh {
                 })
                 .collect(),
             access_rules: None,
+            advertised_routes: vec![],
             container_member: false,
         }
     }
@@ -173,6 +197,8 @@ pub struct FakeDataPlane {
     /// 当前安装的过滤规则与 Edge 设置。
     pub filter: Option<FilterSpec>,
     pub edge: Option<EdgeSpec>,
+    pub ingress: Option<IngressSpec>,
+    pub routes: Vec<IpPrefix>,
     /// 安装过滤规则失败：`Some(true)` 所有安装都失败，`Some(false)` 只有拒绝全部的规则能装上。
     pub fail_filter: Option<bool>,
     /// 按顺序记下的数据面调用，用来检查"先装过滤规则，再添加对端"。
@@ -190,6 +216,8 @@ impl FakeDataPlane {
             tls_guards: Vec::new(),
             filter: None,
             edge: None,
+            ingress: None,
+            routes: Vec::new(),
             fail_filter: None,
             calls: Vec::new(),
         }
@@ -278,6 +306,18 @@ impl DataPlane for FakeDataPlane {
     fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
         self.calls.push("apply_edge");
         self.edge = edge.cloned();
+        Ok(())
+    }
+
+    fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
+        self.calls.push("apply_ingress");
+        self.ingress = ingress.cloned();
+        Ok(())
+    }
+
+    fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
+        self.calls.push("sync_routes");
+        self.routes = routes.to_vec();
         Ok(())
     }
 }

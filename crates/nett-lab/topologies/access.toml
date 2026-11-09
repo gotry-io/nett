@@ -1,6 +1,7 @@
-# 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6 节，ADR 0015、0016）：
+# 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6、8 节，ADR 0015、0016）：
 # edge 运行 Edge（背后有一个"容器"，节点像 Docker 一样对它做源地址伪装）；app 是容器内成员，在锥形 NAT
-# 之后，只放行 edge 的 Edge 访问它的 8686；other 是普通成员
+# 之后，背后有一个服务（相当于 Docker 网络中固定地址的容器），宣告服务的地址，只放行 edge 的 Edge 访问
+# 服务的 8686；other 是普通成员
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -16,6 +17,8 @@ name = "app"
 reachability = "dial-only"
 behind = "nat-a"
 container_member = true
+routes = ["172.30.0.10/32"]
+service = { address = "172.30.0.10", ingress = "172.30.0.200" }
 
 [[node]]
 name = "other"
@@ -39,5 +42,5 @@ candidates = ["direct"]
 
 [[allow]]
 from = ["edge.edge"]
-to = ["app"]
+to = ["app.routes"]
 ports = ["8686/tcp"]

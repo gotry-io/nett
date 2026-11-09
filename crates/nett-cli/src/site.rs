@@ -15,8 +15,8 @@ use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
 use nett_trust::encoding::{Sha256Digest, Timestamp};
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{
-    AccessRule, AccessRuleSet, Artifact, EdgeSources, MeshAddresses, Module, NodeAddresses,
-    NodePolicy, PayloadDoc, PortRange, Protocol, Role, RuleAction,
+    AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, EdgeSources, MeshAddresses, Module,
+    NodeAddresses, NodePolicy, PayloadDoc, PortRange, Protocol, Role, RuleAction,
 };
 use nett_trust::revocation::Revocation;
 use nett_trust::signed::SignedPayload;
@@ -81,6 +81,9 @@ struct SiteNode {
     edge: Option<SiteEdge>,
     #[serde(default)]
     container_member: bool,
+    /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
+    #[serde(default)]
+    routes: Vec<IpPrefix>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -129,6 +132,8 @@ struct NodeState {
     /// 生成节点策略和准入证明的输入（公钥、角色、Edge）的哈希：不变时沿用原来的签名。
     input: Sha256Digest,
     material: AdmissionMaterial,
+    /// 宣告的网段：版本、网段列表的哈希与签名的产物。
+    routes: Option<RulesState>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -280,16 +285,18 @@ fn build(dir: &Path) -> anyhow::Result<()> {
     for node in &site.nodes {
         let (mesh_key, identity_key) =
             parse_keys(&node.keys).with_context(|| format!("node `{}`: keys", node.name))?;
-        let (node_id, mesh, old_edge, old) = match state.nodes.remove(&node.name) {
+        let (node_id, mesh, old_edge, old, old_routes) = match state.nodes.remove(&node.name) {
             Some(n) => (
                 n.node_id,
                 n.mesh,
                 n.edge,
                 Some((n.policy_version, n.input, n.material)),
+                n.routes,
             ),
             None => (
                 NodeId::from_parts(unix_ms(), random()?),
                 allocate(&mut state)?,
+                None,
                 None,
                 None,
             ),
@@ -302,7 +309,12 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         let policy = PolicyInput {
             mesh_key,
             identity_key,
-            roles: node.edge.iter().map(|_| Role::Edge).collect(),
+            roles: node
+                .edge
+                .iter()
+                .map(|_| Role::Edge)
+                .chain((!node.routes.is_empty()).then_some(Role::SubnetRouter))
+                .collect(),
             edge_sources: node.edge.as_ref().map(|e| EdgeSources {
                 containers: e.containers.clone(),
             }),
@@ -324,6 +336,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
                 )
             }
         };
+        let routes = sign_routes(&recovery, &node_id, &node.routes, old_routes, expires_at)?;
         state.nodes.insert(
             node.name.clone(),
             NodeState {
@@ -333,6 +346,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
                 policy_version,
                 input,
                 material,
+                routes,
             },
         );
     }
@@ -377,6 +391,11 @@ fn build(dir: &Path) -> anyhow::Result<()> {
             revocations: revocations.clone(),
             paths: paths(&site, &state, node)?,
             access_rules: state.access_rules.as_ref().map(|r| r.signed.clone()),
+            advertised_routes: state
+                .nodes
+                .values()
+                .filter_map(|n| n.routes.as_ref().map(|r| r.signed.clone()))
+                .collect(),
             container_member: node.container_member,
         };
         // 生成的期望状态必须能被组网进程接受
@@ -440,6 +459,26 @@ fn validate(site: &Site) -> anyhow::Result<()> {
                 node.name
             );
         }
+        let overlaps = |a: &IpPrefix, b: &IpPrefix| a.covers(b) || b.covers(a);
+        for route in &node.routes {
+            ensure!(
+                !overlaps(route, &site.mesh.ipv4) && !overlaps(route, &site.mesh.ipv6),
+                "node `{}`: route {route} overlaps the mesh prefixes",
+                node.name
+            );
+            if let Some(other) = site
+                .nodes
+                .iter()
+                .filter(|o| o.name != node.name)
+                .find(|o| o.routes.iter().any(|r| overlaps(r, route)))
+            {
+                bail!(
+                    "node `{}`: route {route} overlaps a route of `{}`",
+                    node.name,
+                    other.name
+                );
+            }
+        }
     }
     for link in &site.links {
         for peer in &link.peers {
@@ -465,17 +504,19 @@ fn validate(site: &Site) -> anyhow::Result<()> {
             "allow needs `from` and `to`"
         );
         for selector in allow.from.iter().chain(&allow.to) {
-            let (name, edge) = selector
-                .strip_suffix(".edge")
-                .map_or((selector.as_str(), false), |n| (n, true));
+            let (name, kind) = split_selector(selector);
             let node = site
                 .nodes
                 .iter()
                 .find(|n| n.name == name)
                 .with_context(|| format!("allow names unknown node `{name}`"))?;
             ensure!(
-                !edge || node.edge.is_some(),
+                kind != Selector::Edge || node.edge.is_some(),
                 "allow names `{selector}` but `{name}` runs no Edge"
+            );
+            ensure!(
+                kind != Selector::Routes || !node.routes.is_empty(),
+                "allow names `{selector}` but `{name}` advertises no routes"
             );
         }
         for p in &allow.ports {
@@ -542,6 +583,44 @@ fn expiring(material: &AdmissionMaterial, within: i64) -> bool {
     })
 }
 
+/// 宣告的网段：变了就换一个新版本重签；没有网段时不签（节点策略同时去掉 `subnet_router` 角色，
+/// 成员随之作废它已生效的宣告）。
+fn sign_routes(
+    recovery: &RecoveryKeyPair,
+    node_id: &NodeId,
+    routes: &[IpPrefix],
+    old: Option<RulesState>,
+    expires_at: Timestamp,
+) -> anyhow::Result<Option<RulesState>> {
+    if routes.is_empty() {
+        return Ok(None);
+    }
+    let input = Sha256Digest::of(serde_json::to_string(routes)?.as_bytes());
+    if let Some(old) = old.as_ref().filter(|o| o.input == input) {
+        return Ok(Some(RulesState {
+            version: old.version,
+            input,
+            signed: old.signed.clone(),
+        }));
+    }
+    let version = old.map_or(1, |o| o.version + 1);
+    let payload = PayloadDoc::EnrollmentPolicy {
+        v: 1,
+        artifacts: vec![Artifact::AdvertisedRoutes(AdvertisedRoutes {
+            node_id: node_id.clone(),
+            version,
+            routes: routes.to_vec(),
+        })],
+        expires_at,
+    }
+    .to_canonical()?;
+    Ok(Some(RulesState {
+        version,
+        input,
+        signed: recovery.sign(payload)?,
+    }))
+}
+
 /// 节点上 `nett mesh keys` 输出的一行：`<组网公钥> <身份公钥>`。
 fn parse_keys(s: &str) -> anyhow::Result<(X25519PublicKey, X25519PublicKey)> {
     let mut parts = s.split_whitespace();
@@ -571,17 +650,42 @@ fn allocate(state: &mut State) -> anyhow::Result<MeshAddresses> {
     Ok(addrs)
 }
 
-/// 访问规则展开成网段（design/mesh.md 第 12 节）：节点名是它的组网地址，`<节点>.edge` 是它的 Edge 专用地址。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Selector {
+    Mesh,
+    Edge,
+    Routes,
+}
+
+/// `<节点>`、`<节点>.edge`、`<节点>.routes`。
+fn split_selector(s: &str) -> (&str, Selector) {
+    if let Some(name) = s.strip_suffix(".edge") {
+        (name, Selector::Edge)
+    } else if let Some(name) = s.strip_suffix(".routes") {
+        (name, Selector::Routes)
+    } else {
+        (s, Selector::Mesh)
+    }
+}
+
+/// 访问规则展开成网段（design/mesh.md 第 12 节）：节点名是它的组网地址，`<节点>.edge` 是它的 Edge 专用地址，
+/// `<节点>.routes` 是它宣告的网段。
 fn expand_rules(site: &Site, state: &State) -> anyhow::Result<Vec<AccessRule>> {
     let prefixes = |selector: &str| -> anyhow::Result<Vec<IpPrefix>> {
-        let addrs = match selector.strip_suffix(".edge") {
-            Some(name) => state.nodes[name].edge.context("edge addresses")?,
-            None => state.nodes[selector].mesh,
-        };
-        Ok(vec![
-            IpPrefix::host(addrs.ipv4.into()),
-            IpPrefix::host(addrs.ipv6.into()),
-        ])
+        let (name, kind) = split_selector(selector);
+        let host =
+            |a: MeshAddresses| vec![IpPrefix::host(a.ipv4.into()), IpPrefix::host(a.ipv6.into())];
+        Ok(match kind {
+            Selector::Mesh => host(state.nodes[name].mesh),
+            Selector::Edge => host(state.nodes[name].edge.context("edge addresses")?),
+            Selector::Routes => site
+                .nodes
+                .iter()
+                .find(|n| n.name == name)
+                .context("node")?
+                .routes
+                .clone(),
+        })
     };
     let mut rules = Vec::new();
     for allow in &site.allows {
@@ -849,6 +953,74 @@ mod tests {
         assert_eq!(s2.next_host, s1.next_host);
         let app = desired(&dir, "app");
         assert_eq!(app.revocations.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn signs_and_expands_advertised_routes() {
+        use nett_mesh::routes::Routes;
+        let dir = temp_dir("routes");
+        init(&dir, DEFAULT_ORIGIN).expect("init");
+        let (ka, kb) = (keys(), keys());
+        let site = |routes: &str| {
+            format!(
+                "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nkeys = \"{ka}\"\n\
+                 edge = {{ containers = [\"172.17.0.2/32\"] }}\n\
+                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\ncontainer_member = true\n{routes}\
+                 [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n"
+            )
+        };
+        write_site(
+            &dir,
+            &format!(
+                "{}[[allow]]\nfrom = [\"vps.edge\"]\nto = [\"app.routes\"]\nports = [\"8686/tcp\"]\n",
+                site("routes = [\"172.30.0.10/32\"]\n")
+            ),
+        );
+        build(&dir).expect("build");
+        let s1 = state(&dir);
+        assert_eq!(s1.nodes["app"].routes.as_ref().map(|r| r.version), Some(1));
+        let vps = desired(&dir, "vps");
+        assert_eq!(vps.advertised_routes.len(), 1);
+        let mut members = MemberSet::default();
+        members.apply(&vps, &mut VecSink::default());
+        let mut routes = Routes::default();
+        let mut events = VecSink::default();
+        routes.apply(&vps, members.members(), &mut events);
+        let app_id = &s1.nodes["app"].node_id;
+        assert_eq!(
+            routes.of(app_id),
+            ["172.30.0.10/32".parse::<IpPrefix>().expect("prefix")],
+            "{:?}",
+            events.0
+        );
+        // 规则展开成宣告的网段
+        let mut rules = AccessRules::default();
+        rules.apply(&vps, &mut events);
+        assert_eq!(rules.version(), Some(1));
+        // 去掉 routes：不再宣告，节点策略去掉 subnet_router 角色，成员作废已生效的宣告
+        write_site(&dir, &site(""));
+        build(&dir).expect("rebuild");
+        let s2 = state(&dir);
+        assert!(s2.nodes["app"].routes.is_none());
+        assert_eq!(
+            s2.nodes["app"].policy_version,
+            s1.nodes["app"].policy_version + 1
+        );
+        let vps = desired(&dir, "vps");
+        assert!(vps.advertised_routes.is_empty());
+        members.apply(&vps, &mut VecSink::default());
+        routes.apply(&vps, members.members(), &mut VecSink::default());
+        assert!(routes.of(app_id).is_empty());
+        // 不存在的宣告
+        write_site(
+            &dir,
+            &format!(
+                "{}[[allow]]\nfrom = [\"vps\"]\nto = [\"app.routes\"]\n",
+                site("")
+            ),
+        );
+        assert!(build(&dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 

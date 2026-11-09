@@ -1,6 +1,8 @@
-//! rtnetlink：创建 WireGuard 接口、查询接口、设置 MTU 与启用、同步地址（`include/uapi/linux/rtnetlink.h`）。
+//! rtnetlink：创建 WireGuard 接口、查询接口、设置 MTU 与启用、同步地址和路由（`include/uapi/linux/rtnetlink.h`）。
 
 use std::net::IpAddr;
+
+use nett_core::prefix::IpPrefix;
 
 use super::netlink::{
     Message, NLM_F_ACK, NLM_F_CREATE, NLM_F_DUMP, NLM_F_EXCL, NLM_F_REPLACE, NlError, Socket,
@@ -12,6 +14,18 @@ const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
 const RTM_GETADDR: u16 = 22;
+const RTM_NEWROUTE: u16 = 24;
+const RTM_DELROUTE: u16 = 25;
+const RTM_GETROUTE: u16 = 26;
+const RTA_DST: u16 = 1;
+const RTA_OIF: u16 = 4;
+const RTA_TABLE: u16 = 15;
+const RT_TABLE_MAIN: u8 = 254;
+/// nett 在组网接口上加的路由用这个协议号标记，与内核按地址自动加的路由（`kernel`）区分开。
+const RTPROT_STATIC: u8 = 4;
+const RT_SCOPE_LINK: u8 = 253;
+const RTN_UNICAST: u8 = 1;
+const RTMSG_LEN: usize = 12;
 
 const IFLA_IFNAME: u16 = 3;
 const IFLA_MTU: u16 = 4;
@@ -191,4 +205,77 @@ pub(crate) fn del_address(
     m.fixed(&ifaddr(family, prefix_len, index));
     m.attr(IFA_LOCAL, &bytes);
     sock.request(m).map(drop)
+}
+
+fn rtmsg(family: u8, dst_len: u8) -> [u8; RTMSG_LEN] {
+    let mut b = [0u8; RTMSG_LEN];
+    b[0] = family;
+    b[1] = dst_len;
+    b[4] = RT_TABLE_MAIN;
+    b[5] = RTPROT_STATIC;
+    b[6] = RT_SCOPE_LINK;
+    b[7] = RTN_UNICAST;
+    b
+}
+
+/// 经接口 `index` 到达 `prefix` 的路由（主路由表，`static`）。已存在时替换。
+pub(crate) fn add_route(sock: &mut Socket, index: u32, prefix: IpPrefix) -> Result<(), NlError> {
+    let (family, bytes) = addr_bytes(prefix.addr());
+    let mut m = Message::new(RTM_NEWROUTE, NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE);
+    m.fixed(&rtmsg(family, prefix.prefix_len()));
+    m.attr(RTA_DST, &bytes);
+    m.attr_u32(RTA_OIF, index);
+    sock.request(m).map(drop)
+}
+
+pub(crate) fn del_route(sock: &mut Socket, index: u32, prefix: IpPrefix) -> Result<(), NlError> {
+    let (family, bytes) = addr_bytes(prefix.addr());
+    let mut m = Message::new(RTM_DELROUTE, NLM_F_ACK);
+    m.fixed(&rtmsg(family, prefix.prefix_len()));
+    m.attr(RTA_DST, &bytes);
+    m.attr_u32(RTA_OIF, index);
+    sock.request(m).map(drop)
+}
+
+/// 主路由表中经接口 `index`、协议为 `static` 的路由：nett 在组网接口上加的那些。
+pub(crate) fn get_routes(sock: &mut Socket, index: u32) -> Result<Vec<IpPrefix>, NlError> {
+    let mut m = Message::new(RTM_GETROUTE, NLM_F_DUMP);
+    m.fixed(&rtmsg(AF_UNSPEC, 0));
+    let mut out = Vec::new();
+    for reply in sock.request(m)? {
+        if reply.len() < RTMSG_LEN {
+            return Err(NlError::Malformed("short rtmsg"));
+        }
+        let (family, dst_len, protocol) = (reply[0], reply[1], reply[5]);
+        let mut table = u32::from(reply[4]);
+        if protocol != RTPROT_STATIC {
+            continue;
+        }
+        let (mut dst, mut oif) = (None, None);
+        for attr in attrs(&reply[RTMSG_LEN..]) {
+            let (ty, payload) = attr?;
+            match ty {
+                RTA_DST => dst = Some(payload.to_vec()),
+                RTA_OIF => oif = Some(parse_u32(payload)?),
+                RTA_TABLE => table = parse_u32(payload)?,
+                _ => {}
+            }
+        }
+        if oif != Some(index) || table != u32::from(RT_TABLE_MAIN) {
+            continue;
+        }
+        let addr = match (family, dst.as_deref()) {
+            (AF_INET, Some(b)) if b.len() == 4 => {
+                IpAddr::from(<[u8; 4]>::try_from(b).map_err(|_| NlError::Malformed("ipv4"))?)
+            }
+            (AF_INET6, Some(b)) if b.len() == 16 => {
+                IpAddr::from(<[u8; 16]>::try_from(b).map_err(|_| NlError::Malformed("ipv6"))?)
+            }
+            _ => continue,
+        };
+        if let Some(prefix) = IpPrefix::new(addr, dst_len) {
+            out.push(prefix);
+        }
+    }
+    Ok(out)
 }

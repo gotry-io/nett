@@ -27,6 +27,8 @@ pub struct NodeNet {
     pub switch_ns: String,
     /// 运行 Edge 的节点背后的"容器"（ADR 0015）：它的地址。
     pub edge_container: Option<Ipv4Addr>,
+    /// 智能入口背后的服务（design/mesh.md 第 10 节）：服务的地址与节点在服务网络中的地址。
+    pub service: Option<(Ipv4Addr, Ipv4Addr)>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,6 +54,11 @@ pub fn netns(name: &str) -> String {
 /// 运行 Edge 的节点背后的"容器"所在的命名空间。
 pub fn edge_netns(name: &str) -> String {
     format!("{NETNS_PREFIX}{name}-edge")
+}
+
+/// 智能入口背后的服务所在的命名空间。
+pub fn service_netns(name: &str) -> String {
+    format!("{NETNS_PREFIX}{name}-svc")
 }
 
 /// 节点一侧连接 Edge 容器的地址（点对点，容器以它为默认网关）。
@@ -91,6 +98,7 @@ impl Underlay {
                     public_ipv4: Some(Ipv4Addr::new(198, 51, 100, index)),
                     switch_ns: INET_NETNS.to_owned(),
                     edge_container: None,
+                    service: None,
                 },
                 Some(router) => {
                     let (_, k, nat) = routers
@@ -106,6 +114,7 @@ impl Underlay {
                         public_ipv4: None,
                         switch_ns: netns(router),
                         edge_container: None,
+                        service: None,
                     }
                 }
             };
@@ -120,6 +129,7 @@ impl Underlay {
                 node.name.clone(),
                 NodeNet {
                     edge_container,
+                    service: node.service.as_ref().map(|s| (s.address, s.ingress)),
                     ..net
                 },
             );
@@ -171,6 +181,12 @@ impl Underlay {
                 .iter()
                 .filter(|(_, n)| n.edge_container.is_some())
                 .map(|(name, _)| edge_netns(name)),
+        );
+        all.extend(
+            self.nodes
+                .iter()
+                .filter(|(_, n)| n.service.is_some())
+                .map(|(name, _)| service_netns(name)),
         );
         all
     }
@@ -356,6 +372,9 @@ impl Underlay {
             if let Some(container) = net.edge_container {
                 edge_container(name, &net.netns, container)?;
             }
+            if let Some((address, ingress)) = net.service {
+                service(name, &net.netns, address, ingress)?;
+            }
         }
         // "公网"上的节点和其他路由器经路由器的外网地址到达它的局域网 IPv6 网段
         for (name, k, nat) in &self.routers {
@@ -491,6 +510,33 @@ fn edge_container(name: &str, node_ns: &str, container: Ipv4Addr) -> anyhow::Res
         Some(rules.as_bytes()),
         COMMAND_TIMEOUT,
     )?;
+    Ok(())
+}
+
+/// 在智能入口背后接一个服务（相当于 Docker 网络中固定地址的容器）：同一个 `/24`，服务以节点为默认网关，
+/// 节点开启转发（容器中由 Compose 的 sysctls 开启）。
+fn service(name: &str, node_ns: &str, address: Ipv4Addr, ingress: Ipv4Addr) -> anyhow::Result<()> {
+    let ns = service_netns(name);
+    add_netns(&ns)?;
+    run(
+        "ip",
+        [
+            "link", "add", "svc0", "netns", node_ns, "type", "veth", "peer", "name", "eth0",
+            "netns", &ns,
+        ],
+    )?;
+    let (svc, gw) = (format!("{address}/24"), format!("{ingress}/24"));
+    let via = ingress.to_string();
+    for args in [
+        vec!["-n", &ns, "addr", "add", &svc, "dev", "eth0"],
+        vec!["-n", &ns, "link", "set", "eth0", "up"],
+        vec!["-n", &ns, "route", "add", "default", "via", &via],
+        vec!["-n", node_ns, "addr", "add", &gw, "dev", "svc0"],
+        vec!["-n", node_ns, "link", "set", "svc0", "up"],
+    ] {
+        run("ip", args)?;
+    }
+    run_in(node_ns, "sysctl", ["-qw", "net.ipv4.ip_forward=1"])?;
     Ok(())
 }
 

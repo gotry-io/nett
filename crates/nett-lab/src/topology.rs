@@ -46,9 +46,22 @@ pub struct Node {
     /// 节点运行 Edge（ADR 0015）：Edge 所在容器的网段。实验 A 在这个节点背后建一个"容器"命名空间，
     /// 地址就是这里写的唯一一个 IPv4 地址（`/32`）。
     pub edge: Option<EdgeSources>,
-    /// 以边车运行的容器内成员：入方向默认拒绝（ADR 0016）。
+    /// 容器内成员：入方向默认拒绝（ADR 0016）。
     #[serde(default)]
     pub container_member: bool,
+    /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
+    #[serde(default)]
+    pub routes: Vec<IpPrefix>,
+    /// 实验 A：在这个节点背后建一个"服务"命名空间，`address` 是服务的地址，`ingress` 是节点在服务网络中的
+    /// 地址（同一个 `/24`）。
+    pub service: Option<Service>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Service {
+    pub address: std::net::Ipv4Addr,
+    pub ingress: std::net::Ipv4Addr,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,18 +192,32 @@ impl Topology {
                 );
             }
         }
+        for node in &self.nodes {
+            if let Some(service) = &node.service {
+                ensure!(
+                    node.routes
+                        .contains(&IpPrefix::host(service.address.into())),
+                    "node `{}`: the service address must be one of its routes",
+                    node.name
+                );
+            }
+        }
         for allow in &self.allows {
             for selector in allow.from.iter().chain(&allow.to) {
-                let (name, edge) = match selector.strip_suffix(".edge") {
-                    Some(name) => (name, true),
-                    None => (selector.as_str(), false),
-                };
+                let (name, suffix) = selector
+                    .split_once('.')
+                    .map_or((selector.as_str(), ""), |(n, s)| (n, s));
                 let node = self
                     .node(name)
                     .with_context(|| format!("allow names unknown node `{name}`"))?;
                 ensure!(
-                    !edge || node.edge.is_some(),
-                    "allow names `{selector}` but `{name}` runs no Edge"
+                    match suffix {
+                        "" => true,
+                        "edge" => node.edge.is_some(),
+                        "routes" => !node.routes.is_empty(),
+                        _ => false,
+                    },
+                    "allow names `{selector}`, which `{name}` does not have"
                 );
             }
             ensure!(

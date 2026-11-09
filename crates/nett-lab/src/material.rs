@@ -20,8 +20,8 @@ use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{
-    AccessRule, AccessRuleSet, Artifact, EdgeSources, MeshAddresses, Module, NodeAddresses,
-    NodePolicy, PayloadDoc, Role, RuleAction,
+    AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, EdgeSources, MeshAddresses, Module,
+    NodeAddresses, NodePolicy, PayloadDoc, Role, RuleAction,
 };
 use nett_trust::revocation::Revocation;
 use nett_trust::signed::SignedPayload;
@@ -211,6 +211,21 @@ impl Signer<'_> {
         })
     }
 
+    /// 一个节点宣告的网段（auth.md 第 10.5 节）。
+    fn routes(&self, node_id: &NodeId, routes: &[IpPrefix]) -> anyhow::Result<SignedPayload> {
+        let payload = PayloadDoc::EnrollmentPolicy {
+            v: 1,
+            artifacts: vec![Artifact::AdvertisedRoutes(AdvertisedRoutes {
+                node_id: node_id.clone(),
+                version: 1,
+                routes: routes.to_vec(),
+            })],
+            expires_at: Timestamp::from_unix_seconds(0),
+        }
+        .to_canonical()?;
+        Ok(self.recovery.sign(payload)?)
+    }
+
     /// 拓扑中的 `[[allow]]` 展开成一份签名的访问规则集（design/mesh.md 第 12 节）；没有规则时为空。
     fn access_rules(
         &self,
@@ -222,6 +237,9 @@ impl Signer<'_> {
             return Ok(None);
         }
         let prefixes = |selector: &str| -> anyhow::Result<Vec<IpPrefix>> {
+            if let Some(name) = selector.strip_suffix(".routes") {
+                return Ok(topo.node(name).context("node")?.routes.clone());
+            }
             let addrs = match selector.strip_suffix(".edge") {
                 Some(name) => *edges.get(name).context("edge node")?,
                 None => {
@@ -279,8 +297,11 @@ fn policy(
 ) -> NodePolicy {
     let mut roles: Vec<Role> = roles
         .iter()
-        .filter(|r| *r == "relay")
-        .map(|_| Role::Relay)
+        .filter_map(|r| match r.as_str() {
+            "relay" => Some(Role::Relay),
+            "subnet_router" => Some(Role::SubnetRouter),
+            _ => None,
+        })
         .collect();
     if edge.is_some() {
         roles.push(Role::Edge);
@@ -325,6 +346,7 @@ pub fn generate(
     let mut nodes = Vec::new();
     let mut materials = BTreeMap::new();
     let mut edges = BTreeMap::new();
+    let mut routes = Vec::new();
     let mut lower_version_of_second = None;
     for (i, node) in topo.nodes.iter().enumerate() {
         let index = u8::try_from(i + 1).context("too many nodes")?;
@@ -346,11 +368,17 @@ pub fn generate(
         // 有反例时第二个节点用版本 2，同时附上一份版本 1 的材料作为"低于已生效版本"的反例
         let version = if negatives && i == 1 { 2 } else { 1 };
         let edge_policy = edge.zip(node.edge.as_ref().map(|e| e.containers.as_slice()));
+        // 宣告网段的节点带 subnet_router 角色（design/mesh.md 第 10 节）
+        let mut roles = node.roles.clone();
+        if !node.routes.is_empty() {
+            roles.push("subnet_router".to_owned());
+            routes.push(signer.routes(&node_id, &node.routes)?);
+        }
         let p = policy(
             node_id.clone(),
             version,
             addresses,
-            &node.roles,
+            &roles,
             edge_policy,
             &enrollment,
         );
@@ -360,7 +388,7 @@ pub fn generate(
                 node_id.clone(),
                 1,
                 addresses,
-                &node.roles,
+                &roles,
                 edge_policy,
                 &enrollment,
             );
@@ -514,6 +542,7 @@ pub fn generate(
             revocations: node_revocations,
             paths,
             access_rules: access_rules.clone(),
+            advertised_routes: routes.clone(),
             container_member: node.container_member,
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;

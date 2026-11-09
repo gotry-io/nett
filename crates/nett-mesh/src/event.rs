@@ -43,6 +43,16 @@ pub enum Event {
     AccessRulesRejected {
         reason: String,
     },
+    /// 一个智能入口宣告的网段已通过验证（design/mesh.md 第 10 节）。
+    RoutesApplied {
+        node_id: NodeId,
+        version: u64,
+    },
+    /// 宣告的网段验证失败，继续使用已生效的那一份。读不出节点 ID 时为空。
+    RoutesRejected {
+        node_id: Option<NodeId>,
+        reason: String,
+    },
     /// 决定方切换了到某个对端的路径（design/mesh.md 第 8.2 节）。
     PathSwitched {
         node_id: NodeId,
@@ -117,6 +127,13 @@ pub fn log_event(event: &Event) {
         Event::AccessRulesRejected { reason } => {
             tracing::warn!(%reason, "access rules rejected")
         }
+        Event::RoutesApplied { node_id, version } => {
+            tracing::info!(%node_id, version, "advertised routes applied")
+        }
+        Event::RoutesRejected { node_id, reason } => match node_id {
+            Some(node_id) => tracing::warn!(%node_id, %reason, "advertised routes rejected"),
+            None => tracing::warn!(%reason, "advertised routes rejected"),
+        },
         Event::PathSwitched {
             node_id,
             to,

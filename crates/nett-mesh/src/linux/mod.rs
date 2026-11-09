@@ -17,9 +17,10 @@ use rustix::net::netlink::GENERIC;
 
 use self::netlink::{NlError, Socket};
 use self::wg::PeerChange;
-use crate::access::{EdgeSpec, FilterSpec};
+use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
+use nett_core::prefix::IpPrefix;
 
 /// 系统时钟；误差以内核报告的最大误差为准（[`sys::max_clock_error`]）。
 pub struct SystemClock;
@@ -233,6 +234,50 @@ impl DataPlane for KernelWireGuard {
 
     fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
         filter::install_edge(edge).map_err(kernel("install edge address rules"))
+    }
+
+    fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
+        filter::install_ingress(ingress).map_err(kernel("install forwarding rules"))?;
+        if ingress.is_none() {
+            return Ok(());
+        }
+        // 转发由这个网络命名空间的设置决定（容器中用 Compose 的 sysctls 开启）；组网进程只检查，不修改
+        let path = "/proc/sys/net/ipv4/ip_forward";
+        let on = std::fs::read_to_string(path)
+            .map_err(|source| DataPlaneError::Os {
+                op: "read the IPv4 forwarding setting",
+                source,
+            })?
+            .trim()
+            == "1";
+        if on {
+            Ok(())
+        } else {
+            Err(DataPlaneError::Protocol {
+                op: "forward to advertised routes",
+                detail: format!("{path} is 0: this node advertises routes but does not forward"),
+            })
+        }
+    }
+
+    fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
+        let Some(index) = self.ifindex else {
+            return Err(DataPlaneError::Protocol {
+                op: "sync routes",
+                detail: "interface is not set up".to_owned(),
+            });
+        };
+        let current = retry_interrupted(|| rtnl::get_routes(&mut self.route, index))
+            .map_err(kernel("list routes on the mesh interface"))?;
+        for route in current.iter().filter(|r| !routes.contains(r)) {
+            rtnl::del_route(&mut self.route, index, *route)
+                .map_err(kernel("remove a route from the mesh interface"))?;
+        }
+        for route in routes.iter().filter(|r| !current.contains(r)) {
+            rtnl::add_route(&mut self.route, index, *route)
+                .map_err(kernel("add a route to the mesh interface"))?;
+        }
+        Ok(())
     }
 
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {

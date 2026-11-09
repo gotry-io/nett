@@ -4,7 +4,9 @@
 //! - `nett_access`：从组网接口进入、新建连接的过滤。挂在 `prerouting`，优先级在 Docker 的目的地址转换
 //!   （-100）之前，发往本机、发往 Docker 发布端口和需要转发的流量都经过它；
 //! - `nett_edge`：Edge 的源地址转换挂在 `postrouting`，优先级在 Docker 的源地址伪装（100）之前；本机输出与
-//!   转发两个方向上丢弃使用 Edge 专用地址、但不是来自 Edge 的包。
+//!   转发两个方向上丢弃使用 Edge 专用地址、但不是来自 Edge 的包；
+//! - `nett_ingress`：本机作为智能入口时，从组网接口进来、转发出去的连接只放行 Edge 来源，来源换成出接口
+//!   上的地址；其他来源的转发丢弃（design/mesh.md 第 10 节）。
 
 use std::net::IpAddr;
 
@@ -24,11 +26,14 @@ use super::nft::{
     NFTA_TABLE_NAME, NFTA_VERDICT_CODE, NLM_F_APPEND, batch, cmp, expr, load_transport, nfgen,
     nft_type,
 };
-use crate::access::{EdgeSpec, FilterSpec, Match};
+use crate::access::{EdgeSpec, FilterSpec, IngressSpec, Match};
 use crate::dataplane::INTERFACE_NAME;
 
 const ACCESS_TABLE: &str = "nett_access";
 const EDGE_TABLE: &str = "nett_edge";
+const INGRESS_TABLE: &str = "nett_ingress";
+/// 源地址转换的标准优先级（`srcnat`）。
+const SRCNAT_PRIORITY: i32 = 100;
 
 const NF_INET_PRE_ROUTING: u32 = 0;
 const NF_INET_FORWARD: u32 = 2;
@@ -159,6 +164,54 @@ pub(crate) fn install_edge(edge: Option<&EdgeSpec>) -> Result<(), NlError> {
                 verdict(m, NF_DROP);
             }));
         }
+    }
+    messages.push(batch(NFNL_MSG_BATCH_END));
+    Socket::open(Some(NETFILTER))?.request_batch(messages)
+}
+
+/// 整表替换 `nett_ingress`；`ingress` 为空时删除这张表。
+pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlError> {
+    let mut messages = replace_table(INGRESS_TABLE);
+    let Some(ingress) = ingress else {
+        let end = messages.len() - 1;
+        messages.truncate(end);
+        messages.push(batch(NFNL_MSG_BATCH_END));
+        return Socket::open(Some(NETFILTER))?.request_batch(messages);
+    };
+    messages.push(base_chain(
+        INGRESS_TABLE,
+        "fwd",
+        NF_INET_FORWARD,
+        0,
+        "filter",
+    ));
+    for source in &ingress.edge_sources {
+        messages.push(rule(INGRESS_TABLE, "fwd", |m| {
+            ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+            family(m, source.is_ipv4());
+            address(m, IpPrefix::host(*source), true);
+            verdict(m, NF_ACCEPT);
+        }));
+    }
+    messages.push(rule(INGRESS_TABLE, "fwd", |m| {
+        ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+        verdict(m, NF_DROP);
+    }));
+    messages.push(base_chain(
+        INGRESS_TABLE,
+        "snat",
+        NF_INET_POST_ROUTING,
+        SRCNAT_PRIORITY,
+        "nat",
+    ));
+    for source in &ingress.edge_sources {
+        messages.push(rule(INGRESS_TABLE, "snat", |m| {
+            ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+            ifname(m, NFT_META_OIFNAME, NFT_CMP_NEQ);
+            family(m, source.is_ipv4());
+            address(m, IpPrefix::host(*source), true);
+            expr(m, "masq", |_| {});
+        }));
     }
     messages.push(batch(NFNL_MSG_BATCH_END));
     Socket::open(Some(NETFILTER))?.request_batch(messages)

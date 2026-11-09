@@ -6,7 +6,7 @@ use std::time::SystemTime;
 
 use nett_trust::keys::X25519PublicKey;
 
-use crate::access::{EdgeSpec, FilterSpec};
+use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
@@ -107,4 +107,11 @@ pub trait DataPlane: Send {
 
     /// 设置或清除本机 Edge 的源地址转换与防冒用规则（ADR 0015），整体替换之前的设置。
     fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError>;
+
+    /// 设置或清除本机作为智能入口的转发规则（design/mesh.md 第 10 节），整体替换之前的设置。本机宣告了网段
+    /// 而转发没有开启时返回错误（规则照常安装）。
+    fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError>;
+
+    /// 让组网接口上的路由恰好是 `routes`：其他成员宣告的网段（design/mesh.md 第 10 节）。
+    fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
 }

@@ -55,6 +55,26 @@ impl FilterSpec {
     }
 }
 
+/// 本机作为智能入口转发的流量（design/mesh.md 第 10 节，ADR 0016）：从组网接口进来、转发出去的连接，只放行
+/// 来源是 Edge 专用地址的，来源换成本机在出接口上的地址；其他来源的转发丢弃。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IngressSpec {
+    pub edge_sources: Vec<IpAddr>,
+}
+
+impl IngressSpec {
+    /// 本机宣告了网段时才转发。
+    pub fn of(own_routes: &[IpPrefix], members: &BTreeMap<NodeId, Member>) -> Option<Self> {
+        (!own_routes.is_empty()).then(|| Self {
+            edge_sources: members
+                .values()
+                .filter_map(|m| m.edge.as_ref())
+                .flat_map(|e| mesh_addrs(&e.addresses))
+                .collect(),
+        })
+    }
+}
+
 /// 本机的 Edge：发往组网接口、来源在 `containers` 中的流量，源地址换成 Edge 专用地址；其他来源使用
 /// Edge 专用地址的包丢弃（ADR 0015）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,11 +176,13 @@ impl AccessRules {
     /// 1. 成员发往本机隧道内探测端口的包放行：组网自己的测量不受访问规则影响；
     /// 2. 规则集中的规则，按顺序展开；
     /// 3. 来源是任何成员的 Edge 专用地址时拒绝；
-    /// 4. 本机是容器内成员时拒绝其他所有，否则放行。
+    /// 4. 目标是本机宣告的网段时拒绝；
+    /// 5. 本机是容器内成员时拒绝其他所有，否则放行。
     pub fn filter(
         &self,
         own: &NodeId,
         members: &BTreeMap<NodeId, Member>,
+        own_routes: &[IpPrefix],
         container_member: bool,
     ) -> Result<FilterSpec, AccessError> {
         let mut rules = Vec::new();
@@ -212,6 +234,12 @@ impl AccessRules {
                     accept: false,
                 });
             }
+        }
+        for route in own_routes {
+            rules.push(FilterRule {
+                matches: vec![Match::Destination(*route)],
+                accept: false,
+            });
         }
         if container_member {
             rules.push(FilterRule {
@@ -348,7 +376,9 @@ mod tests {
             ],
         )));
         access.apply(&validated(d), &mut VecSink::default());
-        let spec = access.filter(&node_id(2), &members, true).expect("filter");
+        let spec = access
+            .filter(&node_id(2), &members, &[], true)
+            .expect("filter");
         let r = &spec.rules;
         // 成员 1、3 的隧道内探测（IPv4、IPv6 各一条）在最前
         assert_eq!(r.len(), 4 + 1 + 1 + 2 + 1, "{r:?}");
@@ -396,7 +426,9 @@ mod tests {
             }
         );
 
-        let open = access.filter(&node_id(2), &members, false).expect("filter");
+        let open = access
+            .filter(&node_id(2), &members, &[], false)
+            .expect("filter");
         assert_eq!(open.rules.len(), r.len() - 1);
     }
 
@@ -425,7 +457,7 @@ mod tests {
             set.members().clone()
         };
         assert_eq!(
-            access.filter(&node_id(2), &members, false),
+            access.filter(&node_id(2), &members, &[], false),
             Err(AccessError::TooManyRules)
         );
     }

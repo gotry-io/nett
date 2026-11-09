@@ -16,6 +16,7 @@ pub mod path;
 pub mod probe;
 pub mod prober;
 pub mod punch;
+pub mod routes;
 pub mod run;
 pub mod source;
 #[cfg(test)]

@@ -300,6 +300,14 @@ impl Lab {
     }
 
     /// 在节点的命名空间中启动一个测量辅助进程（`nett-lab` 自己的子命令）。
+    /// 在任意一个命名空间中运行测量子命令（例如节点背后的服务）。
+    fn helper_in(&mut self, netns: &str, args: &[&str], log: &Path) -> anyhow::Result<()> {
+        let me = std::env::current_exe().context("locating nett-lab")?;
+        let child = spawn_in(netns, &me, args, log)?;
+        self.helpers.push(child);
+        Ok(())
+    }
+
     fn helper(&mut self, name: &str, args: &[&str], log: &Path) -> anyhow::Result<()> {
         let net = self.underlay.node(name).context("planned node")?;
         let me = std::env::current_exe().context("locating nett-lab")?;
@@ -4145,9 +4153,9 @@ pub fn congestion(
     Ok(report)
 }
 
-/// 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6 节，ADR 0015、0016）。拓扑中 `edge`
-/// 运行 Edge（背后有一个"容器"，节点像 Docker 一样对它做源地址伪装），`app` 是容器内成员，只放行 `edge`
-/// 的 Edge 访问它的 8686；`other` 是普通成员。
+/// 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6、8 节，ADR 0015、0016）。拓扑中 `edge`
+/// 运行 Edge（背后有一个"容器"，节点像 Docker 一样对它做源地址伪装），`app` 是容器内成员（背后有一个服务，
+/// 宣告服务的地址），只放行 `edge` 的 Edge 访问服务的 8686；`other` 是普通成员。
 pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
@@ -4187,24 +4195,41 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         );
     }
 
-    let logs = [8686u16, 2222].map(|port| out.join(format!("accept-{port}.txt")));
-    for (port, log) in [8686u16, 2222].iter().zip(&logs) {
-        lab.helper(
-            "app",
+    // app 背后的服务：宣告的地址上监听 8686、2222；同一网络中另一个没有宣告的地址上也监听 8686
+    let svc_ns = crate::net::service_netns("app");
+    let (svc, ingress) = topo
+        .node("app")
+        .and_then(|n| n.service.as_ref())
+        .map(|s| (s.address, s.ingress))
+        .context("node `app` needs a service")?;
+    let hidden = std::net::Ipv4Addr::from(u32::from(svc) + 1);
+    run_in(
+        &svc_ns,
+        "ip",
+        ["addr", "add", &format!("{hidden}/24"), "dev", "eth0"],
+    )?;
+    let listeners = [(svc, 8686u16), (svc, 2222), (hidden, 8686)];
+    let logs: Vec<PathBuf> = listeners
+        .iter()
+        .map(|(ip, port)| out.join(format!("accept-{ip}-{port}.txt")))
+        .collect();
+    for ((ip, port), log) in listeners.iter().zip(&logs) {
+        lab.helper_in(
+            &svc_ns,
             &[
                 "accept-log",
                 "--listen",
-                &format!("{}:{port}", app.mesh_ipv4),
+                &format!("{ip}:{port}"),
                 "--out",
                 &log.to_string_lossy(),
             ],
-            &out.join(format!("accept-{port}.log")),
+            &out.join(format!("accept-{ip}-{port}.log")),
         )?;
     }
     std::thread::sleep(Duration::from_millis(500));
     let me = std::env::current_exe().context("locating nett-lab")?;
-    let connect = |netns: &str, port: u16| -> String {
-        let to = format!("{}:{port}", app.mesh_ipv4);
+    let connect = |netns: &str, ip: std::net::Ipv4Addr, port: u16| -> String {
+        let to = format!("{ip}:{port}");
         run_in(
             netns,
             &me.to_string_lossy(),
@@ -4212,22 +4237,32 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         )
         .map_or_else(|e| format!("error {e:#}"), |o| o.trim().to_owned())
     };
+    let routes_on_edge = run_in(&ns_edge, "ip", ["route", "show", "dev", "nett0"])?;
+    report.check(
+        "route-to-the-advertised-service",
+        routes_on_edge.contains(&svc.to_string()),
+        routes_on_edge.trim().replace('\n', "; "),
+    );
 
-    // Edge 访问放行的端口：连上，app 看到的来源是 Edge 专用地址（源地址转换在 Docker 的伪装之前生效）
-    let result = connect(&container, 8686);
+    // Edge 访问服务放行的端口：连上；服务看到的来源是 app 在服务网络中的地址（Edge 的源地址转换在 Docker 的
+    // 伪装之前生效，app 转发时换成自己的地址）
+    let result = connect(&container, svc, 8686);
     std::thread::sleep(Duration::from_millis(300));
     let seen = std::fs::read_to_string(&logs[0]).unwrap_or_default();
     report.check(
-        "edge-to-allowed-port",
-        result == "connected" && seen.lines().any(|l| l == edge_ip.to_string()),
-        format!("{result}; app saw {:?}", seen.lines().collect::<Vec<_>>()),
+        "edge-to-allowed-service-port",
+        result == "connected" && seen.lines().all(|l| l == ingress.to_string()) && !seen.is_empty(),
+        format!(
+            "{result}; service saw {:?}",
+            seen.lines().collect::<Vec<_>>()
+        ),
     );
     for (name, netns, port) in [
         ("edge-to-other-port-denied", container.as_str(), 2222),
         ("edge-node-itself-denied", ns_edge.as_str(), 8686),
         ("other-member-denied", ns_other.as_str(), 8686),
     ] {
-        let result = connect(netns, port);
+        let result = connect(netns, svc, port);
         report.check(name, result.starts_with("blocked"), result);
     }
     let unexpected = std::fs::read_to_string(&logs[1]).unwrap_or_default();
@@ -4236,6 +4271,47 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         unexpected.is_empty(),
         format!("{:?}", unexpected.lines().collect::<Vec<_>>()),
     );
+
+    // 模拟 other 被攻破：它在自己这一端给 app 的对端加上没有宣告的地址和路由，把包发过去。app 必须丢弃
+    let peers = run_in(&ns_other, "wg", ["show", "nett0", "allowed-ips"])?;
+    // 按组网地址找到 app 的对端，公钥用 wg 自己的写法
+    let app_mesh = format!("{}/32", app.mesh_ipv4);
+    let app_line = peers
+        .lines()
+        .find(|l| l.split_whitespace().any(|f| f == app_mesh))
+        .context("app's peer on other")?;
+    let mut fields = app_line.split_whitespace();
+    let app_key = fields.next().context("peer key")?.to_owned();
+    let mut allowed: Vec<String> = fields.map(str::to_owned).collect();
+    allowed.push(format!("{hidden}/32"));
+    run_in(
+        &ns_other,
+        "wg",
+        [
+            "set",
+            "nett0",
+            "peer",
+            &app_key,
+            "allowed-ips",
+            &allowed.join(","),
+        ],
+    )?;
+    run_in(
+        &ns_other,
+        "ip",
+        ["route", "replace", &format!("{hidden}/32"), "dev", "nett0"],
+    )?;
+    let result = connect(&ns_other, hidden, 8686);
+    let reached = std::fs::read_to_string(&logs[2]).unwrap_or_default();
+    report.check(
+        "forged-route-to-unadvertised-address-dropped",
+        result.starts_with("blocked") && reached.is_empty(),
+        format!(
+            "{result}; the unadvertised address saw {:?}",
+            reached.lines().collect::<Vec<_>>()
+        ),
+    );
+
     // 成员之间默认放行
     let r = ping(&ns_other, &edge.mesh_ipv4.to_string());
     report.check(
@@ -4292,12 +4368,16 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         report.check(
             &format!("rules-applied:{}", n.name),
             count(&ev, "access_rules_applied") >= 1
+                && count(&ev, "routes_applied") >= 1
                 && count(&ev, "access_rules_rejected") == 0
+                && count(&ev, "routes_rejected") == 0
                 && count(&ev, "data_plane_failed") == 0,
             format!(
-                "applied {}, rejected {}, data plane failures {}",
+                "rules applied {}, routes applied {}, rejected {} / {}, data plane failures {}",
                 count(&ev, "access_rules_applied"),
+                count(&ev, "routes_applied"),
                 count(&ev, "access_rules_rejected"),
+                count(&ev, "routes_rejected"),
                 count(&ev, "data_plane_failed")
             ),
         );
