@@ -415,9 +415,7 @@ M3：iOS、Android App 与 Windows 成员（ADR 0018）。
 
 | 问题 | 说明 |
 |---|---|
-| 用户态 WireGuard 实现的选型 | 在维护状态、性能和内存之间评估；覆盖 DSM、旧内核和 macOS，并考虑 M3 的 iOS、Android 能否复用 |
 | NAS 系统上的 TUN、IP 转发、NAT 能力 | 原型关卡之后、铺开到 NAS 之前逐项验证 |
-| macOS 原生成员与代理类 VPN 应用（增强模式）共存 | 铺开到 macOS 之前实测（ADR 0018） |
 | 在 WireGuard 端口上收发探测 | 各发行版内核上的行为（含 IPv6、主机上已有的连接跟踪和 NAT 规则、nfnetlink_log 是否可用）在原型关卡中验证 |
 | 两端都在对称型 NAT 后时的打洞 | M2 再设计 |
 | 新成员首次连通的时间 | NAT 之后的 `dial-only` 成员，第一次握手若早于对端配置好它，会被对端丢弃，WireGuard 5 秒后才重试：实测 5.2–5.7 秒连通，直连只要 11 毫秒（prototype.md 第 9 节）。之后优化，例如对端配置好新成员后经已有路径通知它立即重新握手；先与 Tailscale 的首次连通时间对比 |

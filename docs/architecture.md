@@ -264,7 +264,7 @@ nett 不含 AI 逻辑。AI 和其他外部程序一样，只经 Hub API（`scrip
 | 各组件共用 | serde、serde_json；ring（签名验证、哈希、HMAC、HKDF，也作为 rustls 的加密后端）；x25519-dalek（由组网私钥派生成员之间直连探测的密钥，ring 不能导入已有的私钥）；rustix（netlink 与原始套接字的系统调用；nftables 规则也经 netlink 下发，不调用 `nft` 命令）；lexopt（命令行解析） |
 | nett-relay | Rust：tokio、rustls（经 tokio-rustls）、tokio-tungstenite（TLS 传输入口的 WebSocket）、hyper（HTTP/2 CONNECT）；blake2（按 WireGuard 协议计算 `mac1`）；后期 quinn（QUIC） |
 | nett-transport | Rust：tokio（单线程）、rustls（经 tokio-rustls，按指纹校验证书）、tokio-tungstenite |
-| 用户态 WireGuard | Rust 实现，用于无内核模块的平台（具体实现待评估） |
+| 用户态 WireGuard | gotatun 的 `noise` 层，用于无内核模块的平台（design/userspace.md 第 3 节） |
 | 协议 | 对外 REST + JSON + SSE（OpenAPI 3.1）；内部 WebSocket + Protobuf |
 | Web | React + Vite、TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow |
 | Hub 前的反向代理 | Caddy（默认，ADR 0009） |
@@ -456,7 +456,7 @@ Web 界面、命令行输出、API 错误信息，以及面向用户的文档（
 | 风险 | 说明 | 应对 |
 |---|---|---|
 | 组网工作量 | M1 是全项目最大的一块：路径层、准入验证、单端口中继、分类转换、打洞 | M1 第一步是 Linux 原型关卡，实测中继接管、切换时间、漫游纠正、MTU，并与原生 WireGuard、Tailscale 对比性能，通过后再铺开；macOS 原生成员与 DSM 共用用户态 WireGuard；核心逻辑与平台无关，为 M3 的客户端预留 |
-| 用户态 WireGuard 选型 | 维护状态、性能和内存 | 原型关卡之后评估，性能在同一台 NAS 上与 Tailscale 对比；在 NAS 系统上先逐项验证 TUN、IP 转发、NAT 能力 |
+| 用户态 WireGuard 的性能与内存 | 吞吐、延迟、CPU 和空闲 RSS | 会话层封装在 trait 之后，可以替换实现（design/userspace.md 第 3 节）；性能在同一台 Mac 上与 wireguard-go 对比、在同一台 NAS 上与 Tailscale 对比；在 NAS 系统上先逐项验证 TUN、IP 转发、NAT 能力 |
 | 网络环境 | UDP 被限速或识别、跨境链路晚高峰质量差、域名备案限制 | TLS 传输兜底；组网进程持续测量并上报线路质量；某条传输（例如按 IP、不带 SNI 的 TLS）在某个网络里是否可用，由测量决定，不预设 |
 | 资源预算 | 节点上最多四个常驻进程（node、组网进程、传输适配进程、relay），各 ≤ 5 MB | 分别计量，同时记录 RSS 和 PSS（CLAUDE.md "资源纪律"）；分片重组落盘；每个里程碑做浸泡测试 |
 | 只支持 HTTP/1.1 CONNECT 的客户端 | 入口节点上用不了 CONNECT | 使用非入口节点上的 nett-relay |
