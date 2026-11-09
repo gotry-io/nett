@@ -2,10 +2,12 @@
 
 use std::process::ExitCode;
 
-#[cfg(all(feature = "lab", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
+#[cfg(target_os = "linux")]
+mod text;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod transport;
 
@@ -31,7 +33,7 @@ fn run() -> anyhow::Result<()> {
         return Ok(());
     };
     match arg {
-        #[cfg(all(feature = "lab", target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         lexopt::Arg::Value(cmd) if cmd == "mesh" => mesh::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
         lexopt::Arg::Value(cmd) if cmd == "relay" => relay::run(parser),

@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyFileError {
-    #[error("reading mesh private key {path}: {source}")]
+    #[error("reading mesh private key {path}")]
     Read {
         path: String,
         source: std::io::Error,
@@ -18,6 +18,13 @@ pub enum KeyFileError {
     Permissions { path: String },
     #[error("mesh private key {path} is not a base64 WireGuard key")]
     Format { path: String },
+    #[error("writing private key {path}")]
+    Write {
+        path: String,
+        source: std::io::Error,
+    },
+    #[error("generating a private key: the system random number generator failed")]
+    Random,
 }
 
 /// 组网私钥。`Debug` 不输出内容。
@@ -30,6 +37,42 @@ impl PrivateKey {
 
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+
+    /// 用系统的随机数生成一把新的私钥（X25519）。
+    pub fn generate() -> Result<Self, KeyFileError> {
+        use ring::rand::{SecureRandom as _, SystemRandom};
+        let mut bytes = Zeroizing::new([0u8; 32]);
+        SystemRandom::new()
+            .fill(bytes.as_mut())
+            .map_err(|_| KeyFileError::Random)?;
+        Ok(Self(bytes))
+    }
+
+    pub fn public_key(&self) -> nett_trust::keys::X25519PublicKey {
+        let secret = x25519_dalek::StaticSecret::from(*self.0);
+        nett_trust::keys::X25519PublicKey::from_bytes(
+            x25519_dalek::PublicKey::from(&secret).to_bytes(),
+        )
+    }
+
+    /// 写到一个新文件（权限 `0600`，与 `wg genkey` 相同的格式）。文件已存在时报错，不覆盖。
+    pub fn save_new(&self, path: &Path) -> Result<(), KeyFileError> {
+        use std::io::Write as _;
+        let write_err = |source| KeyFileError::Write {
+            path: path.display().to_string(),
+            source,
+        };
+        let mut options = std::fs::File::options();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut file = options.open(path).map_err(write_err)?;
+        let text = Zeroizing::new(format!("{}\n", STANDARD.encode(*self.0)));
+        file.write_all(text.as_bytes()).map_err(write_err)
     }
 
     /// 读取 WireGuard 格式（标准 base64，与 `wg genkey` 相同）的私钥文件。
@@ -128,6 +171,32 @@ mod tests {
         assert_eq!(
             format!("{:?}", PrivateKey::from_bytes([1; 32])),
             "PrivateKey(<redacted>)"
+        );
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn generated_keys_round_trip_and_are_never_overwritten() {
+        let dir = std::env::temp_dir().join(format!("nett-keygen-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let key = PrivateKey::generate().expect("generate");
+        assert_ne!(
+            key.as_bytes(),
+            PrivateKey::generate().expect("generate").as_bytes()
+        );
+        let path = dir.join("mesh.key");
+        key.save_new(&path).expect("save");
+        let mode = std::fs::metadata(&path).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        let loaded = PrivateKey::load(&path).expect("load");
+        assert_eq!(loaded.public_key(), key.public_key());
+        assert!(matches!(
+            PrivateKey::generate().expect("generate").save_new(&path),
+            Err(KeyFileError::Write { .. })
+        ));
+        assert_eq!(
+            PrivateKey::load(&path).expect("load").as_bytes(),
+            key.as_bytes()
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }

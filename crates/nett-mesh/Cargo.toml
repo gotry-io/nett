@@ -18,7 +18,7 @@ ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal"] }
 tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
@@ -31,5 +31,6 @@ rustix.workspace = true
 nett-trust = { workspace = true, features = ["signing"] }
 
 [features]
-# 实验构建：从本地文件读取期望状态（design/prototype.md 第 3 节），官方构建不开启
-lab = ["tokio/signal"]
+# 实验构建：事件的 JSON 行文件、模拟时钟误差、传输适配进程的配置文件（design/prototype.md 第 7 节），
+# 官方构建不开启
+lab = []

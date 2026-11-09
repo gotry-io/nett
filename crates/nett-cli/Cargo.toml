@@ -17,29 +17,26 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 lexopt.workspace = true
-nett-core = { workspace = true, optional = true }
-nett-mesh = { workspace = true, optional = true }
 nett-relay = { workspace = true, optional = true }
 nett-transport = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
-tokio = { workspace = true, optional = true, features = ["rt", "signal", "macros", "net"] }
-tracing = { workspace = true, optional = true }
-tracing-subscriber = { workspace = true, optional = true }
 
+# 组网进程只在 Linux 上（design/local-signing.md 第 2 节）
 [target.'cfg(target_os = "linux")'.dependencies]
+nett-core.workspace = true
+nett-mesh.workspace = true
+nett-trust.workspace = true
 rustix = { workspace = true, features = ["thread"] }
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "signal", "macros", "net"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
-# 实验构建：`nett mesh` 从本地文件读取期望状态（design/prototype.md 第 3 节），官方构建不开启
+# 实验构建：组网进程的实验选项（事件文件、模拟时钟误差、传输适配进程的配置），以及中继和传输适配进程
+# （design/prototype.md 第 3、7 节），官方构建不开启
 lab = [
-    "dep:nett-core",
-    "dep:nett-mesh",
     "nett-mesh/lab",
     "dep:nett-relay",
     "nett-relay/lab",
     "dep:nett-transport",
-    "dep:serde_json",
-    "dep:tokio",
-    "dep:tracing",
-    "dep:tracing-subscriber",
 ]

@@ -17,5 +17,6 @@ pub mod probe;
 pub mod prober;
 pub mod punch;
 pub mod run;
+pub mod source;
 #[cfg(test)]
 mod testutil;

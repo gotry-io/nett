@@ -1,52 +1,14 @@
-//! 实验构建（`lab` 特性）：从本地文件读取期望状态，事件另写一份 JSON 行供 `nett-lab` 采集
-//! （design/prototype.md 第 3、7 节）。官方构建不含这个模块。
+//! 实验构建（`lab` 特性）：事件另写一份 JSON 行供 `nett-lab` 采集，模拟时钟误差，以及传输适配进程的
+//! 配置文件（design/prototype.md 第 7 节）。官方构建不含这个模块。
 
 use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
 
-use tokio::signal::unix::{Signal, SignalKind, signal};
-
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::event::{Event, EventSink, log_event};
-use crate::run::{Applier, ConfigSource};
-
-/// 启动时读一次，之后每收到一次 `SIGHUP` 重新读取。
-pub struct FileSource {
-    path: PathBuf,
-    started: bool,
-    hangup: Signal,
-}
-
-impl FileSource {
-    pub fn new(path: PathBuf) -> std::io::Result<Self> {
-        Ok(Self {
-            path,
-            started: false,
-            hangup: signal(SignalKind::hangup())?,
-        })
-    }
-}
-
-impl ConfigSource for FileSource {
-    async fn next(&mut self) -> Option<Result<DesiredMesh, ConfigError>> {
-        if self.started {
-            self.hangup.recv().await?;
-        }
-        self.started = true;
-        let path = self.path.clone();
-        let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
-        Some(match read {
-            Ok(Ok(bytes)) => DesiredMesh::from_json(&bytes),
-            Ok(Err(e)) => Err(ConfigError::Document(format!(
-                "reading {}: {e}",
-                self.path.display()
-            ))),
-            Err(e) => Err(ConfigError::Document(format!("reading config: {e}"))),
-        })
-    }
-}
+use crate::run::Applier;
 
 /// 每个事件写一行 JSON，同时写日志。写文件失败只记日志，不影响组网。
 pub struct JsonLinesSink {
