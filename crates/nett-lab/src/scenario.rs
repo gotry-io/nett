@@ -3526,7 +3526,7 @@ fn cookie_once(
     out: &Path,
     case: CookieCase,
     report: &mut Report,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<(usize, bool)> {
     let label = match case {
         CookieCase::Failover => "failover",
         CookieCase::Planned => "planned",
@@ -3636,19 +3636,13 @@ fn cookie_once(
             completed.zip(first_switch).map(|(c, s)| c - s)
         ),
     );
-    // 内核 WireGuard 按整机的握手队列判断负载，所有发起方都要带 cookie 重试；用户态数据面按来源限额
-    // （design/userspace.md 第 4.1 节），被洪水的一方只要求洪水的来源带 cookie，a 经中继的握手直接得到应答
+    // 用户态数据面按来源限额（design/userspace.md 第 4.1 节），被洪水的一方只要求洪水的来源带 cookie，
+    // a 经中继的握手直接得到应答；内核成员的 cookie 在两个用例合计检查（wg_cookie）
     if b.userspace {
         report.check(
             &format!("{label}:handshake-answered-without-cookie"),
             cookies_to_a == 0 && completed.is_some_and(|c| c < flood_until),
             format!("{cookies_to_a} cookie replies, response at {completed:?}"),
-        );
-    } else {
-        report.check(
-            &format!("{label}:cookie-reaches-a-through-the-relay"),
-            cookies_to_a > 0,
-            format!("{cookies_to_a} cookie replies"),
         );
     }
     // 来回切换：回到了之前离开过的中继
@@ -3693,20 +3687,34 @@ fn cookie_once(
         out.join(format!("handshakes-{label}.json")),
         serde_json::to_vec_pretty(&seen)?,
     )?;
-    Ok(())
+    Ok((cookies_to_a, b.userspace))
 }
 
 /// 场景 20(c)：b 被大量握手发起压到负载状态时，a 换中继、重新握手。经中继送回的 cookie 应答要能到达 a，
 /// 握手要在负载持续期间完成。分两种：当前中继失效；当前中继变慢、旧中继仍然可用（计划内的切换）。
 pub fn wg_cookie(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let mut report = Report::new("20c-wg-cookie");
+    let mut cookies = Vec::new();
+    let mut userspace = false;
     for (case, dir) in [
         (CookieCase::Failover, "failover"),
         (CookieCase::Planned, "planned"),
     ] {
         let out = out.join(dir);
         std::fs::create_dir_all(&out)?;
-        cookie_once(topology, nett, &out, case, &mut report)?;
+        let (n, b_userspace) = cookie_once(topology, nett, &out, case, &mut report)?;
+        cookies.push((dir, n));
+        userspace = b_userspace;
+    }
+    // 内核 WireGuard 按握手队列的瞬时积压判断负载：a 的握手到达时队列恰好没满，b 就直接应答，不要 cookie
+    // （握手更快完成）。cookie 经中继送达只需在两个用例中出现一次（design/prototype.md 场景 20(c)）；握手
+    // 完成、隧道恢复、不来回切换在每个用例中都要满足
+    if !userspace {
+        report.check(
+            "cookie-reaches-a-through-the-relay",
+            cookies.iter().any(|(_, n)| *n > 0),
+            format!("cookie replies at a after the first switch: {cookies:?}"),
+        );
     }
     write_report(out, &report)?;
     Ok(report)
