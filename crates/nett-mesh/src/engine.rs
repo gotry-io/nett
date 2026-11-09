@@ -1,7 +1,8 @@
 //! 把已准入的成员落到数据面：本机的组网接口，以及每个其他成员一个 WireGuard 对端；按选路的结果
 //! 切换对端的 endpoint，并纠正被 WireGuard 漫游改掉的 endpoint（design/mesh.md 第 4、8 节）。
 //!
-//! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。
+//! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。访问控制是
+//! 例外：先安装过滤规则再添加对端，安装失败时拒绝（硬性规则 6）。
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -11,6 +12,7 @@ use nett_core::id::NodeId;
 use nett_trust::admission::Member;
 use nett_trust::keys::X25519PublicKey;
 
+use crate::access::{AccessRules, EdgeSpec, FilterSpec};
 use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
@@ -47,6 +49,10 @@ pub struct Engine<D> {
     /// TLS 中继在传输适配进程上的回环端点，以及最近一次设置的闲置端口（design/mesh.md 第 5.3 节）。
     tls_endpoints: BTreeSet<SocketAddr>,
     tls_guarded: Option<Vec<u16>>,
+    access: AccessRules,
+    /// 已经安装到数据面的过滤规则与 Edge 设置。
+    filter: Option<FilterSpec>,
+    edge: Option<Option<EdgeSpec>>,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -66,6 +72,9 @@ impl<D: DataPlane> Engine<D> {
             clock_trusted: false,
             tls_endpoints: BTreeSet::new(),
             tls_guarded: None,
+            access: AccessRules::default(),
+            filter: None,
+            edge: None,
         }
     }
 
@@ -124,8 +133,15 @@ impl<D: DataPlane> Engine<D> {
             }
         }
 
-        self.reachability = desired.reachability;
         let own_key = me.mesh_public_key;
+        let edge = EdgeSpec::of(me);
+        if !self.apply_access(desired, edge, events) {
+            // 访问控制装不上：不与任何对端通信
+            self.sync_peers(Vec::new(), events);
+            return;
+        }
+
+        self.reachability = desired.reachability;
         let trusted = self.clock_trusted;
         let prober = self.prober.get_or_insert_with(|| {
             let mut prober = Prober::new(&own_key);
@@ -158,6 +174,69 @@ impl<D: DataPlane> Engine<D> {
             .collect();
         self.sync_peers(peers, events);
         self.guard_idle_tls(events);
+    }
+
+    /// 验证规则集，安装本机的过滤规则和 Edge 设置（design/mesh.md 第 12 节，ADR 0015）。规则无法展开或
+    /// 安装失败时改装拒绝全部新建入方向连接的规则；连它也装不上、或 Edge 设置失败时返回 `false`，调用方
+    /// 不添加任何对端。
+    fn apply_access(
+        &mut self,
+        desired: &DesiredMesh,
+        edge: Option<EdgeSpec>,
+        events: &mut impl EventSink,
+    ) -> bool {
+        self.access.apply(desired, events);
+        if self.edge.as_ref() != Some(&edge) {
+            match self.dataplane.apply_edge(edge.as_ref()) {
+                Ok(()) => self.edge = Some(edge),
+                Err(e) => {
+                    self.edge = None;
+                    events.emit(Event::DataPlaneFailed {
+                        reason: e.to_string(),
+                    });
+                    return false;
+                }
+            }
+        }
+        let filter = self
+            .access
+            .filter(
+                &self.node_id,
+                self.members.members(),
+                desired.container_member,
+            )
+            .unwrap_or_else(|e| {
+                events.emit(Event::AccessRulesRejected {
+                    reason: e.to_string(),
+                });
+                FilterSpec::deny_all()
+            });
+        if self.filter.as_ref() == Some(&filter) {
+            return true;
+        }
+        match self.dataplane.apply_filter(&filter) {
+            Ok(()) => {
+                self.filter = Some(filter);
+                return true;
+            }
+            Err(e) => events.emit(Event::DataPlaneFailed {
+                reason: e.to_string(),
+            }),
+        }
+        let deny = FilterSpec::deny_all();
+        match self.dataplane.apply_filter(&deny) {
+            Ok(()) => {
+                self.filter = Some(deny);
+                true
+            }
+            Err(e) => {
+                self.filter = None;
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+                false
+            }
+        }
     }
 
     /// 没有对端在用的 TLS 回环端口：丢弃从它们进入 WireGuard 端口的包（design/mesh.md 第 5.3 节）。
@@ -389,12 +468,15 @@ fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u
 }
 
 fn peer_spec(member: &Member, own: Reachability, endpoint: Option<SocketAddr>) -> PeerSpec {
+    // 组网地址，以及有 `edge` 角色时的 Edge 专用地址（design/mesh.md 第 4 节）
+    let edge = member.edge.iter().map(|e| e.addresses);
     PeerSpec {
         public_key: member.mesh_public_key,
-        allowed_ips: vec![
-            IpPrefix::host(IpAddr::V4(member.addresses.ipv4)),
-            IpPrefix::host(IpAddr::V6(member.addresses.ipv6)),
-        ],
+        allowed_ips: std::iter::once(member.addresses)
+            .chain(edge)
+            .flat_map(|a| [IpAddr::V4(a.ipv4), IpAddr::V6(a.ipv6)])
+            .map(IpPrefix::host)
+            .collect(),
         endpoint,
         persistent_keepalive: (own == Reachability::DialOnly).then_some(DIAL_ONLY_KEEPALIVE_SECS),
     }
@@ -478,6 +560,98 @@ mod tests {
             Some(DIAL_ONLY_KEEPALIVE_SECS)
         );
         assert!(events.0.contains(&Event::PeersApplied { peers: 2 }));
+    }
+
+    #[test]
+    fn access_rules_are_installed_before_peers() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc.clone()), &mut VecSink::default());
+        assert_eq!(
+            e.dataplane.calls,
+            ["apply_edge", "apply_filter", "sync_peers"]
+        );
+        // 成员 2 发往本机隧道内探测端口的包放行（IPv4、IPv6），没有别的规则
+        assert_eq!(e.dataplane.filter.as_ref().map(|f| f.rules.len()), Some(2));
+        assert_eq!(e.dataplane.edge, None);
+        // 没有变化时不重装
+        e.apply(&validated(doc), &mut VecSink::default());
+        assert_eq!(
+            e.dataplane.calls,
+            ["apply_edge", "apply_filter", "sync_peers", "sync_peers"]
+        );
+    }
+
+    #[test]
+    fn failed_filter_falls_back_to_denying_new_inbound_connections() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        e.dataplane.fail_filter = Some(false);
+        let mut events = VecSink::default();
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc), &mut events);
+        assert_eq!(e.dataplane.filter, Some(FilterSpec::deny_all()));
+        assert_eq!(peer_keys(&e), [2]);
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|ev| matches!(ev, Event::DataPlaneFailed { .. }))
+        );
+    }
+
+    #[test]
+    fn no_peers_when_no_filter_can_be_installed() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        e.dataplane.fail_filter = Some(true);
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc), &mut VecSink::default());
+        assert_eq!(e.dataplane.filter, None);
+        assert_eq!(e.dataplane.peers, Some(vec![]));
+    }
+
+    #[test]
+    fn edge_addresses_are_routed_to_the_edge_node_and_rewritten_there() {
+        let mesh = Mesh::new(&[1, 2]);
+        let members = vec![mesh.edge_material(1, 1), mesh.material(2, 1)];
+        let mut edge_node = engine(1);
+        edge_node.apply(
+            &validated(mesh.desired(1, members.clone())),
+            &mut VecSink::default(),
+        );
+        let edge = edge_node.dataplane.edge.as_ref().expect("edge rules");
+        assert_eq!(edge.addresses.ipv4.to_string(), "100.88.1.1");
+        assert_eq!(edge.containers[0].to_string(), "172.17.0.0/16");
+
+        let mut other = engine(2);
+        other.apply(
+            &validated(mesh.desired(2, members)),
+            &mut VecSink::default(),
+        );
+        assert_eq!(other.dataplane.edge, None);
+        let peers = other.dataplane.peers.as_ref().expect("peers");
+        assert_eq!(
+            peers[0]
+                .allowed_ips
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [
+                "100.88.0.1/32",
+                "fd00:88::1/128",
+                "100.88.1.1/32",
+                "fd00:88::1:1/128"
+            ]
+        );
+        // 来源是 Edge 专用地址、又没有规则放行时拒绝
+        let filter = other.dataplane.filter.as_ref().expect("filter");
+        assert!(filter.rules.iter().any(|r| !r.accept
+            && r.matches
+                == [crate::access::Match::Source(
+                    "100.88.1.1/32".parse().expect("prefix")
+                )]));
     }
 
     #[test]

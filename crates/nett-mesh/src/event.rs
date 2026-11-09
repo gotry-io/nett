@@ -35,6 +35,14 @@ pub enum Event {
     DataPlaneFailed {
         reason: String,
     },
+    /// 新版本的访问规则集已通过验证（design/mesh.md 第 12 节）。
+    AccessRulesApplied {
+        version: u64,
+    },
+    /// 访问规则集验证失败或无法展开，继续执行已生效的规则；无法展开时入方向全部拒绝。
+    AccessRulesRejected {
+        reason: String,
+    },
     /// 决定方切换了到某个对端的路径（design/mesh.md 第 8.2 节）。
     PathSwitched {
         node_id: NodeId,
@@ -105,6 +113,10 @@ pub fn log_event(event: &Event) {
         Event::MemberRemoved { node_id } => tracing::info!(%node_id, "member removed"),
         Event::PeersApplied { peers } => tracing::info!(peers, "peers applied"),
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
+        Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),
+        Event::AccessRulesRejected { reason } => {
+            tracing::warn!(%reason, "access rules rejected")
+        }
         Event::PathSwitched {
             node_id,
             to,

@@ -25,6 +25,8 @@ pub struct NodeNet {
     pub public_ipv4: Option<Ipv4Addr>,
     /// 节点接入的交换机所在的命名空间：公网节点是 `nl-inet`，NAT 之后的节点是路由器。
     pub switch_ns: String,
+    /// 运行 Edge 的节点背后的"容器"（ADR 0015）：它的地址。
+    pub edge_container: Option<Ipv4Addr>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +48,14 @@ fn wan_ipv6(router: u8) -> Ipv6Addr {
 pub fn netns(name: &str) -> String {
     format!("{NETNS_PREFIX}{name}")
 }
+
+/// 运行 Edge 的节点背后的"容器"所在的命名空间。
+pub fn edge_netns(name: &str) -> String {
+    format!("{NETNS_PREFIX}{name}-edge")
+}
+
+/// 节点一侧连接 Edge 容器的地址（点对点，容器以它为默认网关）。
+const EDGE_GATEWAY: &str = "169.254.0.1";
 
 impl Underlay {
     pub fn plan(topo: &Topology) -> anyhow::Result<Self> {
@@ -80,6 +90,7 @@ impl Underlay {
                     )),
                     public_ipv4: Some(Ipv4Addr::new(198, 51, 100, index)),
                     switch_ns: INET_NETNS.to_owned(),
+                    edge_container: None,
                 },
                 Some(router) => {
                     let (_, k, nat) = routers
@@ -94,10 +105,24 @@ impl Underlay {
                             .then(|| lan_ipv6(*k, 10 + u16::from(index))),
                         public_ipv4: None,
                         switch_ns: netns(router),
+                        edge_container: None,
                     }
                 }
             };
-            nodes.insert(node.name.clone(), net);
+            let edge_container = node
+                .edge
+                .as_ref()
+                .and_then(|e| match e.containers[0].addr() {
+                    std::net::IpAddr::V4(a) => Some(a),
+                    std::net::IpAddr::V6(_) => None,
+                });
+            nodes.insert(
+                node.name.clone(),
+                NodeNet {
+                    edge_container,
+                    ..net
+                },
+            );
         }
         Ok(Self { nodes, routers })
     }
@@ -141,6 +166,12 @@ impl Underlay {
         ];
         all.extend(self.routers.iter().map(|(name, _, _)| netns(name)));
         all.extend(self.nodes.values().map(|n| n.netns.clone()));
+        all.extend(
+            self.nodes
+                .iter()
+                .filter(|(_, n)| n.edge_container.is_some())
+                .map(|(name, _)| edge_netns(name)),
+        );
         all
     }
 
@@ -321,6 +352,11 @@ impl Underlay {
                 }
             }
         }
+        for (name, net) in &self.nodes {
+            if let Some(container) = net.edge_container {
+                edge_container(name, &net.netns, container)?;
+            }
+        }
         // "公网"上的节点和其他路由器经路由器的外网地址到达它的局域网 IPv6 网段
         for (name, k, nat) in &self.routers {
             if *nat != Nat::Ipv6Firewall {
@@ -400,6 +436,62 @@ impl Underlay {
         }
         Ok(())
     }
+}
+
+/// 在运行 Edge 的节点背后接一个"容器"：一对 veth，节点一侧开启转发，并像 Docker 一样对容器发往其他接口的
+/// 流量做源地址伪装（优先级 100）。组网进程的 Edge 源地址转换必须在它之前生效（ADR 0015）。
+fn edge_container(name: &str, node_ns: &str, container: Ipv4Addr) -> anyhow::Result<()> {
+    let ns = edge_netns(name);
+    add_netns(&ns)?;
+    run(
+        "ip",
+        [
+            "link", "add", "edge0", "netns", node_ns, "type", "veth", "peer", "name", "eth0",
+            "netns", &ns,
+        ],
+    )?;
+    let host = format!("{container}/32");
+    for args in [
+        vec!["-n", &ns, "addr", "add", &host, "dev", "eth0"],
+        vec!["-n", &ns, "link", "set", "eth0", "up"],
+        vec!["-n", &ns, "route", "add", EDGE_GATEWAY, "dev", "eth0"],
+        vec![
+            "-n",
+            &ns,
+            "route",
+            "add",
+            "default",
+            "via",
+            EDGE_GATEWAY,
+            "dev",
+            "eth0",
+        ],
+        vec![
+            "-n",
+            node_ns,
+            "addr",
+            "add",
+            &format!("{EDGE_GATEWAY}/32"),
+            "dev",
+            "edge0",
+        ],
+        vec!["-n", node_ns, "link", "set", "edge0", "up"],
+        vec!["-n", node_ns, "route", "add", &host, "dev", "edge0"],
+    ] {
+        run("ip", args)?;
+    }
+    run_in(node_ns, "sysctl", ["-qw", "net.ipv4.ip_forward=1"])?;
+    let rules = format!(
+        "table ip lab_docker {{\n chain post {{\n  type nat hook postrouting priority 100;\n  \
+         ip saddr {container} oifname != \"edge0\" masquerade\n }}\n}}\n"
+    );
+    run_with_input(
+        "ip",
+        ["netns", "exec", node_ns, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        COMMAND_TIMEOUT,
+    )?;
+    Ok(())
 }
 
 pub(crate) fn add_netns(ns: &str) -> anyhow::Result<()> {

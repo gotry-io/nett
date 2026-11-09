@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use nett_core::id::NodeId;
+use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken};
 use nett_relay::lab::{MemberDoc, RelayConfig, TlsDoc};
@@ -19,15 +20,17 @@ use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{
-    Artifact, MeshAddresses, Module, NodeAddresses, NodePolicy, PayloadDoc, Role,
+    AccessRule, AccessRuleSet, Artifact, EdgeSources, MeshAddresses, Module, NodeAddresses,
+    NodePolicy, PayloadDoc, Role, RuleAction,
 };
 use nett_trust::revocation::Revocation;
+use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 use serde::Serialize;
 
 use crate::cmd;
 use crate::net::Underlay;
-use crate::topology::Topology;
+use crate::topology::{Topology, parse_ports};
 
 /// 生成配置时用到的地址：实验 A 取自本机的网络规划（[`Underlay`]），实验 B 取自拓扑中写明的真实
 /// 地址（[`Topology`]，design/prototype.md 第 5.2 节）。
@@ -84,6 +87,9 @@ pub struct LabNode {
     pub mesh_public_key: X25519PublicKey,
     pub mesh_ipv4: Ipv4Addr,
     pub mesh_ipv6: Ipv6Addr,
+    /// 运行 Edge 的节点的 Edge 专用地址（IPv4）。
+    #[serde(default)]
+    pub edge_ipv4: Option<Ipv4Addr>,
     pub dir: PathBuf,
     /// 有经 TLS 的候选：需要传输适配进程。
     #[serde(default)]
@@ -125,6 +131,21 @@ fn mesh_addresses(topo: &Topology, index: u8) -> anyhow::Result<MeshAddresses> {
         ipv4: Ipv4Addr::from(u32::from(v4) + u32::from(index)),
         ipv6: Ipv6Addr::from(u128::from(v6) + u128::from(index)),
     })
+}
+
+/// 运行 Edge 的节点的 Edge 专用地址：组网地址之后第 256 个（IPv4）、第 65536 个（IPv6），
+/// 例如 `100.88.1.<序号>`、`fd00:88::1:<序号>`。
+fn edge_addresses(topo: &Topology, index: u8) -> anyhow::Result<MeshAddresses> {
+    let mesh = mesh_addresses(topo, index)?;
+    let edge = MeshAddresses {
+        ipv4: Ipv4Addr::from(u32::from(mesh.ipv4) + 256),
+        ipv6: Ipv6Addr::from(u128::from(mesh.ipv6) + 0x1_0000),
+    };
+    ensure!(
+        topo.mesh.ipv4.contains(edge.ipv4.into()) && topo.mesh.ipv6.contains(edge.ipv6.into()),
+        "the mesh ranges are too small for edge addresses"
+    );
+    Ok(edge)
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
@@ -189,28 +210,92 @@ impl Signer<'_> {
             })?,
         })
     }
+
+    /// 拓扑中的 `[[allow]]` 展开成一份签名的访问规则集（design/mesh.md 第 12 节）；没有规则时为空。
+    fn access_rules(
+        &self,
+        topo: &Topology,
+        nodes: &[LabNode],
+        edges: &BTreeMap<String, MeshAddresses>,
+    ) -> anyhow::Result<Option<SignedPayload>> {
+        if topo.allows.is_empty() {
+            return Ok(None);
+        }
+        let prefixes = |selector: &str| -> anyhow::Result<Vec<IpPrefix>> {
+            let addrs = match selector.strip_suffix(".edge") {
+                Some(name) => *edges.get(name).context("edge node")?,
+                None => {
+                    let n = nodes.iter().find(|n| n.name == selector).context("node")?;
+                    MeshAddresses {
+                        ipv4: n.mesh_ipv4,
+                        ipv6: n.mesh_ipv6,
+                    }
+                }
+            };
+            Ok([addrs.ipv4.into(), addrs.ipv6.into()]
+                .into_iter()
+                .map(IpPrefix::host)
+                .collect())
+        };
+        let mut rules = Vec::new();
+        for allow in &topo.allows {
+            let mut from = Vec::new();
+            for s in &allow.from {
+                from.extend(prefixes(s)?);
+            }
+            let mut to = Vec::new();
+            for s in &allow.to {
+                to.extend(prefixes(s)?);
+            }
+            rules.push(AccessRule {
+                action: RuleAction::Allow,
+                from,
+                to,
+                ports: allow
+                    .ports
+                    .iter()
+                    .map(|p| parse_ports(p))
+                    .collect::<anyhow::Result<_>>()?,
+            });
+        }
+        let payload = PayloadDoc::EnrollmentPolicy {
+            v: 1,
+            artifacts: vec![Artifact::AccessRuleSet(AccessRuleSet { version: 1, rules })],
+            expires_at: Timestamp::from_unix_seconds(0),
+        }
+        .to_canonical()?;
+        Ok(Some(self.recovery.sign(payload)?))
+    }
 }
 
+/// 节点策略；`edge` 是 Edge 专用地址与 Edge 所在容器的网段，有它时加上 `edge` 角色。
 fn policy(
     node_id: NodeId,
     version: u64,
     addresses: MeshAddresses,
     roles: &[String],
+    edge: Option<(MeshAddresses, &[IpPrefix])>,
     enrollment: &EnrollmentKeyPair,
 ) -> NodePolicy {
+    let mut roles: Vec<Role> = roles
+        .iter()
+        .filter(|r| *r == "relay")
+        .map(|_| Role::Relay)
+        .collect();
+    if edge.is_some() {
+        roles.push(Role::Edge);
+    }
     NodePolicy {
         node_id,
         policy_version: version,
         modules: vec![Module::Mesh],
-        roles: roles
-            .iter()
-            .filter(|r| *r == "relay")
-            .map(|_| Role::Relay)
-            .collect(),
-        edge: None,
+        roles,
+        edge: edge.map(|(_, containers)| EdgeSources {
+            containers: containers.to_vec(),
+        }),
         addresses: NodeAddresses {
             mesh: addresses,
-            edge: None,
+            edge: edge.map(|(a, _)| a),
         },
         enrollment_public_key: enrollment.public_key(),
     }
@@ -239,6 +324,7 @@ pub fn generate(
 
     let mut nodes = Vec::new();
     let mut materials = BTreeMap::new();
+    let mut edges = BTreeMap::new();
     let mut lower_version_of_second = None;
     for (i, node) in topo.nodes.iter().enumerate() {
         let index = u8::try_from(i + 1).context("too many nodes")?;
@@ -248,19 +334,36 @@ pub fn generate(
         write_private(&dir.join("mesh.key"), private.as_bytes())?;
         let enrollment = EnrollmentKeyPair::generate()?;
         let addresses = mesh_addresses(topo, index)?;
+        let edge = node
+            .edge
+            .as_ref()
+            .map(|_| edge_addresses(topo, index))
+            .transpose()?;
+        if let Some(edge) = edge {
+            edges.insert(node.name.clone(), edge);
+        }
         let node_id = lab_node_id(u32::from(index));
         // 有反例时第二个节点用版本 2，同时附上一份版本 1 的材料作为"低于已生效版本"的反例
         let version = if negatives && i == 1 { 2 } else { 1 };
+        let edge_policy = edge.zip(node.edge.as_ref().map(|e| e.containers.as_slice()));
         let p = policy(
             node_id.clone(),
             version,
             addresses,
             &node.roles,
+            edge_policy,
             &enrollment,
         );
         materials.insert(node.name.clone(), signer.material(&p, &enrollment, public)?);
         if negatives && i == 1 {
-            let older = policy(node_id.clone(), 1, addresses, &node.roles, &enrollment);
+            let older = policy(
+                node_id.clone(),
+                1,
+                addresses,
+                &node.roles,
+                edge_policy,
+                &enrollment,
+            );
             lower_version_of_second = Some(signer.material(&older, &enrollment, public)?);
         }
         // 只有 dial-only 成员经 TLS 传输（design/mesh.md 第 5.3 节）
@@ -277,6 +380,7 @@ pub fn generate(
             mesh_public_key: public,
             mesh_ipv4: addresses.ipv4,
             mesh_ipv6: addresses.ipv6,
+            edge_ipv4: edge.map(|e| e.ipv4),
             dir,
             tls,
         });
@@ -333,6 +437,7 @@ pub fn generate(
     }
     write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints)?;
 
+    let access_rules = signer.access_rules(topo, &nodes, &edges)?;
     let mut first_desired = None;
     for (i, node) in topo.nodes.iter().enumerate() {
         let mut members: Vec<AdmissionMaterial> = materials.values().cloned().collect();
@@ -408,6 +513,8 @@ pub fn generate(
             members,
             revocations: node_revocations,
             paths,
+            access_rules: access_rules.clone(),
+            container_member: node.container_member,
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {
@@ -451,6 +558,7 @@ fn negative_examples(
             1,
             mesh_addresses(topo, index)?,
             &[],
+            None,
             &enrollment,
         );
         let mut material = signer.material(&p, &enrollment, mesh_key)?;

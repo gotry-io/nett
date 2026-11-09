@@ -63,14 +63,14 @@ impl MemberSet {
                 node_id: Some(member.node_id.clone()),
                 reason,
             };
-            let addresses = [
-                IpAddr::V4(member.addresses.ipv4),
-                IpAddr::V6(member.addresses.ipv6),
-            ];
-            let in_prefixes = desired.prefixes.ipv4.contains(addresses[0])
-                && desired.prefixes.ipv6.contains(addresses[1]);
+            let in_prefixes = addresses(&member).iter().all(|a| match a {
+                IpAddr::V4(_) => desired.prefixes.ipv4.contains(*a),
+                IpAddr::V6(_) => desired.prefixes.ipv6.contains(*a),
+            });
             if !in_prefixes {
-                events.emit(reject("mesh address is outside the mesh prefixes".into()));
+                events.emit(reject(
+                    "mesh or edge address is outside the mesh prefixes".into(),
+                ));
                 continue;
             }
             match self.applied.check(&member) {
@@ -84,7 +84,7 @@ impl MemberSet {
             // 地址或组网公钥与另一个成员冲突时，已有的成员优先：WireGuard 不允许对端的 AllowedIPs 重叠
             if let Some(other) = self.conflict(&member) {
                 events.emit(reject(format!(
-                    "mesh address or public key already belongs to {other}"
+                    "mesh or edge address, or public key, already belongs to {other}"
                 )));
                 continue;
             }
@@ -98,19 +98,22 @@ impl MemberSet {
     }
 
     fn conflict(&self, member: &Member) -> Option<&NodeId> {
-        let taken: BTreeSet<_> = [
-            IpAddr::V4(member.addresses.ipv4),
-            IpAddr::V6(member.addresses.ipv6),
-        ]
-        .into();
+        let taken: BTreeSet<_> = addresses(member).into_iter().collect();
         self.members
             .values()
             .filter(|other| other.node_id != member.node_id)
             .find(|other| {
                 other.mesh_public_key == member.mesh_public_key
-                    || taken.contains(&IpAddr::V4(other.addresses.ipv4))
-                    || taken.contains(&IpAddr::V6(other.addresses.ipv6))
+                    || addresses(other).iter().any(|a| taken.contains(a))
             })
             .map(|other| &other.node_id)
     }
+}
+
+/// 成员占用的全部地址：组网地址，以及有 `edge` 角色时的 Edge 专用地址。
+fn addresses(member: &Member) -> Vec<IpAddr> {
+    std::iter::once(member.addresses)
+        .chain(member.edge.iter().map(|e| e.addresses))
+        .flat_map(|a| [IpAddr::V4(a.ipv4), IpAddr::V6(a.ipv6)])
+        .collect()
 }

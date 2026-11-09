@@ -19,63 +19,63 @@ const CHAIN: &str = "probe_in";
 
 const NFNL_SUBSYS_ULOG: u16 = 4;
 const NFNL_SUBSYS_NFTABLES: u16 = 10;
-const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
-const NFNL_MSG_BATCH_END: u16 = 0x11;
-const NFT_MSG_NEWTABLE: u16 = 0;
-const NFT_MSG_DELTABLE: u16 = 2;
-const NFT_MSG_NEWCHAIN: u16 = 3;
-const NFT_MSG_NEWRULE: u16 = 6;
+pub(super) const NFNL_MSG_BATCH_BEGIN: u16 = 0x10;
+pub(super) const NFNL_MSG_BATCH_END: u16 = 0x11;
+pub(super) const NFT_MSG_NEWTABLE: u16 = 0;
+pub(super) const NFT_MSG_DELTABLE: u16 = 2;
+pub(super) const NFT_MSG_NEWCHAIN: u16 = 3;
+pub(super) const NFT_MSG_NEWRULE: u16 = 6;
 const NFT_MSG_DELRULE: u16 = 8;
-const NLM_F_APPEND: u16 = 0x800;
+pub(super) const NLM_F_APPEND: u16 = 0x800;
 
-const NFPROTO_INET: u8 = 1;
+pub(super) const NFPROTO_INET: u8 = 1;
 const AF_INET: u8 = 2;
 const AF_INET6: u8 = 10;
 
-const NFTA_TABLE_NAME: u16 = 1;
-const NFTA_CHAIN_TABLE: u16 = 1;
-const NFTA_CHAIN_NAME: u16 = 3;
-const NFTA_CHAIN_HOOK: u16 = 4;
-const NFTA_CHAIN_POLICY: u16 = 5;
-const NFTA_CHAIN_TYPE: u16 = 7;
-const NFTA_HOOK_HOOKNUM: u16 = 1;
-const NFTA_HOOK_PRIORITY: u16 = 2;
+pub(super) const NFTA_TABLE_NAME: u16 = 1;
+pub(super) const NFTA_CHAIN_TABLE: u16 = 1;
+pub(super) const NFTA_CHAIN_NAME: u16 = 3;
+pub(super) const NFTA_CHAIN_HOOK: u16 = 4;
+pub(super) const NFTA_CHAIN_POLICY: u16 = 5;
+pub(super) const NFTA_CHAIN_TYPE: u16 = 7;
+pub(super) const NFTA_HOOK_HOOKNUM: u16 = 1;
+pub(super) const NFTA_HOOK_PRIORITY: u16 = 2;
 const NF_INET_LOCAL_IN: u32 = 1;
-const NF_ACCEPT: u32 = 1;
-const NFTA_RULE_TABLE: u16 = 1;
-const NFTA_RULE_CHAIN: u16 = 2;
-const NFTA_RULE_EXPRESSIONS: u16 = 4;
+pub(super) const NF_ACCEPT: u32 = 1;
+pub(super) const NFTA_RULE_TABLE: u16 = 1;
+pub(super) const NFTA_RULE_CHAIN: u16 = 2;
+pub(super) const NFTA_RULE_EXPRESSIONS: u16 = 4;
 const NFTA_LIST_ELEM: u16 = 1;
 const NFTA_EXPR_NAME: u16 = 1;
 const NFTA_EXPR_DATA: u16 = 2;
-const NFTA_META_DREG: u16 = 1;
-const NFTA_META_KEY: u16 = 2;
-const NFT_META_L4PROTO: u32 = 16;
+pub(super) const NFTA_META_DREG: u16 = 1;
+pub(super) const NFTA_META_KEY: u16 = 2;
+pub(super) const NFT_META_L4PROTO: u32 = 16;
 const NFT_META_IIF: u32 = 4;
-const NFTA_IMMEDIATE_DREG: u16 = 1;
-const NFTA_IMMEDIATE_DATA: u16 = 2;
-const NFTA_DATA_VERDICT: u16 = 2;
-const NFTA_VERDICT_CODE: u16 = 1;
-const NFT_REG_VERDICT: u32 = 0;
-const NF_DROP: u32 = 0;
+pub(super) const NFTA_IMMEDIATE_DREG: u16 = 1;
+pub(super) const NFTA_IMMEDIATE_DATA: u16 = 2;
+pub(super) const NFTA_DATA_VERDICT: u16 = 2;
+pub(super) const NFTA_VERDICT_CODE: u16 = 1;
+pub(super) const NFT_REG_VERDICT: u32 = 0;
+pub(super) const NF_DROP: u32 = 0;
 /// 网络命名空间中回环接口的编号总是 1。
 const LOOPBACK_IFINDEX: u32 = 1;
 const GUARD_CHAIN: &str = "tls_guard";
 const NFTA_CMP_SREG: u16 = 1;
 const NFTA_CMP_OP: u16 = 2;
 const NFTA_CMP_DATA: u16 = 3;
-const NFTA_DATA_VALUE: u16 = 1;
-const NFT_CMP_EQ: u32 = 0;
-const NFT_CMP_LTE: u32 = 3;
-const NFT_CMP_GTE: u32 = 5;
-const NFTA_PAYLOAD_DREG: u16 = 1;
-const NFTA_PAYLOAD_BASE: u16 = 2;
-const NFTA_PAYLOAD_OFFSET: u16 = 3;
-const NFTA_PAYLOAD_LEN: u16 = 4;
+pub(super) const NFTA_DATA_VALUE: u16 = 1;
+pub(super) const NFT_CMP_EQ: u32 = 0;
+pub(super) const NFT_CMP_LTE: u32 = 3;
+pub(super) const NFT_CMP_GTE: u32 = 5;
+pub(super) const NFTA_PAYLOAD_DREG: u16 = 1;
+pub(super) const NFTA_PAYLOAD_BASE: u16 = 2;
+pub(super) const NFTA_PAYLOAD_OFFSET: u16 = 3;
+pub(super) const NFTA_PAYLOAD_LEN: u16 = 4;
 const NFT_PAYLOAD_TRANSPORT_HEADER: u32 = 2;
 const NFTA_LOG_GROUP: u16 = 1;
 const NFTA_LOG_SNAPLEN: u16 = 3;
-const NFT_REG_1: u32 = 1;
+pub(super) const NFT_REG_1: u32 = 1;
 const IPPROTO_UDP: u8 = 17;
 const ENOENT: i32 = 2;
 
@@ -93,23 +93,23 @@ const SNAPLEN: u32 = 256;
 /// 接收超时：接收线程据此定期检查是否该退出。
 const RECV_TIMEOUT: Duration = Duration::from_millis(500);
 
-fn nfgen(family: u8, res_id: u16) -> [u8; 4] {
+pub(super) fn nfgen(family: u8, res_id: u16) -> [u8; 4] {
     let id = res_id.to_be_bytes();
     [family, 0, id[0], id[1]]
 }
 
-fn nft_type(msg: u16) -> u16 {
+pub(super) fn nft_type(msg: u16) -> u16 {
     (NFNL_SUBSYS_NFTABLES << 8) | msg
 }
 
-fn batch(ty: u16) -> Message {
+pub(super) fn batch(ty: u16) -> Message {
     let mut m = Message::new(ty, 0);
     m.fixed(&nfgen(0, NFNL_SUBSYS_NFTABLES));
     m
 }
 
 /// 一个表达式：名称加数据（嵌套属性）。
-fn expr(m: &mut Message, name: &str, data: impl FnOnce(&mut Message)) {
+pub(super) fn expr(m: &mut Message, name: &str, data: impl FnOnce(&mut Message)) {
     let elem = m.begin_nested(NFTA_LIST_ELEM);
     m.attr_str(NFTA_EXPR_NAME, name);
     let d = m.begin_nested(NFTA_EXPR_DATA);
@@ -118,7 +118,7 @@ fn expr(m: &mut Message, name: &str, data: impl FnOnce(&mut Message)) {
     m.end_nested(elem);
 }
 
-fn cmp(m: &mut Message, op: u32, value: &[u8]) {
+pub(super) fn cmp(m: &mut Message, op: u32, value: &[u8]) {
     expr(m, "cmp", |m| {
         m.attr(NFTA_CMP_SREG, &NFT_REG_1.to_be_bytes());
         m.attr(NFTA_CMP_OP, &op.to_be_bytes());
@@ -128,7 +128,7 @@ fn cmp(m: &mut Message, op: u32, value: &[u8]) {
     });
 }
 
-fn load_transport(m: &mut Message, offset: u32, len: u32) {
+pub(super) fn load_transport(m: &mut Message, offset: u32, len: u32) {
     expr(m, "payload", |m| {
         m.attr(NFTA_PAYLOAD_DREG, &NFT_REG_1.to_be_bytes());
         m.attr(

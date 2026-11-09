@@ -47,6 +47,7 @@ const USAGE: &str = "usage:
   nett-lab run resources --topology fallback.toml --nett <path/to/release/nett> --out <dir> [--duration IDLE_SECONDS]
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
+  nett-lab run access --topology access.toml --nett <path/to/nett> --out <dir>
   nett-lab down --topology <file.toml>
   nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -54,6 +55,8 @@ measurement helpers (started by the scenarios inside a node's network namespace)
   nett-lab probe-recv --listen <addr:port> --out <file>
   nett-lab tcp-source --to <addr:port>
   nett-lab tcp-sink --listen <addr:port> --out <file>
+  nett-lab accept-log --listen <addr:port> --out <file>
+  nett-lab connect --to <addr:port> --duration SECONDS
   nett-lab bulk-send --to <addr:port> --bytes N
   nett-lab bulk-recv --listen <addr:port> --bytes N --out <file>
   nett-lab forge --to <addr:port>
@@ -114,6 +117,14 @@ fn run() -> anyhow::Result<bool> {
             measure::probe_recv(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
         }
         ["tcp-source"] => measure::tcp_source(to.context(USAGE)?).map(|()| true),
+        ["accept-log"] => {
+            measure::accept_log(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)
+        }
+        ["connect"] => measure::connect(
+            to.context(USAGE)?,
+            std::time::Duration::from_secs(duration_s),
+        )
+        .map(|()| true),
         ["forge"] => measure::forge(to.context(USAGE)?, 300).map(|()| true),
         ["flood"] => {
             let hex = key.context(USAGE)?;
@@ -160,6 +171,7 @@ fn run() -> anyhow::Result<bool> {
                     scenario::failover(&topology, &nett()?, &out, repeat, with_tailscale, cut)?
                 }
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
+                "access" => scenario::access(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,

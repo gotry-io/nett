@@ -196,6 +196,31 @@ pub fn flood(to: SocketAddr, public_key: &[u8; 32], secs: u64) -> anyhow::Result
     Ok(())
 }
 
+/// 访问控制的接收端：接受连接，把每个连接的来源地址写成一行，随即关闭连接。
+pub fn accept_log(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
+    let listener = TcpListener::bind(listen).context("binding the accept logger")?;
+    let mut file = File::options()
+        .create(true)
+        .append(true)
+        .open(out)
+        .with_context(|| format!("opening {}", out.display()))?;
+    for stream in listener.incoming() {
+        let peer = stream.context("accepting")?.peer_addr()?;
+        writeln!(file, "{}", peer.ip())?;
+        file.flush()?;
+    }
+    Ok(())
+}
+
+/// 在 `timeout` 之内尝试建立一个 TCP 连接：连上时输出 `connected`，否则输出 `blocked <原因>`。
+pub fn connect(to: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
+    match TcpStream::connect_timeout(&to, timeout) {
+        Ok(_) => println!("connected"),
+        Err(e) => println!("blocked {:?}", e.kind()),
+    }
+    Ok(())
+}
+
 /// 长连接的发送端：连接后持续写入，直到出错或进程被结束。出错时以非 0 退出，原因写入标准错误。
 pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
     let mut stream =

@@ -182,6 +182,12 @@ jobs:
           --topology crates/nett-lab/topologies/fallback.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-24-direct"
+      - name: 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 8 节）
+        run: >-
+          sudo ./target/debug/nett-lab run access
+          --topology crates/nett-lab/topologies/access.toml
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-access"
 
   deny:
     runs-on: ubuntu-24.04

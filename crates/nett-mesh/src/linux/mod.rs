@@ -1,6 +1,7 @@
 //! Linux 数据面：内核 WireGuard，经 netlink 配置接口、对端和地址（design/mesh.md 第 4 节）。
 //! 需要 `CAP_NET_ADMIN`。
 
+mod filter;
 mod netlink;
 mod nft;
 mod rtnl;
@@ -16,6 +17,7 @@ use rustix::net::netlink::GENERIC;
 
 use self::netlink::{NlError, Socket};
 use self::wg::PeerChange;
+use crate::access::{EdgeSpec, FilterSpec};
 use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
 
@@ -223,6 +225,14 @@ impl DataPlane for KernelWireGuard {
 
     fn guard_tls_ports(&mut self, wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError> {
         nft::set_tls_guard(wg_port, idle).map_err(kernel("guard idle TLS ports"))
+    }
+
+    fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError> {
+        filter::install_access(filter).map_err(kernel("install access rules"))
+    }
+
+    fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
+        filter::install_edge(edge).map_err(kernel("install edge address rules"))
     }
 
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {

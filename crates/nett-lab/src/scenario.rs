@@ -4144,3 +4144,163 @@ pub fn congestion(
     write_report(out, &report)?;
     Ok(report)
 }
+
+/// 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6 节，ADR 0015、0016）。拓扑中 `edge`
+/// 运行 Edge（背后有一个"容器"，节点像 Docker 一样对它做源地址伪装），`app` 是容器内成员，只放行 `edge`
+/// 的 Edge 访问它的 8686；`other` 是普通成员。
+pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let mut lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new("access");
+    let node = |name: &str| {
+        generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .with_context(|| format!("node `{name}` in the access topology"))
+    };
+    let (edge, app, other) = (node("edge")?, node("app")?, node("other")?);
+    let ns = |name: &str| -> anyhow::Result<String> {
+        Ok(lab
+            .underlay
+            .node(name)
+            .context("planned node")?
+            .netns
+            .clone())
+    };
+    let (ns_edge, ns_app, ns_other) = (ns("edge")?, ns("app")?, ns("other")?);
+    let container = crate::net::edge_netns("edge");
+    let edge_ip = edge.edge_ipv4.context("edge address of node `edge`")?;
+    for n in &generated.nodes {
+        wait_for(n, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    // 容器内成员只接受它自己发起的连接：从它出发等隧道通
+    for target in [edge.mesh_ipv4, other.mesh_ipv4] {
+        let r = ping(&ns_app, &target.to_string());
+        report.check(
+            &format!("app-reaches:{target}"),
+            r.is_ok(),
+            r.err().map(|e| format!("{e:#}")).unwrap_or_default(),
+        );
+    }
+
+    let logs = [8686u16, 2222].map(|port| out.join(format!("accept-{port}.txt")));
+    for (port, log) in [8686u16, 2222].iter().zip(&logs) {
+        lab.helper(
+            "app",
+            &[
+                "accept-log",
+                "--listen",
+                &format!("{}:{port}", app.mesh_ipv4),
+                "--out",
+                &log.to_string_lossy(),
+            ],
+            &out.join(format!("accept-{port}.log")),
+        )?;
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    let me = std::env::current_exe().context("locating nett-lab")?;
+    let connect = |netns: &str, port: u16| -> String {
+        let to = format!("{}:{port}", app.mesh_ipv4);
+        run_in(
+            netns,
+            &me.to_string_lossy(),
+            ["connect", "--to", to.as_str(), "--duration", "3"],
+        )
+        .map_or_else(|e| format!("error {e:#}"), |o| o.trim().to_owned())
+    };
+
+    // Edge 访问放行的端口：连上，app 看到的来源是 Edge 专用地址（源地址转换在 Docker 的伪装之前生效）
+    let result = connect(&container, 8686);
+    std::thread::sleep(Duration::from_millis(300));
+    let seen = std::fs::read_to_string(&logs[0]).unwrap_or_default();
+    report.check(
+        "edge-to-allowed-port",
+        result == "connected" && seen.lines().any(|l| l == edge_ip.to_string()),
+        format!("{result}; app saw {:?}", seen.lines().collect::<Vec<_>>()),
+    );
+    for (name, netns, port) in [
+        ("edge-to-other-port-denied", container.as_str(), 2222),
+        ("edge-node-itself-denied", ns_edge.as_str(), 8686),
+        ("other-member-denied", ns_other.as_str(), 8686),
+    ] {
+        let result = connect(netns, port);
+        report.check(name, result.starts_with("blocked"), result);
+    }
+    let unexpected = std::fs::read_to_string(&logs[1]).unwrap_or_default();
+    report.check(
+        "nothing-reached-the-closed-port",
+        unexpected.is_empty(),
+        format!("{:?}", unexpected.lines().collect::<Vec<_>>()),
+    );
+    // 成员之间默认放行
+    let r = ping(&ns_other, &edge.mesh_ipv4.to_string());
+    report.check(
+        "members-allowed-by-default",
+        r.is_ok(),
+        r.err().map(|e| format!("{e:#}")).unwrap_or_default(),
+    );
+
+    // 防冒用：edge 节点上以 Edge 专用地址为源发出的包不离开本机。在 other 上计数从组网接口进来的包：
+    // 以 Edge 专用地址为源的应为 0，以 edge 的组网地址为源的（对照）大于 0
+    let rules = format!(
+        "table inet lab_count {{\n chain c {{\n  type filter hook prerouting priority -300;\n  \
+         iifname \"nett0\" ip saddr {edge_ip} counter\n  \
+         iifname \"nett0\" ip saddr {} counter\n }}\n}}\n",
+        edge.mesh_ipv4
+    );
+    crate::cmd::run_with_input(
+        "ip",
+        ["netns", "exec", &ns_other, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        crate::cmd::COMMAND_TIMEOUT,
+    )?;
+    let host = format!("{edge_ip}/32");
+    run_in(&ns_edge, "ip", ["addr", "add", &host, "dev", "lo"])?;
+    let target = other.mesh_ipv4.to_string();
+    let edge_src = edge_ip.to_string();
+    run_in(
+        &ns_edge,
+        "ping",
+        ["-c", "3", "-i", "0.2", "-W", "1", "-I", &edge_src, &target],
+    )
+    .ok();
+    run_in(
+        &ns_edge,
+        "ping",
+        ["-c", "3", "-i", "0.2", "-W", "1", &target],
+    )
+    .ok();
+    run_in(&ns_edge, "ip", ["addr", "del", &host, "dev", "lo"])?;
+    let listing = run_in(&ns_other, "nft", ["list", "table", "inet", "lab_count"])?;
+    let counts: Vec<u64> = listing
+        .lines()
+        .filter_map(|l| l.split("packets ").nth(1))
+        .filter_map(|r| r.split_whitespace().next()?.parse().ok())
+        .collect();
+    report.check(
+        "edge-address-not-spoofable",
+        counts.len() == 2 && counts[0] == 0 && counts[1] > 0,
+        format!("packets from the edge address, from the edge node's mesh address: {counts:?}"),
+    );
+
+    for n in &generated.nodes {
+        let ev = events(n);
+        report.check(
+            &format!("rules-applied:{}", n.name),
+            count(&ev, "access_rules_applied") >= 1
+                && count(&ev, "access_rules_rejected") == 0
+                && count(&ev, "data_plane_failed") == 0,
+            format!(
+                "applied {}, rejected {}, data plane failures {}",
+                count(&ev, "access_rules_applied"),
+                count(&ev, "access_rules_rejected"),
+                count(&ev, "data_plane_failed")
+            ),
+        );
+    }
+    Ok(report)
+}

@@ -17,6 +17,9 @@ pub struct Topology {
     pub routers: Vec<Router>,
     #[serde(rename = "link", default)]
     pub links: Vec<Link>,
+    /// 访问规则（design/mesh.md 第 12 节），按顺序展开成一份签名的规则集。
+    #[serde(rename = "allow", default)]
+    pub allows: Vec<Allow>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -40,6 +43,54 @@ pub struct Node {
     pub ssh: Option<String>,
     pub ipv4: Option<std::net::Ipv4Addr>,
     pub ipv6: Option<std::net::Ipv6Addr>,
+    /// 节点运行 Edge（ADR 0015）：Edge 所在容器的网段。实验 A 在这个节点背后建一个"容器"命名空间，
+    /// 地址就是这里写的唯一一个 IPv4 地址（`/32`）。
+    pub edge: Option<EdgeSources>,
+    /// 以边车运行的容器内成员：入方向默认拒绝（ADR 0016）。
+    #[serde(default)]
+    pub container_member: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeSources {
+    pub containers: Vec<IpPrefix>,
+}
+
+/// 一条放行规则：`from`、`to` 写节点名，`<节点>.edge` 表示该节点的 Edge 专用地址；`ports` 写成
+/// `8686/tcp` 或 `1000-2000/udp`，为空表示所有协议和端口。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Allow {
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+}
+
+/// 解析 `8686/tcp`、`1000-2000/udp` 形式的端口范围。
+pub fn parse_ports(s: &str) -> anyhow::Result<nett_trust::payload::PortRange> {
+    use nett_trust::payload::{PortRange, Protocol};
+    let (range, proto) = s
+        .split_once('/')
+        .with_context(|| format!("port `{s}` must be <port>[-<port>]/<tcp|udp>"))?;
+    let protocol = match proto {
+        "tcp" => Protocol::Tcp,
+        "udp" => Protocol::Udp,
+        _ => bail!("port `{s}`: protocol must be tcp or udp"),
+    };
+    let (first, last) = range.split_once('-').unwrap_or((range, range));
+    let first: u16 = first.parse().with_context(|| format!("port `{s}`"))?;
+    let last: u16 = last.parse().with_context(|| format!("port `{s}`"))?;
+    ensure!(
+        first >= 1 && first <= last,
+        "port `{s}`: need 1 <= first <= last"
+    );
+    Ok(PortRange {
+        protocol,
+        first,
+        last,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -110,6 +161,44 @@ impl Topology {
                     "node `{}`: unknown role `{role}`",
                     node.name
                 );
+            }
+            if let Some(edge) = &node.edge {
+                ensure!(
+                    !edge.containers.is_empty(),
+                    "node `{}`: edge needs at least one container prefix",
+                    node.name
+                );
+                // 实验 A 用这个地址建"容器"
+                ensure!(
+                    node.ssh.is_some()
+                        || (edge.containers.len() == 1
+                            && edge.containers[0].is_ipv4()
+                            && edge.containers[0].prefix_len() == 32),
+                    "node `{}`: in the namespace lab, edge.containers is the container's single IPv4 /32",
+                    node.name
+                );
+            }
+        }
+        for allow in &self.allows {
+            for selector in allow.from.iter().chain(&allow.to) {
+                let (name, edge) = match selector.strip_suffix(".edge") {
+                    Some(name) => (name, true),
+                    None => (selector.as_str(), false),
+                };
+                let node = self
+                    .node(name)
+                    .with_context(|| format!("allow names unknown node `{name}`"))?;
+                ensure!(
+                    !edge || node.edge.is_some(),
+                    "allow names `{selector}` but `{name}` runs no Edge"
+                );
+            }
+            ensure!(
+                !allow.from.is_empty() && !allow.to.is_empty(),
+                "allow needs `from` and `to`"
+            );
+            for port in &allow.ports {
+                parse_ports(port)?;
             }
         }
         for link in &self.links {

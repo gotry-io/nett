@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 use nett_trust::keys::X25519PublicKey;
 
+use crate::access::{EdgeSpec, FilterSpec};
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
@@ -99,4 +100,11 @@ pub trait DataPlane: Send {
 
     /// 丢弃从这些闲置的 TLS 回环端口进入 WireGuard 端口的包（design/mesh.md 第 5.3 节），替换之前的设置。
     fn guard_tls_ports(&mut self, wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError>;
+
+    /// 安装组网接口入方向的过滤规则（design/mesh.md 第 12 节），整体替换之前的规则：替换要么完整生效，
+    /// 要么保持原状，中间不出现没有过滤的时刻。
+    fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError>;
+
+    /// 设置或清除本机 Edge 的源地址转换与防冒用规则（ADR 0015），整体替换之前的设置。
+    fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError>;
 }

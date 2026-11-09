@@ -8,10 +8,12 @@ use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{
-    Artifact, MeshAddresses, Module, NodeAddresses, NodePolicy, PayloadDoc, Role,
+    Artifact, EdgeSources, MeshAddresses, Module, NodeAddresses, NodePolicy, PayloadDoc, Role,
 };
+use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 
+use crate::access::{EdgeSpec, FilterSpec};
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
 use crate::dataplane::{DataPlane, DataPlaneError, InterfaceSpec, PeerSpec, PeerStat};
 use crate::key::PrivateKey;
@@ -93,6 +95,31 @@ impl Mesh {
         self.material_for(self.policy(n, version), mesh_key(n))
     }
 
+    /// 带 `edge` 角色的节点：Edge 专用地址为 `100.88.1.n` 与 `fd00:88::1:n`，Edge 容器在 `172.17.0.0/16`。
+    pub fn edge_policy(&self, n: u8, version: u64) -> NodePolicy {
+        let mut policy = self.policy(n, version);
+        policy.roles.push(Role::Edge);
+        policy.edge = Some(EdgeSources {
+            containers: vec!["172.17.0.0/16".parse().expect("prefix")],
+        });
+        policy.addresses.edge = Some(MeshAddresses {
+            ipv4: format!("100.88.1.{n}").parse().expect("ipv4"),
+            ipv6: format!("fd00:88::1:{n:x}").parse().expect("ipv6"),
+        });
+        policy
+    }
+
+    pub fn edge_material(&self, n: u8, version: u64) -> AdmissionMaterial {
+        self.material_for(self.edge_policy(n, version), mesh_key(n))
+    }
+
+    /// 用这组节点的恢复密钥签一份载荷。
+    pub fn sign(&self, doc: &PayloadDoc) -> SignedPayload {
+        self.recovery
+            .sign(doc.to_canonical().expect("canonical"))
+            .expect("sign")
+    }
+
     pub fn desired(&self, me: u8, members: Vec<AdmissionMaterial>) -> DesiredMeshDoc {
         DesiredMeshDoc {
             node_id: node_id(me),
@@ -124,6 +151,8 @@ impl Mesh {
                     }],
                 })
                 .collect(),
+            access_rules: None,
+            container_member: false,
         }
     }
 }
@@ -141,6 +170,13 @@ pub struct FakeDataPlane {
     pub rehandshakes: Vec<PeerSpec>,
     /// 每次设置的闲置 TLS 端口。
     pub tls_guards: Vec<Vec<u16>>,
+    /// 当前安装的过滤规则与 Edge 设置。
+    pub filter: Option<FilterSpec>,
+    pub edge: Option<EdgeSpec>,
+    /// 安装过滤规则失败：`Some(true)` 所有安装都失败，`Some(false)` 只有拒绝全部的规则能装上。
+    pub fail_filter: Option<bool>,
+    /// 按顺序记下的数据面调用，用来检查"先装过滤规则，再添加对端"。
+    pub calls: Vec<&'static str>,
 }
 
 impl FakeDataPlane {
@@ -152,6 +188,10 @@ impl FakeDataPlane {
             fail_peers: false,
             rehandshakes: Vec::new(),
             tls_guards: Vec::new(),
+            filter: None,
+            edge: None,
+            fail_filter: None,
+            calls: Vec::new(),
         }
     }
 }
@@ -173,6 +213,7 @@ impl DataPlane for FakeDataPlane {
                 detail: "injected failure".into(),
             });
         }
+        self.calls.push("sync_peers");
         self.peers = Some(peers.to_vec());
         Ok(())
     }
@@ -215,6 +256,28 @@ impl DataPlane for FakeDataPlane {
 
     fn guard_tls_ports(&mut self, _wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError> {
         self.tls_guards.push(idle.to_vec());
+        Ok(())
+    }
+
+    fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError> {
+        self.calls.push("apply_filter");
+        let fails = match self.fail_filter {
+            Some(all) => all || *filter != FilterSpec::deny_all(),
+            None => false,
+        };
+        if fails {
+            return Err(DataPlaneError::Protocol {
+                op: "apply filter",
+                detail: "injected failure".into(),
+            });
+        }
+        self.filter = Some(filter.clone());
+        Ok(())
+    }
+
+    fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
+        self.calls.push("apply_edge");
+        self.edge = edge.cloned();
         Ok(())
     }
 }

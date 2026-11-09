@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use nett_core::id::NodeId;
+use nett_core::prefix::IpPrefix;
 use serde::{Deserialize, Serialize};
 
 use crate::anchors::TrustAnchors;
@@ -68,11 +69,20 @@ pub struct Member {
     pub identity_public_key: X25519PublicKey,
     pub addresses: MeshAddresses,
     pub roles: Vec<Role>,
+    /// 有 `edge` 角色时的 Edge 专用地址与 Edge 的来源（ADR 0015）。
+    pub edge: Option<EdgeMember>,
     pub signer: Signer,
     /// 节点策略产物的哈希。
     pub policy_hash: Sha256Digest,
     /// 准入证明载荷的哈希。
     pub proof_hash: Sha256Digest,
+}
+
+/// 成员的 Edge：Edge 专用地址，以及 Edge 发出的流量从哪些容器网段来。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EdgeMember {
+    pub addresses: MeshAddresses,
+    pub containers: Vec<IpPrefix>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -156,6 +166,15 @@ pub fn admit(
         identity_public_key: proof.identity_public_key,
         addresses: policy.addresses.mesh,
         roles: policy.roles.clone(),
+        // 载荷解析时已确认角色、来源和地址同时出现或同时没有
+        edge: policy
+            .addresses
+            .edge
+            .zip(policy.edge.as_ref())
+            .map(|(addresses, sources)| EdgeMember {
+                addresses,
+                containers: sources.containers.clone(),
+            }),
         signer: verified.signer,
         policy_hash: *policy_hash,
         proof_hash: Sha256Digest::of(&material.proof.payload),
