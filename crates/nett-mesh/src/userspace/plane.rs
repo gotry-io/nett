@@ -5,9 +5,9 @@
 //! 出方向：TUN → 按目的地址最长前缀匹配对端 → 记录连接 → 加密 → 对端当前的 endpoint。任何一步不通过就丢弃，
 //! 不作响应。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use nett_core::prefix::IpPrefix;
 use nett_trust::keys::X25519PublicKey;
@@ -18,6 +18,56 @@ use super::session::{Output, Sessions};
 use crate::access::FilterSpec;
 use crate::dataplane::{PeerSpec, PeerStat};
 use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY};
+
+/// 每个来源 IP 每秒最多进入会话层的握手消息数（design/userspace.md 第 4.1 节）。高于会话层回 cookie 的阈值
+/// （每秒 100 个），之间的部分照常得到 cookie。
+pub const HANDSHAKES_PER_SOURCE: u32 = 128;
+/// 所有来源合计每秒最多进入会话层的握手消息数。
+pub const HANDSHAKES_TOTAL: u32 = 2048;
+/// 握手限额的来源表最多的条数；满了之后，这一秒内的新来源一律超额。
+pub const HANDSHAKE_SOURCES: usize = 4096;
+const BUDGET_WINDOW: Duration = Duration::from_secs(1);
+
+/// 握手消息的限额：按来源 IP 计数，每秒清零。超额的在任何加解密之前丢弃，洪水只占一次接收和一次查表。
+#[derive(Debug)]
+struct HandshakeBudget {
+    window: Instant,
+    total: u32,
+    sources: HashMap<IpAddr, u32>,
+}
+
+impl HandshakeBudget {
+    fn new(now: Instant) -> Self {
+        Self {
+            window: now,
+            total: 0,
+            sources: HashMap::new(),
+        }
+    }
+
+    fn admit(&mut self, from: IpAddr, now: Instant) -> bool {
+        if now.saturating_duration_since(self.window) >= BUDGET_WINDOW {
+            self.window = now;
+            self.total = 0;
+            self.sources.clear();
+        }
+        if self.total >= HANDSHAKES_TOTAL {
+            return false;
+        }
+        let full = self.sources.len() >= HANDSHAKE_SOURCES;
+        let count = match self.sources.get_mut(&from) {
+            Some(count) => count,
+            None if full => return false,
+            None => self.sources.entry(from).or_insert(0),
+        };
+        if *count >= HANDSHAKES_PER_SOURCE {
+            return false;
+        }
+        *count += 1;
+        self.total += 1;
+        true
+    }
+}
 
 /// 数据面要执行的动作。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,6 +115,7 @@ pub struct Plane<S> {
     local: Vec<IpAddr>,
     /// 闲置的 TLS 回环端口：从它们进来的包丢弃（design/mesh.md 第 5.3 节）。
     guarded: BTreeSet<u16>,
+    handshakes: HandshakeBudget,
 }
 
 impl<S: Sessions> Plane<S> {
@@ -75,6 +126,7 @@ impl<S: Sessions> Plane<S> {
             filter: Filter::default(),
             local: Vec::new(),
             guarded: BTreeSet::new(),
+            handshakes: HandshakeBudget::new(Instant::now()),
         }
     }
 
@@ -165,7 +217,12 @@ impl<S: Sessions> Plane<S> {
             return;
         }
         match datagram.first() {
-            Some(1..=4) => {}
+            Some(1 | 2) => {
+                if !self.handshakes.admit(from.ip(), now) {
+                    return;
+                }
+            }
+            Some(3 | 4) => {}
             Some(&kind) if (DIRECT_PROBE..=DIRECT_REPLY).contains(&kind) => {
                 if datagram.len() == OUTER_LEN {
                     out.push(Action::Probe {
@@ -478,6 +535,55 @@ mod tests {
                 Action::Probe { from, data: cookie }
             ]
         );
+    }
+
+    #[test]
+    fn handshake_floods_are_capped_per_source_and_in_total() {
+        let start = Instant::now();
+        let mut budget = HandshakeBudget::new(start);
+        let flooder = ip("203.0.113.66");
+        let admitted = (0..10_000).filter(|_| budget.admit(flooder, start)).count();
+        assert_eq!(admitted, HANDSHAKES_PER_SOURCE as usize);
+        // 洪水用完了它自己的额度，其他来源不受影响
+        assert!(budget.admit(ip("198.51.100.3"), start));
+        // 下一秒重新计数
+        assert!(budget.admit(flooder, start + BUDGET_WINDOW));
+
+        // 很多来源：合计不超过总额，来源表不超过上限
+        let mut budget = HandshakeBudget::new(start);
+        let mut total = 0;
+        for i in 0..20_000u32 {
+            let src = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + i));
+            total += (0..4).filter(|_| budget.admit(src, start)).count();
+        }
+        assert_eq!(total, HANDSHAKES_TOTAL as usize);
+        assert!(budget.sources.len() <= HANDSHAKE_SOURCES);
+    }
+
+    #[test]
+    fn over_budget_handshakes_get_no_response() {
+        let (mut a, mut b) = pair(true);
+        let packet = build::udp(a.mesh, 1, b.mesh, 53);
+        let out = send(&mut a, &packet);
+        let Some(Action::Udp { datagram, .. }) = out.first().cloned() else {
+            panic!("handshake initiation");
+        };
+        let now = Instant::now();
+        let mut at_b = Vec::new();
+        // 洪水：类型 1 的垃圾包，用完这个来源的额度（它们本身也得不到响应）
+        let mut junk = vec![0x5a; 148];
+        junk[0] = 1;
+        for _ in 0..HANDSHAKES_PER_SOURCE {
+            b.plane
+                .from_udp(sa("203.0.113.66:5000"), &junk, now, &mut at_b);
+        }
+        assert!(at_b.is_empty(), "{at_b:?}");
+        // 超额之后，同一来源发来的有效握手也不交给会话层，不作任何响应
+        b.plane
+            .from_udp(sa("203.0.113.66:5000"), &datagram, now, &mut at_b);
+        assert!(at_b.is_empty(), "{at_b:?}");
+        // 另一个来源（a 的真实地址）照常完成握手
+        assert_eq!(exchange(&mut a, &mut b, out).1, [packet]);
     }
 
     #[test]

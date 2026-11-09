@@ -3636,11 +3636,21 @@ fn cookie_once(
             completed.zip(first_switch).map(|(c, s)| c - s)
         ),
     );
-    report.check(
-        &format!("{label}:cookie-reaches-a-through-the-relay"),
-        cookies_to_a > 0,
-        format!("{cookies_to_a} cookie replies"),
-    );
+    // 内核 WireGuard 按整机的握手队列判断负载，所有发起方都要带 cookie 重试；用户态数据面按来源限额
+    // （design/userspace.md 第 4.1 节），被洪水的一方只要求洪水的来源带 cookie，a 经中继的握手直接得到应答
+    if b.userspace {
+        report.check(
+            &format!("{label}:handshake-answered-without-cookie"),
+            cookies_to_a == 0 && completed.is_some_and(|c| c < flood_until),
+            format!("{cookies_to_a} cookie replies, response at {completed:?}"),
+        );
+    } else {
+        report.check(
+            &format!("{label}:cookie-reaches-a-through-the-relay"),
+            cookies_to_a > 0,
+            format!("{cookies_to_a} cookie replies"),
+        );
+    }
     // 来回切换：回到了之前离开过的中继
     let mut visited: Vec<&str> = vec![];
     let mut returned = false;
