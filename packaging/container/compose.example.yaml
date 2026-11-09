@@ -3,7 +3,7 @@
 # 也使用固定地址；容器内成员重启不影响服务。
 #
 # 第一次使用：docker compose run --rm nett mesh keys --dir /etc/nett，把输出的一行写进站点描述，在其中
-# 写上 container_member = true 与 routes = ["172.30.0.10/32"]；nett site build 生成的 desired.json 放进
+# 写上 routes = ["172.30.0.10/32"]；nett site build 生成的 desired.json 放进
 # ./nett；之后更新时 docker compose kill -s HUP nett。
 services:
   nett:

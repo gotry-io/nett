@@ -250,12 +250,7 @@ impl<D: DataPlane> Engine<D> {
         }
         let filter = self
             .access
-            .filter(
-                &self.node_id,
-                self.members.members(),
-                self.routes.of(&self.node_id),
-                desired.container_member,
-            )
+            .filter(&self.node_id, self.members.members())
             .unwrap_or_else(|e| {
                 events.emit(Event::AccessRulesRejected {
                     reason: e.to_string(),
@@ -720,13 +715,15 @@ mod tests {
                 "fd00:88::1:1/128"
             ]
         );
-        // 来源是 Edge 专用地址、又没有规则放行时拒绝
+        // 来源是 Edge 专用地址、又没有规则放行时拒绝：只有隧道内探测放行，而它们的来源是组网地址
+        let edge_source: IpPrefix = "100.88.1.1/32".parse().expect("prefix");
         let filter = other.dataplane.filter.as_ref().expect("filter");
-        assert!(filter.rules.iter().any(|r| !r.accept
-            && r.matches
-                == [crate::access::Match::Source(
-                    "100.88.1.1/32".parse().expect("prefix")
-                )]));
+        assert!(!filter.rules.iter().any(|r| {
+            r.accept
+                && r.matches
+                    .iter()
+                    .any(|m| matches!(m, crate::access::Match::Source(s) if s.covers(&edge_source)))
+        }));
     }
 
     #[test]
@@ -740,7 +737,6 @@ mod tests {
         let with_routes = |me: u8| {
             let mut d = mesh.desired(me, members.clone());
             d.advertised_routes = vec![mesh.sign(&mesh.routes_doc(2, 1, &["192.0.2.10/32"]))];
-            d.container_member = me == 2;
             validated(d)
         };
         let route: IpPrefix = "192.0.2.10/32".parse().expect("prefix");
@@ -757,7 +753,7 @@ mod tests {
         assert_eq!(edge.dataplane.routes, [route]);
         assert_eq!(edge.dataplane.ingress, None);
 
-        // 智能入口本身：转发 Edge 的流量，宣告的网段默认拒绝，自己的网段不加路由
+        // 智能入口本身：转发 Edge 的流量，宣告的网段没有规则时拒绝，自己的网段不加路由
         let mut router = engine(2);
         router.apply(&with_routes(2), &mut VecSink::default());
         let ingress = router.dataplane.ingress.as_ref().expect("ingress");
@@ -768,12 +764,12 @@ mod tests {
         );
         assert!(router.dataplane.routes.is_empty());
         let filter = router.dataplane.filter.as_ref().expect("filter");
-        assert!(
-            filter
-                .rules
-                .iter()
-                .any(|r| !r.accept && r.matches == [crate::access::Match::Destination(route)])
-        );
+        assert!(!filter.rules.iter().any(|r| {
+            r.accept
+                && r.matches
+                    .iter()
+                    .any(|m| matches!(m, crate::access::Match::Destination(d) if d.covers(&route)))
+        }));
     }
 
     #[test]

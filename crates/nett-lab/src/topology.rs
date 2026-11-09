@@ -46,9 +46,6 @@ pub struct Node {
     /// 节点运行 Edge（ADR 0015）：Edge 所在容器的网段。实验 A 在这个节点背后建一个"容器"命名空间，
     /// 地址就是这里写的唯一一个 IPv4 地址（`/32`）。
     pub edge: Option<EdgeSources>,
-    /// 容器内成员：入方向默认拒绝（ADR 0016）。
-    #[serde(default)]
-    pub container_member: bool,
     /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
     #[serde(default)]
     pub routes: Vec<IpPrefix>,

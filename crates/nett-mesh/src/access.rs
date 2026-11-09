@@ -17,7 +17,7 @@ use crate::event::{Event, EventSink};
 use crate::probe::TUNNEL_PROBE_PORT;
 
 /// 展开后的过滤规则最多的条数（硬性规则 14）：规则集中每条规则的来源 × 目标 × 端口范围，加上成员之间的
-/// 控制流量与默认值。超过时整体按拒绝处理。
+/// 控制流量。超过时整体按拒绝处理。
 pub const MAX_FILTER_RULES: usize = 4096;
 
 /// 一个匹配条件。来源和目标网段同时决定了地址族。
@@ -37,21 +37,16 @@ pub struct FilterRule {
 }
 
 /// 本机从组网接口进入、新建连接的过滤规则（已建立的连接和与它相关的包直接放行）：按顺序匹配，第一条
-/// 匹配的规则决定放行或拒绝；都不匹配时放行。
+/// 匹配的规则决定放行或拒绝；都不匹配时拒绝（ADR 0023），由数据面的后端执行。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FilterSpec {
     pub rules: Vec<FilterRule>,
 }
 
 impl FilterSpec {
-    /// 拒绝所有新建的入方向连接：规则无法展开或安装失败时使用（硬性规则 6）。
+    /// 拒绝所有新建的入方向连接（没有规则时即是拒绝）：规则无法展开或安装失败时使用（硬性规则 6）。
     pub fn deny_all() -> Self {
-        Self {
-            rules: vec![FilterRule {
-                matches: Vec::new(),
-                accept: false,
-            }],
-        }
+        Self::default()
     }
 }
 
@@ -174,16 +169,13 @@ impl AccessRules {
 
     /// 本机的过滤规则（design/mesh.md 第 12 节）：
     /// 1. 成员发往本机隧道内探测端口的包放行：组网自己的测量不受访问规则影响；
-    /// 2. 规则集中的规则，按顺序展开；
-    /// 3. 来源是任何成员的 Edge 专用地址时拒绝；
-    /// 4. 目标是本机宣告的网段时拒绝；
-    /// 5. 本机是容器内成员时拒绝其他所有，否则放行。
+    /// 2. 规则集中的规则，按顺序展开。
+    ///
+    /// 其他新建连接都拒绝（ADR 0023），包括来自 Edge 专用地址的、发往本机宣告的网段的。
     pub fn filter(
         &self,
         own: &NodeId,
         members: &BTreeMap<NodeId, Member>,
-        own_routes: &[IpPrefix],
-        container_member: bool,
     ) -> Result<FilterSpec, AccessError> {
         let mut rules = Vec::new();
         let own_addrs = members.get(own).map(|m| mesh_addrs(&m.addresses));
@@ -226,26 +218,6 @@ impl AccessRules {
                     }
                 }
             }
-        }
-        for edge in members.values().filter_map(|m| m.edge.as_ref()) {
-            for addr in mesh_addrs(&edge.addresses) {
-                rules.push(FilterRule {
-                    matches: vec![Match::Source(IpPrefix::host(addr))],
-                    accept: false,
-                });
-            }
-        }
-        for route in own_routes {
-            rules.push(FilterRule {
-                matches: vec![Match::Destination(*route)],
-                accept: false,
-            });
-        }
-        if container_member {
-            rules.push(FilterRule {
-                matches: Vec::new(),
-                accept: false,
-            });
         }
         if rules.len() > MAX_FILTER_RULES {
             return Err(AccessError::TooManyRules);
@@ -292,16 +264,14 @@ mod tests {
 
     /// 成员 1、2、3，其中 1 有 Edge；返回 2 看到的成员表。
     fn members(mesh: &Mesh) -> BTreeMap<NodeId, Member> {
-        let mut doc = mesh.desired(
+        let desired = validated(mesh.desired(
             2,
             vec![
                 mesh.edge_material(1, 1),
                 mesh.material(2, 1),
                 mesh.material(3, 1),
             ],
-        );
-        doc.container_member = true;
-        let desired = validated(doc);
+        ));
         let mut set = crate::members::MemberSet::default();
         set.apply(&desired, &mut VecSink::default());
         set.members().clone()
@@ -351,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn filter_orders_control_rules_defaults() {
+    fn filter_puts_control_rules_before_the_rule_set() {
         let mesh = Mesh::new(&[1, 2, 3]);
         let members = members(&mesh);
         let mut access = AccessRules::default();
@@ -376,12 +346,10 @@ mod tests {
             ],
         )));
         access.apply(&validated(d), &mut VecSink::default());
-        let spec = access
-            .filter(&node_id(2), &members, &[], true)
-            .expect("filter");
+        let spec = access.filter(&node_id(2), &members).expect("filter");
         let r = &spec.rules;
-        // 成员 1、3 的隧道内探测（IPv4、IPv6 各一条）在最前
-        assert_eq!(r.len(), 4 + 1 + 1 + 2 + 1, "{r:?}");
+        // 成员 1、3 的隧道内探测（IPv4、IPv6 各一条）在最前；其后只有规则集，没有规则匹配的都拒绝
+        assert_eq!(r.len(), 4 + 1 + 1, "{r:?}");
         assert!(r[..4].iter().all(|x| x.accept
             && x.matches.contains(&Match::Port(PortRange {
                 protocol: Protocol::Udp,
@@ -414,22 +382,6 @@ mod tests {
                 accept: false,
             }
         );
-        // 成员 1 的 Edge 专用地址
-        assert_eq!(r[6].matches, vec![Match::Source(p("100.88.1.1/32"))]);
-        assert!(!r[6].accept && !r[7].accept);
-        // 容器内成员：其他所有都拒绝
-        assert_eq!(
-            r[8],
-            FilterRule {
-                matches: vec![],
-                accept: false
-            }
-        );
-
-        let open = access
-            .filter(&node_id(2), &members, &[], false)
-            .expect("filter");
-        assert_eq!(open.rules.len(), r.len() - 1);
     }
 
     #[test]
@@ -457,7 +409,7 @@ mod tests {
             set.members().clone()
         };
         assert_eq!(
-            access.filter(&node_id(2), &members, &[], false),
+            access.filter(&node_id(2), &members),
             Err(AccessError::TooManyRules)
         );
     }

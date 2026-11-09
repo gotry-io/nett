@@ -543,7 +543,6 @@ pub fn generate(
             paths,
             access_rules: access_rules.clone(),
             advertised_routes: routes.clone(),
-            container_member: node.container_member,
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {

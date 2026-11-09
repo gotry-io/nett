@@ -4185,7 +4185,7 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
     for n in &generated.nodes {
         wait_for(n, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
     }
-    // 容器内成员只接受它自己发起的连接：从它出发等隧道通
+    // 容器内成员在 NAT 之后、只接受它自己发起的连接：从它出发等隧道通（规则放行 app 访问另外两个）
     for target in [edge.mesh_ipv4, other.mesh_ipv4] {
         let r = ping(&ns_app, &target.to_string());
         report.check(
@@ -4312,12 +4312,22 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         ),
     );
 
-    // 成员之间默认放行
-    let r = ping(&ns_other, &edge.mesh_ipv4.to_string());
+    // 成员之间默认拒绝（ADR 0023）：同一条隧道上，规则放行 edge 访问 other，反方向没有规则
+    let r = ping(&ns_edge, &other.mesh_ipv4.to_string());
     report.check(
-        "members-allowed-by-default",
+        "member-allowed-by-rule",
         r.is_ok(),
         r.err().map(|e| format!("{e:#}")).unwrap_or_default(),
+    );
+    let r = ping(&ns_other, &edge.mesh_ipv4.to_string());
+    report.check(
+        "member-denied-without-rule",
+        r.is_err(),
+        if r.is_ok() {
+            "other reached edge".into()
+        } else {
+            String::new()
+        },
     );
 
     // 防冒用：edge 节点上以 Edge 专用地址为源发出的包不离开本机。在 other 上计数从组网接口进来的包：

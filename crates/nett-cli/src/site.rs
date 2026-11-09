@@ -79,8 +79,6 @@ struct SiteNode {
     ipv4: Option<Ipv4Addr>,
     ipv6: Option<Ipv6Addr>,
     edge: Option<SiteEdge>,
-    #[serde(default)]
-    container_member: bool,
     /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
     #[serde(default)]
     routes: Vec<IpPrefix>,
@@ -396,7 +394,6 @@ fn build(dir: &Path) -> anyhow::Result<()> {
                 .values()
                 .filter_map(|n| n.routes.as_ref().map(|r| r.signed.clone()))
                 .collect(),
-            container_member: node.container_member,
         };
         // 生成的期望状态必须能被组网进程接受
         nett_mesh::config::DesiredMesh::from_doc(doc.clone())
@@ -887,7 +884,7 @@ mod tests {
         let nodes = |edge: bool, with_c: bool| {
             let mut s = format!(
                 "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nkeys = \"{ka}\"\n{}\
-                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\ncontainer_member = true\n\
+                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\n\
                  [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n",
                 if edge {
                     "edge = { containers = [\"172.17.0.2/32\"] }\n"
@@ -916,7 +913,6 @@ mod tests {
 
         // 生成的期望状态通过组网进程的准入与规则集验证
         let app = desired(&dir, "app");
-        assert!(app.container_member);
         let mut members = MemberSet::default();
         let mut events = VecSink::default();
         members.apply(&app, &mut events);
@@ -966,7 +962,7 @@ mod tests {
             format!(
                 "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nkeys = \"{ka}\"\n\
                  edge = {{ containers = [\"172.17.0.2/32\"] }}\n\
-                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\ncontainer_member = true\n{routes}\
+                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\n{routes}\
                  [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n"
             )
         };

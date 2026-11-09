@@ -34,9 +34,6 @@ pub struct DesiredMeshDoc {
     /// 智能入口宣告的网段，每份是一个签名载荷（design/mesh.md 第 10 节）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertised_routes: Vec<SignedPayload>,
-    /// 本机是容器内成员：入方向默认拒绝（ADR 0016）。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub container_member: bool,
 }
 
 /// 节点的网络可达性（design/architecture.md 第 6.5 节）。
@@ -141,7 +138,6 @@ pub struct DesiredMesh {
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
-    pub container_member: bool,
     /// 交给传输适配进程的配置，与 [`DesiredMesh::tls_endpoints`] 同出一处。
     pub transport: TransportConfig,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
@@ -218,7 +214,6 @@ impl DesiredMesh {
             paths,
             access_rules: doc.access_rules,
             advertised_routes: doc.advertised_routes,
-            container_member: doc.container_member,
             transport: TransportConfig {
                 wireguard_port: doc.listen_port,
                 targets,

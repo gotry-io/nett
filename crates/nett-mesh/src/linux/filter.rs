@@ -70,7 +70,7 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 
 /// 整表替换 `nett_access`：不是从组网接口进入的、已建立的连接和与它相关的包放行，之后按 `filter` 的顺序
-/// 匹配，都不匹配时放行。
+/// 匹配，都不匹配时丢弃（ADR 0023）。
 pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
     let mut messages = replace_table(ACCESS_TABLE);
     messages.push(base_chain(
@@ -113,6 +113,11 @@ pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
             verdict(m, if r.accept { NF_ACCEPT } else { NF_DROP });
         }));
     }
+    // 链的默认策略是放行（其他接口的流量不归这张表管），组网接口上没有规则放行的新建连接在这里丢弃
+    messages.push(rule(ACCESS_TABLE, "in", |m| {
+        ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+        verdict(m, NF_DROP);
+    }));
     messages.push(batch(NFNL_MSG_BATCH_END));
     Socket::open(Some(NETFILTER))?.request_batch(messages)
 }

@@ -176,7 +176,6 @@ impl Mesh {
                 .collect(),
             access_rules: None,
             advertised_routes: vec![],
-            container_member: false,
         }
     }
 }
