@@ -1,4 +1,5 @@
-//! `nett` 可执行文件：命令行，以及 `nett node`、`nett mesh`、`nett transport`、`nett relay` 各进程的入口（ADR 0012）。
+//! `nett` 可执行文件：命令行（包括接入 Hub 之前的签名工具 `nett site`），以及 `nett node`、`nett mesh`、
+//! `nett transport`、`nett relay` 各进程的入口（ADR 0012）。
 
 use std::process::ExitCode;
 
@@ -6,7 +7,7 @@ use std::process::ExitCode;
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
-#[cfg(target_os = "linux")]
+mod site;
 mod text;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod transport;
@@ -35,6 +36,7 @@ fn run() -> anyhow::Result<()> {
     match arg {
         #[cfg(target_os = "linux")]
         lexopt::Arg::Value(cmd) if cmd == "mesh" => mesh::run(parser),
+        lexopt::Arg::Value(cmd) if cmd == "site" => site::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
         lexopt::Arg::Value(cmd) if cmd == "relay" => relay::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]

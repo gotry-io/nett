@@ -341,11 +341,15 @@ dependencies = [
  "nett-relay",
  "nett-transport",
  "nett-trust",
+ "ring",
  "rustix",
+ "serde",
  "serde_json",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
+ "zeroize",
 ]
 
 [[package]]

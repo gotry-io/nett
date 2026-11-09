@@ -22,6 +22,18 @@ pub enum IdError {
     Ulid,
 }
 
+/// ULID：48 位毫秒时间戳在前，80 位随机数在后，按 Crockford base32 写成 26 个字符（最高两位为 0）。
+fn ulid(unix_ms: u64, random: [u8; 10]) -> String {
+    let mut bits = u128::from(unix_ms & 0xffff_ffff_ffff) << 80;
+    for (i, b) in random.iter().enumerate() {
+        bits |= u128::from(*b) << (72 - 8 * i);
+    }
+    (0..ULID_LEN)
+        .rev()
+        .map(|i| char::from(CROCKFORD[usize::try_from((bits >> (5 * i)) & 0x1f).unwrap_or(0)]))
+        .collect()
+}
+
 fn validate(s: &str, prefix: &'static str) -> Result<(), IdError> {
     let ulid = s
         .strip_prefix(prefix)
@@ -45,6 +57,11 @@ macro_rules! prefixed_id {
 
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+
+            /// 由 Unix 毫秒时间戳和 80 位随机数组成的新 ID（ULID 的规范形式）。随机数由调用方提供。
+            pub fn from_parts(unix_ms: u64, random: [u8; 10]) -> Self {
+                Self(format!("{}_{}", $prefix, ulid(unix_ms, random)))
             }
         }
 
@@ -125,6 +142,16 @@ mod tests {
         ] {
             assert_eq!(bad.parse::<NodeId>(), Err(IdError::Ulid), "{bad}");
         }
+    }
+
+    #[test]
+    fn generated_ids_are_canonical_and_ordered_by_time() {
+        // ULID 规范中的例子：时间戳 1469918176385、随机数全为 0 时为 01ARYZ6S41 加 16 个 0
+        let id = NodeId::from_parts(1_469_918_176_385, [0; 10]);
+        assert_eq!(id.as_str(), "node_01ARYZ6S410000000000000000");
+        let later = NodeId::from_parts(1_469_918_176_386, [0xff; 10]);
+        assert!(later.as_str().parse::<NodeId>().is_ok());
+        assert!(id < later);
     }
 
     #[test]

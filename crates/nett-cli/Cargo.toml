@@ -17,16 +17,21 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 lexopt.workspace = true
+# 签名工具 `nett site`（design/local-signing.md）在用户的电脑上运行，各平台都有
+nett-core.workspace = true
+nett-mesh.workspace = true
+nett-trust = { workspace = true, features = ["signing"] }
+ring.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+zeroize.workspace = true
 nett-relay = { workspace = true, optional = true }
 nett-transport = { workspace = true, optional = true }
 
 # 组网进程只在 Linux 上（design/local-signing.md 第 2 节）
 [target.'cfg(target_os = "linux")'.dependencies]
-nett-core.workspace = true
-nett-mesh.workspace = true
-nett-trust.workspace = true
 rustix = { workspace = true, features = ["thread"] }
-serde_json.workspace = true
 tokio = { workspace = true, features = ["rt", "signal", "macros", "net"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
