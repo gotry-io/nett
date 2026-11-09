@@ -21,6 +21,7 @@ use nett_mesh::macos::{MacTun, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
 use nett_mesh::userspace::UserspaceDataPlane;
+use nett_trust::keys::X25519PublicKey;
 use tokio::signal::unix::{SignalKind, signal};
 
 struct Args {
@@ -46,7 +47,7 @@ struct LabArgs {
 
 const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key>\n       \
 nett mesh keys --dir <directory>\n       \
-sudo nett mesh install | uninstall    (macOS: the launchd service, design/release.md section 4)";
+sudo nett mesh install [--config <desired-state.json>] | uninstall    (macOS service, design/release.md section 4)";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
 [--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
@@ -116,18 +117,46 @@ fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     }
     let dir = dir.context(USAGE)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let mesh = PrivateKey::generate()?;
-    let identity = PrivateKey::generate()?;
-    mesh.save_new(&dir.join("mesh.key"))?;
-    identity.save_new(&dir.join("identity.key"))?;
+    print_keys(&dir, node_keys(&dir)?);
+    Ok(())
+}
+
+/// 本机的组网公钥与身份公钥。两把私钥都还没有时生成（`0600`，不离开本机）；已有时沿用；只有一把时报错，
+/// 不覆盖任何一把。
+pub(crate) fn node_keys(
+    dir: &std::path::Path,
+) -> anyhow::Result<(X25519PublicKey, X25519PublicKey)> {
+    let (mesh, identity) = (dir.join("mesh.key"), dir.join("identity.key"));
+    match (mesh.exists(), identity.exists()) {
+        (true, true) => Ok((
+            PrivateKey::load(&mesh)?.public_key(),
+            PrivateKey::load(&identity)?.public_key(),
+        )),
+        (false, false) => {
+            let (m, i) = (PrivateKey::generate()?, PrivateKey::generate()?);
+            m.save_new(&mesh)?;
+            i.save_new(&identity)?;
+            Ok((m.public_key(), i.public_key()))
+        }
+        _ => bail!(
+            "only one of mesh.key and identity.key exists in {}; move it away to generate both again",
+            dir.display()
+        ),
+    }
+}
+
+/// 打印写进站点描述的一行公钥。
+pub(crate) fn print_keys(
+    dir: &std::path::Path,
+    (mesh, identity): (X25519PublicKey, X25519PublicKey),
+) {
     println!(
         "{}",
-        crate::text::KEYS_WRITTEN
+        crate::text::NODE_KEYS
             .get()
             .replace("{dir}", &dir.display().to_string())
     );
-    println!("keys = \"{} {}\"", mesh.public_key(), identity.public_key());
-    Ok(())
+    println!("keys = \"{mesh} {identity}\"");
 }
 
 /// 日志写到标准错误（Linux 上由 systemd 收进日志）。macOS 上以 launchd 服务运行时（标准错误不是终端）
@@ -232,7 +261,18 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 .map(|a| a.to_string_lossy().into_owned())
         });
         match sub.as_deref() {
-            Some("install") => return crate::service::install(),
+            Some("install") => {
+                let mut config = None;
+                while let Some(arg) = parser.next()? {
+                    match arg {
+                        lexopt::Arg::Long("config") => {
+                            config = Some(PathBuf::from(parser.value()?))
+                        }
+                        other => return Err(other.unexpected().into()),
+                    }
+                }
+                return crate::service::install(config.as_deref());
+            }
             Some("uninstall") => return crate::service::uninstall(),
             _ => {}
         }

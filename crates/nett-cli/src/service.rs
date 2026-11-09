@@ -1,6 +1,6 @@
-//! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett mesh install` 把正在运行的 `nett` 复制到
-//! root 专属的目录，写入 launchd 与日志轮转的配置并启动服务；`sudo nett mesh uninstall` 停止并删除它们。
-//! Homebrew 的目录普通用户可写，root 服务只运行这份副本。
+//! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett mesh install` 在 root 专属的目录中生成
+//! 密钥、放入程序的副本和期望状态，写入 launchd 与日志轮转的配置并启动服务；`sudo nett mesh uninstall` 停止
+//! 服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务只运行这份副本。
 
 use std::fs;
 use std::io::Write as _;
@@ -133,46 +133,73 @@ fn loaded() -> anyhow::Result<bool> {
     launchctl(&["print", &format!("system/{LABEL}")])
 }
 
-pub fn install() -> anyhow::Result<()> {
+/// 写入 `path`，内容与现有的相同时不动；返回是否写了。
+fn replace_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<bool> {
+    if fs::read(path).is_ok_and(|old| old == content) {
+        return Ok(false);
+    }
+    write_atomic(path, content, mode)?;
+    Ok(true)
+}
+
+/// 一个命令完成安装（design/release.md 第 4 节）：密钥、程序的副本、两份配置，`config` 给出时导入期望
+/// 状态；有期望状态时启动服务，已在运行时按变化重启或重新加载。
+pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
     ensure_dir(LOG_DIR, 0o700)?;
+    let keys = crate::mesh::node_keys(Path::new(DIR))?;
+    crate::mesh::print_keys(Path::new(DIR), keys);
+
+    let desired_changed = match config {
+        Some(path) => {
+            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            crate::site::check_desired_for(&bytes, &keys.0)?;
+            replace_if_changed(Path::new(DESIRED), &bytes, 0o600)?
+        }
+        None => false,
+    };
     let exe = std::env::current_exe().context("locating the running nett")?;
     let exe = fs::canonicalize(&exe).unwrap_or(exe);
     // 从副本自己运行时（重新写配置）不用复制
-    if exe != Path::new(BINARY) {
+    let binary_changed = if exe == Path::new(BINARY) {
+        false
+    } else {
         let bytes = fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
-        write_atomic(Path::new(BINARY), &bytes, 0o755)?;
-    }
-    write_atomic(Path::new(PLIST), plist().as_bytes(), 0o644)?;
-    write_atomic(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
+        replace_if_changed(Path::new(BINARY), &bytes, 0o755)?
+    };
+    let plist_changed = replace_if_changed(Path::new(PLIST), plist().as_bytes(), 0o644)?;
+    replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
-    let missing: Vec<&str> = [DESIRED, KEY]
-        .into_iter()
-        .filter(|p| !Path::new(p).exists())
-        .collect();
-    if !missing.is_empty() {
+    if !Path::new(DESIRED).exists() {
         println!(
             "{}",
             text::SERVICE_INSTALLED_NOT_STARTED
                 .get()
                 .replace("{dir}", DIR)
-                .replace("{missing}", &missing.join(", "))
         );
         return Ok(());
     }
-    let (ok, message) = if loaded()? {
-        // 已在运行：重启，换用新的副本
-        let target = format!("system/{LABEL}");
-        (
-            launchctl(&["kickstart", "-k", &target])?,
-            &text::SERVICE_RESTARTED,
-        )
-    } else {
+    let target = format!("system/{LABEL}");
+    let (ok, message) = if !loaded()? {
         (
             launchctl(&["bootstrap", "system", PLIST])?,
             &text::SERVICE_STARTED,
         )
+    } else if binary_changed || plist_changed {
+        // 换用新的副本：重启
+        (
+            launchctl(&["kickstart", "-k", &target])?,
+            &text::SERVICE_RESTARTED,
+        )
+    } else if desired_changed {
+        // 只有期望状态变了：重新读取，不重启，进行中的连接不中断
+        (
+            launchctl(&["kill", "HUP", &target])?,
+            &text::SERVICE_RELOADED,
+        )
+    } else {
+        (true, &text::SERVICE_UNCHANGED)
     };
     if !ok {
         bail!("launchctl could not start {LABEL}; see {LOG_DIR}/mesh.log");

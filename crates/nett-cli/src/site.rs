@@ -233,6 +233,31 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
 }
 
 /// 为站点描述中的每个节点生成期望状态（design/local-signing.md 第 4、5 节）。
+/// `nett site build` 生成的期望状态是不是给这台机器的：其中本节点准入材料的组网公钥必须是 `mesh_public`
+/// （`sudo nett mesh install --config`，design/release.md 第 4 节）。拷错了节点的文件时在复制之前就报错。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn check_desired_for(
+    bytes: &[u8],
+    mesh_public: &X25519PublicKey,
+) -> anyhow::Result<NodeId> {
+    let desired =
+        nett_mesh::config::DesiredMesh::from_json(bytes).context("not a valid desired state")?;
+    let mut members = nett_mesh::members::MemberSet::default();
+    members.apply(&desired, &mut nett_mesh::event::VecSink::default());
+    let me = members
+        .get(&desired.node_id)
+        .context("the desired state does not admit its own node")?;
+    ensure!(
+        me.mesh_public_key == *mesh_public,
+        "this desired state is for node {} (mesh key {}), not for this machine (mesh key {}); \
+         use the desired.json that nett site build wrote for this machine's node",
+        desired.node_id,
+        me.mesh_public_key,
+        mesh_public
+    );
+    Ok(desired.node_id.clone())
+}
+
 fn build(dir: &Path) -> anyhow::Result<()> {
     let site: Site = toml::from_str(
         &std::fs::read_to_string(dir.join(SITE_FILE))
@@ -863,6 +888,38 @@ mod tests {
 
     fn state(dir: &Path) -> State {
         serde_json::from_slice(&std::fs::read(dir.join(STATE_FILE)).expect("state")).expect("parse")
+    }
+
+    #[test]
+    fn desired_state_must_belong_to_this_machine() {
+        let dir = temp_dir("owner");
+        init(&dir, DEFAULT_ORIGIN).expect("init");
+        let (ka, kb) = (keys(), keys());
+        write_site(
+            &dir,
+            &format!(
+                "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nkeys = \"{ka}\"\n\
+                 [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nkeys = \"{kb}\"\n\
+                 [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n"
+            ),
+        );
+        build(&dir).expect("build");
+        let mesh_key = |k: &str| -> X25519PublicKey {
+            k.split_whitespace()
+                .next()
+                .expect("mesh key")
+                .parse()
+                .expect("key")
+        };
+        let mac = std::fs::read(dir.join(OUT_DIR).join("mac").join("desired.json")).expect("out");
+        assert_eq!(
+            check_desired_for(&mac, &mesh_key(&kb)).expect("mine"),
+            state(&dir).nodes["mac"].node_id
+        );
+        // 另一个节点的文件、不是期望状态的文件都在复制之前被拒绝
+        assert!(check_desired_for(&mac, &mesh_key(&ka)).is_err());
+        assert!(check_desired_for(b"{}", &mesh_key(&kb)).is_err());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn desired(dir: &Path, node: &str) -> DesiredMesh {

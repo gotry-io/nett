@@ -22,11 +22,11 @@
 - **macOS**（原生成员与签名工具 `nett site`）：
   ```bash
   brew install gotry-io/tap/nett
-  sudo nett mesh keys --dir "/Library/Application Support/nett"   # 输出的一行写进站点描述
-  # 把 nett site build 为这个节点生成的 desired.json 放进同一个目录
-  sudo nett mesh install                                         # 安装并启动组网服务
+  sudo nett mesh install                           # 生成本机密钥，打印写进站点描述的一行
+  # 在站点描述中加上这个节点，运行 nett site build
+  sudo nett mesh install --config <这个节点的 desired.json>   # 核对、导入期望状态并启动组网服务
   ```
-  组网服务以 root 运行（创建 utun 需要 root），运行的是 `sudo nett mesh install` 复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett mesh install`（[design/release.md](docs/design/release.md) 第 4 节）。
+  期望状态更新后执行同一个命令（只重新加载，不重启）。组网服务以 root 运行（创建 utun 需要 root），运行的是复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett mesh install`（[design/release.md](docs/design/release.md) 第 4 节）。
 - **Linux**：从 [Releases](https://github.com/gotry-io/nett/releases) 下载对应架构的静态版本，核对签名（[keys/](keys/README.md)）后安装到 `/usr/local/bin`，使用 [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service)。
 
 ## 文档

@@ -20,9 +20,9 @@ fn chinese() -> bool {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-pub const KEYS_WRITTEN: Text = Text {
-    zh: "已在 {dir} 生成 mesh.key 和 identity.key（权限 0600，只留在这台机器上）。把下面这一行写进站点描述中这个节点的条目（design/local-signing.md 第 4 节）：",
-    en: "Wrote mesh.key and identity.key to {dir} (mode 0600; keep them on this machine). Add this line to this node's entry in the site description (design/local-signing.md section 4):",
+pub const NODE_KEYS: Text = Text {
+    zh: "这个节点的私钥在 {dir}（mesh.key 与 identity.key，权限 0600，只留在这台机器上）。把下面这一行写进站点描述中这个节点的条目（design/local-signing.md 第 4 节）：",
+    en: "This node's private keys are in {dir} (mesh.key and identity.key, mode 0600; they stay on this machine). Add this line to this node's entry in the site description (design/local-signing.md section 4):",
 };
 
 #[cfg(target_os = "macos")]
@@ -33,20 +33,32 @@ pub const SERVICE_NEEDS_ROOT: Text = Text {
 
 #[cfg(target_os = "macos")]
 pub const SERVICE_INSTALLED_NOT_STARTED: Text = Text {
-    zh: "已安装到 {dir}，服务还没有启动：缺少 {missing}。先运行 `sudo nett mesh keys --dir \"{dir}\"`，把输出的一行写进站点描述；把 `nett site build` 为这个节点生成的 desired.json 放进 {dir}；然后再运行 `sudo nett mesh install`。",
-    en: "Installed into {dir}; the service is not started yet: {missing} is missing. Run `sudo nett mesh keys --dir \"{dir}\"` and add the printed line to the site description, put the desired.json that `nett site build` generated for this node into {dir}, then run `sudo nett mesh install` again.",
+    zh: "已安装到 {dir}，服务还没有启动：还没有期望状态。把上面一行写进站点描述，运行 `nett site build` 之后执行 `sudo nett mesh install --config <这个节点的 desired.json>`。",
+    en: "Installed into {dir}; the service is not started yet because there is no desired state. Add the line above to the site description, run `nett site build`, then run `sudo nett mesh install --config <this node's desired.json>`.",
 };
 
 #[cfg(target_os = "macos")]
 pub const SERVICE_STARTED: Text = Text {
-    zh: "组网服务已启动（launchd 标签 {label}），运行的是 {binary}。日志：log show --last 1h --predicate 'process == \"nett\"'。升级：brew upgrade nett 之后再运行 sudo nett mesh install。",
-    en: "The mesh service is running (launchd label {label}) from {binary}. Logs: log show --last 1h --predicate 'process == \"nett\"'. To upgrade: brew upgrade nett, then sudo nett mesh install.",
+    zh: "组网服务已启动（launchd 标签 {label}），运行的是 {binary}。日志：log show --last 1h --predicate 'process == \"nett\"'。期望状态更新后执行 sudo nett mesh install --config <desired.json>；brew upgrade nett 之后执行 sudo nett mesh install。",
+    en: "The mesh service is running (launchd label {label}) from {binary}. Logs: log show --last 1h --predicate 'process == \"nett\"'. After the desired state changes, run sudo nett mesh install --config <desired.json>; after brew upgrade nett, run sudo nett mesh install.",
 };
 
 #[cfg(target_os = "macos")]
 pub const SERVICE_RESTARTED: Text = Text {
     zh: "组网服务已重启（launchd 标签 {label}），换用新的 {binary}。日志：log show --last 1h --predicate 'process == \"nett\"'。",
     en: "The mesh service restarted (launchd label {label}) with the new {binary}. Logs: log show --last 1h --predicate 'process == \"nett\"'.",
+};
+
+#[cfg(target_os = "macos")]
+pub const SERVICE_RELOADED: Text = Text {
+    zh: "组网服务已重新读取期望状态（没有重启，进行中的连接不中断）。",
+    en: "The mesh service reloaded the desired state (no restart; active connections continue).",
+};
+
+#[cfg(target_os = "macos")]
+pub const SERVICE_UNCHANGED: Text = Text {
+    zh: "组网服务已在运行，程序和期望状态都没有变化。",
+    en: "The mesh service is already running; neither the program nor the desired state changed.",
 };
 
 #[cfg(target_os = "macos")]

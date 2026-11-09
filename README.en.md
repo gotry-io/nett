@@ -22,11 +22,11 @@ nett is for individuals and small teams with a few scattered machines, for examp
 - **macOS** (native member and the signing tool `nett site`):
   ```bash
   brew install gotry-io/tap/nett
-  sudo nett mesh keys --dir "/Library/Application Support/nett"   # add the printed line to the site description
-  # put the desired.json that nett site build generated for this node into the same directory
-  sudo nett mesh install                                         # install and start the mesh service
+  sudo nett mesh install                           # creates this machine's keys and prints the line for the site description
+  # add this node to the site description and run nett site build
+  sudo nett mesh install --config <this node's desired.json>   # checks and imports the desired state, starts the mesh service
   ```
-  The mesh service runs as root (creating the utun interface needs root) and runs a copy that `sudo nett mesh install` places in a root-only directory, so run `sudo nett mesh install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
+  Run the same command whenever the desired state changes (it reloads without a restart). The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett mesh install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
 - **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service).
 
 ## Documentation
