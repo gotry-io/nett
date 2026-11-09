@@ -285,6 +285,29 @@ node                                              Hub
   }
   ```
 
+  有 `edge` 角色时还有两项：`edge` 写明怎样识别 Edge 发出的流量（`containers`：Edge 所在容器的网段），`addresses.edge` 是 Edge 专用地址；没有这个角色时两项都不出现。
+
+  ```json
+  {
+    "roles": ["edge"],
+    "edge": { "containers": ["172.17.0.0/16"] },
+    "addresses": { "mesh": { "ipv4": "…", "ipv6": "…" }, "edge": { "ipv4": "…", "ipv6": "…" } }
+  }
+  ```
+
+- **访问规则集产物**：整份规则集，规则按数组顺序匹配（排在前面的优先），写的是选择器展开后的网段和端口（mesh.md 第 12 节）。`ports` 为空表示所有协议和端口：
+
+  ```json
+  {
+    "kind": "access_rule_set",
+    "version": 3,
+    "rules": [
+      { "action": "allow", "from": ["100.88.0.9/32", "fd…::9/128"], "to": ["100.88.0.2/32", "fd…::2/128"],
+        "ports": [{ "protocol": "tcp", "first": 8686, "last": 8686 }] }
+    ]
+  }
+  ```
+
 - **准入证明**：入网私钥对下面这份载荷的签名，与载荷的字节一起分发：
 
   ```json

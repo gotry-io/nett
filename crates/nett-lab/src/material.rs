@@ -207,7 +207,11 @@ fn policy(
             .filter(|r| *r == "relay")
             .map(|_| Role::Relay)
             .collect(),
-        addresses: NodeAddresses { mesh: addresses },
+        edge: None,
+        addresses: NodeAddresses {
+            mesh: addresses,
+            edge: None,
+        },
         enrollment_public_key: enrollment.public_key(),
     }
 }

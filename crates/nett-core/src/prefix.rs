@@ -1,4 +1,4 @@
-//! 网段：组网网段与 WireGuard 的 `AllowedIPs`。
+//! 网段：组网网段、WireGuard 的 `AllowedIPs`、访问规则与 Edge 的来源。
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};

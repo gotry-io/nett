@@ -49,11 +49,13 @@ impl Mesh {
             policy_version: version,
             modules: vec![Module::Mesh],
             roles: vec![Role::Relay],
+            edge: None,
             addresses: NodeAddresses {
                 mesh: MeshAddresses {
                     ipv4: format!("100.88.0.{n}").parse().expect("ipv4"),
                     ipv6: format!("fd00:88::{n:x}").parse().expect("ipv6"),
                 },
+                edge: None,
             },
             enrollment_public_key: self.enrollment[&n].public_key(),
         }

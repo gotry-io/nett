@@ -6,10 +6,18 @@ use crate::canonical::{CanonicalError, parse_canonical, to_canonical};
 use crate::encoding::{Sha256Digest, Timestamp};
 use crate::keys::Ed25519PublicKey;
 use nett_core::id::{ChangeId, NodeId};
+use nett_core::prefix::IpPrefix;
 use serde::{Deserialize, Serialize};
 
 /// 载荷格式的版本。
 pub const PAYLOAD_V1: u64 = 1;
+
+/// 一份访问规则集最多的规则数，以及每条规则中网段和端口范围的上限（硬性规则 14）。
+pub const MAX_ACCESS_RULES: usize = 1024;
+pub const MAX_RULE_PREFIXES: usize = 256;
+pub const MAX_RULE_PORTS: usize = 64;
+/// Edge 所在容器的网段数的上限。
+pub const MAX_EDGE_CONTAINERS: usize = 16;
 
 /// 签名载荷的文档形式。控制台（以及实验工具）按它生成，验证方按它解析。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,6 +42,7 @@ pub enum PayloadDoc {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Artifact {
     NodePolicy(NodePolicy),
+    AccessRuleSet(AccessRuleSet),
 }
 
 /// 节点策略，字段与 `node-policies` 资源一致（design/api-resources.md 第 5.2 节）。
@@ -44,6 +53,9 @@ pub struct NodePolicy {
     pub policy_version: u64,
     pub modules: Vec<Module>,
     pub roles: Vec<Role>,
+    /// 有 `edge` 角色时，怎样识别 Edge 发出的流量（ADR 0015）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<EdgeSources>,
     pub addresses: NodeAddresses,
     pub enrollment_public_key: Ed25519PublicKey,
 }
@@ -58,12 +70,63 @@ pub enum Module {
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Relay,
+    Edge,
+}
+
+/// Edge 发出的流量从哪里来：Edge 所在容器的网段。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EdgeSources {
+    pub containers: Vec<IpPrefix>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeAddresses {
     pub mesh: MeshAddresses,
+    /// Edge 专用地址，只在有 `edge` 角色时出现。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edge: Option<MeshAddresses>,
+}
+
+/// 访问规则集（design/mesh.md 第 12 节）：选择器展开后的网段和端口，按数组顺序匹配。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRuleSet {
+    pub version: u64,
+    pub rules: Vec<AccessRule>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessRule {
+    pub action: RuleAction,
+    pub from: Vec<IpPrefix>,
+    pub to: Vec<IpPrefix>,
+    /// 为空表示所有协议和端口。
+    pub ports: Vec<PortRange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleAction {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortRange {
+    pub protocol: Protocol,
+    pub first: u16,
+    pub last: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Protocol {
+    Tcp,
+    Udp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +152,15 @@ pub enum PayloadError {
     Address(NodeId),
     #[error("payload: carries more than one node policy for {0}")]
     DuplicatePolicy(NodeId),
+    #[error(
+        "payload: node policy for {0} must have the edge role, the edge sources and the edge \
+         addresses together, with unicast edge addresses that differ from the mesh addresses"
+    )]
+    Edge(NodeId),
+    #[error("payload: access rule set: {0}")]
+    AccessRules(&'static str),
+    #[error("payload: carries more than one access rule set")]
+    DuplicateRuleSet,
 }
 
 /// 已解析、已校验格式的签名载荷（签名由 [`crate::signed`] 验证）。
@@ -120,14 +192,25 @@ impl Payload {
         }
         let mut artifact_hashes = Vec::with_capacity(artifacts.len());
         for (i, artifact) in artifacts.iter().enumerate() {
-            let Artifact::NodePolicy(policy) = artifact;
-            policy.validate()?;
-            let duplicate = artifacts[..i].iter().any(|other| {
-                let Artifact::NodePolicy(other) = other;
-                other.node_id == policy.node_id
-            });
-            if duplicate {
-                return Err(PayloadError::DuplicatePolicy(policy.node_id.clone()));
+            match artifact {
+                Artifact::NodePolicy(policy) => {
+                    policy.validate()?;
+                    let duplicate = artifacts[..i].iter().any(|other| {
+                        matches!(other, Artifact::NodePolicy(o) if o.node_id == policy.node_id)
+                    });
+                    if duplicate {
+                        return Err(PayloadError::DuplicatePolicy(policy.node_id.clone()));
+                    }
+                }
+                Artifact::AccessRuleSet(rules) => {
+                    rules.validate()?;
+                    if artifacts[..i]
+                        .iter()
+                        .any(|other| matches!(other, Artifact::AccessRuleSet(_)))
+                    {
+                        return Err(PayloadError::DuplicateRuleSet);
+                    }
+                }
             }
             artifact_hashes.push(artifact_hash(artifact)?);
         }
@@ -160,10 +243,19 @@ impl Payload {
     }
 
     pub fn node_policy(&self, node_id: &NodeId) -> Option<(&Sha256Digest, &NodePolicy)> {
-        self.artifacts().find_map(|(hash, artifact)| {
-            let Artifact::NodePolicy(policy) = artifact;
-            (policy.node_id == *node_id).then_some((hash, policy))
-        })
+        self.artifacts()
+            .find_map(|(hash, artifact)| match artifact {
+                Artifact::NodePolicy(policy) if policy.node_id == *node_id => Some((hash, policy)),
+                _ => None,
+            })
+    }
+
+    pub fn access_rule_set(&self) -> Option<(&Sha256Digest, &AccessRuleSet)> {
+        self.artifacts()
+            .find_map(|(hash, artifact)| match artifact {
+                Artifact::AccessRuleSet(rules) => Some((hash, rules)),
+                Artifact::NodePolicy(_) => None,
+            })
     }
 }
 
@@ -188,21 +280,72 @@ impl NodePolicy {
         if has_duplicates(&self.modules) || has_duplicates(&self.roles) {
             return Err(PayloadError::DuplicateEntry(self.node_id.clone()));
         }
-        let MeshAddresses { ipv4, ipv6 } = self.addresses.mesh;
-        let ipv4_ok = !(ipv4.is_unspecified()
-            || ipv4.is_loopback()
-            || ipv4.is_multicast()
-            || ipv4.is_broadcast());
-        let ipv6_ok = !(ipv6.is_unspecified() || ipv6.is_loopback() || ipv6.is_multicast());
-        if ipv4_ok && ipv6_ok {
+        if !self.addresses.mesh.is_unicast() {
+            return Err(PayloadError::Address(self.node_id.clone()));
+        }
+        let edge_ok = match (self.has_role(Role::Edge), &self.edge, &self.addresses.edge) {
+            (false, None, None) => true,
+            (true, Some(sources), Some(edge)) => {
+                !sources.containers.is_empty()
+                    && sources.containers.len() <= MAX_EDGE_CONTAINERS
+                    && edge.is_unicast()
+                    && edge.ipv4 != self.addresses.mesh.ipv4
+                    && edge.ipv6 != self.addresses.mesh.ipv6
+            }
+            _ => false,
+        };
+        if edge_ok {
             Ok(())
         } else {
-            Err(PayloadError::Address(self.node_id.clone()))
+            Err(PayloadError::Edge(self.node_id.clone()))
         }
     }
 
     pub fn has_module(&self, module: Module) -> bool {
         self.modules.contains(&module)
+    }
+
+    pub fn has_role(&self, role: Role) -> bool {
+        self.roles.contains(&role)
+    }
+}
+
+impl MeshAddresses {
+    fn is_unicast(&self) -> bool {
+        let Self { ipv4, ipv6 } = *self;
+        let ipv4_ok = !(ipv4.is_unspecified()
+            || ipv4.is_loopback()
+            || ipv4.is_multicast()
+            || ipv4.is_broadcast());
+        let ipv6_ok = !(ipv6.is_unspecified() || ipv6.is_loopback() || ipv6.is_multicast());
+        ipv4_ok && ipv6_ok
+    }
+}
+
+impl AccessRuleSet {
+    fn validate(&self) -> Result<(), PayloadError> {
+        let err = PayloadError::AccessRules;
+        if self.version == 0 {
+            return Err(err("the version starts at 1"));
+        }
+        if self.rules.len() > MAX_ACCESS_RULES {
+            return Err(err("too many rules"));
+        }
+        for rule in &self.rules {
+            if rule.from.is_empty() || rule.to.is_empty() {
+                return Err(err("a rule needs at least one source and one destination"));
+            }
+            if rule.from.len() > MAX_RULE_PREFIXES || rule.to.len() > MAX_RULE_PREFIXES {
+                return Err(err("a rule lists too many prefixes"));
+            }
+            if rule.ports.len() > MAX_RULE_PORTS {
+                return Err(err("a rule lists too many port ranges"));
+            }
+            if rule.ports.iter().any(|p| p.first == 0 || p.first > p.last) {
+                return Err(err("a port range must satisfy 1 <= first <= last"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -270,7 +413,7 @@ pub(crate) mod tests {
             extra,
             payload_value(vec![extra_in_policy]),
             payload_value(vec![unknown_role]),
-            payload_value(vec![json!({"kind": "access_rule_set", "version": 1})]),
+            payload_value(vec![json!({"kind": "device_credential", "version": 1})]),
             unknown_kind,
         ] {
             assert!(Payload::parse(&bytes(&v)).is_err(), "{v}");
@@ -314,6 +457,130 @@ pub(crate) mod tests {
             Payload::parse(&bytes(&v)).err(),
             Some(PayloadError::Format(2))
         );
+    }
+
+    fn edge_policy_value() -> Value {
+        let mut v = policy_value();
+        v["roles"] = json!(["relay", "edge"]);
+        v["edge"] = json!({ "containers": ["172.17.0.0/16"] });
+        v["addresses"]["edge"] = json!({ "ipv4": "100.88.1.2", "ipv6": "fd00:88::1:2" });
+        v
+    }
+
+    pub(crate) fn rule_set_value() -> Value {
+        json!({
+            "kind": "access_rule_set",
+            "version": 3,
+            "rules": [
+                { "action": "allow", "from": ["100.88.1.2/32", "fd00:88::1:2/128"],
+                  "to": ["100.88.0.9/32"], "ports": [{ "protocol": "tcp", "first": 8686, "last": 8686 }] },
+                { "action": "deny", "from": ["100.88.0.0/16"], "to": ["100.88.0.9/32"], "ports": [] },
+            ],
+        })
+    }
+
+    #[test]
+    fn parses_an_edge_policy() {
+        let p = Payload::parse(&bytes(&payload_value(vec![edge_policy_value()]))).expect("valid");
+        let node: NodeId = NODE_A.parse().expect("id");
+        let (_, policy) = p.node_policy(&node).expect("policy present");
+        assert!(policy.has_role(Role::Edge));
+        assert_eq!(
+            policy.edge.as_ref().map(|e| e.containers.clone()),
+            Some(vec!["172.17.0.0/16".parse().expect("prefix")])
+        );
+        assert_eq!(
+            policy.addresses.edge.map(|a| a.ipv4),
+            Some(Ipv4Addr::new(100, 88, 1, 2))
+        );
+    }
+
+    #[test]
+    fn rejects_inconsistent_edge_policies() {
+        let mut role_only = policy_value();
+        role_only["roles"] = json!(["edge"]);
+        let mut sources_only = edge_policy_value();
+        sources_only["roles"] = json!(["relay"]);
+        let mut no_addresses = edge_policy_value();
+        no_addresses["addresses"] =
+            json!({ "mesh": { "ipv4": "100.88.0.2", "ipv6": "fd00:88::2" } });
+        let mut same_as_mesh = edge_policy_value();
+        same_as_mesh["addresses"]["edge"]["ipv4"] = json!("100.88.0.2");
+        let mut no_containers = edge_policy_value();
+        no_containers["edge"]["containers"] = json!([]);
+        let mut loopback = edge_policy_value();
+        loopback["addresses"]["edge"]["ipv6"] = json!("::1");
+        for v in [
+            role_only,
+            sources_only,
+            no_addresses,
+            same_as_mesh,
+            no_containers,
+            loopback,
+        ] {
+            let err = Payload::parse(&bytes(&payload_value(vec![v.clone()]))).expect_err("edge");
+            assert!(matches!(err, PayloadError::Edge(_)), "{v}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_an_access_rule_set() {
+        let v = payload_value(vec![policy_value(), rule_set_value()]);
+        let p = Payload::parse(&bytes(&v)).expect("valid");
+        let (hash, rules) = p.access_rule_set().expect("rule set present");
+        assert_eq!(*hash, Sha256Digest::of(&bytes(&rule_set_value())));
+        assert_eq!(rules.version, 3);
+        assert_eq!(rules.rules[0].action, RuleAction::Allow);
+        assert_eq!(
+            rules.rules[0].ports,
+            vec![PortRange {
+                protocol: Protocol::Tcp,
+                first: 8686,
+                last: 8686
+            }]
+        );
+        assert!(rules.rules[1].ports.is_empty());
+        assert_eq!(p.doc().to_canonical().expect("canonical"), bytes(&v));
+    }
+
+    #[test]
+    fn rejects_bad_access_rule_sets() {
+        let with = |f: &dyn Fn(&mut Value)| {
+            let mut v = rule_set_value();
+            f(&mut v);
+            payload_value(vec![v])
+        };
+        for (v, want) in [
+            (with(&|v| v["version"] = json!(0)), "AccessRules"),
+            (with(&|v| v["rules"][0]["from"] = json!([])), "AccessRules"),
+            (
+                with(&|v| v["rules"][0]["ports"][0]["first"] = json!(0)),
+                "AccessRules",
+            ),
+            (
+                with(&|v| v["rules"][0]["ports"][0]["last"] = json!(80)),
+                "AccessRules",
+            ),
+            (
+                with(&|v| v["rules"][0]["ports"][0]["protocol"] = json!("icmp")),
+                "Document",
+            ),
+            (
+                with(&|v| v["rules"][0]["to"] = json!(["100.88.0.9/16"])),
+                "Document",
+            ),
+            (
+                with(&|v| v["rules"][0]["action"] = json!("reject")),
+                "Document",
+            ),
+            (
+                payload_value(vec![rule_set_value(), rule_set_value()]),
+                "DuplicateRuleSet",
+            ),
+        ] {
+            let err = Payload::parse(&bytes(&v)).expect_err(want);
+            assert!(format!("{err:?}").starts_with(want), "{v}: {err:?}");
+        }
     }
 
     #[test]

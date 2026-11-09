@@ -306,11 +306,13 @@ mod tests {
             policy_version: version,
             modules: vec![Module::Mesh],
             roles: vec![Role::Relay],
+            edge: None,
             addresses: NodeAddresses {
                 mesh: MeshAddresses {
                     ipv4: "100.88.0.2".parse().expect("ipv4"),
                     ipv6: "fd00:88::2".parse().expect("ipv6"),
                 },
+                edge: None,
             },
             enrollment_public_key: enrollment.public_key(),
         }
