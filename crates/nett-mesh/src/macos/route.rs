@@ -150,7 +150,7 @@ pub fn physical(defaults: &[DefaultRoute], name_of: impl Fn(u16) -> Option<Strin
 }
 
 /// 隧道、虚拟机网桥、点对点等接口：不承载发往底层网络的流量。
-fn is_virtual(name: &str) -> bool {
+pub fn is_virtual(name: &str) -> bool {
     const PREFIXES: [&str; 10] = [
         "utun", "ipsec", "ppp", "gif", "stf", "awdl", "llw", "bridge", "anpi", "lo",
     ];

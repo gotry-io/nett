@@ -131,13 +131,13 @@ fn physical_interface() -> Option<u16> {
     route::physical(&route::defaults(&dump), |i| sys::if_name_of(u32::from(i)))
 }
 
-/// 双栈套接字：IPv6 与 IPv4（映射地址）两个方向都绑定。没有物理接口时解除绑定，按路由表发送。
+/// 绑定双栈套接字。`IPV6_BOUND_IF` 同时作用于发往 IPv4 映射地址的流量（实测：绑定 en0 后，发往代理应用
+/// 接管的 IPv4 地址的包从 en0 发出，不绑定时从代理应用的 utun 发出）；`IP_BOUND_IF` 在 IPv6 套接字上返回
+/// EINVAL。没有物理接口时解除绑定，按路由表发送。
 fn bind_physical(socket: &UdpSocket, index: Option<u16>) {
     let index = u32::from(index.unwrap_or(0));
-    for v6 in [true, false] {
-        if let Err(e) = sys::bind_to_interface(socket.as_fd(), index, v6) {
-            tracing::warn!(error = %e, v6, "binding an underlay socket to the physical interface");
-        }
+    if let Err(e) = sys::bind_to_interface(socket.as_fd(), index, true) {
+        tracing::warn!(error = %e, "binding an underlay socket to the physical interface");
     }
 }
 
@@ -349,6 +349,37 @@ impl Platform for MacTun {
 mod tests {
     use super::*;
     use crate::dataplane::MESH_MTU;
+
+    #[test]
+    fn underlay_follows_the_physical_interface_for_ipv4_too() {
+        let Some(index) = physical_interface() else {
+            return; // 没有默认路由的机器上无从比较
+        };
+        let name = sys::if_name_of(u32::from(index)).expect("name");
+        assert!(!route::is_virtual(&name), "{name}");
+        let mac = MacTun::open().expect("routing socket");
+        let underlay = mac.bind_underlay(0).expect("underlay");
+        // 对照：只绑定这个接口的 IPv4 套接字
+        let v4 = UdpSocket::bind("0.0.0.0:0").expect("v4");
+        sys::bind_to_interface(v4.as_fd(), u32::from(index), false).expect("bind v4");
+        let target: SocketAddr = "192.0.2.1:9".parse().expect("addr");
+        v4.connect(target).expect("connect v4");
+        underlay
+            .connect(SocketAddr::new(
+                IpAddr::V6(std::net::Ipv4Addr::new(192, 0, 2, 1).to_ipv6_mapped()),
+                9,
+            ))
+            .expect("connect underlay");
+        let mapped = match underlay.local_addr().expect("local").ip() {
+            IpAddr::V6(a) => a.to_ipv4_mapped().map(IpAddr::V4),
+            v4 => Some(v4),
+        };
+        assert_eq!(
+            mapped,
+            Some(v4.local_addr().expect("local").ip()),
+            "via {name}"
+        );
+    }
 
     /// 需要 root：创建 utun、配置地址和路由，经组网地址收发，退出后接口消失。CI 中用 sudo 运行
     /// （`cargo test -- --ignored macos`）。

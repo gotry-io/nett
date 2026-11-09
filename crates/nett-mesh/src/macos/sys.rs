@@ -231,7 +231,8 @@ pub(crate) fn if_name_of(index: u32) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// 让套接字只经编号为 `index` 的接口收发（0 解除绑定），IPv4 与 IPv6 两个方向都设置。
+/// 让套接字只经编号为 `index` 的接口收发（0 解除绑定）：IPv6 套接字（含双栈）用 `IPV6_BOUND_IF`，IPv4 套接字
+/// 用 `IP_BOUND_IF`。
 pub(crate) fn bind_to_interface(fd: BorrowedFd<'_>, index: u32, v6: bool) -> io::Result<()> {
     let value: c_uint = index;
     let set = |level, name| {
