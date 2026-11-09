@@ -279,6 +279,9 @@ impl Lab {
             "--transport-config".into(),
             transport_config.clone().into(),
         ];
+        if node.userspace {
+            args.push("--userspace".into());
+        }
         args.extend(extra.iter().map(Into::into));
         let child = spawn_in(&net.netns, nett, &args, &dir.join("mesh.log"))?;
         self.processes.push((node.name.clone(), child));

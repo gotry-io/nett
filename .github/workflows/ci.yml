@@ -188,6 +188,27 @@ jobs:
           --topology crates/nett-lab/topologies/access.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-access"
+      - name: 用户态数据面与内核 WireGuard 互通：准入与直连（design/userspace.md 第 8 节）
+        run: >-
+          sudo ./target/debug/nett-lab run admission
+          --topology crates/nett-lab/topologies/direct.toml
+          --userspace b
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-userspace-14"
+      - name: 用户态数据面：直连失效切到中继，恢复后回到直连
+        run: >-
+          sudo ./target/debug/nett-lab run failover
+          --topology crates/nett-lab/topologies/failover.toml
+          --userspace b
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-userspace-failover"
+      - name: 用户态数据面：两端锥形 NAT，打洞
+        run: >-
+          sudo ./target/debug/nett-lab run punch
+          --topology crates/nett-lab/topologies/punch-cone.toml
+          --userspace b
+          --nett ./target/debug/nett
+          --out "$RUNNER_TEMP/lab-userspace-punch"
 
   deny:
     runs-on: ubuntu-24.04

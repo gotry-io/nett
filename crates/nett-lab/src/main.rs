@@ -34,6 +34,7 @@ fn main() -> ExitCode {
 }
 
 const USAGE: &str = "usage:
+  every `run` also takes [--userspace <node>] (repeatable): that node uses the userspace data plane
   nett-lab run <admission|selftest|relay-smoke> --topology <file.toml> --nett <path/to/nett> --out <dir>
   nett-lab run tailscale --topology <file.toml> --out <dir>
   nett-lab run wgport --topology <file.toml> --nett <path/to/nett> --out <dir>
@@ -86,6 +87,7 @@ fn run() -> anyhow::Result<bool> {
     let mut clock_skew_ms = 0i64;
     let mut bytes = None::<u64>;
     let mut key = None::<String>;
+    let mut userspace = Vec::new();
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -103,12 +105,18 @@ fn run() -> anyhow::Result<bool> {
             Long("clock-skew") => clock_skew_ms = parser.value()?.string()?.parse()?,
             Long("bytes") => bytes = Some(parser.value()?.string()?.parse()?),
             Long("key") => key = Some(parser.value()?.string()?),
+            Long("userspace") => userspace.push(parser.value()?.string()?),
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
             }
             other => return Err(other.unexpected().into()),
         }
+    }
+    // 指定节点改用用户态数据面：在输出目录里写一份改过的拓扑，场景读它
+    if !userspace.is_empty() {
+        let (path, out) = (topology.context(USAGE)?, out.as_ref().context(USAGE)?);
+        topology = Some(topology::with_userspace(&path, &userspace, out)?);
     }
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     match words.as_slice() {

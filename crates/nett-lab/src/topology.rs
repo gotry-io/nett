@@ -38,6 +38,9 @@ pub struct Node {
     pub behind: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
+    /// 用户态数据面（design/userspace.md）：`nett mesh --userspace`。缺省用内核 WireGuard。
+    #[serde(default)]
+    pub userspace: bool,
     /// 实验 B（真实机器，design/prototype.md 第 5.2 节）：SSH 主机名，以及公网 IPv4（`public` 节点）与
     /// 全局 IPv6 地址。实验 A 的地址由本机的网络规划决定，不写这几项。
     pub ssh: Option<String>,
@@ -126,6 +129,43 @@ pub enum Nat {
 pub struct Link {
     pub peers: [String; 2],
     pub candidates: Vec<String>,
+}
+
+/// 拓扑的一份副本，其中 `names` 这些节点改用用户态数据面（`userspace = true`），写到 `dir` 中，返回它的路径。
+pub fn with_userspace(
+    path: &std::path::Path,
+    names: &[String],
+    dir: &std::path::Path,
+) -> anyhow::Result<std::path::PathBuf> {
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut out = String::with_capacity(text.len());
+    let mut in_node = false;
+    let mut found = BTreeSet::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_node = trimmed == "[[node]]";
+        }
+        out.push_str(line);
+        out.push('\n');
+        if in_node && let Some(name) = names.iter().find(|n| trimmed == format!("name = \"{n}\"")) {
+            out.push_str("userspace = true\n");
+            found.insert(name.clone());
+        }
+    }
+    for name in names {
+        anyhow::ensure!(
+            found.contains(name),
+            "--userspace names unknown node `{name}`"
+        );
+    }
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    // 沿用原来的文件名：有的场景以它命名报告
+    let copy = dir.join(path.file_name().context("topology file name")?);
+    std::fs::write(&copy, out).with_context(|| format!("writing {}", copy.display()))?;
+    Topology::load(&copy)?;
+    Ok(copy)
 }
 
 impl Topology {

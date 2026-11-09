@@ -6,6 +6,7 @@ mod netlink;
 mod nft;
 mod rtnl;
 mod sys;
+pub mod tun;
 mod wg;
 mod wgport;
 
@@ -85,29 +86,58 @@ impl KernelWireGuard {
             ifindex: None,
         })
     }
+}
 
-    fn sync_addresses(&mut self, index: u32, spec: &InterfaceSpec) -> Result<(), DataPlaneError> {
-        let current = retry_interrupted(|| rtnl::get_addresses(&mut self.route, index))
-            .map_err(kernel("list interface addresses"))?;
-        let wanted: Vec<_> = spec
-            .addresses
-            .iter()
-            .map(|a| (a.addr, a.prefix_len))
-            .collect();
-        for (addr, len) in &current {
-            if !wanted.contains(&(*addr, *len)) {
-                rtnl::del_address(&mut self.route, index, *addr, *len)
-                    .map_err(kernel("remove interface address"))?;
-            }
+/// 让接口上的地址恰好是 `spec` 中的地址。
+fn sync_addresses(
+    route: &mut Socket,
+    index: u32,
+    spec: &InterfaceSpec,
+) -> Result<(), DataPlaneError> {
+    let current = retry_interrupted(|| rtnl::get_addresses(route, index))
+        .map_err(kernel("list interface addresses"))?;
+    let wanted: Vec<_> = spec
+        .addresses
+        .iter()
+        .map(|a| (a.addr, a.prefix_len))
+        .collect();
+    for (addr, len) in &current {
+        if !wanted.contains(&(*addr, *len)) {
+            rtnl::del_address(route, index, *addr, *len)
+                .map_err(kernel("remove interface address"))?;
         }
-        for (addr, len) in &wanted {
-            if !current.contains(&(*addr, *len)) {
-                rtnl::add_address(&mut self.route, index, *addr, *len)
-                    .map_err(kernel("add interface address"))?;
-            }
-        }
-        Ok(())
     }
+    for (addr, len) in &wanted {
+        if !current.contains(&(*addr, *len)) {
+            rtnl::add_address(route, index, *addr, *len)
+                .map_err(kernel("add interface address"))?;
+        }
+    }
+    Ok(())
+}
+
+/// 让接口上的路由恰好是 `routes`（[`DataPlane::sync_routes`]）。
+fn sync_routes(
+    route: &mut Socket,
+    index: Option<u32>,
+    routes: &[IpPrefix],
+) -> Result<(), DataPlaneError> {
+    let Some(index) = index else {
+        return Err(DataPlaneError::Protocol {
+            op: "sync routes",
+            detail: "interface is not set up".to_owned(),
+        });
+    };
+    let current = retry_interrupted(|| rtnl::get_routes(route, index))
+        .map_err(kernel("list routes on the mesh interface"))?;
+    for r in current.iter().filter(|r| !routes.contains(r)) {
+        rtnl::del_route(route, index, *r)
+            .map_err(kernel("remove a route from the mesh interface"))?;
+    }
+    for r in routes.iter().filter(|r| !current.contains(r)) {
+        rtnl::add_route(route, index, *r).map_err(kernel("add a route to the mesh interface"))?;
+    }
+    Ok(())
 }
 
 impl DataPlane for KernelWireGuard {
@@ -137,7 +167,7 @@ impl DataPlane for KernelWireGuard {
         .map_err(kernel("set wireguard private key and port"))?;
         rtnl::set_mtu_up(&mut self.route, link.index, spec.mtu)
             .map_err(kernel("set interface mtu and up"))?;
-        self.sync_addresses(link.index, spec)?;
+        sync_addresses(&mut self.route, link.index, spec)?;
         let device =
             retry_interrupted(|| wg::get_device(&mut self.generic, self.family, link.index))
                 .map_err(kernel("read wireguard device"))?;
@@ -266,23 +296,7 @@ impl DataPlane for KernelWireGuard {
     }
 
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
-        let Some(index) = self.ifindex else {
-            return Err(DataPlaneError::Protocol {
-                op: "sync routes",
-                detail: "interface is not set up".to_owned(),
-            });
-        };
-        let current = retry_interrupted(|| rtnl::get_routes(&mut self.route, index))
-            .map_err(kernel("list routes on the mesh interface"))?;
-        for route in current.iter().filter(|r| !routes.contains(r)) {
-            rtnl::del_route(&mut self.route, index, *route)
-                .map_err(kernel("remove a route from the mesh interface"))?;
-        }
-        for route in routes.iter().filter(|r| !current.contains(r)) {
-            rtnl::add_route(&mut self.route, index, *route)
-                .map_err(kernel("add a route to the mesh interface"))?;
-        }
-        Ok(())
+        sync_routes(&mut self.route, self.ifindex, routes)
     }
 
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError> {

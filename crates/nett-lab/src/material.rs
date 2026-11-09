@@ -94,6 +94,9 @@ pub struct LabNode {
     /// 有经 TLS 的候选：需要传输适配进程。
     #[serde(default)]
     pub tls: bool,
+    /// 用户态数据面：没有内核 WireGuard 接口，`wg show` 读不到它。
+    #[serde(default)]
+    pub userspace: bool,
 }
 
 /// 场景 14 的反例（design/prototype.md 第 4 节第 5 项），加入第一个节点的期望状态。
@@ -411,6 +414,7 @@ pub fn generate(
             edge_ipv4: edge.map(|e| e.ipv4),
             dir,
             tls,
+            userspace: node.userspace,
         });
     }
 

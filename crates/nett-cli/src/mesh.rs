@@ -12,9 +12,11 @@ use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
 use nett_mesh::lab::{JsonLinesSink, LabClock, TransportConfigWriter};
+use nett_mesh::linux::tun::LinuxTun;
 use nett_mesh::linux::{KernelWireGuard, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
+use nett_mesh::userspace::UserspaceDataPlane;
 use tokio::signal::unix::{SignalKind, signal};
 
 struct Args {
@@ -34,13 +36,15 @@ struct LabArgs {
     clock_trusted: Option<bool>,
     /// 传输适配进程的配置写到这里（design/mesh.md 第 5.3 节）。
     transport_config: Option<PathBuf>,
+    /// 用用户态数据面代替内核 WireGuard（design/userspace.md 第 8 节）。
+    userspace: bool,
 }
 
 const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key>\n       \
 nett mesh keys --dir <directory>";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
-[--clock-offset-ms <ms>] [--clock-trusted <yes|no>]";
+[--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
 
 fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
     let (mut config, mut key) = (None, None);
@@ -81,6 +85,7 @@ fn parse_lab(lab: &mut LabArgs, name: &str, parser: &mut lexopt::Parser) -> anyh
     match name {
         "events" => lab.events = Some(PathBuf::from(parser.value()?)),
         "transport-config" => lab.transport_config = Some(PathBuf::from(parser.value()?)),
+        "userspace" => lab.userspace = true,
         "clock-offset-ms" => lab.clock_offset_ms = parser.value()?.parse()?,
         "clock-trusted" => {
             lab.clock_trusted = Some(match parser.value()?.string()?.as_str() {
@@ -147,7 +152,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 
     let node_id = node_id(&args.config)?;
     let key = PrivateKey::load(&args.key)?;
-    let dataplane = KernelWireGuard::open()?;
     #[cfg(feature = "lab")]
     let sink: Box<dyn EventSink + Send> = match &args.lab.events {
         Some(path) => Box::new(
@@ -157,7 +161,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "lab"))]
     let sink: Box<dyn EventSink + Send> = Box::new(LogSink);
-    let engine = Engine::new(node_id, key, dataplane);
     #[cfg(feature = "lab")]
     let clock = LabClock {
         inner: SystemClock,
@@ -166,7 +169,18 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "lab"))]
     let clock = SystemClock;
-    let worker = Runtime::spawn(engine, sink, clock).context("starting the mesh worker thread")?;
+    #[cfg(feature = "lab")]
+    let userspace = args.lab.userspace;
+    #[cfg(not(feature = "lab"))]
+    let userspace = false;
+    let worker = if userspace {
+        let dataplane = UserspaceDataPlane::new(LinuxTun::open()?);
+        Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
+    } else {
+        let dataplane = KernelWireGuard::open()?;
+        Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
+    }
+    .context("starting the mesh worker thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

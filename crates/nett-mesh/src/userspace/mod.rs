@@ -9,7 +9,7 @@ pub mod session;
 mod worker;
 
 #[cfg(unix)]
-pub use self::dataplane::{Platform, Tun, UserspaceDataPlane};
+pub use self::dataplane::{Platform, Tun, UserspaceDataPlane, dual_stack_udp};
 
 #[cfg(unix)]
 mod dataplane {
@@ -84,6 +84,22 @@ mod dataplane {
                 .map(|r| &r.worker)
                 .ok_or(DataPlaneError::Worker("the interface is not up yet"))
         }
+    }
+
+    /// WireGuard 端口的套接字：IPv6 通配地址上的双栈套接字，同时收发 IPv4（映射地址）与 IPv6。
+    pub fn dual_stack_udp(port: u16) -> io::Result<UdpSocket> {
+        use rustix::io::{FdFlags, fcntl_setfd};
+        use rustix::net::{AddressFamily, SocketType, bind, socket, sockopt::set_ipv6_v6only};
+        // macOS 没有 SOCK_CLOEXEC：建好之后再设置
+        let fd = socket(AddressFamily::INET6, SocketType::DGRAM, None)?;
+        fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
+        // 显式关闭"只收 IPv6"：有的系统默认开启
+        set_ipv6_v6only(&fd, false)?;
+        bind(
+            &fd,
+            &std::net::SocketAddrV6::new(std::net::Ipv6Addr::UNSPECIFIED, port, 0, 0),
+        )?;
+        Ok(UdpSocket::from(fd))
     }
 
     fn local(spec: &InterfaceSpec) -> Vec<IpAddr> {
