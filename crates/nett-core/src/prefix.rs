@@ -23,6 +23,14 @@ impl IpPrefix {
         (len <= max && mask(addr, len) == addr).then_some(Self { addr, len })
     }
 
+    /// 包含 `addr` 的、前缀长度为 `len` 的网段（主机位清零）。
+    pub fn containing(addr: IpAddr, len: u8) -> Option<Self> {
+        (len <= max_len(addr)).then(|| Self {
+            addr: mask(addr, len),
+            len,
+        })
+    }
+
     /// 只含一个地址的网段（`/32` 或 `/128`）。
     pub fn host(addr: IpAddr) -> Self {
         Self {

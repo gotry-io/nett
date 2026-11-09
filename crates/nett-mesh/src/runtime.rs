@@ -4,7 +4,7 @@
 //! 套接字：组网地址上的探测端口（只收发经组网接口的包）；发往中继的探测从组网进程自己的端口发出；直连
 //! 探测以 WireGuard 端口为源端口收发，由数据面提供（[`DataPlane::direct_probes`]）。
 
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
@@ -191,7 +191,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         };
         let tunnel_v4 = tunnel(addrs.iter().find(|a| a.is_ipv4()))?;
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;
-        let relay = UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0))?;
+        let relay = dataplane.bind_underlay(0)?;
         let DirectProbes {
             send: direct,
             recv: mut log,

@@ -338,6 +338,10 @@ impl DataPlane for KernelWireGuard {
         sys::bind_to_device(socket.as_fd(), INTERFACE_NAME)?;
         Ok(socket)
     }
+
+    fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket> {
+        crate::userspace::dual_stack_udp(port)
+    }
 }
 
 impl DirectSend for WgPort {

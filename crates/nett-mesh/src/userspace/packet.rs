@@ -217,6 +217,16 @@ pub(crate) mod build {
                 p.extend_from_slice(&[0, 0, 0, 0, 64, protocol, 0, 0]);
                 p.extend_from_slice(&s.octets());
                 p.extend_from_slice(&d.octets());
+                // 头部校验和：本机协议栈收到时会校验
+                let mut sum: u32 = p
+                    .chunks(2)
+                    .map(|c| u32::from(u16::from_be_bytes([c[0], c[1]])))
+                    .sum();
+                while sum >> 16 != 0 {
+                    sum = (sum & 0xffff) + (sum >> 16);
+                }
+                let sum = !u16::try_from(sum).expect("folded");
+                p[10..12].copy_from_slice(&sum.to_be_bytes());
                 p.extend_from_slice(l4);
                 p
             }

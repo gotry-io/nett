@@ -141,4 +141,8 @@ pub trait DataPlane: Send {
 
     /// 绑定到本机组网地址、只收发经组网接口的套接字（隧道内探测，design/mesh.md 第 7 节）。
     fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket>;
+
+    /// 发往底层网络的双栈套接字（发往中继的探测）。macOS 上绑定承载默认路由的物理接口，不经过代理应用的
+    /// TUN（design/userspace.md 第 6.2 节）。
+    fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
 }

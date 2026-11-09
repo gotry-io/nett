@@ -83,11 +83,8 @@ impl Platform for LinuxTun {
         self.configure_link(spec)
     }
 
-    fn bind_wireguard(&mut self, port: u16) -> Result<UdpSocket, DataPlaneError> {
-        dual_stack_udp(port).map_err(|source| DataPlaneError::Os {
-            op: "bind the WireGuard port",
-            source,
-        })
+    fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket> {
+        dual_stack_udp(port)
     }
 
     fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket> {

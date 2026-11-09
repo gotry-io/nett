@@ -28,6 +28,25 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
 
+  # macOS 原生成员（design/userspace.md 第 8 节）：clippy、测试，以及需要 root 的 utun 冒烟测试
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 安装 rust-toolchain.toml 指定的工具链
+        run: rustup toolchain install
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-features --locked
+      - name: utun、地址与路由（需要 root）
+        run: |
+          cargo test --locked -p nett-mesh --lib --no-run
+          test_bin=$(cargo test --locked -p nett-mesh --lib --no-run --message-format=json \
+            | jq -r 'select(.profile.test == true and .target.name == "nett_mesh") | .executable')
+          sudo "$test_bin" --ignored --exact macos::tests::macos_utun_smoke --nocapture
+
   # 实验环境 A 的短场景，每次推送各跑一次 nett（design/prototype.md 第 7 节）
   lab:
     runs-on: ubuntu-24.04

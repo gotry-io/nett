@@ -334,4 +334,10 @@ impl DataPlane for FakeDataPlane {
             "no tunnel sockets in the fake data plane",
         ))
     }
+
+    fn bind_underlay(&self, _port: u16) -> std::io::Result<std::net::UdpSocket> {
+        Err(std::io::Error::other(
+            "no underlay sockets in the fake data plane",
+        ))
+    }
 }

@@ -19,7 +19,7 @@ fn chinese() -> bool {
         .is_some_and(|v| v.starts_with("zh"))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub const KEYS_WRITTEN: Text = Text {
     zh: "已在 {dir} 生成 mesh.key 和 identity.key（权限 0600，只留在这台机器上）。把下面这一行写进站点描述中这个节点的条目（design/local-signing.md 第 4 节）：",
     en: "Wrote mesh.key and identity.key to {dir} (mode 0600; keep them on this machine). Add this line to this node's entry in the site description (design/local-signing.md section 4):",

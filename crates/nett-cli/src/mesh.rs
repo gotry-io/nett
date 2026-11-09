@@ -12,8 +12,12 @@ use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
 use nett_mesh::lab::{JsonLinesSink, LabClock, TransportConfigWriter};
+#[cfg(target_os = "linux")]
 use nett_mesh::linux::tun::LinuxTun;
+#[cfg(target_os = "linux")]
 use nett_mesh::linux::{KernelWireGuard, SystemClock};
+#[cfg(target_os = "macos")]
+use nett_mesh::macos::{MacTun, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
 use nett_mesh::userspace::UserspaceDataPlane;
@@ -169,18 +173,26 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "lab"))]
     let clock = SystemClock;
-    #[cfg(feature = "lab")]
+    // Linux 默认用内核 WireGuard；macOS 是原生成员，用用户态数据面（design/userspace.md）
+    #[cfg(all(target_os = "linux", feature = "lab"))]
     let userspace = args.lab.userspace;
-    #[cfg(not(feature = "lab"))]
+    #[cfg(all(target_os = "linux", not(feature = "lab")))]
     let userspace = false;
+    #[cfg(target_os = "linux")]
     let worker = if userspace {
         let dataplane = UserspaceDataPlane::new(LinuxTun::open()?);
         Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
     } else {
         let dataplane = KernelWireGuard::open()?;
         Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
-    }
-    .context("starting the mesh worker thread")?;
+    };
+    #[cfg(target_os = "macos")]
+    let worker = Runtime::spawn(
+        Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?)),
+        sink,
+        clock,
+    );
+    let worker = worker.context("starting the mesh worker thread")?;
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

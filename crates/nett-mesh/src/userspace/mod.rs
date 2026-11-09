@@ -43,8 +43,8 @@ mod dataplane {
         fn create(&mut self, spec: &InterfaceSpec) -> Result<Self::Tun, DataPlaneError>;
         /// 修改已有组网接口的地址和 MTU。
         fn configure(&mut self, spec: &InterfaceSpec) -> Result<(), DataPlaneError>;
-        /// WireGuard 端口的套接字。
-        fn bind_wireguard(&mut self, port: u16) -> Result<UdpSocket, DataPlaneError>;
+        /// 发往底层网络的双栈套接字：WireGuard 端口与发往中继的探测（[`DataPlane::bind_underlay`]）。
+        fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket>;
         /// 绑定到本机组网地址、只收发经组网接口的套接字。
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket>;
         /// 让组网接口上的路由恰好是 `routes`。
@@ -135,7 +135,13 @@ mod dataplane {
                 return Ok(running.public_key);
             }
             let tun = self.platform.create(spec)?;
-            let socket = self.platform.bind_wireguard(spec.listen_port)?;
+            let socket = self
+                .platform
+                .bind_underlay(spec.listen_port)
+                .map_err(|source| DataPlaneError::Os {
+                    op: "bind the WireGuard port",
+                    source,
+                })?;
             let mut plane = Plane::new(Gotatun::new(private_key));
             plane.set_local(local(spec));
             let os = |op| move |source| DataPlaneError::Os { op, source };
@@ -239,6 +245,10 @@ mod dataplane {
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket> {
             self.platform.bind_tunnel(addr)
         }
+
+        fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket> {
+            self.platform.bind_underlay(port)
+        }
     }
 
     #[cfg(test)]
@@ -288,8 +298,8 @@ mod dataplane {
             fn configure(&mut self, _spec: &InterfaceSpec) -> Result<(), DataPlaneError> {
                 Ok(())
             }
-            fn bind_wireguard(&mut self, _port: u16) -> Result<UdpSocket, DataPlaneError> {
-                Ok(UdpSocket::bind("127.0.0.1:0").expect("bind"))
+            fn bind_underlay(&self, _port: u16) -> io::Result<UdpSocket> {
+                UdpSocket::bind("127.0.0.1:0")
             }
             fn bind_tunnel(&self, _addr: SocketAddr) -> io::Result<UdpSocket> {
                 Err(io::Error::other("not used"))

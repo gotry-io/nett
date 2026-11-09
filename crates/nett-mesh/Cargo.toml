@@ -31,6 +31,9 @@ rustix = { workspace = true, features = ["event"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 nett-trust = { workspace = true, features = ["signing"] }
 

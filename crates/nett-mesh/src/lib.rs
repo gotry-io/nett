@@ -11,6 +11,8 @@ pub mod key;
 pub mod lab;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod members;
 pub mod path;
 pub mod probe;

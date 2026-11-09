@@ -3,7 +3,7 @@
 
 use std::process::ExitCode;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
@@ -34,7 +34,7 @@ fn run() -> anyhow::Result<()> {
         return Ok(());
     };
     match arg {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         lexopt::Arg::Value(cmd) if cmd == "mesh" => mesh::run(parser),
         lexopt::Arg::Value(cmd) if cmd == "site" => site::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
