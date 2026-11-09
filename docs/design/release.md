@@ -30,7 +30,7 @@
 
 ## 4. macOS：Homebrew 与组网服务
 
-- `brew install gotry-io/tap/nett` 安装命令行（签名工具 `nett site` 等）；
+- `brew install gotry-io/tap/nett` 安装命令行（签名工具 `nett site` 等）。配方的安装提示只用英文，与 Homebrew 社区一致：Homebrew 运行配方时固定使用英文区域设置，无法按用户的语言选择；nett 命令自己的输出按系统语言显示；
 - 原生成员的组网服务以 root 运行（design/userspace.md 第 6.3 节）。Homebrew 的目录普通用户可写，root 服务直接运行那里的程序时，用户权限下的恶意程序能替换它、在下次启动时得到 root 和组网私钥。因此服务运行一份 root 专属的副本：
   - `sudo nett mesh install`：把正在运行的 `nett` 复制到 `/Library/Application Support/nett/nett`（目录属主 root、权限 `0700`），写入 launchd 配置（`/Library/LaunchDaemons/io.gotry.nett.mesh.plist`）与日志轮转配置（`/etc/newsyslog.d/nett.conf`），然后启动服务；服务已在运行时重启它，换用新的副本。期望状态或组网私钥还不在时只安装、不启动，并说明下一步。配置文件的内容只在代码中定义；
   - 升级：`brew upgrade nett` 之后执行 `sudo nett mesh install`。接入 Hub 之后由 nett-node 的签名自动升级接管（ADR 0020）；

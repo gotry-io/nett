@@ -21,6 +21,8 @@ class Nett < Formula
     bin.install "nett"
   end
 
+  # 只用英文，与 Homebrew 社区一致：Homebrew 运行配方时固定使用英文区域设置，配方无法按用户的语言选择；
+  # 执行这些命令时，nett 自己的输出按系统语言显示
   def caveats
     <<~EOS
       To join the mesh as a native member (root is needed for the utun interface):
@@ -28,10 +30,6 @@ class Nett < Formula
         # add the printed line to the site description, and put this node's desired.json there
         sudo nett mesh install
       After every `brew upgrade nett`, run `sudo nett mesh install` again: the service runs a root-only copy.
-
-      以原生成员加入组网（创建 utun 需要 root）：运行上面的命令；把输出的一行写进站点描述，把这个节点的
-      desired.json 放进同一个目录。每次 `brew upgrade nett` 之后再运行一次 `sudo nett mesh install`：
-      服务运行的是只有 root 能改的副本。
     EOS
   end
 
