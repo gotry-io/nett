@@ -7,6 +7,8 @@ use std::process::ExitCode;
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
+#[cfg(target_os = "macos")]
+mod service;
 mod site;
 mod text;
 #[cfg(all(feature = "lab", target_os = "linux"))]

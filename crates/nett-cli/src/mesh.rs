@@ -45,7 +45,8 @@ struct LabArgs {
 }
 
 const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key>\n       \
-nett mesh keys --dir <directory>";
+nett mesh keys --dir <directory>\n       \
+sudo nett mesh install | uninstall    (macOS: the launchd service, design/release.md section 4)";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
 [--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
@@ -223,6 +224,18 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         .is_some_and(|mut raw| raw.next_if(|a| a == "keys").is_some());
     if is_keys {
         return keys(parser);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sub = parser.try_raw_args().and_then(|mut raw| {
+            raw.next_if(|a| a == "install" || a == "uninstall")
+                .map(|a| a.to_string_lossy().into_owned())
+        });
+        match sub.as_deref() {
+            Some("install") => return crate::service::install(),
+            Some("uninstall") => return crate::service::uninstall(),
+            _ => {}
+        }
     }
     let args = parse(parser)?;
     init_logging();

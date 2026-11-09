@@ -38,6 +38,10 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["thread"] }
 
+# 安装组网服务时确认以 root 运行
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, features = ["process"] }
+
 [features]
 # 实验构建：组网进程的实验选项（事件文件、模拟时钟误差、传输适配进程的配置），以及中继和传输适配进程
 # （design/prototype.md 第 3、7 节），官方构建不开启
