@@ -25,9 +25,11 @@ tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true, features = ["event"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
-rustix.workspace = true
 
 [dev-dependencies]
 nett-trust = { workspace = true, features = ["signing"] }
