@@ -79,6 +79,8 @@ struct SiteNode {
     ipv4: Option<Ipv4Addr>,
     ipv6: Option<Ipv6Addr>,
     edge: Option<SiteEdge>,
+    /// 这个节点的 WireGuard 端口，不写时用 `[mesh]` 中的（design/local-signing.md 第 4 节）。
+    listen_port: Option<u16>,
     /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
     #[serde(default)]
     routes: Vec<IpPrefix>,
@@ -407,7 +409,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         let doc = DesiredMeshDoc {
             node_id: me.node_id.clone(),
             reachability: node.reachability,
-            listen_port: site.mesh.listen_port,
+            listen_port: node.listen_port.unwrap_or(site.mesh.listen_port),
             prefixes: state.prefixes,
             trust_anchors: state.trust_anchors.clone(),
             members: members.clone(),
@@ -750,6 +752,7 @@ fn paths(site: &Site, state: &State, node: &SiteNode) -> anyhow::Result<Vec<Path
             .iter()
             .find(|n| &n.name == other)
             .context("peer")?;
+        let port = peer.listen_port.unwrap_or(site.mesh.listen_port);
         let mut candidates = Vec::new();
         for c in &link.candidates {
             match c.as_str() {
@@ -757,14 +760,14 @@ fn paths(site: &Site, state: &State, node: &SiteNode) -> anyhow::Result<Vec<Path
                 "direct" => {
                     if let Some(ip) = peer.ipv4 {
                         candidates.push(Candidate::Direct {
-                            endpoint: SocketAddr::new(ip.into(), site.mesh.listen_port),
+                            endpoint: SocketAddr::new(ip.into(), port),
                         });
                     }
                 }
                 "direct6" => {
                     if let Some(ip) = peer.ipv6 {
                         candidates.push(Candidate::Direct {
-                            endpoint: SocketAddr::new(ip.into(), site.mesh.listen_port),
+                            endpoint: SocketAddr::new(ip.into(), port),
                         });
                     }
                 }
@@ -927,6 +930,41 @@ mod tests {
             &std::fs::read(dir.join(OUT_DIR).join(node).join("desired.json")).expect("desired"),
         )
         .expect("valid desired state")
+    }
+
+    #[test]
+    fn node_port_applies_to_the_node_and_direct_candidates_to_it() {
+        let dir = temp_dir("port");
+        init(&dir, DEFAULT_ORIGIN).expect("init");
+        write_site(
+            &dir,
+            &format!(
+                "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nlisten_port = 51000\nkeys = \"{}\"\n\
+                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{}\"\n\
+                 [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nlisten_port = 41821\nkeys = \"{}\"\n\
+                 [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n\
+                 [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n",
+                keys(),
+                keys(),
+                keys()
+            ),
+        );
+        build(&dir).expect("build");
+        assert_eq!(desired(&dir, "vps").listen_port, 51000);
+        assert_eq!(desired(&dir, "app").listen_port, DEFAULT_LISTEN_PORT);
+        let vps = state(&dir).nodes["vps"].node_id.clone();
+        let expected = vec![Candidate::Direct {
+            endpoint: "203.0.113.10:51000".parse().expect("endpoint"),
+        }];
+        for node in ["app", "mac"] {
+            assert_eq!(
+                desired(&dir, node).paths[&vps].candidates,
+                expected,
+                "{node}"
+            );
+        }
+        assert_eq!(desired(&dir, "mac").listen_port, 41821);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
