@@ -134,6 +134,22 @@ fn loaded() -> anyhow::Result<bool> {
     launchctl(&["print", &format!("system/{LABEL}")])
 }
 
+/// bootout 返回时进程可能还在退出（launchctl print 显示 `SIGTERMed`）。等到 launchd 中没有这个服务，
+/// 再删副本、报告已停止；紧接着重新安装时也不会遇到还没退出的旧服务。
+fn wait_unloaded() -> anyhow::Result<()> {
+    let deadline = Instant::now() + LAUNCHCTL_TIMEOUT;
+    while loaded()? {
+        if Instant::now() >= deadline {
+            bail!(
+                "{LABEL} did not stop within {} seconds",
+                LAUNCHCTL_TIMEOUT.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
 /// 写入 `path`，内容与现有的相同时不动；返回是否写了。
 fn replace_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<bool> {
     if fs::read(path).is_ok_and(|old| old == content) {
@@ -281,8 +297,11 @@ mod passwd {
 
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
-    if loaded()? && !launchctl(&["bootout", &format!("system/{LABEL}")])? {
-        bail!("launchctl could not stop {LABEL}");
+    if loaded()? {
+        if !launchctl(&["bootout", &format!("system/{LABEL}")])? {
+            bail!("launchctl could not stop {LABEL}");
+        }
+        wait_unloaded()?;
     }
     for path in [PLIST, NEWSYSLOG, BINARY] {
         match fs::remove_file(path) {

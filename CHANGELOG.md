@@ -18,6 +18,8 @@ User-visible changes by version; versions follow Semantic Versioning.
   `--config`；站点不在这台机器上时仍可用 `--config` 指定。
   macOS: `sudo nett mesh install` finds this machine's desired state in the site directory of the user who
   ran sudo, so `--config` is only needed when the site is on another machine.
+- macOS：`sudo nett mesh uninstall` 等服务的进程退出之后才报告已停止。
+  macOS: `sudo nett mesh uninstall` reports the service as stopped only after its process has exited.
 
 ## [0.1.1] - 2026-11-09
 
