@@ -3,6 +3,15 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+- WireGuard 端口不能用组网进程自己在本机用的端口（组网地址上的探测端口 `41821`、TLS 中继的回环端口
+  `41830`–`41845`）：`nett site build` 生成时即报错。之前这样设置时组网照常连通，但不收发探测，测不到路径、
+  也发现不了故障。
+  The WireGuard port cannot be one the mesh process uses itself (the probe port `41821` on mesh addresses,
+  the TLS relay loopback ports `41830`–`41845`); `nett site build` reports it. Before, such a node stayed
+  connected but sent and answered no probes, so it could not measure paths or notice failures.
+
 ## [0.1.2] - 2026-11-10
 
 - 站点描述的节点可以写 `listen_port`，用自己的 WireGuard 端口：同一台主机上的原生成员与容器内成员各用一个。

@@ -187,7 +187,10 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         let tunnel = |ip: Option<&IpAddr>| -> std::io::Result<UdpSocket> {
             let ip =
                 ip.ok_or_else(|| std::io::Error::other("interface has no address of this family"))?;
-            dataplane.bind_tunnel(SocketAddr::new(*ip, TUNNEL_PROBE_PORT))
+            let addr = SocketAddr::new(*ip, TUNNEL_PROBE_PORT);
+            dataplane
+                .bind_tunnel(addr)
+                .map_err(|e| std::io::Error::new(e.kind(), format!("binding {addr}: {e}")))
         };
         let tunnel_v4 = tunnel(addrs.iter().find(|a| a.is_ipv4()))?;
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;

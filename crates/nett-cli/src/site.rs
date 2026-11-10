@@ -1095,19 +1095,17 @@ mod tests {
     fn node_port_applies_to_the_node_and_direct_candidates_to_it() {
         let dir = temp_dir("port");
         init(&dir, DEFAULT_ORIGIN).expect("init");
-        write_site(
-            &dir,
-            &format!(
-                "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nlisten_port = 51000\nkeys = \"{}\"\n\
-                 [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{}\"\n\
-                 [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nlisten_port = 41821\nkeys = \"{}\"\n\
-                 [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n\
-                 [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n",
-                keys(),
-                keys(),
-                keys()
-            ),
+        let nodes = format!(
+            "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nlisten_port = 51000\nkeys = \"{}\"\n\
+             [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{}\"\n\
+             [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nlisten_port = 41822\nkeys = \"{}\"\n\
+             [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n\
+             [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n",
+            keys(),
+            keys(),
+            keys()
         );
+        write_site(&dir, &nodes);
         build(&dir).expect("build");
         assert_eq!(desired(&dir, "vps").listen_port, 51000);
         assert_eq!(desired(&dir, "app").listen_port, DEFAULT_LISTEN_PORT);
@@ -1122,7 +1120,11 @@ mod tests {
                 "{node}"
             );
         }
-        assert_eq!(desired(&dir, "mac").listen_port, 41821);
+        assert_eq!(desired(&dir, "mac").listen_port, 41822);
+        // 组网进程自己用的端口在生成时就拒绝，不等到节点上绑定失败
+        write_site(&dir, &nodes.replace("41822", "41821"));
+        let err = format!("{:#}", build(&dir).expect_err("probe port"));
+        assert!(err.contains("node `mac`") && err.contains("41821"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

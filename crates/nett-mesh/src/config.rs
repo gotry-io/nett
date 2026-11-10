@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use nett_core::prefix::IpPrefix;
 
+use crate::probe::TUNNEL_PROBE_PORT;
+
 /// 期望状态的文档形式。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +90,7 @@ pub enum Candidate {
 
 /// 传输适配进程的回环端口从这里起，按中继的节点 ID 排序依次分配（ADR 0013：由组网进程分配）。
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
+const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
 /// 成员与中继之间的探测令牌。`Debug` 不输出内容（硬性规则 10）。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -115,6 +118,12 @@ pub enum ConfigError {
     Anchors(#[from] AnchorsError),
     #[error("listen port must not be 0")]
     ListenPort,
+    #[error(
+        "listen port {0} is one nett itself uses on this host: {TUNNEL_PROBE_PORT} for probes on mesh \
+         addresses and {TLS_LOOPBACK_BASE}-{last} for TLS relays on loopback; pick another WireGuard port",
+        last = TLS_LOOPBACK_LAST
+    )]
+    ListenPortInUse(u16),
     #[error("mesh prefix {0} is not a private-use range of a sensible size")]
     Prefix(IpPrefix),
     #[error("paths list peer {0} more than once")]
@@ -158,6 +167,12 @@ impl DesiredMesh {
     pub fn from_doc(doc: DesiredMeshDoc) -> Result<Self, ConfigError> {
         if doc.listen_port == 0 {
             return Err(ConfigError::ListenPort);
+        }
+        // WireGuard 的套接字绑定全部地址，与组网进程和传输适配进程自己的端口相同时，后绑定的一方失败
+        if doc.listen_port == TUNNEL_PROBE_PORT
+            || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&doc.listen_port)
+        {
+            return Err(ConfigError::ListenPortInUse(doc.listen_port));
         }
         for prefix in [doc.prefixes.ipv4, doc.prefixes.ipv6] {
             if !is_sensible_mesh_prefix(&prefix) {
@@ -268,6 +283,27 @@ mod tests {
         ] {
             let p: IpPrefix = s.parse().expect(s);
             assert_eq!(is_sensible_mesh_prefix(&p), ok, "{s}");
+        }
+    }
+
+    #[test]
+    fn listen_port_avoids_the_ports_nett_uses_itself() {
+        use crate::testutil::Mesh;
+        let mesh = Mesh::new(&[1]);
+        let with_port = |port| {
+            let mut doc = mesh.desired(1, vec![]);
+            doc.listen_port = port;
+            DesiredMesh::from_doc(doc).map(|d| d.listen_port)
+        };
+        assert_eq!(with_port(0).err(), Some(ConfigError::ListenPort));
+        for port in [TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, TLS_LOOPBACK_LAST] {
+            assert_eq!(
+                with_port(port).err(),
+                Some(ConfigError::ListenPortInUse(port))
+            );
+        }
+        for port in [41820, 41822, TLS_LOOPBACK_BASE - 1, TLS_LOOPBACK_LAST + 1] {
+            assert_eq!(with_port(port), Ok(port));
         }
     }
 
