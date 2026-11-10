@@ -85,6 +85,7 @@ impl Runtime {
                     stop: Arc::new(AtomicBool::new(false)),
                     dropped: Arc::new(AtomicU64::new(0)),
                     receivers: Vec::new(),
+                    started: false,
                 };
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
@@ -98,26 +99,35 @@ impl Runtime {
                     let mut tick_now = false;
                     match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
                         Ok(Msg::Desired(desired, reply)) => {
-                            let outcome = match *desired {
+                            let applied = match *desired {
                                 Ok(desired) => {
                                     worker.events.begin_apply();
-                                    worker.engine.apply(&desired, &mut worker.events);
-                                    worker.ensure_sockets();
-                                    ReloadOutcome::Applied {
-                                        problems: worker.events.problems(
-                                            worker.engine.node_id(),
-                                            worker.engine.names(),
-                                            Instant::now(),
-                                        ),
-                                    }
+                                    worker.engine.apply(&desired, &mut worker.events)
                                 }
                                 Err(e) => {
                                     let reason = e.to_string();
                                     worker.events.emit(Event::ConfigRejected {
                                         reason: reason.clone(),
                                     });
-                                    ReloadOutcome::Rejected { reason }
+                                    Err(reason)
                                 }
+                            };
+                            // 启动时期望状态文件整份被拒绝：改用信任存储中最近一次整份接受的那一份
+                            // （design/mesh.md 第 4.2 节）；运行中被拒绝时继续使用已生效的状态
+                            if !worker.started && applied.is_err() {
+                                worker.engine.apply_saved(&mut worker.events);
+                            }
+                            worker.started = true;
+                            worker.ensure_sockets();
+                            let outcome = match applied {
+                                Ok(()) => ReloadOutcome::Applied {
+                                    problems: worker.events.problems(
+                                        worker.engine.node_id(),
+                                        worker.engine.names(),
+                                        Instant::now(),
+                                    ),
+                                },
+                                Err(reason) => ReloadOutcome::Rejected { reason },
                             };
                             // 等结果的一方已经超时离开时丢弃
                             if let Some(reply) = reply {
@@ -229,6 +239,8 @@ struct Worker<D, E> {
     stop: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
     receivers: Vec<JoinHandle<()>>,
+    /// 已经处理过第一份期望状态（启动时的读取）。
+    started: bool,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {

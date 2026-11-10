@@ -23,6 +23,7 @@ pub mod run;
 pub mod runtime;
 pub mod source;
 pub mod status;
+pub mod store;
 #[cfg(test)]
 mod testutil;
 pub mod userspace;

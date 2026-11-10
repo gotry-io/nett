@@ -2,14 +2,17 @@
 //!
 //! - 先应用撤销记录，再应用新的准入材料；撤销永久生效（design/auth.md 第 10.4 节）；
 //! - 成员只因撤销记录删除，期望状态中缺少某个成员不视为撤销；
-//! - 版本号只增不减，与已生效材料相同的视为幂等；
+//! - 版本号只增不减，与已生效材料相同的视为幂等；重启之后以信任存储中的版本为基准（design/mesh.md
+//!   第 4.2 节）；
+//! - 本机节点策略的新版本检查过期时间（design/auth.md 第 10.2 节检查 6）；
 //! - 验证失败的成员不配置，已生效的旧版本保持不变，并上报事件。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
 use nett_core::id::NodeId;
-use nett_trust::admission::{AppliedMembers, Member, VersionCheck, admit};
+use nett_trust::admission::{AppliedMembers, AppliedRecord, Member, VersionCheck, admit};
+use nett_trust::encoding::Timestamp;
 use nett_trust::revocation::{Revocation, Revocations};
 
 use crate::config::DesiredMesh;
@@ -19,7 +22,16 @@ use crate::event::{Event, EventSink};
 pub struct MemberSet {
     revocations: Revocations,
     applied: AppliedMembers,
+    /// 本机此前接受过的版本（信任存储）：低于它的、同版本不同内容的材料都不接受。
+    floor: BTreeMap<NodeId, AppliedRecord>,
     members: BTreeMap<NodeId, Member>,
+}
+
+/// 本机节点策略的检查：本机的节点 ID，以及检查过期时间用的当前时间。信任存储刚建立时（第一份期望状态）
+/// 不检查过期时间，`now` 为 `None`。
+pub struct OwnPolicy<'a> {
+    pub node_id: &'a NodeId,
+    pub now: Option<Timestamp>,
 }
 
 impl MemberSet {
@@ -31,12 +43,44 @@ impl MemberSet {
         self.members.get(node_id)
     }
 
+    /// 从信任存储恢复撤销记录和各成员此前接受过的版本。
+    pub fn restore(&mut self, revoked: &BTreeSet<NodeId>, floor: &BTreeMap<NodeId, AppliedRecord>) {
+        for node_id in revoked {
+            self.revocations.apply(&Revocation::Node {
+                node_id: node_id.clone(),
+            });
+        }
+        self.floor = floor.clone();
+    }
+
+    pub fn revoked(&self) -> &BTreeSet<NodeId> {
+        self.revocations.nodes()
+    }
+
+    /// 保存进信任存储的版本：此前接受过的，加上这次生效的（只会更高）。
+    pub fn saved_versions(&self) -> BTreeMap<NodeId, AppliedRecord> {
+        let mut out = self.floor.clone();
+        out.extend(
+            self.applied
+                .records()
+                .iter()
+                .map(|(id, r)| (id.clone(), *r)),
+        );
+        out
+    }
+
     /// 应用一份期望状态中的撤销记录和准入材料。
-    pub fn apply(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+    pub fn apply(
+        &mut self,
+        desired: &DesiredMesh,
+        own: &OwnPolicy<'_>,
+        events: &mut impl EventSink,
+    ) {
         for revocation in &desired.revocations {
             self.revocations.apply(revocation);
             let Revocation::Node { node_id } = revocation;
             self.applied.remove(node_id);
+            self.floor.remove(node_id);
             if self.members.remove(node_id).is_some() {
                 events.emit(Event::MemberRemoved {
                     node_id: node_id.clone(),
@@ -73,6 +117,14 @@ impl MemberSet {
                 ));
                 continue;
             }
+            let seen_before = match self.floor.get(&member.node_id).map(|f| f.compare(&member)) {
+                Some(Err(e)) => {
+                    events.emit(reject(e.to_string()));
+                    continue;
+                }
+                Some(Ok(VersionCheck::Unchanged)) => true,
+                Some(Ok(VersionCheck::Newer)) | None => false,
+            };
             match self.applied.check(&member) {
                 Ok(VersionCheck::Unchanged) => continue,
                 Ok(VersionCheck::Newer) => {}
@@ -80,6 +132,17 @@ impl MemberSet {
                     events.emit(reject(e.to_string()));
                     continue;
                 }
+            }
+            if member.node_id == *own.node_id
+                && !seen_before
+                && let Some(now) = own.now
+                && member.policy_expires_at <= now
+            {
+                events.emit(reject(format!(
+                    "this node's policy version {} expired at {}; sign a new one",
+                    member.policy_version, member.policy_expires_at
+                )));
+                continue;
             }
             // 地址或组网公钥与另一个成员冲突时，已有的成员优先：WireGuard 不允许对端的 AllowedIPs 重叠
             if let Some(other) = self.conflict(&member) {

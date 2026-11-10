@@ -15,6 +15,7 @@ use nett_trust::signed::SignedPayload;
 use crate::config::DesiredMesh;
 use crate::event::{Event, EventSink};
 use crate::probe::TUNNEL_PROBE_PORT;
+use crate::store::{FloorError, VersionRecord};
 
 /// 展开后的过滤规则最多的条数（硬性规则 14）：规则集中每条规则的来源 × 目标 × 端口范围，加上成员之间的
 /// 控制流量。超过时整体按拒绝处理。
@@ -93,6 +94,8 @@ pub enum AccessError {
     Signature(String),
     #[error("access rule set: the signed payload carries no access rule set")]
     Missing,
+    #[error("access rule set: {0}")]
+    Floor(FloorError),
     #[error("access rule set: version {got} is not newer than the applied version {applied}")]
     Version { got: u64, applied: u64 },
     #[error("access rules expand to more than {MAX_FILTER_RULES} filter rules")]
@@ -106,15 +109,33 @@ struct Applied {
     rules: AccessRuleSet,
 }
 
-/// 已生效的访问规则集。版本号只增不减；期望状态中没有规则集时保持已生效的那一份。
+/// 已生效的访问规则集。版本号只增不减，重启之后以信任存储中的版本为基准（design/mesh.md 第 4.2 节）；
+/// 期望状态中没有规则集时保持已生效的那一份。
 #[derive(Debug, Default)]
 pub struct AccessRules {
     applied: Option<Applied>,
+    /// 本机此前接受过的版本。
+    floor: Option<VersionRecord>,
 }
 
 impl AccessRules {
     pub fn version(&self) -> Option<u64> {
         self.applied.as_ref().map(|a| a.version)
+    }
+
+    pub fn restore(&mut self, floor: Option<VersionRecord>) {
+        self.floor = floor;
+    }
+
+    /// 保存进信任存储的版本。
+    pub fn saved_version(&self) -> Option<VersionRecord> {
+        self.applied
+            .as_ref()
+            .map(|a| VersionRecord {
+                version: a.version,
+                hash: a.hash,
+            })
+            .or(self.floor)
     }
 
     /// 应用期望状态中的规则集。验证失败时保持已生效的规则集，并上报事件。
@@ -149,6 +170,11 @@ impl AccessRules {
             .payload
             .access_rule_set()
             .ok_or(AccessError::Missing)?;
+        if let Some(floor) = &self.floor {
+            floor
+                .admits(rules.version, hash)
+                .map_err(AccessError::Floor)?;
+        }
         if let Some(applied) = &self.applied {
             if applied.version == rules.version && applied.hash == *hash {
                 return Ok(None);
@@ -234,7 +260,7 @@ fn mesh_addrs(addresses: &MeshAddresses) -> [IpAddr; 2] {
 mod tests {
     use super::*;
     use crate::event::VecSink;
-    use crate::testutil::{Mesh, node_id, validated};
+    use crate::testutil::{Mesh, no_expiry, node_id, validated};
     use nett_trust::payload::{AccessRule, Artifact, PayloadDoc};
 
     fn p(s: &str) -> IpPrefix {
@@ -273,7 +299,7 @@ mod tests {
             ],
         ));
         let mut set = crate::members::MemberSet::default();
-        set.apply(&desired, &mut VecSink::default());
+        set.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
         set.members().clone()
     }
 
@@ -402,15 +428,37 @@ mod tests {
         access.apply(&validated(d), &mut VecSink::default());
         let members = {
             let mut set = crate::members::MemberSet::default();
-            set.apply(
-                &validated(mesh.desired(2, vec![mesh.material(1, 1), mesh.material(2, 1)])),
-                &mut VecSink::default(),
-            );
+            let desired =
+                validated(mesh.desired(2, vec![mesh.material(1, 1), mesh.material(2, 1)]));
+            set.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
             set.members().clone()
         };
         assert_eq!(
             access.filter(&node_id(2), &members),
             Err(AccessError::TooManyRules)
         );
+    }
+
+    #[test]
+    fn a_restored_version_rejects_older_rule_sets() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut first = AccessRules::default();
+        let mut d = mesh.desired(2, vec![]);
+        d.access_rules = Some(mesh.sign(&rule_set(2, vec![])));
+        first.apply(&validated(d), &mut VecSink::default());
+        assert_eq!(first.version(), Some(2));
+        // 重启之后：信任存储中的版本是基准
+        let mut restarted = AccessRules::default();
+        restarted.restore(first.saved_version());
+        let mut d = mesh.desired(2, vec![]);
+        d.access_rules = Some(mesh.sign(&rule_set(1, vec![])));
+        let mut events = VecSink::default();
+        restarted.apply(&validated(d.clone()), &mut events);
+        assert!(matches!(events.0[..], [Event::AccessRulesRejected { .. }]));
+        assert_eq!(restarted.version(), None);
+        // 同一个版本、同样的内容照常生效
+        d.access_rules = Some(mesh.sign(&rule_set(2, vec![])));
+        restarted.apply(&validated(d), &mut VecSink::default());
+        assert_eq!(restarted.version(), Some(2));
     }
 }

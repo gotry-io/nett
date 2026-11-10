@@ -29,4 +29,9 @@ impl Revocations {
     pub fn is_node_revoked(&self, node_id: &NodeId) -> bool {
         self.nodes.contains(node_id)
     }
+
+    /// 被撤销的节点，保存在本机的信任存储中（design/mesh.md 第 4.2 节）。
+    pub fn nodes(&self) -> &BTreeSet<NodeId> {
+        &self.nodes
+    }
 }

@@ -295,7 +295,12 @@ pub(crate) fn check_desired_for(
     let desired =
         nett_mesh::config::DesiredMesh::from_json(bytes).context("not a valid desired state")?;
     let mut members = nett_mesh::members::MemberSet::default();
-    members.apply(&desired, &mut nett_mesh::event::VecSink::default());
+    // 只是在复制之前发现拷错了文件：验证的基准是组网进程自己的信任存储（design/mesh.md 第 4.2 节）
+    let own = nett_mesh::members::OwnPolicy {
+        node_id: &desired.node_id,
+        now: None,
+    };
+    members.apply(&desired, &own, &mut nett_mesh::event::VecSink::default());
     let me = members
         .get(&desired.node_id)
         .context("the desired state does not admit its own node")?;
@@ -1223,7 +1228,14 @@ mod tests {
         let app = desired(&dir, "app");
         let mut members = MemberSet::default();
         let mut events = VecSink::default();
-        members.apply(&app, &mut events);
+        members.apply(
+            &app,
+            &nett_mesh::members::OwnPolicy {
+                node_id: &app.node_id,
+                now: None,
+            },
+            &mut events,
+        );
         assert_eq!(members.members().len(), 3, "{:?}", events.0);
         let vps = members.get(&s1.nodes["vps"].node_id).expect("vps admitted");
         assert_eq!(vps.edge.as_ref().map(|e| e.addresses), s1.nodes["vps"].edge);
@@ -1288,7 +1300,14 @@ mod tests {
         let vps = desired(&dir, "vps");
         assert_eq!(vps.advertised_routes.len(), 1);
         let mut members = MemberSet::default();
-        members.apply(&vps, &mut VecSink::default());
+        members.apply(
+            &vps,
+            &nett_mesh::members::OwnPolicy {
+                node_id: &vps.node_id,
+                now: None,
+            },
+            &mut VecSink::default(),
+        );
         let mut routes = Routes::default();
         let mut events = VecSink::default();
         routes.apply(&vps, members.members(), &mut events);
@@ -1314,7 +1333,14 @@ mod tests {
         );
         let vps = desired(&dir, "vps");
         assert!(vps.advertised_routes.is_empty());
-        members.apply(&vps, &mut VecSink::default());
+        members.apply(
+            &vps,
+            &nett_mesh::members::OwnPolicy {
+                node_id: &vps.node_id,
+                now: None,
+            },
+            &mut VecSink::default(),
+        );
         routes.apply(&vps, members.members(), &mut VecSink::default());
         assert!(routes.of(app_id).is_empty());
         // 不存在的宣告

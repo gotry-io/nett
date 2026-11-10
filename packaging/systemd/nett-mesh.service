@@ -13,6 +13,9 @@ LoadCredential=mesh.key:/etc/nett/mesh.key
 # 本机状态的套接字 /run/nett/mesh.sock（design/status.md 第 3 节）：目录属于服务的身份，只有它和 root 能进入
 RuntimeDirectory=nett
 RuntimeDirectoryMode=0700
+# 信任存储 /var/lib/nett（design/mesh.md 第 4.2 节）：固定的信任锚、撤销记录与已生效的版本，重启后保留
+StateDirectory=nett
+StateDirectoryMode=0700
 # 专用的身份，只有配置 WireGuard、nftables 与发送探测需要的两项能力
 DynamicUser=yes
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW

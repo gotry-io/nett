@@ -126,7 +126,7 @@ edge-vps is already a member. On edge-vps, run (valid for 30 minutes, once):
 
 协议按 protocol.md：WebSocket 上的 Noise IK，Protobuf 消息，按分区和代数下发期望状态。这一步用到的分区是 `trust`、`mesh`、`hub_endpoints`；消息是 `Hello`/`Welcome`、`DesiredState`/`StateAck`、`Inventory`、`LinkReport`、`NodeEvent`、`Leave`、`Ping`/`Pong`。
 
-- **交给组网进程**：nett-node 把 `mesh` 分区写成组网进程的期望状态文件（先写临时文件再改名），再经本机接口发出重新读取的请求（`nett reload` 的同一个请求，status.md 第 4.1 节），拿回结果：`applied`（附 `problems`）、`rejected`（附原因）、`busy`，分别作为 `StateAck` 的 `applied`、`rejected`、`pending` 报给 Hub（protocol.md 第 5 节）。`problems` 随状态上报；`busy` 时期望状态照常在应用，nett-node 在下一次读状态时按其中的 `config` 确认它已生效。这份文件就是组网进程"本地保存的配置"：重启时先应用它，不等 nett-node 和 Hub（硬性规则 8）；
+- **交给组网进程**：nett-node 把 `mesh` 分区写成组网进程的期望状态文件（先写临时文件再改名），再经本机接口发出重新读取的请求（`nett reload` 的同一个请求，status.md 第 4.1 节），拿回结果：`applied`（附 `problems`）、`rejected`（附原因）、`busy`，分别作为 `StateAck` 的 `applied`、`rejected`、`pending` 报给 Hub（protocol.md 第 5 节）。`problems` 随状态上报；`busy` 时期望状态照常在应用，nett-node 在下一次读状态时按其中的 `config` 确认它已生效。组网进程把接受过的授权和最近一次整份接受的期望状态保存在它自己的信任存储中（mesh.md 第 4.2 节），重启时先应用它们，不等 nett-node 和 Hub（硬性规则 8）；期望状态文件只是输入，被拒绝的文件不会成为验证的基准，也不会让被撤销的权限恢复；
 - **期望状态文件只有一个写入者**：接入 Hub 的机器上只由 nett-node 写，`sudo nett install` 不从站点目录导入（第 7 节）；用户运行 `nett reload` 只是让组网进程重新读同一份文件；
 - **上报状态**：nett-node 每 15 秒、以及期望状态应用之后，经本机状态接口读一次状态，有变化时发 `LinkReport`（各对端的状态、路径、往返时间）和 `Inventory`（版本、平台、地址）。Hub 只保存每台机器最新的一份，事件保留最近的若干条（第 8 节）；
 - **离线**：Hub 或 nett-node 不在时，组网照常（architecture.md 第 12.2 节）；nett-node 按 protocol.md 第 8 节重连，连上后按代数补齐；
@@ -172,7 +172,7 @@ edge-vps is already a member. On edge-vps, run (valid for 30 minutes, once):
 
 | 步 | 内容 | 做完之后 |
 |---|---|---|
-| **H1 分发与状态** | `nett-hub` 与节点网关，发布与安装（第 8 节）；站点的命令与 `nett-site` 库（site.md）；`nett site link`、`status`、`invite`（已有的机器）；两个平台上的 `sudo nett install <token>`（第 7 节）；nett-node 接收期望状态、交给组网进程、上报状态 | 已有的机器接入 Hub；修改之后自动送达；一处看到全部机器 |
+| **H1 分发与状态** | 前提：组网进程的信任存储（mesh.md 第 4.2 节），Hub 下发的内容才不会改变验证的基准。`nett-hub` 与节点网关，发布与安装（第 8 节）；站点的命令与 `nett-site` 库（site.md）；`nett site link`、`status`、`invite`（已有的机器）；两个平台上的 `sudo nett install <token>`（第 7 节）；nett-node 接收期望状态、交给组网进程、上报状态 | 已有的机器接入 Hub；修改之后自动送达；一处看到全部机器 |
 | **H2 入网与退出** | 新机器的 `add` 与入网；Hub 提供的安装脚本（architecture.md 第 13.3 节）；`public` 机器的公网地址由 Hub 得知（第 11 节）；`nett leave`（第 4 节） | 新机器在电脑上一条命令、在机器上一条命令入网，不用复制公钥；退出的机器可以重新入网 |
 | **H3 升级** | `release` 分区：Hub 缓存签名的发布包，nett-node 核对发布签名、只接受更高的版本、失败回滚（auth.md 第 11.3 节、ADR 0020） | 不用逐台下载、替换 |
 | **H4 运行时协调** | 节点上报的地址用于候选路径（地址变化自动跟随）；中继分配；两端都是 `dial-only` 时经 Hub 转达切换（`PathSwitch`，mesh.md 第 8.4 节） | 家宽 IP 变化、笔记本换网络不需要重新生成配置；更快地绕开失效的中继 |

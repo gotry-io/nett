@@ -4,7 +4,9 @@
 //! 签名产物在这里只解析格式，签名和准入由 [`crate::members`] 逐项验证，不因来源而跳过。
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::Path;
 
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
@@ -98,6 +100,37 @@ pub enum Candidate {
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
+/// 期望状态文件与信任存储中每个文件的大小上限（design/mesh.md 第 17 节）。
+pub const MAX_DESIRED_BYTES: u64 = 4 << 20;
+/// 一份期望状态中成员（以及路径、节点名、宣告网段）的数量上限。
+pub const MAX_MEMBERS: usize = 256;
+/// 撤销记录的数量上限：撤销永久保存，重新入网的节点每次留下一条。
+pub const MAX_REVOCATIONS: usize = 4096;
+
+/// 读一个不超过 `max` 字节的普通文件；不存在时为 `Ok(None)`。
+pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let mut bytes = Vec::new();
+    file.take(max + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max {
+        return Err(std::io::Error::other(format!(
+            "{} is larger than {max} bytes",
+            path.display()
+        )));
+    }
+    Ok(Some(bytes))
+}
+
 /// 组网进程和传输适配进程自己在本机用的端口：组网地址上的探测端口与 TLS 中继的回环端口。WireGuard 的
 /// 套接字绑定本机全部地址，用了其中一个时后绑定的一方失败（design/site.md 第 4 节）。
 pub fn is_reserved_port(port: u16) -> bool {
@@ -146,6 +179,8 @@ pub enum ConfigError {
     TlsTargetConflict(NodeId),
     #[error("paths list more than {MAX_TARGETS} TLS relays")]
     TooManyTlsRelays,
+    #[error("desired state lists more than {max} {what}")]
+    TooMany { what: &'static str, max: usize },
 }
 
 /// 已校验的期望状态。
@@ -156,6 +191,8 @@ pub struct DesiredMesh {
     pub listen_port: Option<u16>,
     pub prefixes: MeshPrefixes,
     pub anchors: TrustAnchors,
+    /// 信任锚清单的文档形式：与本机固定的信任锚比较（design/mesh.md 第 4.2 节）。
+    pub trust_anchors: TrustAnchorsDoc,
     pub members: Vec<AdmissionMaterial>,
     pub revocations: Vec<Revocation>,
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
@@ -165,9 +202,15 @@ pub struct DesiredMesh {
     /// 传输适配进程的 TLS 目标，与 [`DesiredMesh::tls_endpoints`] 同出一处。
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
+    /// 校验之前的文档：整份接受之后保存进信任存储，启动时期望状态文件被拒绝时改用它。
+    doc: DesiredMeshDoc,
 }
 
 impl DesiredMesh {
+    pub fn doc(&self) -> &DesiredMeshDoc {
+        &self.doc
+    }
+
     /// 各 TLS 中继在 WireGuard 中的 endpoint：传输适配进程为它开的回环端口。
     pub fn tls_endpoints(&self) -> &BTreeMap<NodeId, SocketAddr> {
         &self.tls_endpoints
@@ -193,6 +236,22 @@ impl DesiredMesh {
     }
 
     pub fn from_doc(doc: DesiredMeshDoc) -> Result<Self, ConfigError> {
+        for (what, len, max) in [
+            ("members", doc.members.len(), MAX_MEMBERS),
+            ("revocations", doc.revocations.len(), MAX_REVOCATIONS),
+            ("paths", doc.paths.len(), MAX_MEMBERS),
+            ("names", doc.names.len(), MAX_MEMBERS),
+            (
+                "advertised routes",
+                doc.advertised_routes.len(),
+                MAX_MEMBERS,
+            ),
+        ] {
+            if len > max {
+                return Err(ConfigError::TooMany { what, max });
+            }
+        }
+        let source = doc.clone();
         match doc.listen_port {
             Some(0) => return Err(ConfigError::ListenPort),
             Some(port) if is_reserved_port(port) => {
@@ -253,6 +312,7 @@ impl DesiredMesh {
             listen_port: doc.listen_port,
             prefixes: doc.prefixes,
             anchors: TrustAnchors::from_doc(&doc.trust_anchors)?,
+            trust_anchors: doc.trust_anchors,
             members: doc.members,
             revocations: doc.revocations,
             paths,
@@ -261,6 +321,7 @@ impl DesiredMesh {
             names: doc.names,
             tls_targets: targets,
             tls_endpoints,
+            doc: source,
         })
     }
 }
@@ -294,6 +355,44 @@ fn min_len(addr: IpAddr) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{Mesh, node_id};
+
+    #[test]
+    fn counts_and_sizes_are_bounded() {
+        let mesh = Mesh::new(&[1]);
+        let mut doc = mesh.desired(1, vec![]);
+        doc.revocations = vec![
+            Revocation::Node {
+                node_id: node_id(9)
+            };
+            MAX_REVOCATIONS + 1
+        ];
+        assert_eq!(
+            DesiredMesh::from_doc(doc).err(),
+            Some(ConfigError::TooMany {
+                what: "revocations",
+                max: MAX_REVOCATIONS
+            })
+        );
+
+        let dir = std::env::temp_dir().join(format!("nett-config-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("desired.json");
+        std::fs::write(&file, [b' '; 11]).expect("written");
+        assert!(read_bounded(&file, 10).is_err());
+        assert_eq!(
+            read_bounded(&file, 11)
+                .expect("small enough")
+                .map(|b| b.len()),
+            Some(11)
+        );
+        assert_eq!(
+            read_bounded(&dir.join("missing"), 10).expect("no error"),
+            None
+        );
+        assert!(read_bounded(&dir, 10).is_err());
+        std::fs::remove_dir_all(&dir).expect("cleaned up");
+    }
 
     #[test]
     fn mesh_prefixes_must_be_private_and_sized() {

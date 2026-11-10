@@ -3,4 +3,4 @@
 FROM scratch
 COPY nett /nett
 ENTRYPOINT ["/nett"]
-CMD ["mesh", "--config", "/etc/nett/desired.json", "--key", "/etc/nett/mesh.key"]
+CMD ["mesh", "--config", "/etc/nett/desired.json", "--key", "/etc/nett/mesh.key", "--state", "/etc/nett/state"]
