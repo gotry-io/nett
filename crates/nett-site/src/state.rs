@@ -79,6 +79,14 @@ pub struct Machine {
     /// 签名的宣告网段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes_signed: Option<SignedVersion>,
+    /// 签过的宣告网段的最高版本。网段全部去掉时签名的产物随之去掉，版本留在这里：再宣告时接着增加，
+    /// 组网进程只接受更高的版本（design/mesh.md 第 4.2 节）。
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub routes_version: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
 }
 
 impl Machine {
