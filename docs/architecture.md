@@ -89,7 +89,7 @@ nett-node 是控制代理，只负责入网、连接 Hub、保存本地状态、
 节点本地只保存**身份和权限**，其余来自 Hub 下发或本地探测：Hub 端点列表（入网时只需一个公网地址，其余由 Hub 推送，node 并发探测并选择最优）、网络可达性（`public` / `dial-only`）、局域网地址、组网地址等。组网私钥在本机生成，永不离开节点。
 
 ```bash
-curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <token>
+curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <token>
 ```
 
 ## 4. Hub
@@ -366,28 +366,43 @@ curl -fsSL https://<项目主页>/install.sh | sudo sh -s -- hub --domain hub.ex
 **节点**：在控制台"添加节点"并勾选模块和角色，复制生成的命令：
 
 ```bash
-curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <一次性 token>
+curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性 token>
 ```
 
 - **安装脚本和二进制都由用户自己的 Hub 提供**：脚本中预置 Hub 的公钥；可执行文件用项目的发布签名验证（主备两把公钥在构建时嵌入 `nett`，首次安装时可对照项目主页公布的指纹核对，ADR 0020）；Hub 缓存经过签名的发布包，节点无需访问公共代码托管平台（在网络受限的地区更可靠）；
 - token 一次性有效且很快过期；
-- 不使用 `curl | sh` 时，可手动下载、校验签名后执行 `sudo nett enroll <token>`；
-- macOS 也可以通过 Homebrew 安装后执行 `sudo nett enroll <token>`。
+- 不使用 `curl | sh` 时，可手动下载、校验签名后执行 `sudo nett install <token>`；
+- macOS 也可以通过 Homebrew 安装后执行 `sudo nett install <token>`。
 
 **手机**：无需安装 nett。控制台"添加设备"（passkey 确认）后导出标准 WireGuard 配置，用任意 WireGuard 客户端导入；也可以导出 Surge、mihomo、sing-box 的配置，直连家里不通时自动改走网关。
 
-### 13.4 日常命令
+### 13.4 命令
+
+命令按作用范围分三组，每个命令只做一件事。`nett` 或 `nett help` 按这三组列出全部命令，任何命令加 `--help` 显示它的用法。
+
+**整张网**：只在持有站点的那台电脑上运行（design/local-signing.md）。
 
 | 命令 | 作用 |
 |---|---|
-| `nett status` | 本机状态：模块、Hub 连接、组网当前路径 |
-| `nett doctor` | 自动诊断，给出通俗的说明和处理建议 |
-| `nett upgrade` | 手动升级；默认由 Hub 经 `release` 分区推送，校验发布签名、拒绝降级后替换，失败自动回滚 |
+| `nett site init` | 建立站点：恢复密钥与空的站点描述 |
+| `nett site apply` | 签名变化的产物，生成各节点的期望状态。不接 Hub 时写成文件；接了 Hub 时推送给 Hub（design/hub.md 第 3.2 节） |
+
+**这台机器**：在每台机器上运行，多数需要 root。
+
+| 命令 | 作用 |
+|---|---|
+| `nett status` | 本机与各对端的状态（design/status.md） |
+| `nett install` | 把这台机器装成成员：生成密钥、安装服务、导入期望状态（macOS，design/release.md 第 4 节）；带入网 token 时向 Hub 入网（design/hub.md 第 6 节） |
+| `nett uninstall` | 停止并删除服务，保留密钥和期望状态，再次 `install` 即恢复 |
+| `nett keys` | 只生成本机密钥、打印写进站点描述的一行：用于容器内成员和自己写服务配置的机器 |
 | `nett leave` | 退出这张网（root）：通知 Hub，拆掉组网接口，删除本机的密钥、信任锚和期望状态，卸载服务；之后可以加入任何网（design/auth.md 第 8.3 节） |
-| `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
-| `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
+| `nett doctor` | 自动诊断，给出通俗的说明和处理建议 |
 | `nett whois <地址>` | 按本机已验证的准入材料，查询一个组网地址属于哪个节点、设备或 Edge |
-| `nett mesh keys`、`nett site` | 接入 Hub 之前：在节点上生成密钥；在用户电脑上签名并生成各节点的期望状态文件（design/local-signing.md） |
+| `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
+| `nett upgrade` | 手动升级；默认由 Hub 经 `release` 分区推送，校验发布签名、拒绝降级后替换，失败自动回滚 |
+| `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
+
+**服务进程**：由 systemd、launchd 或容器运行，用户不直接运行：`nett mesh`（组网进程）、`nett node`（控制代理）、`nett relay`、`nett transport`（第 13.2 节）。
 
 ### 13.5 节点形态
 

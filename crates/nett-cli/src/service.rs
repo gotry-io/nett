@@ -1,7 +1,7 @@
-//! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett mesh install` 在 root 专属的目录中生成
-//! 密钥、放入程序的副本和期望状态（从运行 sudo 的用户的站点目录中找到给本机的那一份），写入 launchd 与
-//! 日志轮转的配置并启动服务；`sudo nett mesh uninstall` 停止
-//! 服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务只运行这份副本。
+//! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett install` 在 root 专属的目录中生成密钥、
+//! 放入程序的副本和期望状态（从运行 sudo 的用户的站点目录中找到给本机的那一份），写入 launchd 与日志轮转的
+//! 配置并启动服务；`sudo nett uninstall` 停止服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务
+//! 只运行这份副本。
 
 use std::fs;
 use std::io::Write as _;
@@ -29,7 +29,7 @@ fn plist() -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 由 nett mesh install 生成（design/release.md 第 4 节） -->
+<!-- 由 nett install 生成（design/release.md 第 4 节） -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -68,7 +68,7 @@ fn plist() -> String {
 /// 启动失败记录的轮转：超过 1 MB 时轮转，保留 5 份，压缩旧的。
 fn newsyslog() -> String {
     format!(
-        "# 由 nett mesh install 生成：组网服务启动失败记录的轮转（运行日志在系统日志中）\n\
+        "# 由 nett install 生成：组网服务启动失败记录的轮转（运行日志在系统日志中）\n\
          # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
          {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n"
     )
@@ -159,7 +159,7 @@ fn replace_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<
 
 /// 一个命令完成安装（design/release.md 第 4 节）：密钥、程序的副本、两份配置，`config` 给出时导入期望
 /// 状态；有期望状态时启动服务，已在运行时按变化重启或重新加载。
-pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
+fn install(config: Option<&Path>) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
     ensure_dir(LOG_DIR, 0o700)?;
@@ -203,10 +203,10 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
         println!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
         println!(
-            "Add the keys line above to site.toml, run `nett site build`, then run `sudo nett mesh install` again."
+            "Add the keys line above to site.toml, run `nett site apply`, then run `sudo nett install` again."
         );
         println!(
-            "If the site is on another machine, use `sudo nett mesh install --config <desired.json>`."
+            "If the site is on another machine, use `sudo nett install --config <desired.json>`."
         );
         return Ok(());
     }
@@ -217,7 +217,7 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
             concat!(
                 "Started the mesh service.\n",
                 "Logs: log show --last 1h --predicate 'process == \"nett\"'\n",
-                "Run `sudo nett mesh install` again after `nett site build` or `brew upgrade nett`."
+                "Run `sudo nett install` again after `nett site apply` or `brew upgrade nett`."
             ),
         )
     } else if binary_changed || plist_changed {
@@ -287,7 +287,33 @@ mod passwd {
     }
 }
 
-pub fn uninstall() -> anyhow::Result<()> {
+pub const INSTALL_USAGE: &str = "usage: sudo nett install [--config <desired-state.json>]\n\n\
+Creates this machine's keys, copies nett into a root-only directory, imports this machine's\n\
+desired state from the site directory (or --config) and starts the service.\n\
+Run it again after `nett site apply` or `brew upgrade nett`.";
+pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall";
+
+/// `sudo nett install [--config <期望状态>]`。
+pub fn install_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+    let mut config = None;
+    while let Some(arg) = parser.next()? {
+        match arg {
+            lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
+            other => return Err(other.unexpected().into()),
+        }
+    }
+    install(config.as_deref())
+}
+
+/// `sudo nett uninstall`。
+pub fn uninstall_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+    if let Some(arg) = parser.next()? {
+        return Err(arg.unexpected().into());
+    }
+    uninstall()
+}
+
+fn uninstall() -> anyhow::Result<()> {
     require_root()?;
     if loaded()? {
         if !launchctl(&["bootout", &format!("system/{LABEL}")])? {

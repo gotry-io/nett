@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use anyhow::{Context as _, bail};
 use tokio::signal::unix::{SignalKind, signal};
 
+pub const USAGE: &str = "usage: nett transport --config <transport.json>";
+
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut config = None;
     while let Some(arg) = parser.next()? {
@@ -16,7 +18,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
     }
     let Some(config) = config else {
-        bail!("usage: nett transport --config <transport.json>");
+        bail!(USAGE);
     };
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)

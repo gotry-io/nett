@@ -8,6 +8,8 @@ use nett_relay::lab::RelayConfig;
 use nett_relay::server::{TlsIngress, serve, tls_acceptor, tls_listener};
 use tokio::signal::unix::{SignalKind, signal};
 
+pub const USAGE: &str = "usage: nett relay --config <relay.json> [--state <relay-state.json>]";
+
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let (mut config, mut state) = (None, None);
     while let Some(arg) = parser.next()? {
@@ -18,7 +20,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
     }
     let Some(config) = config else {
-        bail!("usage: nett relay --config <relay.json> [--state <relay-state.json>]");
+        bail!(USAGE);
     };
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
