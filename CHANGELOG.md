@@ -5,8 +5,18 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [Unreleased]
 
-- macOS：`sudo nett mesh install` 只在本机还没有期望状态时打印写进站点描述的公钥那一行；之后再运行只说明结果。
-  macOS: `sudo nett mesh install` prints the key line for the site description only while this machine has no
+- 命令按作用范围重新整理（`nett help` 按组列出，任何命令加 `--help` 显示用法）：本机的命令都在顶层，
+  `nett mesh` 只是由服务管理器运行的组网进程。改名：`nett mesh install` / `uninstall` → `nett install` /
+  `uninstall`，`nett mesh keys` → `nett keys`，`nett site build` → `nett site apply`。已安装的 macOS 服务、
+  systemd 单元和容器镜像都按 `nett mesh` 启动，不受影响；脚本和自己的笔记里的旧命令要改成新的。
+  Commands are regrouped by scope (`nett help` lists them by group; `--help` after any command shows its
+  usage): commands for this machine are top-level, and `nett mesh` is only the mesh process run by the
+  service manager. Renamed: `nett mesh install` / `uninstall` -> `nett install` / `uninstall`,
+  `nett mesh keys` -> `nett keys`, `nett site build` -> `nett site apply`. Installed macOS services, systemd
+  units and container images start `nett mesh` and keep working; update scripts and notes that use the old
+  commands.
+- macOS：`sudo nett install` 只在本机还没有期望状态时打印写进站点描述的公钥那一行；之后再运行只说明结果。
+  macOS: `sudo nett install` prints the key line for the site description only while this machine has no
   desired state yet; later runs just report what happened.
 
 ## [0.1.4] - 2026-11-10

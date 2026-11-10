@@ -44,7 +44,7 @@
 
 ## 5. 节点名
 
-期望状态增加一项不签名的 `names`：节点 ID 到节点名的映射。`nett site build` 按站点描述写入；接入 Hub 之后由 Hub 下发，与主机名同一出处（mesh.md 第 11 节）。
+期望状态增加一项不签名的 `names`：节点 ID 到节点名的映射。`nett site apply` 按站点描述写入；接入 Hub 之后由 Hub 下发，与主机名同一出处（mesh.md 第 11 节）。
 
 ```json
 "names": { "node_01JC…": "edge-vps", "node_01JD…": "mac-app" }

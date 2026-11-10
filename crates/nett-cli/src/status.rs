@@ -13,7 +13,7 @@ use nett_mesh::status::{
 };
 use nett_trust::encoding::Timestamp;
 
-const USAGE: &str = "usage: nett status [<peer>] [--json] [--socket <path>]";
+pub const USAGE: &str = "usage: nett status [<peer>] [--json] [--socket <path>]";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut peer = None;
@@ -24,10 +24,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             lexopt::Arg::Long("json") => json = true,
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
             lexopt::Arg::Value(v) if peer.is_none() => peer = Some(v.string()?),
-            lexopt::Arg::Long("help") | lexopt::Arg::Short('h') => {
-                println!("{USAGE}");
-                return Ok(());
-            }
             _ => bail!("{USAGE}"),
         }
     }

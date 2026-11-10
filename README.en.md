@@ -22,13 +22,14 @@ nett is for individuals and small teams with a few scattered machines, for examp
 - **macOS** (native member and the signing tool `nett site`):
   ```bash
   brew install gotry-io/tap/nett
-  sudo nett mesh install    # creates this machine's keys and prints the line for the site description
+  sudo nett install    # creates this machine's keys and prints the line for the site description
   # add this node to the site description (~/.config/nett/site.toml by default)
-  nett site build
-  sudo nett mesh install    # finds this machine's desired state, checks and imports it, starts the mesh service
+  nett site apply
+  sudo nett install    # finds this machine's desired state, checks and imports it, starts the mesh service
   ```
-  Run the same command whenever the desired state changes (it reloads without a restart); if the site is on another machine, add `--config <this node's desired.json>`. The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett mesh install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
-- **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service).
+  Run the same command whenever the desired state changes (it reloads without a restart); if the site is on another machine, add `--config <this node's desired.json>`. The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
+- **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, create this machine's keys with `sudo nett keys --dir /etc/nett`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service).
+- **Commands**: `nett help` lists every command; add `--help` to any command for its usage.
 - **Check the status**: `sudo nett status` lists this node and every peer: whether it is connected, the path, round-trip time and loss, and any rejected configuration; `sudo nett status <peer>` shows one peer's candidate paths and recent switches ([design/status.md](docs/design/status.md), in Chinese).
 
 ## Documentation

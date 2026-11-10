@@ -1,6 +1,6 @@
 //! `nett site`：用户自己电脑上的签名工具（design/local-signing.md）。站点目录（默认 `~/.config/nett`）中有
 //! 站点描述 `site.toml`、恢复密钥 `recovery.pk8`（权限 `0600`，只在签名时读取）和签名工具的状态
-//! `state.json`；`nett site build` 为每个节点生成 `nodes/<名称>/desired.json`，文件不含私钥。
+//! `state.json`；`nett site apply` 为每个节点生成 `nodes/<名称>/desired.json`，文件不含私钥。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -41,8 +41,8 @@ const RESIGN_BEFORE_SECS: i64 = 7 * 24 * 3600;
 /// 一个站点最多的节点数（硬性规则 14）。
 const MAX_NODES: usize = 256;
 
-const USAGE: &str = "usage: nett site init [--dir <site>] [--origin https://<console host>]\n       \
-nett site build [--dir <site>]\n\
+pub const USAGE: &str = "usage: nett site init [--dir <site>] [--origin https://<console host>]\n       \
+nett site apply [--dir <site>]\n\n\
 The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it is not set.";
 
 // ---- 站点描述（design/local-signing.md 第 4 节） ----
@@ -78,7 +78,7 @@ fn default_listen_port() -> u16 {
 struct SiteNode {
     name: String,
     reachability: Reachability,
-    /// 节点上 `nett mesh keys` 输出的一行：组网公钥与身份公钥。
+    /// 节点上 `nett keys` 输出的一行：组网公钥与身份公钥。
     keys: String,
     /// `public` 节点的公网地址。
     ipv4: Option<Ipv4Addr>,
@@ -169,9 +169,9 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
-    let build_command = match &dir {
-        Some(dir) => format!("nett site build --dir {}", dir.display()),
-        None => "nett site build".to_owned(),
+    let apply_command = match &dir {
+        Some(dir) => format!("nett site apply --dir {}", dir.display()),
+        None => "nett site apply".to_owned(),
     };
     let dir = match dir {
         Some(dir) => dir,
@@ -193,15 +193,15 @@ without it, the site has to be created again and every node enrolled again.
 
 Next:
   1. On each node, create its keys:
-       macOS  sudo nett mesh install
-       Linux  nett mesh keys --dir <directory>
+       macOS  sudo nett install
+       Linux  sudo nett keys --dir /etc/nett
   2. Add the printed keys line to that node's entry in site.toml.
-  3. Run `{build_command}`.",
+  3. Run `{apply_command}`.",
                 dir.display()
             );
             Ok(())
         }
-        ["build"] => build(&dir),
+        ["apply"] => apply(&dir),
         _ => bail!(USAGE),
     }
 }
@@ -285,8 +285,8 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nett site build` 生成的期望状态是不是给这台机器的：其中本节点准入材料的组网公钥必须是 `mesh_public`
-/// （`sudo nett mesh install --config`，design/release.md 第 4 节）。拷错了节点的文件时在复制之前就报错。
+/// `nett site apply` 生成的期望状态是不是给这台机器的：其中本节点准入材料的组网公钥必须是 `mesh_public`
+/// （`sudo nett install --config`，design/release.md 第 4 节）。拷错了节点的文件时在复制之前就报错。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn check_desired_for(
     bytes: &[u8],
@@ -302,7 +302,7 @@ pub(crate) fn check_desired_for(
     ensure!(
         me.mesh_public_key == *mesh_public,
         "this desired state is for node {} (mesh key {}), not for this machine (mesh key {}); \
-         use the desired.json that nett site build wrote for this machine's node",
+         use the desired.json that nett site apply wrote for this machine's node",
         desired.node_id,
         me.mesh_public_key,
         mesh_public
@@ -310,7 +310,7 @@ pub(crate) fn check_desired_for(
     Ok(desired.node_id.clone())
 }
 
-/// 站点目录中给这台机器的期望状态（`sudo nett mesh install`，design/release.md 第 4 节）：`nodes/` 下
+/// 站点目录中给这台机器的期望状态（`sudo nett install`，design/release.md 第 4 节）：`nodes/` 下
 /// 本节点的组网公钥是 `mesh_public` 的那一份，返回它的路径和内容。还没有 `nodes/` 时返回 `None`。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn find_desired_for(
@@ -369,7 +369,7 @@ pub(crate) fn read_desired(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
 }
 
 /// 为站点描述中的每个节点生成期望状态（design/local-signing.md 第 4、5 节）。
-fn build(dir: &Path) -> anyhow::Result<()> {
+fn apply(dir: &Path) -> anyhow::Result<()> {
     let site: Site = toml::from_str(
         &std::fs::read_to_string(dir.join(SITE_FILE))
             .with_context(|| format!("reading {}", dir.join(SITE_FILE).display()))?,
@@ -562,7 +562,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         "Built the desired state for {} in {}/<node>/desired.json.
 The files contain no private keys. To apply one on its node:
   Linux      copy it to /etc/nett/desired.json, then run `systemctl reload nett-mesh`
-  macOS      sudo nett mesh install --config <desired.json>
+  macOS      sudo nett install, or with --config <desired.json> when the site is elsewhere
   container  replace the mounted desired.json, then run `docker kill -s HUP <container>`",
         match site.nodes.len() {
             1 => "1 node".to_owned(),
@@ -768,11 +768,11 @@ fn sign_routes(
     }))
 }
 
-/// 节点上 `nett mesh keys` 输出的一行：`<组网公钥> <身份公钥>`。
+/// 节点上 `nett keys` 输出的一行：`<组网公钥> <身份公钥>`。
 fn parse_keys(s: &str) -> anyhow::Result<(X25519PublicKey, X25519PublicKey)> {
     let mut parts = s.split_whitespace();
     let (Some(mesh), Some(identity), None) = (parts.next(), parts.next(), parts.next()) else {
-        bail!("expected two public keys separated by a space, as printed by `nett mesh keys`");
+        bail!("expected two public keys separated by a space, as printed by `nett keys`");
     };
     Ok((mesh.parse()?, identity.parse()?))
 }
@@ -1059,7 +1059,7 @@ mod tests {
                  [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n"
             ),
         );
-        build(&dir).expect("build");
+        apply(&dir).expect("apply");
         let mesh_key = |k: &str| -> X25519PublicKey {
             k.split_whitespace()
                 .next()
@@ -1129,7 +1129,7 @@ mod tests {
             keys()
         );
         write_site(&dir, &nodes);
-        build(&dir).expect("build");
+        apply(&dir).expect("apply");
         assert_eq!(desired(&dir, "vps").listen_port, Some(51000));
         assert_eq!(desired(&dir, "vps2").listen_port, Some(DEFAULT_LISTEN_PORT));
         // dial-only：系统分配，同一台主机上的几个成员不争用端口
@@ -1158,7 +1158,7 @@ mod tests {
         let refused = |nodes: String| {
             format!("{:#}", {
                 write_site(&dir, &nodes);
-                build(&dir).expect_err("refused")
+                apply(&dir).expect_err("refused")
             })
         };
         // 组网进程自己用的端口在生成时就拒绝，不等到节点上绑定失败
@@ -1180,8 +1180,8 @@ mod tests {
     }
 
     #[test]
-    fn builds_admissible_state_and_keeps_signatures_until_inputs_change() {
-        let dir = temp_dir("build");
+    fn apply_writes_admissible_state_and_keeps_signatures_until_inputs_change() {
+        let dir = temp_dir("apply");
         init(&dir, DEFAULT_ORIGIN).expect("init");
         assert!(
             init(&dir, DEFAULT_ORIGIN).is_err(),
@@ -1212,7 +1212,7 @@ mod tests {
             s
         };
         write_site(&dir, &nodes(true, true));
-        build(&dir).expect("build");
+        apply(&dir).expect("apply");
         let first =
             std::fs::read(dir.join(NODES_DIR).join("app").join("desired.json")).expect("out");
         let s1 = state(&dir);
@@ -1241,14 +1241,14 @@ mod tests {
         );
 
         // 输入不变：同样的签名与文件
-        build(&dir).expect("rebuild");
+        apply(&dir).expect("apply again");
         let again =
             std::fs::read(dir.join(NODES_DIR).join("app").join("desired.json")).expect("out");
         assert_eq!(first, again);
 
         // 去掉一个节点：撤销，地址不再分配；去掉 Edge：版本加一，规则集换成空的新版本
         write_site(&dir, &nodes(false, false));
-        build(&dir).expect("build without c");
+        apply(&dir).expect("apply without c");
         let s2 = state(&dir);
         assert_eq!(s2.revoked.len(), 1);
         assert_eq!(s2.revoked[0].node_id, s1.nodes["c"].node_id);
@@ -1282,7 +1282,7 @@ mod tests {
                 site("routes = [\"172.30.0.10/32\"]\n")
             ),
         );
-        build(&dir).expect("build");
+        apply(&dir).expect("apply");
         let s1 = state(&dir);
         assert_eq!(s1.nodes["app"].routes.as_ref().map(|r| r.version), Some(1));
         let vps = desired(&dir, "vps");
@@ -1305,7 +1305,7 @@ mod tests {
         assert_eq!(rules.version(), Some(1));
         // 去掉 routes：不再宣告，节点策略去掉 subnet_router 角色，成员作废已生效的宣告
         write_site(&dir, &site(""));
-        build(&dir).expect("rebuild");
+        apply(&dir).expect("apply again");
         let s2 = state(&dir);
         assert!(s2.nodes["app"].routes.is_none());
         assert_eq!(
@@ -1325,7 +1325,7 @@ mod tests {
                 site("")
             ),
         );
-        assert!(build(&dir).is_err());
+        assert!(apply(&dir).is_err());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -1340,7 +1340,7 @@ mod tests {
                 keys()
             ),
         );
-        build(&dir).expect("build");
+        apply(&dir).expect("apply");
         let material = &state(&dir).nodes["a"].material;
         assert!(!expiring(material, RESIGN_BEFORE_SECS));
         assert!(expiring(material, PAYLOAD_VALIDITY_SECS + 60));
@@ -1381,7 +1381,7 @@ mod tests {
             ),
         ] {
             write_site(&dir, &body);
-            assert!(build(&dir).is_err(), "{case}");
+            assert!(apply(&dir).is_err(), "{case}");
         }
         std::fs::remove_dir_all(&dir).ok();
     }

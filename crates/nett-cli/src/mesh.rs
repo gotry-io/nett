@@ -1,6 +1,5 @@
-//! `nett mesh`：组网进程，期望状态来自本地文件，收到 `SIGHUP` 时重新读取（design/local-signing.md 第 5 节）。
-//! `nett mesh keys` 在本机生成组网私钥和身份私钥（第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置
-//! 只在实验构建中（`lab` 特性）。
+//! `nett mesh`：组网进程，由服务管理器运行。期望状态来自本地文件，收到 `SIGHUP` 时重新读取
+//! （design/local-signing.md 第 5 节）。`nett keys` 在本机生成组网私钥和身份私钥（第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置只在实验构建中（`lab` 特性）。
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
@@ -48,9 +47,10 @@ struct LabArgs {
     userspace: bool,
 }
 
-const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>]\n       \
-nett mesh keys --dir <directory>\n       \
-sudo nett mesh install [--config <desired-state.json>] | uninstall    (macOS service)";
+pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>]\n\n\
+Started by systemd, launchd or a container; to install the service on macOS, use `sudo nett install`.";
+pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
+Existing keys are kept and the same line is printed again. On macOS, `sudo nett install` does this.";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
 [--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
@@ -111,9 +111,9 @@ fn parse_lab(lab: &mut LabArgs, name: &str, parser: &mut lexopt::Parser) -> anyh
     Ok(true)
 }
 
-/// `nett mesh keys --dir <目录>`：生成组网私钥和身份私钥（各一个新文件，已存在时不覆盖），输出写进站点描述的
+/// `nett keys --dir <目录>`：生成组网私钥和身份私钥（各一个新文件，已存在时不覆盖），输出写进站点描述的
 /// 一行公钥。
-fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+pub fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut dir = None;
     while let Some(arg) = parser.next()? {
         match arg {
@@ -121,7 +121,7 @@ fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
-    let dir = dir.context(USAGE)?;
+    let dir = dir.context(KEYS_USAGE)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     print_keys(&dir, node_keys(&dir)?);
     Ok(())
@@ -252,36 +252,7 @@ fn node_id(config: &PathBuf) -> anyhow::Result<NodeId> {
         .context("desired state node_id")
 }
 
-pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    let is_keys = parser
-        .try_raw_args()
-        .is_some_and(|mut raw| raw.next_if(|a| a == "keys").is_some());
-    if is_keys {
-        return keys(parser);
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let sub = parser.try_raw_args().and_then(|mut raw| {
-            raw.next_if(|a| a == "install" || a == "uninstall")
-                .map(|a| a.to_string_lossy().into_owned())
-        });
-        match sub.as_deref() {
-            Some("install") => {
-                let mut config = None;
-                while let Some(arg) = parser.next()? {
-                    match arg {
-                        lexopt::Arg::Long("config") => {
-                            config = Some(PathBuf::from(parser.value()?))
-                        }
-                        other => return Err(other.unexpected().into()),
-                    }
-                }
-                return crate::service::install(config.as_deref());
-            }
-            Some("uninstall") => return crate::service::uninstall(),
-            _ => {}
-        }
-    }
+pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let args = parse(parser)?;
     init_logging();
 

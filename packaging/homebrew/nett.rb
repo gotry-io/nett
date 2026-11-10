@@ -21,15 +21,14 @@ class Nett < Formula
     bin.install "nett"
   end
 
-  # 只用英文，与 Homebrew 社区一致：Homebrew 运行配方时固定使用英文区域设置，配方无法按用户的语言选择；
-  # 执行这些命令时，nett 自己的输出按系统语言显示
+  # 只用英文，与 nett 命令的输出一致（architecture.md 第 14.3 节）
   def caveats
     <<~EOS
       To join the mesh as a native member (root is needed for the utun interface):
-        sudo nett mesh install    # prints the line to add to the site description
-        nett site build           # in the site directory, ~/.config/nett by default
-        sudo nett mesh install    # finds this machine's desired state there and starts the service
-      Run `sudo nett mesh install` again after every `nett site build` and `brew upgrade nett`.
+        sudo nett install    # prints the line to add to the site description
+        nett site apply      # in the site directory, ~/.config/nett by default
+        sudo nett install    # finds this machine's desired state there and starts the service
+      Run `sudo nett install` again after every `nett site apply` and `brew upgrade nett`.
     EOS
   end
 
