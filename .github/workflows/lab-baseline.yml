@@ -105,9 +105,10 @@ jobs:
         run: rustup toolchain install
       - name: 安装实验网络用到的工具
         if: env.SELECTED == 'true'
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 openssl tcpdump
+          sudo apt-get -c .github/apt.conf update
+          sudo apt-get -c .github/apt.conf install -y --no-install-recommends wireguard-tools nftables iperf3 openssl tcpdump
       - name: 安装 Tailscale、Headscale 与 derper（固定版本，校验哈希）
         if: env.SELECTED == 'true'
         run: |
@@ -139,7 +140,7 @@ jobs:
       - name: 发布构建的 nett（release，静态链接 musl）
         if: env.SELECTED == 'true' && matrix.musl
         run: |
-          sudo apt-get install -y --no-install-recommends musl-tools
+          sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools
           rustup target add x86_64-unknown-linux-musl
           cargo build --locked --release --target x86_64-unknown-linux-musl -p nett-cli --features lab
           file target/x86_64-unknown-linux-musl/release/nett

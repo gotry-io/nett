@@ -122,9 +122,10 @@ jobs:
       - name: 安装 rust-toolchain.toml 指定的工具链
         run: rustup toolchain install
       - name: 安装实验网络用到的工具
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends wireguard-tools nftables iperf3 tcpdump
+          sudo apt-get -c .github/apt.conf update
+          sudo apt-get -c .github/apt.conf install -y --no-install-recommends wireguard-tools nftables iperf3 tcpdump
       - name: 确认内核 WireGuard 可用
         run: |
           uname -r
