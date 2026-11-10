@@ -1,4 +1,5 @@
-//! `nett status`：本机组网的状态（design/status.md 第 7 节）。只读，经组网进程的本机套接字查询。
+//! `nett status`：本机组网的状态（design/status.md 第 7 节），以及 `nett reload`（第 4.1 节）。都经组网进程的
+//! 本机套接字。
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -9,11 +10,13 @@ use lexopt::ValueExt as _;
 use nett_mesh::config::Reachability;
 use nett_mesh::status::{
     self, CandidateStateDoc, DataPlaneKind, EventRecord, NatKind, NodeRef, PathKindDoc, PathStatus,
-    PeerRole, PeerState, PeerStatus, Problem, ProblemKind, QueryError, StatusDoc,
+    PeerRole, PeerState, PeerStatus, Problem, ProblemKind, QueryError, ReloadOutcome, StatusDoc,
 };
 use nett_trust::encoding::Timestamp;
 
 pub const USAGE: &str = "usage: nett status [<peer>] [--json] [--socket <path>]";
+pub const RELOAD_USAGE: &str = "usage: nett reload [--socket <path>]\n\n\
+On Linux, run it with sudo. In a container member: docker exec <container> /nett reload";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut peer = None;
@@ -45,6 +48,48 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// `nett reload`：请组网进程重新读取期望状态文件，显示它是否被接受（design/status.md 第 4.1 节）。
+pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+    let mut socket = PathBuf::from(status::DEFAULT_SOCKET);
+    while let Some(arg) = parser.next()? {
+        match arg {
+            lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
+            _ => bail!("{RELOAD_USAGE}"),
+        }
+    }
+    print!("{}", reload_at(&socket)?);
+    Ok(())
+}
+
+/// 请 `socket` 上的组网进程重新读取期望状态文件，返回要显示的结果；被拒绝时是错误。`nett reload` 与
+/// macOS 的 `nett install` 共用。
+pub fn reload_at(socket: &std::path::Path) -> anyhow::Result<String> {
+    let outcome = status::reload(socket).map_err(|e| explain(e, socket))?;
+    reload_text(&outcome, Timestamp::now())
+}
+
+/// `applied` 时的输出；`rejected` 作为错误返回（退出码 1）。
+fn reload_text(outcome: &ReloadOutcome, now: Timestamp) -> anyhow::Result<String> {
+    match outcome {
+        ReloadOutcome::Rejected { reason } => {
+            bail!("desired state rejected, still using the previous one: {reason}")
+        }
+        ReloadOutcome::Applied { problems } if problems.is_empty() => {
+            Ok("Reloaded the desired state.\n".to_owned())
+        }
+        ReloadOutcome::Applied { problems } => {
+            let rows: Vec<[String; 2]> = problems
+                .iter()
+                .map(|p| [ago(p.at, now), problem_text(p)])
+                .collect();
+            Ok(format!(
+                "Reloaded the desired state, with problems:\n{}",
+                table(&rows)
+            ))
+        }
+    }
 }
 
 /// 连不上时说清楚是没有运行、还是权限不够。
@@ -717,6 +762,32 @@ EVENTS
         assert_eq!(ago_s(3 * 86_400 + 5), "3d ago");
         // 时钟回拨时不出现负数
         assert_eq!(ago_s(-5), "0s ago");
+    }
+
+    #[test]
+    fn reload_says_what_happened() {
+        let now = Timestamp::from_unix_seconds(NOW);
+        let applied = ReloadOutcome::Applied { problems: vec![] };
+        assert_eq!(
+            reload_text(&applied, now).expect("ok"),
+            "Reloaded the desired state.\n"
+        );
+        let with_problems = ReloadOutcome::Applied {
+            problems: doc().problems,
+        };
+        assert_eq!(
+            reload_text(&with_problems, now).expect("ok"),
+            "Reloaded the desired state, with problems:\n2m ago  desired state rejected, still using the previous one: listen port 41821 is one nett itself uses\n"
+        );
+        let rejected = ReloadOutcome::Rejected {
+            reason: "bad json".into(),
+        };
+        assert_eq!(
+            reload_text(&rejected, now)
+                .expect_err("rejected")
+                .to_string(),
+            "desired state rejected, still using the previous one: bad json"
+        );
     }
 
     #[test]

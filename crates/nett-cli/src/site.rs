@@ -561,9 +561,9 @@ fn apply(dir: &Path) -> anyhow::Result<()> {
     println!(
         "Built the desired state for {} in {}/<node>/desired.json.
 The files contain no private keys. To apply one on its node:
-  Linux      copy it to /etc/nett/desired.json, then run `systemctl reload nett-mesh`
+  Linux      copy it to /etc/nett/desired.json, then run `sudo nett reload`
   macOS      sudo nett install, or with --config <desired.json> when the site is elsewhere
-  container  replace the mounted desired.json, then run `docker kill -s HUP <container>`",
+  container  replace the mounted desired.json, then run `docker exec <container> /nett reload`",
         match site.nodes.len() {
             1 => "1 node".to_owned(),
             n => format!("{n} nodes"),

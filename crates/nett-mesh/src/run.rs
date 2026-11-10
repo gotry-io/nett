@@ -5,17 +5,25 @@
 use std::future::Future;
 
 use crate::config::{ConfigError, DesiredMesh};
+use crate::status::ReloadReply;
+
+/// 交付的一份期望状态。`reply` 是经本机接口请求重新读取（`nett reload`）、在等应用结果的一方
+/// （design/status.md 第 4.1 节）；启动时的读取与 `SIGHUP` 没有。
+pub struct Delivery {
+    pub desired: Result<DesiredMesh, ConfigError>,
+    pub reply: Option<ReloadReply>,
+}
 
 /// 期望状态的来源。实验构建从本地文件读取；接入 Hub 之后由 nett-node 经本机接口提供
 /// （design/prototype.md 第 3 节）。
 pub trait ConfigSource {
     /// 下一份期望状态；`None` 表示来源已关闭。
-    fn next(&mut self) -> impl Future<Output = Option<Result<DesiredMesh, ConfigError>>> + Send;
+    fn next(&mut self) -> impl Future<Output = Option<Delivery>> + Send;
 }
 
 /// 接收期望状态的一方（组网进程的后台线程）。调用可能阻塞，由 [`run`] 放到阻塞线程池中执行。
 pub trait Applier: Send + 'static {
-    fn apply(&mut self, desired: Result<DesiredMesh, ConfigError>);
+    fn apply(&mut self, delivery: Delivery);
 }
 
 #[derive(Debug, thiserror::Error)]

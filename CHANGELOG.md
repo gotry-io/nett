@@ -15,6 +15,18 @@ User-visible changes by version; versions follow Semantic Versioning.
   `nett mesh keys` -> `nett keys`, `nett site build` -> `nett site apply`. Installed macOS services, systemd
   units and container images start `nett mesh` and keep working; update scripts and notes that use the old
   commands.
+- 新命令 `nett reload`：请组网进程重新读取期望状态文件，并显示它是否被接受、应用之后还有哪些问题；被拒绝时
+  退出码为 1。容器内成员用 `docker exec <容器> /nett reload`，Linux 上用 `sudo nett reload`；macOS 上
+  `sudo nett install` 在期望状态有变化时也这样做。0.1.4 中 `nett site build` 提示容器用 `docker kill -s HUP`，
+  这会让 Docker 把容器记为手动停止过，主机重启后 `unless-stopped` 的容器不再自动启动；照着做过的，运行一次
+  `docker restart <容器>` 清掉这个记录。
+  New command `nett reload`: asks the mesh process to re-read its desired state file and shows whether it was
+  accepted and what problems remain; it exits with 1 when the file is rejected. Container members use
+  `docker exec <container> /nett reload`, Linux nodes `sudo nett reload`; on macOS, `sudo nett install` does
+  this when the desired state changed. The 0.1.4 hint from `nett site build` said `docker kill -s HUP` for
+  containers, which makes Docker treat the container as manually stopped, so an `unless-stopped` container
+  no longer starts after the host restarts; if you followed it, run `docker restart <container>` once to
+  clear that.
 - macOS：`sudo nett install` 只在本机还没有期望状态时打印写进站点描述的公钥那一行；之后再运行只说明结果。
   macOS: `sudo nett install` prints the key line for the site description only while this machine has no
   desired state yet; later runs just report what happened.

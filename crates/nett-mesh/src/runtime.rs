@@ -19,8 +19,10 @@ use crate::event::{Event, EventSink};
 use crate::path::FAST_RECOVERY_INTERVAL;
 use crate::probe::TUNNEL_PROBE_PORT;
 use crate::prober::{Incoming, Outgoing};
-use crate::run::Applier;
-use crate::status::{QUERY_TIMEOUT, Recorder, StatusDoc, StatusSource};
+use crate::run::{Applier, Delivery};
+use crate::status::{
+    QUERY_TIMEOUT, RELOAD_TIMEOUT, Recorder, ReloadOutcome, ReloadReply, StatusDoc, StatusSource,
+};
 
 /// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
 /// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时（第 7 节）、等待重新握手完成时（第 8.4 节）改为
@@ -36,7 +38,8 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_DATAGRAM: usize = 2048;
 
 enum Msg {
-    Desired(Box<Result<DesiredMesh, ConfigError>>),
+    /// 一份期望状态，以及在等应用结果的一方（design/status.md 第 4.1 节）。
+    Desired(Box<Result<DesiredMesh, ConfigError>>, Option<ReloadReply>),
     Packet {
         kind: Incoming,
         from: SocketAddr,
@@ -55,9 +58,11 @@ pub struct Runtime {
 }
 
 impl Applier for Runtime {
-    fn apply(&mut self, desired: Result<DesiredMesh, ConfigError>) {
+    fn apply(&mut self, delivery: Delivery) {
         // 后台线程退出时（只在 bug 时发生）发送失败，由 shutdown 报告
-        let _ = self.tx.send(Msg::Desired(Box::new(desired)));
+        let _ = self
+            .tx
+            .send(Msg::Desired(Box::new(delivery.desired), delivery.reply));
     }
 }
 
@@ -92,16 +97,33 @@ impl Runtime {
                     // 收到探测消息后立即推进：高频探测时应答一到就处理，不等下一次定时推进
                     let mut tick_now = false;
                     match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
-                        Ok(Msg::Desired(desired)) => match *desired {
-                            Ok(desired) => {
-                                worker.events.begin_apply();
-                                worker.engine.apply(&desired, &mut worker.events);
-                                worker.ensure_sockets();
+                        Ok(Msg::Desired(desired, reply)) => {
+                            let outcome = match *desired {
+                                Ok(desired) => {
+                                    worker.events.begin_apply();
+                                    worker.engine.apply(&desired, &mut worker.events);
+                                    worker.ensure_sockets();
+                                    ReloadOutcome::Applied {
+                                        problems: worker.events.problems(
+                                            worker.engine.node_id(),
+                                            worker.engine.names(),
+                                            Instant::now(),
+                                        ),
+                                    }
+                                }
+                                Err(e) => {
+                                    let reason = e.to_string();
+                                    worker.events.emit(Event::ConfigRejected {
+                                        reason: reason.clone(),
+                                    });
+                                    ReloadOutcome::Rejected { reason }
+                                }
+                            };
+                            // 等结果的一方已经超时离开时丢弃
+                            if let Some(reply) = reply {
+                                let _ = reply.try_send(outcome);
                             }
-                            Err(e) => worker.events.emit(Event::ConfigRejected {
-                                reason: e.to_string(),
-                            }),
-                        },
+                        }
                         Ok(Msg::Packet {
                             kind,
                             from,
@@ -152,10 +174,12 @@ impl Runtime {
         })
     }
 
-    /// 本机状态的查询一方，交给 [`crate::status::StatusServer`]。
-    pub fn status_source(&self) -> RuntimeStatus {
+    /// 本机接口背后的一方，交给 [`crate::status::StatusServer`]。`reloads` 通往读取期望状态的一方
+    /// （[`crate::source::FileSource`]），`reload` 请求经它触发重新读取。
+    pub fn status_source(&self, reloads: tokio::sync::mpsc::Sender<ReloadReply>) -> RuntimeStatus {
         RuntimeStatus {
             tx: self.tx.clone(),
+            reloads,
         }
     }
 
@@ -176,9 +200,10 @@ struct Sockets {
     direct: Box<dyn DirectSend>,
 }
 
-/// 经后台线程的队列查询本机状态。
+/// 经后台线程的队列查询本机状态，经读取期望状态的一方触发重新读取。
 pub struct RuntimeStatus {
     tx: SyncSender<Msg>,
+    reloads: tokio::sync::mpsc::Sender<ReloadReply>,
 }
 
 impl StatusSource for RuntimeStatus {
@@ -187,6 +212,12 @@ impl StatusSource for RuntimeStatus {
         // 队列满时不等：查询让位给探测与期望状态
         self.tx.try_send(Msg::Status(reply)).ok()?;
         answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
+
+    fn reload(&self) -> Option<ReloadOutcome> {
+        let (reply, answer) = sync_channel(1);
+        self.reloads.try_send(reply).ok()?;
+        answer.recv_timeout(RELOAD_TIMEOUT).ok()
     }
 }
 

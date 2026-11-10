@@ -97,7 +97,7 @@ Mac 以原生成员加入组网：本机有自己的组网地址，其他成员�
 
 - launchd 以 root 运行组网进程（创建 utun 需要 root），开机启动，退出后自动重启。`sudo nett install` 安装服务（design/release.md 第 4 节）：服务运行 root 专属目录中的副本，不运行 Homebrew 目录中的程序；
 - 文件放在 `/Library/Application Support/nett/`（属主 root，权限 `0700`）：程序的副本、组网私钥和身份私钥（`0600`），以及期望状态文件，都由 `sudo nett install` 生成和复制；
-- 重新加载：`sudo launchctl kill HUP system/io.gotry.nett.mesh`，读取新的期望状态，与 Linux 上的 `systemctl reload` 相同；
+- 重新加载：`sudo nett reload`，或期望状态有变化时的 `sudo nett install`（status.md 第 4.1 节）；
 - 日志：以服务运行时经 syslog 写进系统日志（info 记为 notice，系统默认持久保存），大小由系统管理；launchd 的标准错误文件只记录启动失败。交互运行时写标准错误。
 
 ### 6.4 网络变化

@@ -1,5 +1,6 @@
-//! `nett mesh`：组网进程，由服务管理器运行。期望状态来自本地文件，收到 `SIGHUP` 时重新读取
-//! （design/local-signing.md 第 5 节）。`nett keys` 在本机生成组网私钥和身份私钥（第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置只在实验构建中（`lab` 特性）。
+//! `nett mesh`：组网进程，由服务管理器运行。期望状态来自本地文件，收到 `SIGHUP` 或本机接口的 `reload`
+//! 时重新读取（design/local-signing.md 第 5 节、status.md 第 4.1 节）。`nett keys` 在本机生成组网私钥和
+//! 身份私钥（local-signing.md 第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置只在实验构建中（`lab` 特性）。
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
@@ -300,8 +301,9 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         clock,
     );
     let worker = worker.context("starting the mesh worker thread")?;
-    // 状态查询只是给人看的：套接字建不起来时记录下来，组网照常（硬性规则 8）
-    let status = match StatusServer::spawn(&args.socket, worker.status_source()) {
+    // 本机接口只是给人和 nett-node 用的：套接字建不起来时记录下来，组网照常（硬性规则 8）
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(nett_mesh::status::MAX_PENDING_RELOADS);
+    let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
             tracing::warn!(socket = %args.socket.display(), error = %e, "status socket unavailable; `nett status` will not work");
@@ -314,7 +316,8 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         .build()
         .context("starting the async runtime")?;
     runtime.block_on(async move {
-        let source = FileSource::new(args.config).context("installing the SIGHUP handler")?;
+        let source =
+            FileSource::new(args.config, reload_rx).context("installing the SIGHUP handler")?;
         let mut terminate =
             signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
         let mut interrupt =

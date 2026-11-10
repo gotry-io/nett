@@ -72,6 +72,10 @@ jobs:
           ! "$nett" status 2> status.err
           grep -F 'run with sudo' status.err
           sudo "$nett" install | grep -F 'The mesh service is running. Nothing changed.'
+          # 期望状态变了（内容相同、字节不同）：经本机接口重新加载，并报告结果
+          python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json
+          sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
+          sudo "$nett" reload | grep -F 'Reloaded the desired state.'
           sudo "$nett" uninstall
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 

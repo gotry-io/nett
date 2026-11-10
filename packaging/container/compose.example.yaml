@@ -4,8 +4,10 @@
 #
 # 第一次使用：docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett，把输出的
 # 一行写进站点描述，在其中写上 routes = ["172.30.0.10/32"]；nett site apply 生成的 desired.json 放进
-# ./nett；之后更新时 docker compose kill -s HUP nett。一次性任务不用 docker compose run：临时容器会继承
-# 服务的固定地址，与运行中的容器冲突（design/local-signing.md 第 6 节）。
+# ./nett；之后更新时 docker compose exec nett /nett reload，它报告新的期望状态是否被接受。不用
+# docker compose kill 发信号：Docker 会把容器记为手动停止过，主机重启后不再自动启动它（design/status.md
+# 第 4.1 节）。一次性任务不用 docker compose run：临时容器会继承服务的固定地址，与运行中的容器冲突
+# （design/local-signing.md 第 6 节）。
 services:
   nett:
     image: nett

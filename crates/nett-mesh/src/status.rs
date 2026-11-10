@@ -45,6 +45,10 @@ pub const MAX_REPLY: u64 = 4 << 20;
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
 /// 等后台线程交出快照的上限：期望状态应用期间它可能忙于数据面操作。
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+/// 等一份重新读取的期望状态应用完的上限（design/status.md 第 4.1 节）。
+pub const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
+/// 同时进行的 `reload` 的上限：读取期望状态的一方逐个处理。
+pub const MAX_PENDING_RELOADS: usize = 4;
 /// 保留的最近事件数。
 const MAX_EVENTS: usize = 32;
 /// 按节点记的问题（成员、宣告网段被拒绝）最多保留的项数。
@@ -270,6 +274,19 @@ impl EventRecord {
     }
 }
 
+/// 一次 `reload` 的结果（design/status.md 第 4.1 节）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ReloadOutcome {
+    /// 已经生效；`problems` 是应用之后仍需处理的情况。
+    Applied { problems: Vec<Problem> },
+    /// 整份被拒绝，继续使用上一份。
+    Rejected { reason: String },
+}
+
+/// 等一次 `reload` 应用完的一方：后台线程应用之后把结果交到这里。
+pub type ReloadReply = std::sync::mpsc::SyncSender<ReloadOutcome>;
+
 pub fn timestamp(t: SystemTime) -> Timestamp {
     Timestamp::from_unix_seconds(
         t.duration_since(UNIX_EPOCH)
@@ -334,6 +351,25 @@ impl<E: EventSink> Recorder<E> {
 
     /// 把记下的问题、最近的事件和切换的时间与原因填进快照。`names` 用来给问题中的节点配上名字。
     pub fn fill(&self, doc: &mut StatusDoc, names: &BTreeMap<NodeId, NodeName>, now: Instant) {
+        doc.problems = self.problems(&doc.node.id, names, now);
+        doc.events = self.events.iter().cloned().collect();
+        for peer in &mut doc.peers {
+            if let (Some(path), Some((at, reason))) = (&mut peer.path, self.switches.get(&peer.id))
+                && peer.role == Some(PeerRole::Decider)
+            {
+                path.since = Some(*at);
+                path.reason = Some(reason.clone());
+            }
+        }
+    }
+
+    /// 现在需要处理的情况（design/status.md 第 6 节）。`own` 是本机的节点 ID。
+    pub fn problems(
+        &self,
+        own: &NodeId,
+        names: &BTreeMap<NodeId, NodeName>,
+        now: Instant,
+    ) -> Vec<Problem> {
         let node_ref = |id: &Option<NodeId>| {
             id.as_ref().map(|id| NodeRef {
                 id: id.clone(),
@@ -356,7 +392,7 @@ impl<E: EventSink> Recorder<E> {
         if let Some(at) = p.not_admitted {
             push(
                 ProblemKind::NotAdmitted,
-                node_ref(&Some(doc.node.id.clone())),
+                node_ref(&Some(own.clone())),
                 &(at, "this node is not among the admitted members".into()),
             );
         }
@@ -374,16 +410,7 @@ impl<E: EventSink> Recorder<E> {
         {
             push(ProblemKind::DataPlaneFailed, None, &(*at, reason.clone()));
         }
-        doc.problems = problems;
-        doc.events = self.events.iter().cloned().collect();
-        for peer in &mut doc.peers {
-            if let (Some(path), Some((at, reason))) = (&mut peer.path, self.switches.get(&peer.id))
-                && peer.role == Some(PeerRole::Decider)
-            {
-                path.since = Some(*at);
-                path.reason = Some(reason.clone());
-            }
-        }
+        problems
     }
 
     fn record(&mut self, event: &Event) {
@@ -455,6 +482,12 @@ struct Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+struct ReloadReplyDoc {
+    v: u32,
+    reload: ReloadOutcome,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct ErrorReply {
     v: u32,
     error: ErrorBody,
@@ -466,10 +499,12 @@ struct ErrorBody {
     message: String,
 }
 
-/// 后台线程交出快照的一方。
+/// 接口背后的组网进程。
 pub trait StatusSource: Send + 'static {
     /// 当前的快照；后台线程忙、在 [`QUERY_TIMEOUT`] 内交不出时为 `None`。
     fn snapshot(&self) -> Option<StatusDoc>;
+    /// 重新读取期望状态文件并等它应用完；已有太多在等、或 [`RELOAD_TIMEOUT`] 内没应用完时为 `None`。
+    fn reload(&self) -> Option<ReloadOutcome>;
 }
 
 /// 接受状态查询的线程。丢弃时停止线程并删除套接字。
@@ -629,6 +664,23 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()
             ),
         );
     }
+    if request.query == "reload" {
+        let Some(outcome) = source.reload() else {
+            return reply_error(
+                stream,
+                "busy",
+                "the mesh process did not finish applying in time; check again with nett status",
+            );
+        };
+        let mut bytes = serde_json::to_vec(&ReloadReplyDoc {
+            v: VERSION,
+            reload: outcome,
+        })
+        .map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        let mut out = stream;
+        return out.write_all(&bytes);
+    }
     if request.query != "status" {
         let query: String = request.query.chars().take(32).collect();
         return reply_error(stream, "unknown_query", &format!("unknown query `{query}`"));
@@ -693,6 +745,19 @@ pub fn query(path: &Path) -> Result<StatusDoc, QueryError> {
 
 /// 与 [`query`] 相同，返回未经解析的回复：其中可能有这个版本不认识的字段（`nett status --json` 原样输出）。
 pub fn query_raw(path: &Path) -> Result<serde_json::Value, QueryError> {
+    request(path, "status", QUERY_TIMEOUT)
+}
+
+/// 请 `path` 上的组网进程重新读取期望状态文件，等它应用完（design/status.md 第 4.1 节）。
+pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
+    let value = request(path, "reload", RELOAD_TIMEOUT)?;
+    let doc: ReloadReplyDoc =
+        serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
+    Ok(doc.reload)
+}
+
+/// 发一个请求，读回回复；组网进程那一侧最多用 `wait` 处理它。
+fn request(path: &Path, query: &str, wait: Duration) -> Result<serde_json::Value, QueryError> {
     let io = |source| QueryError::Io {
         path: path.to_owned(),
         source,
@@ -702,11 +767,11 @@ pub fn query_raw(path: &Path) -> Result<serde_json::Value, QueryError> {
         source,
     })?;
     stream
-        .set_read_timeout(Some(QUERY_TIMEOUT + IO_TIMEOUT))
+        .set_read_timeout(Some(wait + IO_TIMEOUT))
         .map_err(io)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
     (&stream)
-        .write_all(format!("{{\"v\":{VERSION},\"query\":\"status\"}}\n").as_bytes())
+        .write_all(format!("{{\"v\":{VERSION},\"query\":\"{query}\"}}\n").as_bytes())
         .map_err(io)?;
     let mut bytes = Vec::new();
     (&stream)
@@ -795,6 +860,12 @@ mod tests {
         fn snapshot(&self) -> Option<StatusDoc> {
             self.0.clone()
         }
+
+        fn reload(&self) -> Option<ReloadOutcome> {
+            self.0.as_ref().map(|_| ReloadOutcome::Rejected {
+                reason: "bad json".into(),
+            })
+        }
     }
 
     /// 测试用的短路径（macOS 上 Unix 套接字路径最长 104 字节）。
@@ -859,6 +930,31 @@ mod tests {
         let _busy = StatusServer::spawn(&path, Fixed(None)).expect("spawn");
         assert!(matches!(
             query(&path),
+            Err(QueryError::Refused { code, .. }) if code == "busy"
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reload_reports_the_outcome_or_busy() {
+        let dir = temp_dir();
+        let path = dir.join("mesh.sock");
+        let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
+        assert_eq!(
+            reload(&path).expect("reload"),
+            ReloadOutcome::Rejected {
+                reason: "bad json".into()
+            }
+        );
+        // 线上的形式（design/status.md 第 4.1 节）
+        assert_eq!(
+            raw(&path, b"{\"v\":1,\"query\":\"reload\"}\n"),
+            serde_json::json!({"v": 1, "reload": {"result": "rejected", "reason": "bad json"}})
+        );
+        drop(server);
+        let _busy = StatusServer::spawn(&path, Fixed(None)).expect("spawn");
+        assert!(matches!(
+            reload(&path),
             Err(QueryError::Refused { code, .. }) if code == "busy"
         ));
         std::fs::remove_dir_all(&dir).ok();
