@@ -29,6 +29,11 @@ const MONITOR_TIMEOUT: Duration = Duration::from_secs(1);
 /// 绑定物理接口的底层套接字最多几个（WireGuard 端口、发往中继的探测）。
 const MAX_UNDERLAY: usize = 8;
 
+/// Unix 套接字对端进程的有效用户 ID（design/status.md 第 3 节）。
+pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    sys::peer_uid(fd)
+}
+
 /// 系统时钟；误差以内核报告的最大误差为准（`ntp_gettime`）。
 pub struct SystemClock;
 

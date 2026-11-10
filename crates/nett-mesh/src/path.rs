@@ -176,6 +176,15 @@ impl PathStats {
         self.rtt_ms
     }
 
+    pub fn jitter_ms(&self) -> f64 {
+        self.jitter_ms
+    }
+
+    /// 还没有任何一次探测有结果时为 `None`。
+    pub fn measured_loss(&self) -> Option<f64> {
+        (!self.window.is_empty()).then(|| self.loss_rate())
+    }
+
     /// 得分（毫秒，越小越好）：往返时间 + 丢包惩罚 + 抖动 + 路径类型偏好（第 8.1 节）。
     pub fn score(&self, kind: PathKind) -> Option<f64> {
         let type_penalty = match kind {
@@ -257,6 +266,29 @@ pub enum SwitchReason {
     Proposed,
     /// 双方都是 `dial-only`、当前路径中断：按时间片（时钟不可信时按随机间隔）轮换中继（第 8.4 节）。
     Rotation,
+}
+
+/// 一条候选路径在本机状态中的样子（design/status.md 第 6 节）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CandidateView {
+    pub route: Route,
+    pub kind: PathKind,
+    pub rtt_ms: Option<f64>,
+    pub loss: Option<f64>,
+    pub state: CandidateState,
+    /// 打洞打通的直连（design/mesh.md 第 6.1 节）。
+    pub punched: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateState {
+    Current,
+    /// 最近的探测有应答。
+    Ok,
+    /// 最近的探测丢失，或故障之后还在退避。
+    Failing,
+    /// 还没有探测结果。
+    Untested,
 }
 
 /// 这一端在这一对成员中的角色（第 8.3、8.4 节）。
@@ -437,6 +469,35 @@ impl PeerPaths {
 
     pub fn punched_index(&self) -> Option<usize> {
         self.punched
+    }
+
+    /// 各候选路径的测量与状态，当前路径在内（design/status.md 第 6 节）。
+    pub fn candidate_views(&self, now: Instant) -> Vec<CandidateView> {
+        self.candidates
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let state = if i == self.current {
+                    CandidateState::Current
+                } else if c.first_probe.is_none() {
+                    CandidateState::Untested
+                } else if c.stats.consecutive_losses > 0 || !backoff(&c.failures, now).is_zero() {
+                    CandidateState::Failing
+                } else if c.stats.consecutive_successes > 0 {
+                    CandidateState::Ok
+                } else {
+                    CandidateState::Untested
+                };
+                CandidateView {
+                    route: c.route,
+                    kind: c.kind,
+                    rtt_ms: c.stats.rtt_ms(),
+                    loss: c.stats.measured_loss(),
+                    state,
+                    punched: self.punched == Some(i),
+                }
+            })
+            .collect()
     }
 
     /// 经中继 `relay` 的候选。

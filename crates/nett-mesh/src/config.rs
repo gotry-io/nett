@@ -173,6 +173,11 @@ impl DesiredMesh {
         &self.tls_endpoints
     }
 
+    /// 传输适配进程的 TLS 目标：回环端口与中继的 TLS 地址。
+    pub fn tls_targets(&self) -> &[TlsTarget] {
+        &self.tls_targets
+    }
+
     /// 交给传输适配进程的配置：WireGuard 端口取接口实际监听的端口（可能由系统分配）。
     pub fn transport(&self, wireguard_port: u16) -> TransportConfig {
         TransportConfig {

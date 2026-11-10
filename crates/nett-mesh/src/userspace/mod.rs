@@ -134,6 +134,10 @@ mod dataplane {
     }
 
     impl<P: Platform> DataPlane for UserspaceDataPlane<P> {
+        fn kind(&self) -> crate::status::DataPlaneKind {
+            crate::status::DataPlaneKind::Userspace
+        }
+
         fn ensure_interface(
             &mut self,
             spec: &InterfaceSpec,

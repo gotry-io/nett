@@ -344,3 +344,12 @@ pub(crate) fn route_socket() -> io::Result<OwnedFd> {
     rustix::io::fcntl_setfd(fd.as_fd(), rustix::io::FdFlags::CLOEXEC)?;
     Ok(fd)
 }
+
+/// Unix 套接字对端进程的有效用户 ID（本机状态的连接检查，design/status.md 第 3 节）。
+pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: 两个指针指向本地的整数，内核只在调用期间写入它们
+    check(unsafe { libc::getpeereid(fd.as_raw_fd(), &raw mut uid, &raw mut gid) })?;
+    Ok(uid)
+}

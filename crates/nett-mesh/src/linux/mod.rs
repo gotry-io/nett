@@ -141,6 +141,10 @@ fn sync_routes(
 }
 
 impl DataPlane for KernelWireGuard {
+    fn kind(&self) -> crate::status::DataPlaneKind {
+        crate::status::DataPlaneKind::Kernel
+    }
+
     fn ensure_interface(
         &mut self,
         spec: &InterfaceSpec,

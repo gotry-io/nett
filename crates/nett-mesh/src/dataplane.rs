@@ -127,6 +127,9 @@ pub struct InterfaceState {
 }
 
 pub trait DataPlane: Send {
+    /// 内核还是用户态的 WireGuard（本机状态中显示，design/status.md 第 6 节）。
+    fn kind(&self) -> crate::status::DataPlaneKind;
+
     /// 创建或沿用组网接口，设置私钥、监听端口、MTU 和地址并启用。已有的对端保持不变：组网进程重启时，
     /// 进行中的连接不中断。
     fn ensure_interface(

@@ -22,6 +22,7 @@ pub mod routes;
 pub mod run;
 pub mod runtime;
 pub mod source;
+pub mod status;
 #[cfg(test)]
 mod testutil;
 pub mod userspace;

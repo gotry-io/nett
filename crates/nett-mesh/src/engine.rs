@@ -4,13 +4,15 @@
 //! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。访问控制是
 //! 例外：先安装过滤规则再添加对端，安装失败时拒绝（硬性规则 6）。
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::id::NodeId;
+use nett_core::name::NodeName;
 use nett_core::transport::TransportConfig;
 use nett_trust::admission::Member;
+use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 
 use crate::access::{AccessRules, EdgeSpec, FilterSpec, IngressSpec};
@@ -21,9 +23,14 @@ use crate::dataplane::{
 use crate::event::{Event, EventSink};
 use crate::key::PrivateKey;
 use crate::members::MemberSet;
-use crate::path::Route;
-use crate::prober::{Incoming, Outgoing, Prober};
+use crate::path::{CandidateState, PathKind, Role, Route};
+use crate::probe::{KeyId, NatType};
+use crate::prober::{ACTIVE_WINDOW, Incoming, Outgoing, Prober};
 use crate::routes::Routes;
+use crate::status::{
+    self, CandidateStateDoc, CandidateStatus, ConfigStatus, NatKind, NatStatus, NodeRef,
+    NodeStatus, PathKindDoc, PathStatus, PeerRole, PeerState, PeerStatus, StatusDoc,
+};
 use nett_core::prefix::IpPrefix;
 
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
@@ -52,7 +59,7 @@ pub struct Engine<D> {
     prober: Option<Prober>,
     /// 已经配置到数据面的对端：经漫游跟随的一方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
     configured: HashSet<X25519PublicKey>,
-    bytes: HashMap<X25519PublicKey, (u64, u64)>,
+    traffic: HashMap<X25519PublicKey, Traffic>,
     /// 最近一次重新握手执行的时刻（Unix 毫秒）：WireGuard 报告的握手时间不早于它，才是这次握手完成
     /// （第 8.4 节）。决定与执行之间读到的仍是旧对端的握手时间。
     rehandshaked_at: HashMap<X25519PublicKey, u64>,
@@ -68,6 +75,22 @@ pub struct Engine<D> {
     edge: Option<Option<EdgeSpec>>,
     ingress: Option<Option<IngressSpec>>,
     installed_routes: Option<Vec<IpPrefix>>,
+    /// 最近一次接受的期望状态中的节点名，以及接受的时刻（本机状态，design/status.md 第 5、6 节）。
+    names: BTreeMap<NodeId, NodeName>,
+    applied_at: Option<Instant>,
+    /// TLS 中继在传输适配进程上的回环端口 → 中继的 TLS 地址：本机状态中显示后者。
+    tls_relays: BTreeMap<SocketAddr, SocketAddr>,
+}
+
+/// 从数据面读到的一个对端的流量，以及收发字节数最近一次变化的时刻。
+#[derive(Debug, Clone, Default)]
+struct Traffic {
+    rx_bytes: u64,
+    tx_bytes: u64,
+    last_rx: Option<Instant>,
+    last_tx: Option<Instant>,
+    endpoint: Option<SocketAddr>,
+    last_handshake: Option<SystemTime>,
 }
 
 impl<D: DataPlane> Engine<D> {
@@ -82,7 +105,7 @@ impl<D: DataPlane> Engine<D> {
             reachability: Reachability::Public,
             prober: None,
             configured: HashSet::new(),
-            bytes: HashMap::new(),
+            traffic: HashMap::new(),
             rehandshaked_at: HashMap::new(),
             last_stats: None,
             clock_trusted: false,
@@ -94,7 +117,15 @@ impl<D: DataPlane> Engine<D> {
             edge: None,
             ingress: None,
             installed_routes: None,
+            names: BTreeMap::new(),
+            applied_at: None,
+            tls_relays: BTreeMap::new(),
         }
+    }
+
+    /// 最近一次接受的期望状态中的节点名。
+    pub fn names(&self) -> &BTreeMap<NodeId, NodeName> {
+        &self.names
     }
 
     pub fn members(&self) -> &MemberSet {
@@ -121,6 +152,13 @@ impl<D: DataPlane> Engine<D> {
             });
             return;
         }
+        self.names = desired.names.clone();
+        self.applied_at = Some(Instant::now());
+        self.tls_relays = desired
+            .tls_targets()
+            .iter()
+            .map(|t| (t.listen, t.connect))
+            .collect();
         self.members.apply(desired, events);
         self.routes.apply(desired, self.members.members(), events);
 
@@ -474,12 +512,28 @@ impl<D: DataPlane> Engine<D> {
             .collect();
         self.rehandshaked_at
             .retain(|key, _| stats.iter().any(|s| s.public_key == *key));
+        self.traffic
+            .retain(|key, _| stats.iter().any(|s| s.public_key == *key));
         for stat in stats {
             let Some(id) = by_key.get(&stat.public_key) else {
                 continue;
             };
             let bytes = (stat.rx_bytes, stat.tx_bytes);
-            let before = self.bytes.insert(stat.public_key, bytes);
+            let before = self
+                .traffic
+                .get(&stat.public_key)
+                .map(|t| (t.rx_bytes, t.tx_bytes));
+            let traffic = self.traffic.entry(stat.public_key).or_default();
+            if before.is_some_and(|(rx, _)| rx != stat.rx_bytes) {
+                traffic.last_rx = Some(now);
+            }
+            if before.is_some_and(|(_, tx)| tx != stat.tx_bytes) {
+                traffic.last_tx = Some(now);
+            }
+            traffic.rx_bytes = stat.rx_bytes;
+            traffic.tx_bytes = stat.tx_bytes;
+            traffic.endpoint = stat.endpoint;
+            traffic.last_handshake = stat.last_handshake;
             if before != Some(bytes) {
                 prober.mark_active(id, now);
             }
@@ -510,6 +564,178 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
+    /// 本机状态的快照（design/status.md 第 6 节）。`now` 与 `wall` 是同一时刻。问题、最近的事件和切换的
+    /// 时间与原因由 [`crate::status::Recorder::fill`] 填入。
+    pub fn status(&self, now: Instant, wall: SystemTime, started_at: Timestamp) -> StatusDoc {
+        let relays: HashMap<KeyId, &NodeId> = self
+            .members
+            .members()
+            .keys()
+            .map(|id| (KeyId::of(id.as_str().as_bytes()), id))
+            .collect();
+        let node_ref = |key: &KeyId| {
+            relays.get(key).map(|id| NodeRef {
+                id: (*id).clone(),
+                name: self.names.get(*id).cloned(),
+            })
+        };
+        let path_status = |route: Route, kind: PathKind, punched: bool| PathStatus {
+            kind: kind_doc(kind),
+            relay: match &route {
+                Route::Relay { relay, .. } => node_ref(relay),
+                Route::Direct(_) => None,
+            },
+            endpoint: Some(self.shown_endpoint(&route, kind)),
+            punched,
+            since: None,
+            reason: None,
+        };
+        let me = self.members.get(&self.node_id);
+        let node = NodeStatus {
+            id: self.node_id.clone(),
+            name: self.names.get(&self.node_id).cloned(),
+            admitted: me.is_some(),
+            mesh: me.map(mesh_addrs).unwrap_or_default(),
+            edge: me.map(edge_addrs).unwrap_or_default(),
+            routes: self.routes.of(&self.node_id).to_vec(),
+            reachability: self.reachability,
+            dataplane: self.dataplane.kind(),
+            listen_port: self.interface.as_ref().map(|i| i.listen_port),
+            nat: self
+                .prober
+                .as_ref()
+                .filter(|_| self.reachability == Reachability::DialOnly)
+                .map(|p| {
+                    let own = p.own_nat(now);
+                    NatStatus {
+                        kind: match own.nat {
+                            NatType::Cone => NatKind::Cone,
+                            NatType::Symmetric => NatKind::Symmetric,
+                            NatType::Unknown => NatKind::Unknown,
+                        },
+                        ipv4: own.v4.map(SocketAddr::V4),
+                        ipv6: own.v6.map(SocketAddr::V6),
+                    }
+                }),
+            clock_trusted: self.clock_trusted,
+            started_at,
+        };
+        let recent = |t: Option<Instant>| {
+            t.is_some_and(|t| now.saturating_duration_since(t) < ACTIVE_WINDOW)
+        };
+        let peers = self
+            .members
+            .members()
+            .values()
+            .filter(|m| m.node_id != self.node_id)
+            .map(|m| {
+                let view = self
+                    .prober
+                    .as_ref()
+                    .and_then(|p| p.peer_view(&m.node_id, now));
+                let traffic = self.traffic.get(&m.mesh_public_key);
+                let last_rx = traffic.and_then(|t| t.last_rx);
+                let ever_received = last_rx.is_some()
+                    || traffic.is_some_and(|t| t.rx_bytes > 0 || t.last_handshake.is_some());
+                let linked = view.as_ref().is_some_and(|v| v.linked);
+                let state = if recent(last_rx) {
+                    PeerState::Connected
+                } else if !linked {
+                    PeerState::NoPath
+                } else if recent(traffic.and_then(|t| t.last_tx)) {
+                    if ever_received {
+                        PeerState::Unreachable
+                    } else {
+                        PeerState::Connecting
+                    }
+                } else {
+                    PeerState::Idle
+                };
+                let role = linked.then(|| match view.as_ref().and_then(|v| v.role) {
+                    Some(Role::Decide | Role::DecideTogether) => PeerRole::Decider,
+                    Some(Role::FollowTogether) | None => PeerRole::Follower,
+                });
+                let candidates = view.as_ref().map(|v| &v.candidates[..]).unwrap_or_default();
+                let path = match candidates
+                    .iter()
+                    .find(|c| c.state == CandidateState::Current)
+                {
+                    Some(c) => Some(path_status(c.route, c.kind, c.punched)),
+                    // 经漫游跟随：WireGuard 当前的 endpoint 是本机候选中的哪一条，不在其中时是直连
+                    None => traffic.and_then(|t| t.endpoint).map(|endpoint| {
+                        let (route, kind) = view
+                            .as_ref()
+                            .and_then(|v| v.routes.iter().find(|(r, _)| r.endpoint() == endpoint))
+                            .copied()
+                            .unwrap_or((Route::Direct(endpoint), PathKind::Direct));
+                        path_status(route, kind, false)
+                    }),
+                };
+                let tunnel = view.as_ref().and_then(|v| v.tunnel);
+                PeerStatus {
+                    id: m.node_id.clone(),
+                    name: self.names.get(&m.node_id).cloned(),
+                    mesh: mesh_addrs(m),
+                    edge: edge_addrs(m),
+                    routes: self.routes.of(&m.node_id).to_vec(),
+                    state,
+                    role,
+                    path,
+                    rtt_ms: tunnel.and_then(|t| t.rtt_ms),
+                    loss: tunnel.and_then(|t| t.loss),
+                    jitter_ms: tunnel.and_then(|t| t.rtt_ms.map(|_| t.jitter_ms)),
+                    last_handshake: traffic
+                        .and_then(|t| t.last_handshake)
+                        .map(status::timestamp),
+                    last_received: last_rx.map(|t| status::wall_time(now, wall, t)),
+                    rx_bytes: traffic.map_or(0, |t| t.rx_bytes),
+                    tx_bytes: traffic.map_or(0, |t| t.tx_bytes),
+                    candidates: candidates
+                        .iter()
+                        .map(|c| CandidateStatus {
+                            kind: kind_doc(c.kind),
+                            relay: match &c.route {
+                                Route::Relay { relay, .. } => node_ref(relay),
+                                Route::Direct(_) => None,
+                            },
+                            endpoint: self.shown_endpoint(&c.route, c.kind),
+                            punched: c.punched,
+                            rtt_ms: c.rtt_ms,
+                            loss: c.loss,
+                            state: match c.state {
+                                CandidateState::Current => CandidateStateDoc::Current,
+                                CandidateState::Ok => CandidateStateDoc::Ok,
+                                CandidateState::Failing => CandidateStateDoc::Failing,
+                                CandidateState::Untested => CandidateStateDoc::Untested,
+                            },
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        StatusDoc {
+            v: status::VERSION,
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            node,
+            config: ConfigStatus {
+                applied_at: self.applied_at.map(|t| status::wall_time(now, wall, t)),
+                access_rules_version: self.access.version(),
+            },
+            peers,
+            problems: Vec::new(),
+            events: Vec::new(),
+        }
+    }
+
+    /// 本机状态中显示的地址：TLS 中继显示它的 TLS 地址，而不是传输适配进程的回环端口。
+    fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
+        let endpoint = route.endpoint();
+        match kind {
+            PathKind::RelayTls => self.tls_relays.get(&endpoint).copied().unwrap_or(endpoint),
+            _ => endpoint,
+        }
+    }
+
     /// 处理收到的探测消息，返回要发出的应答。
     pub fn on_packet(
         &mut self,
@@ -524,6 +750,26 @@ impl<D: DataPlane> Engine<D> {
             None => Vec::new(),
         }
     }
+}
+
+fn kind_doc(kind: PathKind) -> PathKindDoc {
+    match kind {
+        PathKind::Lan => PathKindDoc::Lan,
+        PathKind::Direct => PathKindDoc::Direct,
+        PathKind::Relay => PathKindDoc::Relay,
+        PathKind::RelayTls => PathKindDoc::RelayTls,
+    }
+}
+
+fn mesh_addrs(m: &Member) -> Vec<IpAddr> {
+    vec![IpAddr::V4(m.addresses.ipv4), IpAddr::V6(m.addresses.ipv6)]
+}
+
+fn edge_addrs(m: &Member) -> Vec<IpAddr> {
+    m.edge
+        .iter()
+        .flat_map(|e| [IpAddr::V4(e.addresses.ipv4), IpAddr::V6(e.addresses.ipv6)])
+        .collect()
 }
 
 fn route_label(route: &Route) -> String {
@@ -1073,5 +1319,148 @@ mod tests {
         doc.paths[0].candidates = vec![direct];
         plain.apply(&validated(doc), &mut events);
         assert!(plain.dataplane.tls_guards.is_empty());
+    }
+
+    /// 本机状态的快照（design/status.md 第 6 节）：节点名、对端状态随流量变化、TLS 中继显示真实地址、
+    /// 回复中没有私钥与探测令牌。
+    #[test]
+    fn status_reports_peers_paths_and_no_secrets() {
+        use crate::config::{Candidate, PathDoc, ProbeToken};
+        use crate::status::{PathKindDoc, PeerRole, PeerState};
+        use base64::Engine as _;
+        use nett_core::transport::CertFingerprint;
+
+        let mesh = Mesh::new(&[1, 2, 3, 4]);
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        let mut doc = mesh.desired(1, (1..=4).map(|n| mesh.material(n, 1)).collect());
+        let token = ProbeToken([9; 32]);
+        doc.paths = vec![
+            PathDoc {
+                peer: node_id(2),
+                peer_reachability: Reachability::Public,
+                candidates: vec![
+                    Candidate::RelayTls {
+                        relay: node_id(3),
+                        address: "198.51.100.3:443".parse().expect("addr"),
+                        fingerprint: CertFingerprint([1; 32]),
+                        token: token.clone(),
+                    },
+                    Candidate::Direct {
+                        endpoint: "192.0.2.2:41820".parse().expect("addr"),
+                    },
+                ],
+            },
+            PathDoc {
+                peer: node_id(3),
+                peer_reachability: Reachability::Public,
+                candidates: vec![Candidate::Direct {
+                    endpoint: "192.0.2.3:41820".parse().expect("addr"),
+                }],
+            },
+        ];
+        // 节点 4 没有路径
+        e.apply(&validated(doc), &mut events);
+        let t0 = Instant::now();
+        let wall = SystemTime::now();
+        e.tick(t0, 0, &mut events);
+
+        let st = e.status(t0, wall, Timestamp::now());
+        assert_eq!(st.node.name.as_ref().map(NodeName::as_str), Some("node-1"));
+        assert!(st.node.admitted);
+        assert_eq!(st.node.mesh[0].to_string(), "100.88.0.1");
+        assert_eq!(st.node.listen_port, Some(41820));
+        let peer = |st: &StatusDoc, n: u8| {
+            st.peers
+                .iter()
+                .find(|p| p.id == node_id(n))
+                .cloned()
+                .expect("peer")
+        };
+        assert_eq!(st.peers.len(), 3);
+        // 还没有流量：有路径的对端无从判断，没有路径的写明
+        assert_eq!(peer(&st, 2).state, PeerState::Idle);
+        assert_eq!(peer(&st, 4).state, PeerState::NoPath);
+        assert_eq!(peer(&st, 4).role, None);
+        // 本机是 dial-only：对 public 对端决定路径；TLS 中继显示它的 TLS 地址和名字
+        let p2 = peer(&st, 2);
+        assert_eq!(p2.role, Some(PeerRole::Decider));
+        let path = p2.path.expect("path");
+        assert_eq!(path.kind, PathKindDoc::RelayTls);
+        assert_eq!(
+            path.endpoint,
+            Some("198.51.100.3:443".parse().expect("addr"))
+        );
+        assert_eq!(
+            path.relay.and_then(|r| r.name).map(|n| n.to_string()),
+            Some("node-3".to_owned())
+        );
+        assert_eq!(p2.candidates.len(), 2);
+
+        // 两个方向都有包：连通；只发不收、从未收到过：正在连接
+        e.dataplane.traffic.insert(mesh_key(2), (100, 100));
+        e.dataplane.traffic.insert(mesh_key(3), (0, 100));
+        let t1 = t0 + Duration::from_secs(1);
+        e.tick(t1, 1_000, &mut events);
+        let st = e.status(t1, wall, Timestamp::now());
+        assert_eq!(peer(&st, 2).state, PeerState::Connected);
+        assert_eq!(peer(&st, 2).rx_bytes, 100);
+        assert_eq!(peer(&st, 3).state, PeerState::Connecting);
+
+        // 之后只发不收超过 30 秒：不通
+        let t2 = t1 + Duration::from_secs(31);
+        e.dataplane.traffic.insert(mesh_key(2), (100, 200));
+        e.tick(t2, 32_000, &mut events);
+        assert_eq!(
+            e.status(t2, wall, Timestamp::now()).peers[0].state,
+            PeerState::Unreachable
+        );
+        // 两个方向都没有包超过 30 秒：空闲
+        let t3 = t2 + Duration::from_secs(31);
+        e.tick(t3, 63_000, &mut events);
+        assert_eq!(
+            peer(&e.status(t3, wall, Timestamp::now()), 2).state,
+            PeerState::Idle
+        );
+
+        let json = serde_json::to_string(&e.status(t3, wall, Timestamp::now())).expect("json");
+        let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        for secret in [b64.encode([9u8; 32]), b64.encode([1u8; 32])] {
+            assert!(!json.contains(&secret), "status leaks {secret}");
+        }
+    }
+
+    /// 本机是 public、对端是 dial-only：本机跟随，路径按 WireGuard 当前的 endpoint 判断，没有测量。
+    #[test]
+    fn a_follower_reports_the_endpoint_without_measurements() {
+        use crate::config::PathDoc;
+        use crate::status::{PathKindDoc, PeerRole};
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.reachability = Reachability::Public;
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::DialOnly,
+            candidates: vec![],
+        }];
+        e.apply(&validated(doc), &mut events);
+        // 对端连进来以后，WireGuard 记下它的地址
+        let roamed: SocketAddr = "203.0.113.7:53557".parse().expect("addr");
+        e.dataplane.peers.as_mut().expect("peers")[0].endpoint = Some(roamed);
+        let now = Instant::now();
+        e.tick(now, 0, &mut events);
+        let st = e.status(now, SystemTime::now(), Timestamp::now());
+        let p = &st.peers[0];
+        assert_eq!(p.role, Some(PeerRole::Follower));
+        assert_eq!(p.rtt_ms, None);
+        assert!(p.candidates.is_empty());
+        let path = p.path.as_ref().expect("path");
+        assert_eq!(
+            (path.kind, path.endpoint),
+            (PathKindDoc::Direct, Some(roamed))
+        );
+        assert!(st.node.nat.is_none());
     }
 }

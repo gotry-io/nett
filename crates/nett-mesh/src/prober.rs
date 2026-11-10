@@ -14,7 +14,7 @@ use crate::config::{Candidate, PeerPathConfig, ProbeToken, Reachability};
 use crate::event::Event;
 use crate::key::PrivateKey;
 use crate::path::{
-    Action, LATE_HORIZON, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason,
+    Action, CandidateView, LATE_HORIZON, PathKind, PathStats, PeerPaths, Role, Route, SwitchReason,
 };
 use crate::probe::{
     self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, PUNCH_ACK, PUNCH_PROPOSAL,
@@ -65,6 +65,27 @@ pub enum Incoming {
     Direct,
 }
 
+/// 一个对端的选路状态在本机状态中的样子（design/status.md 第 6 节）。
+#[derive(Debug, Clone)]
+pub struct PeerView {
+    pub linked: bool,
+    /// 有选路状态时的角色；`None` 表示经漫游跟随（design/mesh.md 第 8.3 节）。
+    pub role: Option<Role>,
+    /// 候选路径（含打通的直连）：跟随方据此判断 WireGuard 当前的 endpoint 是哪条路径。
+    pub routes: Vec<(Route, PathKind)>,
+    /// 有选路状态时各候选的测量，当前路径在内。
+    pub candidates: Vec<CandidateView>,
+    /// 有选路状态时当前路径上隧道内探测的测量。
+    pub tunnel: Option<TunnelView>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TunnelView {
+    pub rtt_ms: Option<f64>,
+    pub loss: Option<f64>,
+    pub jitter_ms: f64,
+}
+
 /// 要对数据面执行的切换。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
@@ -86,6 +107,8 @@ enum CandidateMeta {
 }
 
 struct Peer {
+    /// 期望状态中有到它的路径（站点描述中有这一对的 `link`）。
+    linked: bool,
     public_key: X25519PublicKey,
     mesh_addrs: [IpAddr; 2],
     direct_key: Option<ProbeKey>,
@@ -406,6 +429,7 @@ impl Prober {
             next.insert(
                 id.clone(),
                 Peer {
+                    linked: config.is_some(),
                     public_key: member.mesh_public_key,
                     mesh_addrs: [
                         IpAddr::V4(member.addresses.ipv4),
@@ -469,6 +493,34 @@ impl Prober {
         if let Some(paths) = self.peers.get_mut(peer).and_then(|p| p.paths.as_mut()) {
             paths.on_receive(now);
         }
+    }
+
+    /// 一个对端的选路状态（design/status.md 第 6 节）。
+    pub fn peer_view(&self, peer: &NodeId, now: Instant) -> Option<PeerView> {
+        let p = self.peers.get(peer)?;
+        Some(PeerView {
+            linked: p.linked,
+            role: p.paths.as_ref().map(PeerPaths::role),
+            routes: p.routes.clone(),
+            candidates: p
+                .paths
+                .as_ref()
+                .map(|paths| paths.candidate_views(now))
+                .unwrap_or_default(),
+            tunnel: p.paths.as_ref().map(|paths| {
+                let t = paths.tunnel_stats();
+                TunnelView {
+                    rtt_ms: t.rtt_ms(),
+                    loss: t.measured_loss(),
+                    jitter_ms: t.jitter_ms(),
+                }
+            }),
+        })
+    }
+
+    /// 本机的 NAT 类型与映射地址（design/mesh.md 第 6.1 节）。
+    pub fn own_nat(&self, now: Instant) -> crate::punch::OwnInfo {
+        self.observations.own(now)
     }
 
     pub fn peer_ids(&self) -> impl Iterator<Item = (&NodeId, &X25519PublicKey)> {

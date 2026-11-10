@@ -215,6 +215,9 @@ pub struct FakeDataPlane {
     pub fail_filter: Option<bool>,
     /// 按顺序记下的数据面调用，用来检查"先装过滤规则，再添加对端"。
     pub calls: Vec<&'static str>,
+    /// 各对端的收发字节数与最近一次握手，`peer_stats` 照此报告（没有的为 0 与空）。
+    pub traffic: std::collections::HashMap<X25519PublicKey, (u64, u64)>,
+    pub handshakes: std::collections::HashMap<X25519PublicKey, std::time::SystemTime>,
 }
 
 impl FakeDataPlane {
@@ -233,11 +236,17 @@ impl FakeDataPlane {
             routes: Vec::new(),
             fail_filter: None,
             calls: Vec::new(),
+            traffic: std::collections::HashMap::new(),
+            handshakes: std::collections::HashMap::new(),
         }
     }
 }
 
 impl DataPlane for FakeDataPlane {
+    fn kind(&self) -> crate::status::DataPlaneKind {
+        crate::status::DataPlaneKind::Kernel
+    }
+
     fn ensure_interface(
         &mut self,
         spec: &InterfaceSpec,
@@ -272,12 +281,16 @@ impl DataPlane for FakeDataPlane {
             .peers
             .iter()
             .flatten()
-            .map(|p| PeerStat {
-                public_key: p.public_key,
-                endpoint: p.endpoint,
-                rx_bytes: 0,
-                tx_bytes: 0,
-                last_handshake: None,
+            .map(|p| {
+                let (rx_bytes, tx_bytes) =
+                    self.traffic.get(&p.public_key).copied().unwrap_or((0, 0));
+                PeerStat {
+                    public_key: p.public_key,
+                    endpoint: p.endpoint,
+                    rx_bytes,
+                    tx_bytes,
+                    last_handshake: self.handshakes.get(&p.public_key).copied(),
+                }
             })
             .collect())
     }

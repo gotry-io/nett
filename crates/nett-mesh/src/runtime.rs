@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
@@ -20,6 +20,7 @@ use crate::path::FAST_RECOVERY_INTERVAL;
 use crate::probe::TUNNEL_PROBE_PORT;
 use crate::prober::{Incoming, Outgoing};
 use crate::run::Applier;
+use crate::status::{QUERY_TIMEOUT, Recorder, StatusDoc, StatusSource};
 
 /// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
 /// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时（第 7 节）、等待重新握手完成时（第 8.4 节）改为
@@ -42,6 +43,8 @@ enum Msg {
         data: Vec<u8>,
         at: Instant,
     },
+    /// 本机状态的查询（design/status.md 第 8 节）：后台线程生成快照，经这个通道交回。
+    Status(SyncSender<StatusDoc>),
     Shutdown,
 }
 
@@ -71,7 +74,7 @@ impl Runtime {
             .spawn(move || {
                 let mut worker = Worker {
                     engine,
-                    events,
+                    events: Recorder::new(events),
                     tx: worker_tx,
                     sockets: None,
                     stop: Arc::new(AtomicBool::new(false)),
@@ -91,6 +94,7 @@ impl Runtime {
                     match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
                         Ok(Msg::Desired(desired)) => match *desired {
                             Ok(desired) => {
+                                worker.events.begin_apply();
                                 worker.engine.apply(&desired, &mut worker.events);
                                 worker.ensure_sockets();
                             }
@@ -110,6 +114,17 @@ impl Runtime {
                                     .on_packet(kind, from, &data, at, clock.now_ms());
                             worker.send_all(out);
                             tick_now = true;
+                        }
+                        Ok(Msg::Status(reply)) => {
+                            let now = Instant::now();
+                            let mut doc = worker.engine.status(
+                                now,
+                                SystemTime::now(),
+                                worker.events.started_at(),
+                            );
+                            worker.events.fill(&mut doc, worker.engine.names(), now);
+                            // 查询的一方已经超时离开时丢弃
+                            let _ = reply.try_send(doc);
                         }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
@@ -137,6 +152,13 @@ impl Runtime {
         })
     }
 
+    /// 本机状态的查询一方，交给 [`crate::status::StatusServer`]。
+    pub fn status_source(&self) -> RuntimeStatus {
+        RuntimeStatus {
+            tx: self.tx.clone(),
+        }
+    }
+
     /// 通知后台线程退出并等它结束。组网接口保持不变（[`crate::run`]）。
     pub fn shutdown(mut self) -> Result<(), String> {
         let _ = self.tx.send(Msg::Shutdown);
@@ -152,6 +174,20 @@ struct Sockets {
     tunnel_v6: UdpSocket,
     relay: UdpSocket,
     direct: Box<dyn DirectSend>,
+}
+
+/// 经后台线程的队列查询本机状态。
+pub struct RuntimeStatus {
+    tx: SyncSender<Msg>,
+}
+
+impl StatusSource for RuntimeStatus {
+    fn snapshot(&self) -> Option<StatusDoc> {
+        let (reply, answer) = sync_channel(1);
+        // 队列满时不等：查询让位给探测与期望状态
+        self.tx.try_send(Msg::Status(reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
 }
 
 struct Worker<D, E> {
