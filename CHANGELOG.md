@@ -8,6 +8,10 @@ User-visible changes by version; versions follow Semantic Versioning.
 - 站点描述的节点可以写 `listen_port`，用自己的 WireGuard 端口：同一台主机上的原生成员与容器内成员各用一个。
   A node in the site description can set `listen_port` for its own WireGuard port, so a native member and a
   container member on the same host each get one.
+- `nett site` 的站点目录默认是 `~/.config/nett`（按 `$XDG_CONFIG_HOME`），不用再写 `--dir`；`nett site init`
+  把目录权限设为 `0700`。
+  The `nett site` directory defaults to `~/.config/nett` (following `$XDG_CONFIG_HOME`), so `--dir` is
+  optional; `nett site init` makes the directory `0700`.
 
 ## [0.1.1] - 2026-11-09
 

@@ -73,8 +73,8 @@ pub const SITE_TEMPLATE: Text = Text {
 };
 
 pub const SITE_CREATED: Text = Text {
-    zh: "已在 {dir} 建立站点：recovery.pk8 是恢复密钥（唯一的信任锚，权限 0600），另存一份离线备份，丢失后只能重建信任锚、所有节点重新入网。在每个节点上运行 `nett mesh keys --dir <目录>`，把输出的一行写进 site.toml 中这个节点的条目，再运行 `nett site build --dir {dir}`。",
-    en: "Created a site in {dir}: recovery.pk8 is the recovery key (the only trust anchor, mode 0600); keep an offline copy, since losing it means rebuilding the trust anchor and re-enrolling every node. On each node run `nett mesh keys --dir <directory>`, add the printed line to that node's entry in site.toml, then run `nett site build --dir {dir}`.",
+    zh: "已在 {dir} 建立站点：recovery.pk8 是恢复密钥（唯一的信任锚，权限 0600），另存一份离线备份，丢失后只能重建信任锚、所有节点重新入网。在每个节点上生成密钥（macOS：`sudo nett mesh install`；Linux：`nett mesh keys --dir <目录>`），把输出的一行写进 site.toml 中这个节点的条目，再运行 `{build}`。",
+    en: "Created a site in {dir}: recovery.pk8 is the recovery key (the only trust anchor, mode 0600); keep an offline copy, since losing it means rebuilding the trust anchor and re-enrolling every node. On each node create its keys (macOS: `sudo nett mesh install`; Linux: `nett mesh keys --dir <directory>`), add the printed line to that node's entry in site.toml, then run `{build}`.",
 };
 
 pub const SITE_BUILT: Text = Text {

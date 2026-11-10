@@ -1,8 +1,9 @@
-//! `nett site`：用户自己电脑上的签名工具（design/local-signing.md）。站点目录中有站点描述 `site.toml`、
-//! 恢复密钥 `recovery.pk8`（权限 `0600`，只在签名时读取）和签名工具的状态 `state.json`；`nett site build`
-//! 为每个节点生成 `out/<名称>/desired.json`，文件不含私钥。
+//! `nett site`：用户自己电脑上的签名工具（design/local-signing.md）。站点目录（默认 `~/.config/nett`）中有
+//! 站点描述 `site.toml`、恢复密钥 `recovery.pk8`（权限 `0600`，只在签名时读取）和签名工具的状态
+//! `state.json`；`nett site build` 为每个节点生成 `out/<名称>/desired.json`，文件不含私钥。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
@@ -38,8 +39,9 @@ const RESIGN_BEFORE_SECS: i64 = 7 * 24 * 3600;
 /// 一个站点最多的节点数（硬性规则 14）。
 const MAX_NODES: usize = 256;
 
-const USAGE: &str = "usage: nett site init --dir <site> [--origin https://<console host>]\n       \
-nett site build --dir <site>";
+const USAGE: &str = "usage: nett site init [--dir <site>] [--origin https://<console host>]\n       \
+nett site build [--dir <site>]\n\
+The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it is not set.";
 
 // ---- 站点描述（design/local-signing.md 第 4 节） ----
 
@@ -163,21 +165,61 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
-    let dir = dir.context(USAGE)?;
+    let build_command = match &dir {
+        Some(dir) => format!("nett site build --dir {}", dir.display()),
+        None => "nett site build".to_owned(),
+    };
+    let dir = match dir {
+        Some(dir) => dir,
+        None => default_dir()?,
+    };
     match words
         .iter()
         .map(String::as_str)
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["init"] => init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN)),
+        ["init"] => {
+            init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN))?;
+            println!(
+                "{}",
+                text::SITE_CREATED
+                    .get()
+                    .replace("{dir}", &dir.display().to_string())
+                    .replace("{build}", &build_command)
+            );
+            Ok(())
+        }
         ["build"] => build(&dir),
         _ => bail!(USAGE),
     }
 }
 
-/// 建立站点目录：恢复密钥、只含它的信任锚清单、随机的 IPv6 组网网段，以及一份站点描述的开头。
+/// 站点目录的默认位置（design/local-signing.md 第 4 节）。
+fn default_dir() -> anyhow::Result<PathBuf> {
+    Ok(config_home(
+        std::env::var_os("XDG_CONFIG_HOME"),
+        std::env::var_os("HOME"),
+    )?
+    .join("nett"))
+}
+
+/// `$XDG_CONFIG_HOME`，没有设置时 `~/.config`；按 XDG 规范，相对路径的 `XDG_CONFIG_HOME` 不用。
+fn config_home(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<PathBuf> {
+    if let Some(xdg) = xdg.map(PathBuf::from).filter(|p| p.is_absolute()) {
+        return Ok(xdg);
+    }
+    let home = home
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .context("HOME is not set to an absolute path; give the site directory with --dir")?;
+    Ok(home.join(".config"))
+}
+
+/// 建立站点目录：恢复密钥、只含它的信任锚清单、随机的 IPv6 组网网段，以及一份站点描述的开头。目录中
+/// 有恢复密钥，只有本人能进（`0700`）。
 fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     for name in [SITE_FILE, STATE_FILE, RECOVERY_FILE] {
         ensure!(
@@ -204,6 +246,8 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
         ipv4: "100.88.0.0/16".parse().expect("built-in prefix"),
         ipv6: random_ula()?,
     };
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("setting permissions of {}", dir.display()))?;
     write_new(&dir.join(RECOVERY_FILE), recovery.pkcs8(), 0o600)?;
     let state = State {
         trust_anchors,
@@ -225,12 +269,6 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
         prefixes.ipv6
     );
     write_new(&dir.join(SITE_FILE), site.as_bytes(), 0o644)?;
-    println!(
-        "{}",
-        text::SITE_CREATED
-            .get()
-            .replace("{dir}", &dir.display().to_string())
-    );
     Ok(())
 }
 
@@ -891,6 +929,36 @@ mod tests {
 
     fn state(dir: &Path) -> State {
         serde_json::from_slice(&std::fs::read(dir.join(STATE_FILE)).expect("state")).expect("parse")
+    }
+
+    #[test]
+    fn site_directory_defaults_to_the_xdg_config_home() {
+        let os = |s: &str| Some(OsString::from(s));
+        assert_eq!(
+            config_home(os("/x/config"), os("/home/u")).expect("xdg"),
+            Path::new("/x/config")
+        );
+        assert_eq!(
+            config_home(None, os("/home/u")).expect("home"),
+            Path::new("/home/u/.config")
+        );
+        // 相对路径的 XDG_CONFIG_HOME 不用（XDG 规范）
+        assert_eq!(
+            config_home(os("relative"), os("/home/u")).expect("home"),
+            Path::new("/home/u/.config")
+        );
+        assert!(config_home(None, None).is_err());
+    }
+
+    #[test]
+    fn init_keeps_the_site_directory_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = temp_dir("private");
+        init(&dir, DEFAULT_ORIGIN).expect("init");
+        let mode = |p: &Path| std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join(RECOVERY_FILE)), 0o600);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
