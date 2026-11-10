@@ -1,0 +1,137 @@
+// nett-node 与 Hub 之间的控制协议（docs/design/protocol.md）。每条 Envelope 是 Noise 通道上的一条消息；
+// 字段编号不复用，删除的字段写进 reserved；枚举的 0 值为 *_UNSPECIFIED（protocol.md 第 4.2 节）。
+syntax = "proto3";
+
+package nett.v1;
+
+import "google/protobuf/timestamp.proto";
+
+message Envelope {
+  // 每个方向单调递增
+  uint64 id = 1;
+  // 应答时填写对方消息的 id
+  uint64 reply_to = 2;
+  google.protobuf.Timestamp sent_at = 3;
+  oneof body {
+    Hello hello = 10;
+    Welcome welcome = 11;
+    Ping ping = 12;
+    Pong pong = 13;
+    Goodbye goodbye = 14;
+    Error error = 15;
+    DesiredState desired_state = 20;
+    StateAck state_ack = 21;
+    Inventory inventory = 30;
+    LinkReport link_report = 31;
+    // 超过单条消息上限的 Envelope 分片发送（protocol.md 第 4.1 节）
+    Chunk chunk = 40;
+  }
+}
+
+// node → Hub：Noise 握手的第一条消息的载荷（protocol.md 第 3.3 节）
+message Hello {
+  // 支持的协议版本，例如 "1.0"
+  repeated string protocol_versions = 1;
+  string node_version = 2;
+  string node_id = 3;
+  // 本次进程启动的随机 ID
+  bytes boot_id = 4;
+  // 本地已应用的期望状态代数
+  uint64 applied_generation = 5;
+  repeated string capabilities = 6;
+}
+
+// Hub → node：Noise 握手的第二条消息的载荷
+message Welcome {
+  string protocol_version = 1;
+  string hub_version = 2;
+  string session_id = 3;
+  google.protobuf.Timestamp server_time = 4;
+  uint32 keepalive_secs = 5;
+}
+
+message Ping {}
+
+message Pong {
+  google.protobuf.Timestamp server_time = 1;
+}
+
+message Goodbye {
+  string reason = 1;
+}
+
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  NODE_UNKNOWN = 1;
+  NODE_REVOKED = 2;
+  UPGRADE_REQUIRED = 3;
+  INVALID_MESSAGE = 4;
+  RATE_LIMITED = 5;
+}
+
+message Error {
+  ErrorCode code = 1;
+  string message = 2;
+  uint64 related_id = 3;
+}
+
+enum PartitionKind {
+  PARTITION_KIND_UNSPECIFIED = 0;
+  TRUST = 1;
+  POLICY = 2;
+  HUB_ENDPOINTS = 3;
+  RELEASE = 4;
+  MESH = 5;
+}
+
+// 期望状态的一个分区。mesh 分区的内容就是本地签名部署的期望状态文件（JSON，protocol.md 第 6 节），nett-node
+// 原样写给组网进程；hub_endpoints 分区是 JSON 字符串数组
+message Partition {
+  PartitionKind kind = 1;
+  bytes content = 2;
+}
+
+// Hub → node：期望状态。base_generation 为 0 时是完整快照
+message DesiredState {
+  uint64 generation = 1;
+  uint64 base_generation = 2;
+  repeated Partition partitions = 3;
+}
+
+enum AckResult {
+  ACK_RESULT_UNSPECIFIED = 0;
+  APPLIED = 1;
+  REJECTED = 2;
+  PENDING = 3;
+}
+
+message PartitionAck {
+  PartitionKind kind = 1;
+  AckResult result = 2;
+  string reason = 3;
+}
+
+// node → Hub：期望状态的应用结果，按分区报告
+message StateAck {
+  uint64 generation = 1;
+  repeated PartitionAck partitions = 2;
+}
+
+// node → Hub：版本、平台与本机的地址
+message Inventory {
+  string nett_version = 1;
+  string platform = 2;
+  repeated string addresses = 3;
+}
+
+// node → Hub：组网进程的本机状态（design/status.md 第 6 节的 JSON），nett site status 由它显示
+message LinkReport {
+  bytes status = 1;
+}
+
+message Chunk {
+  uint64 stream_id = 1;
+  uint32 seq = 2;
+  bool last = 3;
+  bytes data = 4;
+}
