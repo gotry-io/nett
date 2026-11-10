@@ -2,8 +2,8 @@
 
 nett 是用户所有机器之间的那张网：连回家、管服务器、访问服务都要经过它。组网出错时，用来修它的通路可能也一起断了；权限出错时，一台被攻破的机器就能走到所有机器。下面的规则都由此而来：**拿不准时，访问保持拒绝，连接保持现状；拿不准就先问。**
 
-- 项目：开源、自托管、单用户的组网基础设施，只做组网（ADR 0019）。组件：`nett-hub`（组网的控制面与 Web 控制台）、每台机器上的 `nett-node`（控制代理）、组网进程 `nett-mesh`、按需运行的传输适配进程 `nett-transport`、可被外部连入的节点上的 `nett-relay`；命令行 `nett`。入口节点上的反向代理（Edge）由用户自己运行，不是 nett 的组件。
-- 当前阶段：**M1 本地签名部署**（`docs/design/local-signing.md`，ADR 0022；原型关卡已通过，结果见 `docs/design/prototype.md` 第 9 节）：设计文档为草案；代码结构见 `docs/architecture.md` 第 11 节；进度见 `docs/roadmap.md`。
+- 项目：开源、自托管、单用户的组网基础设施，只做组网（ADR 0019）。组件：`nett-hub`（组网的控制面，没有界面，Web 控制台以后加入，ADR 0024）、每台机器上的 `nett-node`（控制代理）、组网进程 `nett-mesh`、按需运行的传输适配进程 `nett-transport`、可被外部连入的节点上的 `nett-relay`；命令行 `nett` 是操作界面，签名工具 `nett site` 在用户自己的电脑上维护并签名整张网。入口节点上的反向代理（Edge）由用户自己运行，不是 nett 的组件。
+- 当前阶段：**M1 接入 Hub**（`docs/design/hub.md`、`docs/design/site.md`，ADR 0024；原型关卡与本地签名部署已完成，见 `docs/design/prototype.md` 第 9 节、`docs/design/local-signing.md`）：设计文档为草案；代码结构见 `docs/architecture.md` 第 11 节；进度见 `docs/roadmap.md`。
 - 总体设计：`docs/architecture.md`；详细设计：`docs/design/`；决定的理由：`docs/adr/`。实现必须符合设计；要改设计，先改文档并经用户确认。没有设计文档的功能先写设计文档，架构层面的变化先写 ADR。
 - 本地的 `private/`（不进 Git）存放机器信息、盘点数据、调研材料和决策过程：可以读来了解背景（决策过程先读 `private/decision-log.md`，部署到用户自己的机器先读 `private/fleet/plan.md`），但**绝不提交，也不在代码和已提交的文档中引用**。
 
@@ -92,7 +92,7 @@ nett 是用户所有机器之间的那张网：连回家、管服务器、访问
 | 节点侧模块 | 外部依赖通过 trait 抽象，测试中使用替身 |
 | Hub 集成测试 | 使用临时 SQLite，经由 HTTP 调用真实路由，覆盖权限检查 |
 | 协议兼容 | nett-node 与 Hub 相邻版本互通 |
-| Web 端到端 | Playwright 覆盖关键流程：登录、节点入网、签名授权 |
+| Web 端到端（Web 控制台加入之后） | Playwright 覆盖关键流程：登录、节点入网、签名授权 |
 | 组网 | 用网络模拟（如 `tc netem`）制造延迟、丢包、断开、屏蔽 UDP，验证切换时间和连接不中断 |
 | 资源 | 每个里程碑的浸泡测试与 RSS、PSS 测量 |
 
@@ -146,4 +146,4 @@ sudo ./target/debug/nett-lab run failover --topology crates/nett-lab/topologies/
   --nett ./target/debug/nett --out /tmp/lab-failover --repeat 20 --with-tailscale
 ```
 
-`web/` 在 M1 搭好之后加上 `pnpm -C web lint && pnpm -C web test`。
+Web 控制台加入之后（ADR 0024），`web/` 加上 `pnpm -C web lint && pnpm -C web test`。

@@ -33,11 +33,11 @@
 - `brew install gotry-io/tap/nett` 安装命令行（签名工具 `nett site` 等）。配方的安装提示与 nett 命令的输出一样只用英文（architecture.md 第 14.3 节）；
 - 原生成员的组网服务以 root 运行（design/userspace.md 第 6.3 节）。Homebrew 的目录普通用户可写，root 服务直接运行那里的程序时，用户权限下的恶意程序能替换它、在下次启动时得到 root 和组网私钥。因此服务运行一份 root 专属的副本：
   - `sudo nett install`：一个命令完成安装，路径都是固定的，用户不需要知道：
-    - 在 `/Library/Application Support/nett/`（目录属主 root、权限 `0700`）中生成组网私钥和身份私钥（`0600`，已有的沿用，私钥不离开本机）。本机还没有期望状态时，打印写进站点描述的一行公钥；已经有了就不再打印，只说明结果；
+    - 在 `/Library/Application Support/nett/`（目录属主 root、权限 `0700`）中生成组网私钥和身份私钥（`0600`，已有的沿用，私钥不离开本机）。本机还没有期望状态时，打印 `nett site add --keys` 要用的一行公钥；已经有了就只说明结果；
     - 把正在运行的 `nett` 复制为这个目录中的 `nett`，写入 launchd 配置（`/Library/LaunchDaemons/io.gotry.nett.mesh.plist`）与日志轮转配置（`/etc/newsyslog.d/nett.conf`），配置文件的内容只在代码中定义；
-    - 导入期望状态：到运行 `sudo` 的用户的站点目录（local-signing.md 第 4 节，默认 `~/.config/nett`）的 `nodes/` 中，找出给本机的那一份（其中本节点准入材料的组网公钥与本机的组网私钥相符），复制进来。签名工具不在这台机器上、或站点放在别处时，用 `--config <desired.json>` 指定，同样先核对。只读普通文件，大小有上限。站点目录中的恢复密钥本来就只受这个用户的权限保护，能改写这个目录的程序已经能签名，从这里导入不扩大风险；
+    - 导入期望状态：到运行 `sudo` 的用户的站点目录（site.md 第 8 节，默认 `~/.config/nett`）的 `nodes/` 中，找出给本机的那一份（其中本节点准入材料的组网公钥与本机的组网私钥相符），复制进来。签名工具不在这台机器上、或站点放在别处时，用 `--config <desired.json>` 指定，同样先核对。只读普通文件，大小有上限。站点目录中的恢复密钥本来就只受这个用户的权限保护，能改写这个目录的程序已经能签名，从这里导入不扩大风险；
     - 有期望状态时启动服务。服务已在运行时：程序变了（升级之后）重启它，换用新的副本；只有期望状态变了时经本机接口让它重新加载（`nett reload` 的同一个请求，status.md 第 4.1 节），不重启、连接不中断，并显示是否被接受；都没变时不动。还没有期望状态时只安装，并说明下一步；
-  - 首次安装：`sudo nett install` → 把打印的一行写进站点描述、`nett site apply` → 再执行一次 `sudo nett install`。期望状态更新后执行同一个命令；
+  - 首次安装：`sudo nett install` → 在持有站点的电脑上 `nett site add <名字> --keys "<打印的一行>"`（site.md 第 4 节）→ 再执行一次 `sudo nett install`。期望状态更新后执行同一个命令；
   - 升级：`brew upgrade nett` 之后执行 `sudo nett install`。接入 Hub 之后由 nett-node 的签名自动升级接管（ADR 0020）；
   - `sudo nett uninstall`：停止服务，删除副本与两份配置；密钥和期望状态保留；
   - 启停服务调用 `/bin/launchctl`，以参数数组传参、带超时（硬性规则 9、14）；

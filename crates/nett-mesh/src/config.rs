@@ -99,7 +99,7 @@ pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
 /// 组网进程和传输适配进程自己在本机用的端口：组网地址上的探测端口与 TLS 中继的回环端口。WireGuard 的
-/// 套接字绑定本机全部地址，用了其中一个时后绑定的一方失败（design/local-signing.md 第 4 节）。
+/// 套接字绑定本机全部地址，用了其中一个时后绑定的一方失败（design/site.md 第 4 节）。
 pub fn is_reserved_port(port: u16) -> bool {
     port == TUNNEL_PROBE_PORT || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
 }

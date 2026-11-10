@@ -10,10 +10,10 @@
 | [0002](0002-rust-for-hub-and-node.md) | Hub 和 node 使用 Rust | 已采纳 |
 | [0003](0003-api-and-protocols.md) | 对外 REST + OpenAPI，内部 WebSocket + Protobuf | 已采纳 |
 | [0004](0004-sqlite-storage.md) | Hub 使用 SQLite 存储 | 已采纳 |
-| [0005](0005-react-spa-embedded.md) | Web 控制台为 React SPA，内嵌进 Hub 二进制 | 已采纳 |
-| [0006](0006-auth-and-passkey-signing.md) | 身份模型与 passkey 签名授权 | 已采纳 |
+| [0005](0005-react-spa-embedded.md) | Web 控制台为 React SPA，内嵌进 Hub 二进制 | 已采纳；推迟，见 0024 |
+| [0006](0006-auth-and-passkey-signing.md) | 身份模型与 passkey 签名授权 | 已采纳；passkey 推迟，见 0024 |
 | [0007](0007-own-mesh-wireguard-session-path-layer.md) | 自研组网：WireGuard 会话层 + nett 路径层 | 已采纳 |
-| [0008](0008-mobile-dual-path.md) | 手机以标准 WireGuard 双路径接入 | 已采纳 |
+| [0008](0008-mobile-dual-path.md) | 手机以标准 WireGuard 双路径接入 | 已采纳；配对见 0024 |
 | [0009](0009-caddy-as-first-edge.md) | Hub 前的反向代理默认使用 Caddy | 已采纳 |
 | [0010](0010-ai-via-api-only.md) | AI 只经由 Hub API 接入，node 不含 AI 逻辑 | 已采纳 |
 | [0011](0011-nett-relay.md) | nett-relay：独立的低权限中继与传输入口 | 已采纳 |
@@ -29,6 +29,7 @@
 | [0021](0021-tailscale-parity.md) | 组网体验以 Tailscale 为基线 | 已采纳 |
 | [0022](0022-local-signing-before-hub.md) | 接入 Hub 之前，用本地签名部署替换已有的隧道 | 已采纳 |
 | [0023](0023-access-default-deny.md) | 访问默认拒绝 | 已采纳 |
+| [0024](0024-cli-first-headless-hub.md) | 命令行是操作界面，Hub 先不带控制台 | 已采纳 |
 
 模板：
 

@@ -1,7 +1,7 @@
 # 变更集与动作目录
 
 - 状态：草案
-- 阶段：P0 设计；M1 实现（见第 10 节）
+- 阶段：P0 设计；随 Web 控制台加入（ADR 0024）。接入 Hub 时，修改由签名工具的命令在用户的电脑上签名（site.md 第 7 节）
 - 相关：[api-resources.md](api-resources.md)、ADR [0006](../adr/0006-auth-and-passkey-signing.md)、[0014](../adr/0014-signed-mesh-membership.md)、[0015](../adr/0015-origin-identity-and-lan-default-deny.md)、[0019](../adr/0019-mesh-only.md)；签名格式见 `auth.md`
 
 ## 1. 目标与原则

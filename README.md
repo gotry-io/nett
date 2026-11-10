@@ -9,12 +9,12 @@
 - GoTry 旗下项目 · 主页 `nett.gotry.io`（建设中）
 - 命令行：`nett`
 - 服务：
-  - `nett-hub`：组网的控制面与 Web 控制台
+  - `nett-hub`：组网的控制面，用命令行 `nett` 操作；Web 控制台以后加入（ADR 0024）
   - `nett-node`：每台机器上的控制代理，负责入网、连接 Hub 和升级
   - `nett-mesh`：组网进程，负责 WireGuard、选路与切换、DNS 和访问规则
   - `nett-transport`：按需运行的低权限传输适配进程，UDP 不可用时把流量转成 TLS
   - `nett-relay`：能被外部连入的节点上的中继与公网传输入口
-- 状态：**M1 开发中**。接入 Hub 之前，可以用本地签名部署组网（[design/local-signing.md](docs/design/local-signing.md)）：Linux 使用内核 WireGuard，macOS 以原生成员加入，Mac 上需要访客真实 IP 的容器服务另用容器内成员；Hub 与控制台尚未完成
+- 状态：**M1 开发中**。接入 Hub 之前，可以用本地签名部署组网（[design/local-signing.md](docs/design/local-signing.md)）：Linux 使用内核 WireGuard，macOS 以原生成员加入，Mac 上需要访客真实 IP 的容器服务另用容器内成员；Hub 尚未完成（[design/hub.md](docs/design/hub.md)）
 - 许可证：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)（双许可，任选其一）
 
 ## 安装
