@@ -1,6 +1,6 @@
 //! `nett site`：用户自己电脑上的签名工具（design/local-signing.md）。站点目录（默认 `~/.config/nett`）中有
 //! 站点描述 `site.toml`、恢复密钥 `recovery.pk8`（权限 `0600`，只在签名时读取）和签名工具的状态
-//! `state.json`；`nett site build` 为每个节点生成 `out/<名称>/desired.json`，文件不含私钥。
+//! `state.json`；`nett site build` 为每个节点生成 `nodes/<名称>/desired.json`，文件不含私钥。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -29,7 +29,10 @@ use crate::text;
 const SITE_FILE: &str = "site.toml";
 const STATE_FILE: &str = "state.json";
 const RECOVERY_FILE: &str = "recovery.pk8";
-const OUT_DIR: &str = "out";
+const NODES_DIR: &str = "nodes";
+const DESIRED_FILE: &str = "desired.json";
+/// 读入的期望状态文件的上限：256 个节点的准入材料和规则集远小于它（硬性规则 14）。
+const MAX_DESIRED_BYTES: u64 = 4 << 20;
 const DEFAULT_LISTEN_PORT: u16 = 41820;
 const DEFAULT_ORIGIN: &str = "https://nett.invalid";
 /// 签名载荷的有效期：节点首次接受自己的节点策略时检查（design/auth.md 第 10.2 节）。
@@ -197,11 +200,15 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 
 /// 站点目录的默认位置（design/local-signing.md 第 4 节）。
 fn default_dir() -> anyhow::Result<PathBuf> {
-    Ok(config_home(
+    site_dir(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
-    )?
-    .join("nett"))
+    )
+}
+
+/// 给定 `XDG_CONFIG_HOME` 与家目录时的默认站点目录。
+pub(crate) fn site_dir(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<PathBuf> {
+    Ok(config_home(xdg, home)?.join("nett"))
 }
 
 /// `$XDG_CONFIG_HOME`，没有设置时 `~/.config`；按 XDG 规范，相对路径的 `XDG_CONFIG_HOME` 不用。
@@ -272,7 +279,6 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 为站点描述中的每个节点生成期望状态（design/local-signing.md 第 4、5 节）。
 /// `nett site build` 生成的期望状态是不是给这台机器的：其中本节点准入材料的组网公钥必须是 `mesh_public`
 /// （`sudo nett mesh install --config`，design/release.md 第 4 节）。拷错了节点的文件时在复制之前就报错。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
@@ -298,6 +304,65 @@ pub(crate) fn check_desired_for(
     Ok(desired.node_id.clone())
 }
 
+/// 站点目录中给这台机器的期望状态（`sudo nett mesh install`，design/release.md 第 4 节）：`nodes/` 下
+/// 本节点的组网公钥是 `mesh_public` 的那一份，返回它的路径和内容。还没有 `nodes/` 时返回 `None`。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn find_desired_for(
+    site: &Path,
+    mesh_public: &X25519PublicKey,
+) -> anyhow::Result<Option<(PathBuf, Vec<u8>)>> {
+    let nodes = site.join(NODES_DIR);
+    let entries = match std::fs::read_dir(&nodes) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", nodes.display())),
+    };
+    let mut found = Vec::new();
+    // 一个站点最多 MAX_NODES 个节点，多出的条目不是签名工具写的
+    for entry in entries.take(MAX_NODES) {
+        let path = entry
+            .with_context(|| format!("reading {}", nodes.display()))?
+            .path()
+            .join(DESIRED_FILE);
+        if let Some(bytes) = read_desired(&path)?
+            && check_desired_for(&bytes, mesh_public).is_ok()
+        {
+            found.push((path, bytes));
+        }
+    }
+    if found.len() > 1 {
+        let paths: Vec<String> = found.iter().map(|(p, _)| p.display().to_string()).collect();
+        bail!(
+            "several desired states are for this machine ({}); give one with --config",
+            paths.join(", ")
+        );
+    }
+    Ok(found.pop())
+}
+
+/// 读一份期望状态文件：只读普通文件（不读设备、管道），大小有上限。不存在或不是普通文件时返回 `None`。
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn read_desired(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(MAX_DESIRED_BYTES + 1).read_to_end(&mut bytes))
+        .with_context(|| format!("reading {}", path.display()))?;
+    ensure!(
+        bytes.len() as u64 <= MAX_DESIRED_BYTES,
+        "{} is larger than {MAX_DESIRED_BYTES} bytes; it is not a desired state",
+        path.display()
+    );
+    Ok(Some(bytes))
+}
+
+/// 为站点描述中的每个节点生成期望状态（design/local-signing.md 第 4、5 节）。
 fn build(dir: &Path) -> anyhow::Result<()> {
     let site: Site = toml::from_str(
         &std::fs::read_to_string(dir.join(SITE_FILE))
@@ -432,7 +497,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         });
     }
 
-    let out = dir.join(OUT_DIR);
+    let out = dir.join(NODES_DIR);
     let revocations: Vec<Revocation> = state
         .revoked
         .iter()
@@ -467,7 +532,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         std::fs::create_dir_all(&node_dir)
             .with_context(|| format!("creating {}", node_dir.display()))?;
         std::fs::write(
-            node_dir.join("desired.json"),
+            node_dir.join(DESIRED_FILE),
             serde_json::to_vec_pretty(&doc)?,
         )
         .with_context(|| format!("writing {}", node_dir.display()))?;
@@ -982,7 +1047,7 @@ mod tests {
                 .parse()
                 .expect("key")
         };
-        let mac = std::fs::read(dir.join(OUT_DIR).join("mac").join("desired.json")).expect("out");
+        let mac = std::fs::read(dir.join(NODES_DIR).join("mac").join("desired.json")).expect("out");
         assert_eq!(
             check_desired_for(&mac, &mesh_key(&kb)).expect("mine"),
             state(&dir).nodes["mac"].node_id
@@ -990,12 +1055,38 @@ mod tests {
         // 另一个节点的文件、不是期望状态的文件都在复制之前被拒绝
         assert!(check_desired_for(&mac, &mesh_key(&ka)).is_err());
         assert!(check_desired_for(b"{}", &mesh_key(&kb)).is_err());
+
+        // install 不带 --config 时在站点目录中按组网公钥找到本机的那一份，其他条目跳过
+        std::fs::create_dir_all(dir.join(NODES_DIR).join("stray").join(DESIRED_FILE)).expect("dir");
+        std::fs::create_dir_all(dir.join(NODES_DIR).join("junk")).expect("dir");
+        std::fs::write(dir.join(NODES_DIR).join("junk").join(DESIRED_FILE), b"{}").expect("junk");
+        let (path, bytes) = find_desired_for(&dir, &mesh_key(&kb))
+            .expect("search")
+            .expect("found");
+        assert_eq!(path, dir.join(NODES_DIR).join("mac").join(DESIRED_FILE));
+        assert_eq!(bytes, mac);
+        let other = keys();
+        assert!(
+            find_desired_for(&dir, &mesh_key(&other))
+                .expect("search")
+                .is_none()
+        );
+        // 两份都是给本机的（拷贝出来的副本）：不猜，要求 --config
+        std::fs::create_dir_all(dir.join(NODES_DIR).join("copy")).expect("dir");
+        std::fs::write(dir.join(NODES_DIR).join("copy").join(DESIRED_FILE), &mac).expect("copy");
+        assert!(find_desired_for(&dir, &mesh_key(&kb)).is_err());
+        // 还没有生成过：没有 nodes/
+        assert!(
+            find_desired_for(&dir.join("absent"), &mesh_key(&kb))
+                .expect("search")
+                .is_none()
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
     fn desired(dir: &Path, node: &str) -> DesiredMesh {
         DesiredMesh::from_json(
-            &std::fs::read(dir.join(OUT_DIR).join(node).join("desired.json")).expect("desired"),
+            &std::fs::read(dir.join(NODES_DIR).join(node).join("desired.json")).expect("desired"),
         )
         .expect("valid desired state")
     }
@@ -1069,7 +1160,8 @@ mod tests {
         };
         write_site(&dir, &nodes(true, true));
         build(&dir).expect("build");
-        let first = std::fs::read(dir.join(OUT_DIR).join("app").join("desired.json")).expect("out");
+        let first =
+            std::fs::read(dir.join(NODES_DIR).join("app").join("desired.json")).expect("out");
         let s1 = state(&dir);
         assert_eq!(s1.nodes["vps"].policy_version, 1);
         assert_eq!(s1.access_rules.as_ref().map(|r| r.version), Some(1));
@@ -1097,7 +1189,8 @@ mod tests {
 
         // 输入不变：同样的签名与文件
         build(&dir).expect("rebuild");
-        let again = std::fs::read(dir.join(OUT_DIR).join("app").join("desired.json")).expect("out");
+        let again =
+            std::fs::read(dir.join(NODES_DIR).join("app").join("desired.json")).expect("out");
         assert_eq!(first, again);
 
         // 去掉一个节点：撤销，地址不再分配；去掉 Edge：版本加一，规则集换成空的新版本

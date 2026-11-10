@@ -696,6 +696,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "lexopt",
+ "libc",
  "nett-core",
  "nett-mesh",
  "nett-relay",

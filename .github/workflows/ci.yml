@@ -46,6 +46,25 @@ jobs:
           test_bin=$(cargo test --locked -p nett-mesh --lib --no-run --message-format=json \
             | jq -r 'select(.profile.test == true and .target.name == "nett_mesh") | .executable')
           sudo "$test_bin" --ignored --exact macos::tests::macos_utun_smoke --nocapture
+      # design/release.md 第 4 节：站点在默认目录中，install 不带 --config 找到给本机的期望状态
+      - name: sudo nett mesh install 的完整流程（需要 root）
+        run: |
+          cargo build --locked -p nett-cli
+          nett="$PWD/target/debug/nett"
+          "$nett" site init
+          keys=$(sudo "$nett" mesh install | grep '^keys = ')
+          printf '[[node]]\nname = "ci"\nreachability = "dial-only"\n%s\n' "$keys" >> ~/.config/nett/site.toml
+          "$nett" site build
+          sudo "$nett" mesh install | tee install.log
+          grep -F "$HOME/.config/nett/nodes/ci/desired.json" install.log
+          for _ in $(seq 20); do
+            sudo launchctl print system/io.gotry.nett.mesh | grep -q 'state = running' && break
+            sleep 0.5
+          done
+          sudo launchctl print system/io.gotry.nett.mesh | grep 'state = running'
+          sudo "$nett" mesh install | grep 'neither the program nor the desired state changed'
+          sudo "$nett" mesh uninstall
+          ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 
   # 实验环境 A 的短场景，每次推送各跑一次 nett（design/prototype.md 第 7 节）
   lab:

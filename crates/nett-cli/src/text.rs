@@ -33,14 +33,20 @@ pub const SERVICE_NEEDS_ROOT: Text = Text {
 
 #[cfg(target_os = "macos")]
 pub const SERVICE_INSTALLED_NOT_STARTED: Text = Text {
-    zh: "已安装到 {dir}，服务还没有启动：还没有期望状态。把上面一行写进站点描述，运行 `nett site build` 之后执行 `sudo nett mesh install --config <这个节点的 desired.json>`。",
-    en: "Installed into {dir}; the service is not started yet because there is no desired state. Add the line above to the site description, run `nett site build`, then run `sudo nett mesh install --config <this node's desired.json>`.",
+    zh: "已安装到 {dir}，服务还没有启动：站点目录 {site} 中还没有给本机的期望状态。把上面一行写进站点描述，运行 `nett site build` 之后再执行一次 `sudo nett mesh install`。站点不在这台机器上时，加上 `--config <这个节点的 desired.json>`。",
+    en: "Installed into {dir}; the service is not started yet because the site directory {site} has no desired state for this machine. Add the line above to the site description, run `nett site build`, then run `sudo nett mesh install` again. If the site is on another machine, add `--config <this node's desired.json>`.",
+};
+
+#[cfg(target_os = "macos")]
+pub const SERVICE_FOUND_DESIRED: Text = Text {
+    zh: "使用站点目录中给本机的期望状态：{path}",
+    en: "Using the desired state for this machine from the site directory: {path}",
 };
 
 #[cfg(target_os = "macos")]
 pub const SERVICE_STARTED: Text = Text {
-    zh: "组网服务已启动（launchd 标签 {label}），运行的是 {binary}。日志：log show --last 1h --predicate 'process == \"nett\"'。期望状态更新后执行 sudo nett mesh install --config <desired.json>；brew upgrade nett 之后执行 sudo nett mesh install。",
-    en: "The mesh service is running (launchd label {label}) from {binary}. Logs: log show --last 1h --predicate 'process == \"nett\"'. After the desired state changes, run sudo nett mesh install --config <desired.json>; after brew upgrade nett, run sudo nett mesh install.",
+    zh: "组网服务已启动（launchd 标签 {label}），运行的是 {binary}。日志：log show --last 1h --predicate 'process == \"nett\"'。期望状态更新后（nett site build）和 brew upgrade nett 之后，都执行 sudo nett mesh install。",
+    en: "The mesh service is running (launchd label {label}) from {binary}. Logs: log show --last 1h --predicate 'process == \"nett\"'. After the desired state changes (nett site build) and after brew upgrade nett, run sudo nett mesh install.",
 };
 
 #[cfg(target_os = "macos")]
@@ -78,6 +84,6 @@ pub const SITE_CREATED: Text = Text {
 };
 
 pub const SITE_BUILT: Text = Text {
-    zh: "已为 {n} 个节点生成期望状态，在 {dir}/<节点>/desired.json。把它拷到对应的节点上，替换后向组网进程发 SIGHUP（文件不含私钥）。",
-    en: "Generated the desired state for {n} nodes in {dir}/<node>/desired.json. Copy each file to its node, replace the old one and send SIGHUP to the mesh process (the files hold no private keys).",
+    zh: "已为 {n} 个节点生成期望状态，在 {dir}/<节点>/desired.json。把它拷到对应的节点上，替换后向组网进程发 SIGHUP（文件不含私钥）；运行签名工具的 Mac 本身是节点时，在它上面运行 sudo nett mesh install 即可。",
+    en: "Generated the desired state for {n} nodes in {dir}/<node>/desired.json. Copy each file to its node, replace the old one and send SIGHUP to the mesh process (the files hold no private keys); when the Mac running the signing tool is itself a node, just run sudo nett mesh install on it.",
 };

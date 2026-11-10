@@ -26,9 +26,10 @@ class Nett < Formula
   def caveats
     <<~EOS
       To join the mesh as a native member (root is needed for the utun interface):
-        sudo nett mesh install                             # prints the line to add to the site description
-        sudo nett mesh install --config <desired.json>     # after nett site build: starts the service
-      After every `brew upgrade nett`, run `sudo nett mesh install` again: the service runs a root-only copy.
+        sudo nett mesh install    # prints the line to add to the site description
+        nett site build           # in the site directory, ~/.config/nett by default
+        sudo nett mesh install    # finds this machine's desired state there and starts the service
+      Run `sudo nett mesh install` again after every `nett site build` and `brew upgrade nett`.
     EOS
   end
 

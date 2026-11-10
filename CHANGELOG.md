@@ -12,6 +12,12 @@ User-visible changes by version; versions follow Semantic Versioning.
   把目录权限设为 `0700`。
   The `nett site` directory defaults to `~/.config/nett` (following `$XDG_CONFIG_HOME`), so `--dir` is
   optional; `nett site init` makes the directory `0700`.
+- `nett site build` 把各节点的期望状态写在站点目录的 `nodes/<节点>/desired.json`。
+  `nett site build` writes each node's desired state to `nodes/<node>/desired.json` in the site directory.
+- macOS：`sudo nett mesh install` 自动在运行 sudo 的用户的站点目录中找到给本机的期望状态，不用再写
+  `--config`；站点不在这台机器上时仍可用 `--config` 指定。
+  macOS: `sudo nett mesh install` finds this machine's desired state in the site directory of the user who
+  ran sudo, so `--config` is only needed when the site is on another machine.
 
 ## [0.1.1] - 2026-11-09
 

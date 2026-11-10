@@ -1,11 +1,12 @@
 //! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett mesh install` 在 root 专属的目录中生成
-//! 密钥、放入程序的副本和期望状态，写入 launchd 与日志轮转的配置并启动服务；`sudo nett mesh uninstall` 停止
+//! 密钥、放入程序的副本和期望状态（从运行 sudo 的用户的站点目录中找到给本机的那一份），写入 launchd 与
+//! 日志轮转的配置并启动服务；`sudo nett mesh uninstall` 停止
 //! 服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务只运行这份副本。
 
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -151,12 +152,29 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
     crate::mesh::print_keys(Path::new(DIR), keys);
 
-    let desired_changed = match config {
+    let site = invoking_site_dir();
+    let imported = match config {
         Some(path) => {
-            let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let bytes = crate::site::read_desired(path)?
+                .with_context(|| format!("{} is not a regular file", path.display()))?;
             crate::site::check_desired_for(&bytes, &keys.0)?;
-            replace_if_changed(Path::new(DESIRED), &bytes, 0o600)?
+            Some(bytes)
         }
+        None => match &site {
+            Some(site) => crate::site::find_desired_for(site, &keys.0)?.map(|(path, bytes)| {
+                println!(
+                    "{}",
+                    text::SERVICE_FOUND_DESIRED
+                        .get()
+                        .replace("{path}", &path.display().to_string())
+                );
+                bytes
+            }),
+            None => None,
+        },
+    };
+    let desired_changed = match imported {
+        Some(bytes) => replace_if_changed(Path::new(DESIRED), &bytes, 0o600)?,
         None => false,
     };
     let exe = std::env::current_exe().context("locating the running nett")?;
@@ -172,11 +190,13 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
     if !Path::new(DESIRED).exists() {
+        let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
         println!(
             "{}",
             text::SERVICE_INSTALLED_NOT_STARTED
                 .get()
                 .replace("{dir}", DIR)
+                .replace("{site}", &site)
         );
         return Ok(());
     }
@@ -214,6 +234,51 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 运行 `sudo` 的用户的站点目录（design/local-signing.md 第 4 节）。sudo 可能把 `HOME` 换成 root 的，
+/// 所以按 `SUDO_UID` 从用户数据库查家目录；不经 sudo 运行时用 `HOME`。
+fn invoking_site_dir() -> Option<PathBuf> {
+    let home = match std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
+        Some(uid) => passwd::home(uid)?.into_os_string(),
+        None => std::env::var_os("HOME")?,
+    };
+    crate::site::site_dir(std::env::var_os("XDG_CONFIG_HOME"), Some(home)).ok()
+}
+
+/// 用户数据库的查询：标准库和 rustix 都没有 getpwuid_r。
+#[allow(unsafe_code)]
+mod passwd {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::PathBuf;
+
+    /// 远大于 macOS 上一条用户记录的长度；放不下（ERANGE）时返回 `None`。
+    const BUFFER: usize = 4096;
+
+    pub fn home(uid: libc::uid_t) -> Option<PathBuf> {
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+        let mut buffer = vec![0 as libc::c_char; BUFFER];
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        // SAFETY: entry、buffer、result 都是本函数持有的有效内存，传入的是 buffer 的真实长度。
+        let rc = unsafe {
+            libc::getpwuid_r(
+                uid,
+                entry.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut result,
+            )
+        };
+        if rc != 0 || result.is_null() {
+            return None;
+        }
+        // SAFETY: 返回 0 且 result 非空时 entry 已填好，pw_dir 是 buffer 中以 NUL 结尾的字符串，
+        // buffer 在本函数结束前一直有效；用完之前就复制出来。
+        let dir = unsafe { CStr::from_ptr((*result).pw_dir) };
+        let path = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
+        path.is_absolute().then_some(path)
+    }
+}
+
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
     if loaded()? && !launchctl(&["bootout", &format!("system/{LABEL}")])? {
@@ -244,6 +309,14 @@ mod tests {
             "the service never runs the Homebrew copy"
         );
         assert!(newsyslog().contains(&format!("{LOG_DIR}/mesh.log")));
+    }
+
+    #[test]
+    fn finds_the_home_of_a_user() {
+        let home = passwd::home(rustix::process::getuid().as_raw()).expect("own entry");
+        assert!(home.is_dir(), "{}", home.display());
+        // macOS 的 nobody 是 -2（uid_t::MAX - 1），取一个没有分配的 uid
+        assert!(passwd::home(3_999_999).is_none());
     }
 
     #[test]
