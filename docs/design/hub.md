@@ -40,8 +40,8 @@ Hub initialized. Link your site from the computer that holds it, within 1 hour:
 
 # 用户的电脑上
 nett site link nett_lnk_…
-Linked to https://hub.example.com. Pushed 3 nodes, access rules v3.
-Connect each existing node with `nett site invite <name>`.
+Linked to https://hub.example.com. Pushed 3 machines, access rules v3.
+Connect each existing machine with `nett site invite <name>`.
 ```
 
 关联码包含 Hub 地址、Hub 身份公钥和一次性的随机密钥（1 小时内有效，只能用一次，与 auth.md 第 4.1 节的初始化链接相同）。`nett site link` 校验 Hub 的 TLS 证书（硬性规则 11），用一次性密钥证明自己，把信任锚清单交给 Hub，换回一个属于站点的 API token，保存在站点目录中（`0600`）。Hub 从此只接受能用这份信任锚验证的产物。站点中已有的机器按第 3.5 节接入。
@@ -57,10 +57,13 @@ Access rules v4 -> v5:
 Connections:
   + mac - nas  punch only; may not connect
 Sign and push? [y/N] y
-Pushed. 1 of 2 nodes applied; nas has not connected yet.
+Pushed. 1 of 2 machines applied.
+  nas has not connected yet; `nett site invite nas` connects it
 ```
 
 - 推送之后，Hub 组成各台机器的期望状态并下发，各台应用后回报；命令等待最多 10 秒，报告已应用的机器，没连上的在它连上后自动补齐。某台机器拒绝了期望状态、或应用之后仍有问题（例如某个成员的准入材料被拒绝，status.md 第 4.1 节的 `problems`）时，逐台列出原因，退出码为 1，与 `nett reload` 相同；
+- 推送失败（Hub 不在）时，修改照常签名并保存在站点目录中，命令报告推送失败、退出码为 1；之后的任何一条修改命令推送整个站点，把错过的修改一起送到。同一份站点再推一次时 Hub 不换代数；
+- 站点目录照常写出各台机器的期望状态文件；只有还没有连过 Hub 的机器，命令才提示把文件拷过去；
 - 不接 Hub 时，同样的命令写成期望状态文件，由用户拷到各台机器（site.md 第 7 节）。
 
 ### 3.3 新机器入网
@@ -86,7 +89,7 @@ nett site status
 hub     https://hub.example.com, nett-hub 0.3.0
 site    4 nodes, access rules v5
 
-NODE      ADDRESS     HUB      VERSION  CONFIG   PROBLEMS
+MACHINE   ADDRESS     HUB      VERSION  CONFIG   PROBLEMS
 edge-vps  100.88.0.1  online   0.3.0    current  -
 mac       100.88.0.4  online   0.3.0    current  -
 mac-app   100.88.0.3  online   0.3.0    current  -
@@ -98,7 +101,9 @@ edge-vps  mac-app  connected    direct                8.6 ms
 mac       nas      unreachable  relay edge-vps (tls)  -
 ```
 
+- `HUB` 是这台机器与 Hub 的连接：`online`、`offline`，从没连过时为 `never`；`CONFIG` 是它对最新一次推送的确认：`current`（已应用）、`pending`（已写好，组网进程还没给出结果）、`rejected`、`behind`（还没收到或还没确认）；
 - `nett site status <机器>` 显示一台机器的详情，与在那台机器上运行 `nett status`（status.md）的内容相同，另加它最近一次连接 Hub 的时间；
+- Hub 不在时，`nett site status` 说明连不上，照样列出站点中的机器；
 - 列出的机器对就是站点推导出的连接（site.md 第 6 节）；每对机器的路径与往返时间取决定方的测量（mesh.md 第 8.3 节）；
 - 排版按 architecture.md 第 14.3 节；`--json` 输出完整内容。
 
@@ -108,11 +113,11 @@ mac       nas      unreachable  relay edge-vps (tls)  -
 
 ```
 nett site invite edge-vps
-edge-vps is already a member. On edge-vps, run (valid for 30 minutes, once):
+edge-vps is already a member. On edge-vps, run:
   sudo nett install nett_enr_…
 ```
 
-已是成员的机器拿到的 token 里没有入网私钥，只有 Hub 地址、Hub 身份公钥和节点 ID：这台机器用自己的身份密钥连接 Hub，Hub 按站点推送来的身份公钥认出它。之后它的期望状态由 nett-node 从 Hub 接收（第 5 节），不用手工拷。
+已是成员的机器拿到的 token 里没有入网私钥，只有 Hub 地址、Hub 身份公钥、节点 ID、信任锚清单的指纹，以及 Hub 自签证书时证书的指纹：这台机器用自己的身份密钥连接 Hub，Hub 按站点推送来的身份公钥认出它。token 里没有秘密，所以不设有效期，也可以重复使用；它能做的只是让一台已是成员的机器换一个 Hub 连接，而这一步要在那台机器上以 root 执行，并核对节点 ID 与信任锚（第 7 节）。之后它的期望状态由 nett-node 从 Hub 接收（第 5 节），不用手工拷。
 
 ## 4. 站点与 Hub
 
@@ -122,13 +127,14 @@ edge-vps is already a member. On edge-vps, run (valid for 30 minutes, once):
 - **推送的内容**：签名产物（节点策略、访问规则集、宣告网段）、撤销记录、不签名的部分（机器的名字、可达性、公网地址与端口）。连接与候选路径由 Hub 组成期望状态时推导（site.md 第 6 节）。Hub 验证每份签名产物的签名与版本，版本低于已保存的、或与已保存的版本相同而内容不同的整份拒绝；
 - **组成期望状态**：Hub 按站点模型为每台机器组成 `mesh` 分区，格式与本地签名部署的期望状态文件相同（protocol.md 第 6 节）。组成的逻辑只有一份：站点模型与组成从 `nett site` 中移到一个库 crate（`nett-site`），签名工具不接 Hub 时与 Hub 共用；
 - **API**：REST + JSON，经 HTTPS，带 OpenAPI（ADR 0003）。这一步用到的资源是 api-resources.md 中的 `hub`、`trust`、`nodes`、`enrollment-tokens`、`node-policies`、`access-rules`、`links`、`events` 与一个新的 `site`（推送的站点模型）；
+- **H1 的接口**：`POST /api/v1/link`（关联码中的一次性密钥与信任锚清单，换回 owner token）、`PUT /api/v1/site`（推送站点状态，回复 Hub 接受之后的代数）、`GET /api/v1/site/status`（各台机器的连接、版本、确认与本机状态）；节点网关是 `GET /node/v1/connect` 上的 WebSocket（protocol.md）。关联码是 `nett_lnk_` 加上 base64url 编码的 JSON（Hub 地址、Hub 身份公钥、一次性密钥、自签证书的指纹），接入 token 是 `nett_enr_` 加上同样编码的 JSON（第 3.5 节）。Hub 自签证书时（没有反向代理的部署、实验拓扑），`nett-hub serve --tls-cert --tls-key` 自己终止 TLS，签名工具与节点按关联码和 token 中的指纹校验证书（硬性规则 11）；
 - **API token**：关联时发给站点的 token，`kind` 为 `owner`，拥有站点的全部操作。它能推送签名产物，但推送的产物照样要通过签名验证：token 本身批准不了任何提升权限的变更（硬性规则 3）。它能做的不签名的事，与 Hub 能做的相同：撤销（降低权限）、改机器的名字、可达性与公网地址，影响的是可用性，不是权限。
 
 ## 5. 节点与 Hub
 
 协议按 protocol.md：WebSocket 上的 Noise IK，Protobuf 消息，按分区和代数下发期望状态。这一步用到的分区是 `trust`、`mesh`、`hub_endpoints`；消息是 `Hello`/`Welcome`、`DesiredState`/`StateAck`、`Inventory`、`LinkReport`、`NodeEvent`、`Leave`、`Ping`/`Pong`。
 
-- **交给组网进程**：nett-node 把 `mesh` 分区写成组网进程的期望状态文件（先写临时文件再改名），再经本机接口发出重新读取的请求（`nett reload` 的同一个请求，status.md 第 4.1 节），拿回结果：`applied`（附 `problems`）、`rejected`（附原因）、`busy`，分别作为 `StateAck` 的 `applied`、`rejected`、`pending` 报给 Hub（protocol.md 第 5 节）。`problems` 随状态上报；`busy` 时期望状态照常在应用，nett-node 在下一次读状态时按其中的 `config` 确认它已生效。组网进程把接受过的授权和最近一次整份接受的期望状态保存在它自己的信任存储中（mesh.md 第 4.2 节），重启时先应用它们，不等 nett-node 和 Hub（硬性规则 8）；期望状态文件只是输入，被拒绝的文件不会成为验证的基准，也不会让被撤销的权限恢复；
+- **交给组网进程**：nett-node 把 `mesh` 分区写成组网进程的期望状态文件（先写临时文件再改名），再经本机接口发出重新读取的请求（`nett reload` 的同一个请求，status.md 第 4.1 节），拿回结果：`applied`（附 `problems`）、`rejected`（附原因）、`busy`，分别作为 `StateAck` 的 `applied`、`rejected`、`pending` 报给 Hub（protocol.md 第 5 节）。`problems` 随状态上报；`busy`、或组网进程没有应答（文件已写好，它启动时会读）时报 `pending`，nett-node 在下一次读状态时再请它重新读取一次，拿到结果后补报。组网进程把接受过的授权和最近一次整份接受的期望状态保存在它自己的信任存储中（mesh.md 第 4.2 节），重启时先应用它们，不等 nett-node 和 Hub（硬性规则 8）；期望状态文件只是输入，被拒绝的文件不会成为验证的基准，也不会让被撤销的权限恢复；
 - **期望状态文件只有一个写入者**：接入 Hub 的机器上只由 nett-node 写，`sudo nett install` 不从站点目录导入（第 7 节）；用户运行 `nett reload` 只是让组网进程重新读同一份文件；
 - **上报状态**：nett-node 每 15 秒、以及期望状态应用之后，经本机状态接口读一次状态，有变化时发 `LinkReport`（各对端的状态、路径、往返时间）和 `Inventory`（版本、平台、地址）。Hub 只保存每台机器最新的一份，事件保留最近的若干条（第 8 节）；
 - **离线**：Hub 或 nett-node 不在时，组网照常（architecture.md 第 12.2 节）；nett-node 按 protocol.md 第 8 节重连，连上后按代数补齐；
