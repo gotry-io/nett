@@ -29,6 +29,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
   ```
   Run the same command whenever the desired state changes (it reloads without a restart); if the site is on another machine, add `--config <this node's desired.json>`. The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett mesh install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
 - **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service).
+- **Check the status**: `sudo nett status` lists this node and every peer: whether it is connected, the path, round-trip time and loss, and any rejected configuration; `sudo nett status <peer>` shows one peer's candidate paths and recent switches ([design/status.md](docs/design/status.md), in Chinese).
 
 ## Documentation
 

@@ -5,6 +5,20 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [Unreleased]
 
+- 新命令 `nett status`：本机的地址与运行方式，每个对端是否连通、走哪条路径、往返时间与丢包、最近一次握手，以及
+  被拒绝的期望状态、成员和访问规则；`nett status <对端>` 显示候选路径和最近的切换，`--json` 输出完整的状态。
+  状态经组网进程的本机套接字读取（Linux 与容器内为 `/run/nett/mesh.sock`，macOS 为 `/var/run/nett/mesh.sock`，
+  `nett mesh --socket` 可改），只有 root 能读，所以要 `sudo nett status`。Linux 上自己安装 systemd 单元的，
+  换上新的 `nett-mesh.service`（增加了 `RuntimeDirectory=nett`）后 `systemctl daemon-reload`；不换时组网照常，
+  日志中有一条警告，`nett status` 连不上。
+  New command `nett status`: this node's addresses and setup; for each peer whether it is connected, which
+  path it uses, round-trip time and loss, and the last handshake; plus any rejected desired state, members
+  or access rules. `nett status <peer>` shows the candidate paths and recent switches; `--json` prints the
+  full status. It is read from the mesh process's local socket (`/run/nett/mesh.sock` on Linux and in
+  containers, `/var/run/nett/mesh.sock` on macOS, `nett mesh --socket` to change it), which only root can
+  read, so run `sudo nett status`. If you installed the systemd unit yourself, replace `nett-mesh.service`
+  (it adds `RuntimeDirectory=nett`) and run `systemctl daemon-reload`; without it the mesh keeps working,
+  the log has a warning and `nett status` cannot connect.
 - `nett site build` 把节点名写进期望状态（不签名，只用于显示）。之前的版本不接受这个字段：先升级节点上的 nett，
   再换上新生成的期望状态；顺序反了时节点继续使用上一份期望状态。节点名最长 63 个字符。
   `nett site build` puts node names into the desired state (unsigned, for display only). Earlier versions
