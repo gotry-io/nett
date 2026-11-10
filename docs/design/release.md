@@ -39,7 +39,7 @@
     - 有期望状态时启动服务。服务已在运行时：程序变了（升级之后）重启它，换用新的副本；只有期望状态变了时经本机接口让它重新加载（`nett reload` 的同一个请求，status.md 第 4.1 节），不重启、连接不中断，并显示是否被接受；都没变时不动。还没有期望状态时只安装，并说明下一步；
   - 首次安装：`sudo nett install` → 在持有站点的电脑上 `nett site add <名字> --keys "<打印的一行>"`（site.md 第 4 节）→ 再执行一次 `sudo nett install`。期望状态更新后执行同一个命令；
   - 升级：`brew upgrade nett` 之后执行 `sudo nett install`。接入 Hub 之后由 nett-node 的签名自动升级接管（ADR 0020）；
-  - `sudo nett uninstall`：停止服务，删除副本与两份配置；密钥和期望状态保留；
+  - `sudo nett uninstall`：停止服务，删除副本与两份配置；密钥、期望状态和信任存储（`state/`，mesh.md 第 4.2 节）保留；
   - 启停服务调用 `/bin/launchctl`，以参数数组传参、带超时（硬性规则 9、14）；
 - 安装与每次升级各需要一次 sudo。不用 sudo 的方式是带 Network Extension 的 App，需要 Apple 开发者账号签名（ADR 0018 中的 M3 客户端）。
 

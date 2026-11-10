@@ -1,8 +1,9 @@
 //! 智能入口宣告的网段（design/mesh.md 第 10 节）：验证签名，只接受有 `subnet_router` 角色的成员的宣告，
 //! 版本号只增不减；网段不能与组网网段或其他成员宣告的网段重叠（WireGuard 不允许对端的 `AllowedIPs`
-//! 重叠）。成员被移除、或它的节点策略不再有 `subnet_router` 角色时，它宣告的网段随之作废。
+//! 重叠）。成员被移除、或它的节点策略不再有 `subnet_router` 角色时，它宣告的网段随之作废。重启之后以
+//! 信任存储中的版本为基准（design/mesh.md 第 4.2 节）。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nett_core::id::NodeId;
 use nett_core::prefix::IpPrefix;
@@ -12,6 +13,7 @@ use nett_trust::payload::Role;
 
 use crate::config::DesiredMesh;
 use crate::event::{Event, EventSink};
+use crate::store::VersionRecord;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Applied {
@@ -24,9 +26,31 @@ struct Applied {
 #[derive(Debug, Default)]
 pub struct Routes {
     applied: BTreeMap<NodeId, Applied>,
+    /// 本机此前接受过的各成员的版本。
+    floor: BTreeMap<NodeId, VersionRecord>,
 }
 
 impl Routes {
+    pub fn restore(&mut self, floor: &BTreeMap<NodeId, VersionRecord>) {
+        self.floor = floor.clone();
+    }
+
+    /// 保存进信任存储的版本：此前接受过的，加上这次生效的；被撤销的成员不再保存。
+    pub fn saved_versions(&self, revoked: &BTreeSet<NodeId>) -> BTreeMap<NodeId, VersionRecord> {
+        let mut out = self.floor.clone();
+        out.extend(self.applied.iter().map(|(id, a)| {
+            (
+                id.clone(),
+                VersionRecord {
+                    version: a.version,
+                    hash: a.hash,
+                },
+            )
+        }));
+        out.retain(|id, _| !revoked.contains(id));
+        out
+    }
+
     /// 某个成员宣告的网段。
     pub fn of(&self, node: &NodeId) -> &[IpPrefix] {
         self.applied.get(node).map_or(&[], |a| a.routes.as_slice())
@@ -70,6 +94,12 @@ impl Routes {
                 };
                 if !member.roles.contains(&Role::SubnetRouter) {
                     events.emit(reject("the node policy has no subnet_router role".into()));
+                    continue;
+                }
+                if let Some(floor) = self.floor.get(&routes.node_id)
+                    && let Err(e) = floor.admits(routes.version, hash)
+                {
+                    events.emit(reject(e.to_string()));
                     continue;
                 }
                 if let Some(applied) = self.applied.get(&routes.node_id) {
@@ -142,7 +172,7 @@ mod tests {
     use super::*;
     use crate::event::VecSink;
     use crate::members::MemberSet;
-    use crate::testutil::{Mesh, node_id, validated};
+    use crate::testutil::{Mesh, no_expiry, node_id, validated};
 
     fn p(s: &str) -> IpPrefix {
         s.parse().expect(s)
@@ -160,7 +190,7 @@ mod tests {
         d.advertised_routes = docs;
         let desired = validated(d);
         let mut members = MemberSet::default();
-        members.apply(&desired, &mut VecSink::default());
+        members.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
         let mut routes = Routes::default();
         let mut events = VecSink::default();
         routes.apply(&desired, members.members(), &mut events);
@@ -202,13 +232,13 @@ mod tests {
         let mut members = MemberSet::default();
         let mut routes = Routes::default();
         let desired = validated(d.clone());
-        members.apply(&desired, &mut VecSink::default());
+        members.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
         routes.apply(&desired, members.members(), &mut VecSink::default());
         assert_eq!(routes.of(&node_id(2)).len(), 1);
         // 新版本的节点策略去掉了 subnet_router 角色
         d.members = vec![mesh.material(1, 1), mesh.material(2, 2)];
         let desired = validated(d);
-        members.apply(&desired, &mut VecSink::default());
+        members.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
         routes.apply(&desired, members.members(), &mut VecSink::default());
         assert!(routes.of(&node_id(2)).is_empty());
     }

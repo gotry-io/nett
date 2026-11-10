@@ -3,6 +3,29 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
+## [未发布 · Unreleased]
+
+- 组网进程在本机保存信任存储（design/mesh.md 第 4.2 节）：第一次接受期望状态时固定这台机器的信任锚，之后
+  信任锚不同的期望状态整份拒绝；撤销记录和各签名产物已生效的版本写入磁盘，重启之后旧版本的产物、被撤销的
+  成员同样不接受；启动时期望状态文件被拒绝，改用最近一次整份接受的那一份。已经在运行的机器升级之后，以当时的
+  期望状态为基准建立它，连接不受影响。位置：Linux 为 `/var/lib/nett`，要换上新的
+  `packaging/systemd/nett-mesh.service`（加了 `StateDirectory=nett`），否则 `nett status` 会列出
+  "trust store" 问题；macOS 为 `/Library/Application Support/nett/state`；容器镜像为挂载目录中的
+  `/etc/nett/state`。
+  The mesh process keeps a trust store on the machine (design/mesh.md section 4.2): the first accepted desired
+  state pins this machine's trust anchors, and a desired state with different trust anchors is rejected as a
+  whole; revocations and the applied versions of signed artifacts are written to disk, so after a restart
+  older artifacts and revoked members are still refused; when the desired state file is rejected at start,
+  the last state accepted as a whole is used. Machines that are already running build it from their current
+  desired state on the first start after the upgrade, without losing connections. Location: `/var/lib/nett`
+  on Linux — install the new `packaging/systemd/nett-mesh.service` (it adds `StateDirectory=nett`), otherwise
+  `nett status` lists a "trust store" problem; `/Library/Application Support/nett/state` on macOS;
+  `/etc/nett/state` in the mounted directory for the container image.
+- 期望状态不是给这台机器的（节点 ID 不同）时，`nett reload` 报告被拒绝，退出码为 1；之前报告为已生效。
+  本机节点策略的新版本过期时不接受。期望状态文件与成员、撤销记录的数量都有上限。
+  `nett reload` reports a desired state for another node (a different node ID) as rejected and exits with 1.
+  A new version of this machine's own node policy is refused once it has expired. The desired state file
+  and its member and revocation counts are bounded.
 ## [0.1.5] - 2026-11-10
 
 - 命令按作用范围重新整理（`nett help` 按组列出，任何命令加 `--help` 显示用法）：本机的命令都在顶层，

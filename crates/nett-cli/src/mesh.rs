@@ -3,7 +3,7 @@
 //! 身份私钥（local-signing.md 第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置只在实验构建中（`lab` 特性）。
 
 use std::io::IsTerminal as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
@@ -21,6 +21,7 @@ use nett_mesh::macos::{MacTun, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
 use nett_mesh::status::StatusServer;
+use nett_mesh::store::{DirBackend, TrustStore};
 use nett_mesh::userspace::UserspaceDataPlane;
 use nett_trust::keys::X25519PublicKey;
 use tokio::signal::unix::{SignalKind, signal};
@@ -30,6 +31,8 @@ struct Args {
     key: PathBuf,
     /// 本机状态的套接字（design/status.md 第 3 节）。
     socket: PathBuf,
+    /// 信任存储的目录（design/mesh.md 第 4.2 节）。
+    state: PathBuf,
     #[cfg(feature = "lab")]
     lab: LabArgs,
 }
@@ -48,7 +51,7 @@ struct LabArgs {
     userspace: bool,
 }
 
-pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>]\n\n\
+pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>] [--state <dir>]\n\n\
 Started by systemd, launchd or a container; to install the service on macOS, use `sudo nett install`.";
 pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
 Existing keys are kept and the same line is printed again. On macOS, `sudo nett install` does this.";
@@ -59,6 +62,7 @@ const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-con
 fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
     let (mut config, mut key) = (None, None);
     let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
+    let mut state = PathBuf::from(nett_mesh::store::DEFAULT_STATE_DIR);
     #[cfg(feature = "lab")]
     let mut lab = LabArgs::default();
     while let Some(arg) = parser.next()? {
@@ -66,6 +70,7 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
+            lexopt::Arg::Long("state") => state = PathBuf::from(parser.value()?),
             #[cfg(feature = "lab")]
             lexopt::Arg::Long(name) => {
                 let name = name.to_owned();
@@ -81,6 +86,7 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
             config,
             key,
             socket,
+            state,
             #[cfg(feature = "lab")]
             lab,
         }),
@@ -242,9 +248,16 @@ mod syslog {
     }
 }
 
-/// 本机的节点 ID：引擎据此确认每份期望状态都是给本机的。
-fn node_id(config: &PathBuf) -> anyhow::Result<NodeId> {
-    let bytes = std::fs::read(config).with_context(|| format!("reading {}", config.display()))?;
+/// 还没有信任存储时，本机的节点 ID 取自期望状态文件：引擎据此确认每份期望状态都是给本机的。
+fn node_id(config: &Path) -> anyhow::Result<NodeId> {
+    let bytes = nett_mesh::config::read_bounded(config, nett_mesh::config::MAX_DESIRED_BYTES)
+        .with_context(|| format!("reading {}", config.display()))?
+        .with_context(|| {
+            format!(
+                "{} does not exist and there is no trust store yet",
+                config.display()
+            )
+        })?;
     let doc: serde_json::Value = serde_json::from_slice(&bytes).context("parsing desired state")?;
     doc.get("node_id")
         .and_then(|v| v.as_str())
@@ -257,7 +270,12 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let args = parse(parser)?;
     init_logging();
 
-    let node_id = node_id(&args.config)?;
+    // 先读信任存储，再读期望状态（design/mesh.md 第 4.2 节）
+    let trust = TrustStore::open(Box::new(DirBackend::new(args.state.clone())));
+    let node_id = match trust.node_id() {
+        Some(id) => id.clone(),
+        None => node_id(&args.config)?,
+    };
     let key = PrivateKey::load(&args.key)?;
     #[cfg(feature = "lab")]
     let sink: Box<dyn EventSink + Send> = match &args.lab.events {
@@ -289,14 +307,22 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let worker = if userspace {
         let dataplane = UserspaceDataPlane::new(LinuxTun::open()?);
-        Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
+        Runtime::spawn(
+            Engine::new(node_id, key, dataplane).with_trust_store(trust),
+            sink,
+            clock,
+        )
     } else {
         let dataplane = KernelWireGuard::open()?;
-        Runtime::spawn(Engine::new(node_id, key, dataplane), sink, clock)
+        Runtime::spawn(
+            Engine::new(node_id, key, dataplane).with_trust_store(trust),
+            sink,
+            clock,
+        )
     };
     #[cfg(target_os = "macos")]
     let worker = Runtime::spawn(
-        Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?)),
+        Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?)).with_trust_store(trust),
         sink,
         clock,
     );

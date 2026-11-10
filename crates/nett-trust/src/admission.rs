@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::anchors::TrustAnchors;
 use crate::canonical::{CanonicalError, parse_canonical, to_canonical};
-use crate::encoding::{Sha256Digest, b64, b64_fixed};
+use crate::encoding::{Sha256Digest, Timestamp, b64, b64_fixed};
 use crate::keys::X25519PublicKey;
 use crate::payload::{MeshAddresses, Module, Role};
 use crate::revocation::Revocations;
@@ -76,6 +76,8 @@ pub struct Member {
     pub policy_hash: Sha256Digest,
     /// 准入证明载荷的哈希。
     pub proof_hash: Sha256Digest,
+    /// 节点策略载荷的过期时间：只在本机首次接受自己的策略时检查（design/auth.md 第 10.2 节检查 6）。
+    pub policy_expires_at: Timestamp,
 }
 
 /// 成员的 Edge：Edge 专用地址，以及 Edge 发出的流量从哪些容器网段来。
@@ -178,6 +180,7 @@ pub fn admit(
         signer: verified.signer,
         policy_hash: *policy_hash,
         proof_hash: Sha256Digest::of(&material.proof.payload),
+        policy_expires_at: verified.payload.expires_at(),
         node_id,
     })
 }
@@ -185,14 +188,17 @@ pub fn admit(
 /// 已生效的成员版本。版本号只增不减；与已生效版本完全相同的材料视为幂等（design/auth.md 第 10.2 节检查 7）。
 #[derive(Debug, Clone, Default)]
 pub struct AppliedMembers {
-    by_node: BTreeMap<NodeId, Applied>,
+    by_node: BTreeMap<NodeId, AppliedRecord>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Applied {
-    policy_version: u64,
-    policy_hash: Sha256Digest,
-    proof_hash: Sha256Digest,
+/// 一个成员已生效的材料：版本与两份载荷的哈希。组网进程把它保存在本机的信任存储中，重启之后据此拒绝
+/// 旧版本（design/mesh.md 第 4.2 节）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedRecord {
+    pub policy_version: u64,
+    pub policy_hash: Sha256Digest,
+    pub proof_hash: Sha256Digest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,32 +225,20 @@ pub enum VersionError {
 
 impl AppliedMembers {
     pub fn check(&self, member: &Member) -> Result<VersionCheck, VersionError> {
-        let Some(applied) = self.by_node.get(&member.node_id) else {
-            return Ok(VersionCheck::Newer);
-        };
-        let offered = Applied::of(member);
-        if offered.policy_version > applied.policy_version {
-            Ok(VersionCheck::Newer)
-        } else if offered == *applied {
-            Ok(VersionCheck::Unchanged)
-        } else if offered.policy_version < applied.policy_version {
-            Err(VersionError::Older {
-                node_id: member.node_id.clone(),
-                applied: applied.policy_version,
-                offered: offered.policy_version,
-            })
-        } else {
-            Err(VersionError::Conflict {
-                node_id: member.node_id.clone(),
-                version: offered.policy_version,
-            })
+        match self.by_node.get(&member.node_id) {
+            Some(applied) => applied.compare(member),
+            None => Ok(VersionCheck::Newer),
         }
     }
 
     /// 记录一个通过 [`Self::check`] 的成员。
     pub fn record(&mut self, member: &Member) {
         self.by_node
-            .insert(member.node_id.clone(), Applied::of(member));
+            .insert(member.node_id.clone(), AppliedRecord::of(member));
+    }
+
+    pub fn records(&self) -> &BTreeMap<NodeId, AppliedRecord> {
+        &self.by_node
     }
 
     /// 已生效的版本；撤销的成员由调用方移除。
@@ -253,12 +247,34 @@ impl AppliedMembers {
     }
 }
 
-impl Applied {
-    fn of(member: &Member) -> Self {
+impl AppliedRecord {
+    pub fn of(member: &Member) -> Self {
         Self {
             policy_version: member.policy_version,
             policy_hash: member.policy_hash,
             proof_hash: member.proof_hash,
+        }
+    }
+
+    /// 与这份已生效的材料比较：版本更高为 [`VersionCheck::Newer`]，完全相同为
+    /// [`VersionCheck::Unchanged`]，更低或同版本不同内容为错误。
+    pub fn compare(&self, member: &Member) -> Result<VersionCheck, VersionError> {
+        let offered = Self::of(member);
+        if offered.policy_version > self.policy_version {
+            Ok(VersionCheck::Newer)
+        } else if offered == *self {
+            Ok(VersionCheck::Unchanged)
+        } else if offered.policy_version < self.policy_version {
+            Err(VersionError::Older {
+                node_id: member.node_id.clone(),
+                applied: self.policy_version,
+                offered: offered.policy_version,
+            })
+        } else {
+            Err(VersionError::Conflict {
+                node_id: member.node_id.clone(),
+                version: offered.policy_version,
+            })
         }
     }
 }

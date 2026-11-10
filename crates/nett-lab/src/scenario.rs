@@ -293,6 +293,14 @@ fn start_with(
         helpers: Vec::new(),
     };
     for node in &generated.nodes {
+        // 每次实验重新生成密钥与信任锚：上一次留下的信任存储会让新的期望状态被拒绝（design/mesh.md
+        // 第 4.2 节）。同一次实验中重启组网进程不经过这里，信任存储保留
+        let state = node.dir.join("state");
+        match std::fs::remove_dir_all(&state) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", state.display())),
+        }
         lab.spawn_with(node, nett, &extra(&node.name))?;
         if topo
             .node(&node.name)
@@ -325,6 +333,8 @@ impl Lab {
             transport_config.clone().into(),
             "--socket".into(),
             dir.join("mesh.sock").into(),
+            "--state".into(),
+            dir.join("state").into(),
         ];
         if node.userspace {
             args.push("--userspace".into());
@@ -561,12 +571,19 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     }
 
     // 重新加载一份只带低版本材料的期望状态：被拒绝，已生效的对端保持不变
-    if let Some(lower) = &generated.lower_version_of_second {
-        let mut doc = generated.first_desired.clone();
-        doc.members = vec![generated.materials[&a.name].clone(), lower.clone()];
-        doc.revocations.clear();
-        let text = serde_json::to_vec_pretty(&doc).context("serializing desired state")?;
-        std::fs::write(a.dir.join("desired.json"), text).context("rewriting desired state")?;
+    let desired_a = a.dir.join("desired.json");
+    let original = std::fs::read(&desired_a).context("reading desired state of a")?;
+    let downgraded = match &generated.lower_version_of_second {
+        Some(lower) => {
+            let mut doc = generated.first_desired.clone();
+            doc.members = vec![generated.materials[&a.name].clone(), lower.clone()];
+            doc.revocations.clear();
+            Some(serde_json::to_vec_pretty(&doc).context("serializing desired state")?)
+        }
+        None => None,
+    };
+    if let Some(text) = &downgraded {
+        std::fs::write(&desired_a, text).context("rewriting desired state")?;
         let before = count(&ev, "member_rejected");
         let pid = lab.pid(&a.name).context("process of node a")?;
         run("kill", ["-HUP", &pid.to_string()])?;
@@ -603,6 +620,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             }) && peers_after == expected,
             format!("{reloaded:?}; peers {peers_after:?}"),
         );
+        std::fs::write(&desired_a, &original).context("restoring desired state")?;
     }
 
     // 组网进程停止期间，内核中的 WireGuard 照常工作；重启后沿用已有的接口和对端
@@ -631,6 +649,25 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             after_restart.err()
         ),
     );
+
+    // 重启之后再拿到低版本材料：以信任存储中已生效的版本为基准，照样拒绝（design/mesh.md 第 4.2 节）
+    if let Some(text) = &downgraded {
+        std::fs::write(&desired_a, text).context("rewriting desired state")?;
+        lab.stop(&a.name)?;
+        let before = count(&events(a), "member_rejected");
+        lab.spawn(a, nett)?;
+        let waited = wait_for(a, "a rejection after restart", |ev| {
+            count(ev, "member_rejected") > before
+        });
+        let peers_after = wg_peers(&ns_a)?;
+        let b_configured = peers_after.contains(&b.mesh_public_key.to_string());
+        report.check(
+            "restart:lower-version-still-rejected",
+            waited.is_ok() && !b_configured,
+            format!("{waited:?}; peers {peers_after:?}"),
+        );
+        std::fs::write(&desired_a, &original).context("restoring desired state")?;
+    }
 
     // 各节点 WireGuard 的现场，供排查
     for node in &generated.nodes {

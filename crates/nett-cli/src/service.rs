@@ -330,7 +330,7 @@ fn uninstall() -> anyhow::Result<()> {
             Err(e) => return Err(e).with_context(|| format!("removing {path}")),
         }
     }
-    println!("Removed the mesh service. Keys and desired state remain in {DIR}.");
+    println!("Removed the mesh service. Keys, desired state and the trust store remain in {DIR}.");
     Ok(())
 }
 

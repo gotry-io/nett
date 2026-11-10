@@ -28,6 +28,9 @@ pub fn node_id(n: u8) -> NodeId {
         .expect("valid node id")
 }
 
+/// 测试材料的过期时间：2100-01-01。
+pub const FAR_FUTURE: Timestamp = Timestamp::from_unix_seconds(4_102_444_800);
+
 pub fn mesh_key(n: u8) -> X25519PublicKey {
     X25519PublicKey::from_bytes([n; 32])
 }
@@ -68,6 +71,16 @@ impl Mesh {
     }
 
     pub fn material_for(&self, policy: NodePolicy, mesh: X25519PublicKey) -> AdmissionMaterial {
+        self.material_expiring(policy, mesh, FAR_FUTURE)
+    }
+
+    /// 节点策略载荷在 `expires_at` 过期的准入材料。
+    pub fn material_expiring(
+        &self,
+        policy: NodePolicy,
+        mesh: X25519PublicKey,
+        expires_at: Timestamp,
+    ) -> AdmissionMaterial {
         let n = self
             .enrollment
             .iter()
@@ -77,7 +90,7 @@ impl Mesh {
         let payload = PayloadDoc::EnrollmentPolicy {
             v: 1,
             artifacts: vec![Artifact::NodePolicy(policy.clone())],
-            expires_at: Timestamp::from_unix_seconds(0),
+            expires_at,
         }
         .to_canonical()
         .expect("canonical");
@@ -190,6 +203,14 @@ impl Mesh {
 
 pub fn validated(doc: DesiredMeshDoc) -> DesiredMesh {
     DesiredMesh::from_doc(doc).expect("valid desired state")
+}
+
+/// 应用成员时不检查本机节点策略的过期时间（相当于信任存储刚建立）。
+pub fn no_expiry(desired: &DesiredMesh) -> crate::members::OwnPolicy<'_> {
+    crate::members::OwnPolicy {
+        node_id: &desired.node_id,
+        now: None,
+    }
 }
 
 /// 替身数据面在期望状态不带端口时"分配"的端口。

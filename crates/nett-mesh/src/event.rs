@@ -10,6 +10,14 @@ pub enum Event {
     ConfigRejected {
         reason: String,
     },
+    /// 启动时期望状态文件整份被拒绝，改用信任存储中最近一次整份接受的期望状态（design/mesh.md 第 4.2 节）。
+    AcceptedStateRestored,
+    /// 信任存储读写失败：照常运行，以内存中的状态验证，这期间重启可能接受旧版本的产物。
+    TrustStoreFailed {
+        reason: String,
+    },
+    /// 信任存储写入成功。
+    TrustStoreSaved,
     /// 本机不在已准入的成员中，组网接口不启用。
     SelfNotAdmitted {
         node_id: NodeId,
@@ -117,6 +125,11 @@ impl EventSink for LogSink {
 pub fn log_event(event: &Event) {
     match event {
         Event::ConfigRejected { reason } => tracing::warn!(%reason, "desired state rejected"),
+        Event::AcceptedStateRestored => {
+            tracing::warn!("using the last accepted desired state from the trust store")
+        }
+        Event::TrustStoreFailed { reason } => tracing::error!(%reason, "trust store unavailable"),
+        Event::TrustStoreSaved => tracing::debug!("trust store saved"),
         Event::SelfNotAdmitted { node_id } => {
             tracing::error!(%node_id, "this node is not an admitted member")
         }

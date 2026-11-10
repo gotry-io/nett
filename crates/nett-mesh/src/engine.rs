@@ -22,7 +22,7 @@ use crate::dataplane::{
 };
 use crate::event::{Event, EventSink};
 use crate::key::PrivateKey;
-use crate::members::MemberSet;
+use crate::members::{MemberSet, OwnPolicy};
 use crate::path::{CandidateState, PathKind, Role, Route};
 use crate::probe::{KeyId, NatType};
 use crate::prober::{ACTIVE_WINDOW, Incoming, Outgoing, Prober};
@@ -31,6 +31,7 @@ use crate::status::{
     self, CandidateStateDoc, CandidateStatus, ConfigStatus, NatKind, NatStatus, NodeRef,
     NodeStatus, PathKindDoc, PathStatus, PeerRole, PeerState, PeerStatus, StatusDoc,
 };
+use crate::store::{Saved, TrustStore};
 use nett_core::prefix::IpPrefix;
 
 /// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
@@ -80,6 +81,8 @@ pub struct Engine<D> {
     applied_at: Option<Instant>,
     /// TLS 中继在传输适配进程上的回环端口 → 中继的 TLS 地址：本机状态中显示后者。
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
+    /// 本机的信任存储：固定的信任锚与各产物已生效的版本（design/mesh.md 第 4.2 节）。
+    trust: TrustStore,
 }
 
 /// 从数据面读到的一个对端的流量，以及收发字节数最近一次变化的时刻。
@@ -120,7 +123,19 @@ impl<D: DataPlane> Engine<D> {
             names: BTreeMap::new(),
             applied_at: None,
             tls_relays: BTreeMap::new(),
+            trust: TrustStore::in_memory(),
         }
+    }
+
+    /// 以这份信任存储为验证的基准：恢复撤销记录与各产物此前接受过的版本。
+    pub fn with_trust_store(mut self, trust: TrustStore) -> Self {
+        if let Some(saved) = trust.saved() {
+            self.members.restore(&saved.revoked, &saved.members);
+            self.access.restore(saved.access_rules);
+            self.routes.restore(&saved.routes);
+        }
+        self.trust = trust;
+        self
     }
 
     pub fn node_id(&self) -> &NodeId {
@@ -146,16 +161,92 @@ impl<D: DataPlane> Engine<D> {
         self.interface.as_ref()
     }
 
-    pub fn apply(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
-        if desired.node_id != self.node_id {
-            events.emit(Event::ConfigRejected {
-                reason: format!(
-                    "desired state is for {}, this node is {}",
-                    desired.node_id, self.node_id
-                ),
-            });
-            return;
+    /// 应用一份期望状态。整份被拒绝时（不是给本机的、信任锚与本机固定的不同）返回原因，继续使用已生效的
+    /// 状态；整份接受之后写入信任存储。
+    pub fn apply(
+        &mut self,
+        desired: &DesiredMesh,
+        events: &mut impl EventSink,
+    ) -> Result<(), String> {
+        if let Some(problem) = self.trust.take_problem() {
+            events.emit(Event::TrustStoreFailed { reason: problem });
         }
+        let rejected = if desired.node_id != self.node_id {
+            Some(format!(
+                "desired state is for {}, this node is {}",
+                desired.node_id, self.node_id
+            ))
+        } else {
+            self.trust
+                .saved()
+                .filter(|saved| saved.trust_anchors != desired.trust_anchors)
+                .map(|saved| {
+                    format!(
+                        "its trust anchors (version {}) differ from the ones this node pinned (version {}); \
+                         trust anchors change only through an update signed by the pinned ones, or after \
+                         this node leaves the network",
+                        desired.trust_anchors.version, saved.trust_anchors.version
+                    )
+                })
+        };
+        if let Some(reason) = rejected {
+            events.emit(Event::ConfigRejected {
+                reason: reason.clone(),
+            });
+            return Err(reason);
+        }
+        // 信任存储刚建立时（第一份期望状态）不检查本机节点策略的过期时间（design/mesh.md 第 4.2 节）
+        let now = self.trust.saved().is_some().then(Timestamp::now);
+        self.apply_accepted(desired, now, events);
+        self.save_trust(desired, events);
+        Ok(())
+    }
+
+    /// 启动时期望状态文件整份被拒绝：改用信任存储中最近一次整份接受的期望状态。没有时返回 `false`。
+    pub fn apply_saved(&mut self, events: &mut impl EventSink) -> bool {
+        let doc = match self.trust.accepted() {
+            Ok(Some(doc)) => doc,
+            Ok(None) => return false,
+            Err(reason) => {
+                events.emit(Event::TrustStoreFailed { reason });
+                return false;
+            }
+        };
+        match DesiredMesh::from_doc(doc) {
+            Ok(desired) => {
+                events.emit(Event::AcceptedStateRestored);
+                self.apply(&desired, events).is_ok()
+            }
+            Err(e) => {
+                events.emit(Event::TrustStoreFailed {
+                    reason: format!("the saved desired state is not valid: {e}"),
+                });
+                false
+            }
+        }
+    }
+
+    fn save_trust(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        let revoked = self.members.revoked().clone();
+        let saved = Saved {
+            members: self.members.saved_versions(),
+            access_rules: self.access.saved_version(),
+            routes: self.routes.saved_versions(&revoked),
+            revoked,
+            ..Saved::new(self.node_id.clone(), desired.trust_anchors.clone())
+        };
+        match self.trust.save(saved, desired.doc()) {
+            Ok(()) => events.emit(Event::TrustStoreSaved),
+            Err(reason) => events.emit(Event::TrustStoreFailed { reason }),
+        }
+    }
+
+    fn apply_accepted(
+        &mut self,
+        desired: &DesiredMesh,
+        now: Option<Timestamp>,
+        events: &mut impl EventSink,
+    ) {
         self.names = desired.names.clone();
         self.applied_at = Some(Instant::now());
         self.tls_relays = desired
@@ -163,7 +254,11 @@ impl<D: DataPlane> Engine<D> {
             .iter()
             .map(|t| (t.listen, t.connect))
             .collect();
-        self.members.apply(desired, events);
+        let own = OwnPolicy {
+            node_id: &self.node_id,
+            now,
+        };
+        self.members.apply(desired, &own, events);
         self.routes.apply(desired, self.members.members(), events);
 
         let Some(me) = self.members.get(&self.node_id) else {
@@ -836,6 +931,7 @@ fn peer_spec(
 mod tests {
     use super::*;
     use crate::event::VecSink;
+    use crate::store::MemoryBackend;
     use crate::testutil::{FAKE_AUTO_PORT, FakeDataPlane, Mesh, mesh_key, node_id, validated};
     use nett_trust::revocation::Revocation;
 
@@ -881,7 +977,7 @@ mod tests {
                 mesh.material(3, 1),
             ],
         );
-        e.apply(&validated(doc), &mut events);
+        e.apply(&validated(doc), &mut events).expect("accepted");
 
         let iface = &e.dataplane.interfaces[0];
         assert_eq!(iface.name, "nett0");
@@ -919,7 +1015,8 @@ mod tests {
         let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
         doc.listen_port = None;
         let mut events = VecSink::default();
-        e.apply(&validated(doc.clone()), &mut events);
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
         assert_eq!(e.dataplane.interfaces[0].listen_port, None);
         assert_eq!(e.interface().map(|i| i.listen_port), Some(FAKE_AUTO_PORT));
         assert!(events.0.contains(&Event::InterfaceReady {
@@ -934,7 +1031,7 @@ mod tests {
         assert!(transport.expect("transport config") < peers.expect("peers"));
         // 没有变化时不再报告
         let mut again = VecSink::default();
-        e.apply(&validated(doc), &mut again);
+        e.apply(&validated(doc), &mut again).expect("accepted");
         assert!(!again.0.iter().any(|e| matches!(
             e,
             Event::InterfaceReady { .. } | Event::TransportConfigChanged { .. }
@@ -946,7 +1043,8 @@ mod tests {
         let mesh = Mesh::new(&[1, 2]);
         let mut e = engine(1);
         let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
-        e.apply(&validated(doc.clone()), &mut VecSink::default());
+        e.apply(&validated(doc.clone()), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(
             e.dataplane.calls,
             [
@@ -961,7 +1059,8 @@ mod tests {
         assert_eq!(e.dataplane.filter.as_ref().map(|f| f.rules.len()), Some(2));
         assert_eq!(e.dataplane.edge, None);
         // 没有变化时不重装
-        e.apply(&validated(doc), &mut VecSink::default());
+        e.apply(&validated(doc), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(
             e.dataplane.calls,
             [
@@ -982,7 +1081,7 @@ mod tests {
         e.dataplane.fail_filter = Some(false);
         let mut events = VecSink::default();
         let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
-        e.apply(&validated(doc), &mut events);
+        e.apply(&validated(doc), &mut events).expect("accepted");
         assert_eq!(e.dataplane.filter, Some(FilterSpec::deny_all()));
         assert_eq!(peer_keys(&e), [2]);
         assert!(
@@ -999,7 +1098,8 @@ mod tests {
         let mut e = engine(1);
         e.dataplane.fail_filter = Some(true);
         let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
-        e.apply(&validated(doc), &mut VecSink::default());
+        e.apply(&validated(doc), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(e.dataplane.filter, None);
         assert_eq!(e.dataplane.peers, Some(vec![]));
     }
@@ -1009,19 +1109,23 @@ mod tests {
         let mesh = Mesh::new(&[1, 2]);
         let members = vec![mesh.edge_material(1, 1), mesh.material(2, 1)];
         let mut edge_node = engine(1);
-        edge_node.apply(
-            &validated(mesh.desired(1, members.clone())),
-            &mut VecSink::default(),
-        );
+        edge_node
+            .apply(
+                &validated(mesh.desired(1, members.clone())),
+                &mut VecSink::default(),
+            )
+            .expect("accepted");
         let edge = edge_node.dataplane.edge.as_ref().expect("edge rules");
         assert_eq!(edge.addresses.ipv4.to_string(), "100.88.1.1");
         assert_eq!(edge.containers[0].to_string(), "172.17.0.0/16");
 
         let mut other = engine(2);
-        other.apply(
-            &validated(mesh.desired(2, members)),
-            &mut VecSink::default(),
-        );
+        other
+            .apply(
+                &validated(mesh.desired(2, members)),
+                &mut VecSink::default(),
+            )
+            .expect("accepted");
         assert_eq!(other.dataplane.edge, None);
         let peers = other.dataplane.peers.as_ref().expect("peers");
         assert_eq!(
@@ -1064,7 +1168,8 @@ mod tests {
         let route: IpPrefix = "192.0.2.10/32".parse().expect("prefix");
         // 其他成员：对端的 AllowedIPs 和组网接口上的路由都有这个网段
         let mut edge = engine(1);
-        edge.apply(&with_routes(1), &mut VecSink::default());
+        edge.apply(&with_routes(1), &mut VecSink::default())
+            .expect("accepted");
         let peer2 = edge
             .dataplane
             .peers
@@ -1077,7 +1182,9 @@ mod tests {
 
         // 智能入口本身：转发 Edge 的流量，宣告的网段没有规则时拒绝，自己的网段不加路由
         let mut router = engine(2);
-        router.apply(&with_routes(2), &mut VecSink::default());
+        router
+            .apply(&with_routes(2), &mut VecSink::default())
+            .expect("accepted");
         let ingress = router.dataplane.ingress.as_ref().expect("ingress");
         assert!(
             ingress
@@ -1099,8 +1206,10 @@ mod tests {
         let mesh = Mesh::new(&[1, 2]);
         let mut e = engine(1);
         let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
-        e.apply(&validated(doc.clone()), &mut VecSink::default());
-        e.apply(&validated(doc), &mut VecSink::default());
+        e.apply(&validated(doc.clone()), &mut VecSink::default())
+            .expect("accepted");
+        e.apply(&validated(doc), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(e.dataplane.interfaces.len(), 1);
     }
 
@@ -1124,7 +1233,8 @@ mod tests {
             mesh.material_for(outside, mesh_key(4)),
             mesh.material_for(no_mesh, mesh_key(5)),
         ];
-        e.apply(&validated(mesh.desired(1, members)), &mut events);
+        e.apply(&validated(mesh.desired(1, members)), &mut events)
+            .expect("accepted");
 
         assert_eq!(peer_keys(&e), [2]);
         assert_eq!(
@@ -1142,12 +1252,14 @@ mod tests {
             mesh.material(2, 1),
             mesh.material(3, 1),
         ];
-        e.apply(&validated(mesh.desired(1, all)), &mut VecSink::default());
+        e.apply(&validated(mesh.desired(1, all)), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(peer_keys(&e), [2, 3]);
 
         // 快照中缺少 3：不删除
         let without_3 = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
-        e.apply(&validated(without_3), &mut VecSink::default());
+        e.apply(&validated(without_3), &mut VecSink::default())
+            .expect("accepted");
         assert_eq!(peer_keys(&e), [2, 3]);
 
         // 撤销 3：删除；之后更高版本的签名材料也不能恢复
@@ -1156,7 +1268,7 @@ mod tests {
             node_id: node_id(3),
         }];
         let mut events = VecSink::default();
-        e.apply(&validated(revoke), &mut events);
+        e.apply(&validated(revoke), &mut events).expect("accepted");
         assert!(events.0.contains(&Event::MemberRemoved {
             node_id: node_id(3)
         }));
@@ -1166,7 +1278,8 @@ mod tests {
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material(3, 9)])),
             &mut events,
-        );
+        )
+        .expect("accepted");
         assert_eq!(peer_keys(&e), [2]);
         assert_eq!(rejected(&events), [Some(node_id(3))]);
     }
@@ -1178,14 +1291,16 @@ mod tests {
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 2)])),
             &mut VecSink::default(),
-        );
+        )
+        .expect("accepted");
         let mut older = mesh.policy(2, 1);
         older.addresses.mesh.ipv4 = "100.88.0.42".parse().expect("ipv4");
         let mut events = VecSink::default();
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material_for(older, mesh_key(2))])),
             &mut events,
-        );
+        )
+        .expect("accepted");
         assert_eq!(rejected(&events), [Some(node_id(2))]);
         let peers = e.dataplane.peers.as_ref().expect("peers");
         assert_eq!(peers[0].allowed_ips[0].to_string(), "100.88.0.2/32");
@@ -1198,7 +1313,8 @@ mod tests {
             mesh.material(2, 1),
             mesh.material(2, 3),
         ];
-        e.apply(&validated(mesh.desired(1, both)), &mut events);
+        e.apply(&validated(mesh.desired(1, both)), &mut events)
+            .expect("accepted");
         assert_eq!(
             e.members().get(&node_id(2)).map(|m| m.policy_version),
             Some(3)
@@ -1219,7 +1335,8 @@ mod tests {
             mesh.material_for(mesh.policy(4, 1), mesh_key(2)),
         ];
         let mut events = VecSink::default();
-        e.apply(&validated(mesh.desired(1, members)), &mut events);
+        e.apply(&validated(mesh.desired(1, members)), &mut events)
+            .expect("accepted");
         assert_eq!(peer_keys(&e), [2]);
         assert_eq!(rejected(&events), [Some(node_id(3)), Some(node_id(4))]);
     }
@@ -1236,12 +1353,15 @@ mod tests {
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)])),
             &mut events,
-        );
+        )
+        .expect("accepted");
         assert!(e.dataplane.peers.is_none());
-        assert!(matches!(
-            events.0.last(),
-            Some(Event::DataPlaneFailed { .. })
-        ));
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|e| matches!(e, Event::DataPlaneFailed { .. }))
+        );
     }
 
     #[test]
@@ -1251,13 +1371,14 @@ mod tests {
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)])),
             &mut VecSink::default(),
-        );
+        )
+        .expect("accepted");
         let mut revoke = mesh.desired(1, vec![]);
         revoke.revocations = vec![Revocation::Node {
             node_id: node_id(1),
         }];
         let mut events = VecSink::default();
-        e.apply(&validated(revoke), &mut events);
+        e.apply(&validated(revoke), &mut events).expect("accepted");
         assert!(events.0.contains(&Event::SelfNotAdmitted {
             node_id: node_id(1)
         }));
@@ -1269,7 +1390,8 @@ mod tests {
         let mesh = Mesh::new(&[1, 2]);
         let mut e = engine(1);
         let mut events = VecSink::default();
-        e.apply(&validated(mesh.desired(2, vec![])), &mut events);
+        e.apply(&validated(mesh.desired(2, vec![])), &mut events)
+            .expect_err("the state is for another node");
         assert!(matches!(events.0[..], [Event::ConfigRejected { .. }]));
         assert!(e.dataplane.interfaces.is_empty());
     }
@@ -1309,19 +1431,21 @@ mod tests {
             peer_reachability: Reachability::Public,
             candidates: vec![direct.clone(), tls.clone()],
         }];
-        e.apply(&validated(doc.clone()), &mut events);
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
         assert_eq!(
             e.dataplane.tls_guards,
             vec![vec![crate::config::TLS_LOOPBACK_BASE]]
         );
         // 只剩 TLS 候选：它就是当前路径，放开
         doc.paths[0].candidates = vec![tls];
-        e.apply(&validated(doc.clone()), &mut events);
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
         assert_eq!(e.dataplane.tls_guards.last(), Some(&vec![]));
         // 没有 TLS 候选的节点不设置
         let mut plain = engine(1);
         doc.paths[0].candidates = vec![direct];
-        plain.apply(&validated(doc), &mut events);
+        plain.apply(&validated(doc), &mut events).expect("accepted");
         assert!(plain.dataplane.tls_guards.is_empty());
     }
 
@@ -1364,7 +1488,7 @@ mod tests {
             },
         ];
         // 节点 4 没有路径
-        e.apply(&validated(doc), &mut events);
+        e.apply(&validated(doc), &mut events).expect("accepted");
         let t0 = Instant::now();
         let wall = SystemTime::now();
         e.tick(t0, 0, &mut events);
@@ -1449,7 +1573,7 @@ mod tests {
             peer_reachability: Reachability::DialOnly,
             candidates: vec![],
         }];
-        e.apply(&validated(doc), &mut events);
+        e.apply(&validated(doc), &mut events).expect("accepted");
         // 对端连进来以后，WireGuard 记下它的地址
         let roamed: SocketAddr = "203.0.113.7:53557".parse().expect("addr");
         e.dataplane.peers.as_mut().expect("peers")[0].endpoint = Some(roamed);
@@ -1466,5 +1590,162 @@ mod tests {
             (PathKindDoc::Direct, Some(roamed))
         );
         assert!(st.node.nat.is_none());
+    }
+
+    /// 与 `backend` 共享信任存储的引擎：重新构造一个，相当于组网进程重启。
+    fn engine_with(me: u8, backend: &MemoryBackend) -> Engine<FakeDataPlane> {
+        engine(me).with_trust_store(TrustStore::open(Box::new(backend.clone())))
+    }
+
+    fn version_of(e: &Engine<FakeDataPlane>, n: u8) -> Option<u64> {
+        e.members().get(&node_id(n)).map(|m| m.policy_version)
+    }
+
+    #[test]
+    fn trust_anchors_are_pinned_by_the_first_accepted_state() {
+        let mesh = Mesh::new(&[1, 2]);
+        let backend = MemoryBackend::default();
+        let mut e = engine_with(1, &backend);
+        e.apply(
+            &validated(mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)])),
+            &mut VecSink::default(),
+        )
+        .expect("accepted");
+        // 改写过的期望状态：另一把恢复密钥签名，带上攻击者的成员 3
+        let attacker = Mesh::new(&[1, 2, 3]);
+        let forged = attacker.desired(
+            1,
+            vec![
+                attacker.material(1, 2),
+                attacker.material(2, 2),
+                attacker.material(3, 1),
+            ],
+        );
+        let reason = e
+            .apply(&validated(forged.clone()), &mut VecSink::default())
+            .expect_err("other trust anchors");
+        assert!(reason.contains("pinned"), "{reason}");
+        assert_eq!(peer_keys(&e), vec![2]);
+        assert_eq!(version_of(&e, 2), Some(1));
+        // 重启之后同样拒绝
+        engine_with(1, &backend)
+            .apply(&validated(forged), &mut VecSink::default())
+            .expect_err("still pinned after a restart");
+    }
+
+    #[test]
+    fn a_restart_keeps_revocations_and_accepted_versions() {
+        let mesh = Mesh::new(&[1, 2, 3]);
+        let backend = MemoryBackend::default();
+        let old = mesh.desired(
+            1,
+            vec![
+                mesh.material(1, 1),
+                mesh.material(2, 1),
+                mesh.material(3, 1),
+            ],
+        );
+        let mut e = engine_with(1, &backend);
+        e.apply(&validated(old.clone()), &mut VecSink::default())
+            .expect("accepted");
+        let mut newer = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 2)]);
+        newer.revocations = vec![Revocation::Node {
+            node_id: node_id(3),
+        }];
+        e.apply(&validated(newer), &mut VecSink::default())
+            .expect("accepted");
+        assert_eq!(peer_keys(&e), vec![2]);
+
+        // 重启之后拿到旧的期望状态：被撤销的 3、旧版本的 2 都不接受
+        let mut restarted = engine_with(1, &backend);
+        let mut events = VecSink::default();
+        restarted
+            .apply(&validated(old), &mut events)
+            .expect("accepted as a whole");
+        let mut refused = rejected(&events);
+        refused.sort();
+        assert_eq!(refused, [Some(node_id(2)), Some(node_id(3))]);
+        assert_eq!(version_of(&restarted, 2), None);
+        assert_eq!(version_of(&restarted, 3), None);
+        assert_eq!(version_of(&restarted, 1), Some(1));
+    }
+
+    #[test]
+    fn a_rejected_file_at_startup_falls_back_to_the_last_accepted_state() {
+        let mesh = Mesh::new(&[1, 2]);
+        let backend = MemoryBackend::default();
+        engine_with(1, &backend)
+            .apply(
+                &validated(mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)])),
+                &mut VecSink::default(),
+            )
+            .expect("accepted");
+        assert!(backend.get(crate::store::ACCEPTED_FILE).is_some());
+
+        let mut restarted = engine_with(1, &backend);
+        let mut events = VecSink::default();
+        restarted
+            .apply(&validated(mesh.desired(2, vec![])), &mut events)
+            .expect_err("not for this node");
+        assert!(restarted.apply_saved(&mut events));
+        assert!(events.0.contains(&Event::AcceptedStateRestored));
+        assert_eq!(peer_keys(&restarted), vec![2]);
+    }
+
+    #[test]
+    fn a_new_version_of_the_own_policy_must_not_have_expired() {
+        let mesh = Mesh::new(&[1, 2]);
+        let past = Timestamp::from_unix_seconds(1_000_000_000);
+        let expired = |n, v| mesh.material_expiring(mesh.policy(n, v), mesh_key(n), past);
+        let mut e = engine(1);
+        // 信任存储刚建立（已经在运行的成员升级之后）：不检查过期时间
+        e.apply(
+            &validated(mesh.desired(1, vec![expired(1, 1), mesh.material(2, 1)])),
+            &mut VecSink::default(),
+        )
+        .expect("accepted");
+        assert_eq!(version_of(&e, 1), Some(1));
+        // 之后出现的新版本已经过期：不接受，继续使用版本 1
+        let mut events = VecSink::default();
+        e.apply(
+            &validated(mesh.desired(1, vec![expired(1, 2), mesh.material(2, 1)])),
+            &mut events,
+        )
+        .expect("accepted as a whole");
+        assert_eq!(rejected(&events), [Some(node_id(1))]);
+        assert_eq!(version_of(&e, 1), Some(1));
+        // 没有过期的新版本照常接受；其他成员的过期时间不检查
+        e.apply(
+            &validated(mesh.desired(1, vec![mesh.material(1, 3), expired(2, 2)])),
+            &mut VecSink::default(),
+        )
+        .expect("accepted");
+        assert_eq!(version_of(&e, 1), Some(3));
+        assert_eq!(version_of(&e, 2), Some(2));
+    }
+
+    #[test]
+    fn trust_store_failures_are_reported_until_a_write_succeeds() {
+        let mesh = Mesh::new(&[1, 2]);
+        let backend = MemoryBackend::default();
+        backend.set_fail_writes(true);
+        let mut e = engine_with(1, &backend);
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        let mut events = VecSink::default();
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|e| matches!(e, Event::TrustStoreFailed { .. }))
+        );
+        // 组网照常
+        assert_eq!(peer_keys(&e), vec![2]);
+        backend.set_fail_writes(false);
+        let mut events = VecSink::default();
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        assert!(events.0.contains(&Event::TrustStoreSaved));
+        assert!(backend.get(crate::store::TRUST_FILE).is_some());
     }
 }

@@ -442,6 +442,7 @@ fn problem_text(p: &Problem) -> String {
             None => format!("routes rejected: {reason}"),
         },
         ProblemKind::DataPlaneFailed => format!("data plane error: {reason}"),
+        ProblemKind::TrustStore => format!("trust store: {reason}"),
         ProblemKind::Other => reason.clone(),
     }
 }

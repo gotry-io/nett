@@ -253,6 +253,8 @@ pub enum ProblemKind {
     AccessRulesRejected,
     RoutesRejected,
     DataPlaneFailed,
+    /// 信任存储读写失败（design/mesh.md 第 4.2 节）。
+    TrustStore,
     #[serde(other)]
     Other,
 }
@@ -322,6 +324,8 @@ struct Problems {
     access: Option<(Timestamp, String)>,
     routes: BTreeMap<Option<NodeId>, (Timestamp, String)>,
     data_plane: Option<(Instant, Timestamp, String)>,
+    /// 一直列出，直到下一次写入成功。
+    trust_store: Option<(Timestamp, String)>,
 }
 
 impl<E: EventSink> Recorder<E> {
@@ -339,8 +343,10 @@ impl<E: EventSink> Recorder<E> {
     /// （验证失败的材料每次应用都会报告）。
     pub fn begin_apply(&mut self) {
         let data_plane = self.problems.data_plane.take();
+        let trust_store = self.problems.trust_store.take();
         self.problems = Problems {
             data_plane,
+            trust_store,
             ..Problems::default()
         };
     }
@@ -410,6 +416,9 @@ impl<E: EventSink> Recorder<E> {
         {
             push(ProblemKind::DataPlaneFailed, None, &(*at, reason.clone()));
         }
+        if let Some(t) = &p.trust_store {
+            push(ProblemKind::TrustStore, None, t);
+        }
         problems
     }
 
@@ -436,6 +445,10 @@ impl<E: EventSink> Recorder<E> {
             Event::DataPlaneFailed { reason } => {
                 self.problems.data_plane = Some((Instant::now(), now, reason.clone()));
             }
+            Event::TrustStoreFailed { reason } => {
+                self.problems.trust_store = Some((now, reason.clone()));
+            }
+            Event::TrustStoreSaved => self.problems.trust_store = None,
             Event::PathSwitched {
                 node_id, reason, ..
             } => {
@@ -453,7 +466,9 @@ impl<E: EventSink> Recorder<E> {
         // 每次应用都会出现、或内容很长的事件不进最近事件：它们说明不了"刚才发生了什么"
         if matches!(
             event,
-            Event::PeersApplied { .. } | Event::TransportConfigChanged { .. }
+            Event::PeersApplied { .. }
+                | Event::TransportConfigChanged { .. }
+                | Event::TrustStoreSaved
         ) {
             return;
         }

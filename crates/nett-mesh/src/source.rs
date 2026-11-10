@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::mpsc::Receiver;
 
-use crate::config::{ConfigError, DesiredMesh};
+use crate::config::{ConfigError, DesiredMesh, MAX_DESIRED_BYTES, read_bounded};
 use crate::run::{ConfigSource, Delivery};
 use crate::status::ReloadReply;
 
@@ -56,9 +56,14 @@ impl ConfigSource for FileSource {
         };
         self.started = true;
         let path = self.path.clone();
-        let read = tokio::task::spawn_blocking(move || std::fs::read(path)).await;
+        let read =
+            tokio::task::spawn_blocking(move || read_bounded(&path, MAX_DESIRED_BYTES)).await;
         let desired = match read {
-            Ok(Ok(bytes)) => DesiredMesh::from_json(&bytes),
+            Ok(Ok(Some(bytes))) => DesiredMesh::from_json(&bytes),
+            Ok(Ok(None)) => Err(ConfigError::Document(format!(
+                "{} does not exist",
+                self.path.display()
+            ))),
             Ok(Err(e)) => Err(ConfigError::Document(format!(
                 "reading {}: {e}",
                 self.path.display()
