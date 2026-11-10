@@ -647,12 +647,44 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 /// 处理一个连接。回复之后关闭写方向，再丢弃对方没被读走的输入（最多 [`MAX_DRAIN`]）：带着未读数据关闭
 /// 时，Linux 向对方发送复位，对方可能还没读到回复。
 fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
-    stream.set_read_timeout(Some(IO_TIMEOUT))?;
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let result = answer(&stream, source);
     let _ = stream.shutdown(std::net::Shutdown::Write);
-    let _ = std::io::copy(&mut (&stream).take(MAX_DRAIN), &mut std::io::sink());
+    let _ = std::io::copy(
+        &mut Deadline::new(&stream).take(MAX_DRAIN),
+        &mut std::io::sink(),
+    );
     result
+}
+
+/// 读的总时限 [`IO_TIMEOUT`]：每次读之前把读超时设为剩下的时间。按每次读计算时，一点一点发送的对方能
+/// 一直占住这个线程（design/status.md 第 4 节）。
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    until: Instant,
+}
+
+impl<'a> Deadline<'a> {
+    fn new(stream: &'a UnixStream) -> Self {
+        Self {
+            stream,
+            until: Instant::now() + IO_TIMEOUT,
+        }
+    }
+}
+
+impl std::io::Read for Deadline<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the request took longer than the time limit",
+            ));
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        (&mut &*self.stream).read(buf)
+    }
 }
 
 fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
@@ -664,7 +696,7 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()
         );
     }
     let mut line = String::new();
-    BufReader::new(stream.take(MAX_REQUEST)).read_line(&mut line)?;
+    BufReader::new(Deadline::new(stream).take(MAX_REQUEST)).read_line(&mut line)?;
     let request: Request = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
         Err(_) => return reply_error(stream, "bad_request", "the request is not valid JSON"),
@@ -947,6 +979,34 @@ mod tests {
             query(&path),
             Err(QueryError::Refused { code, .. }) if code == "busy"
         ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_slow_client_cannot_hold_the_socket_past_the_time_limit() {
+        let dir = temp_dir();
+        let path = dir.join("mesh.sock");
+        let _server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
+        let mut slow = UnixStream::connect(&path).expect("connect");
+        let started = Instant::now();
+        // 每 200 毫秒发一个字节，不发换行：按每次读计算超时的话，可以一直占住处理连接的线程
+        let mut closed = false;
+        for _ in 0..40 {
+            if slow.write_all(b" ").is_err() {
+                closed = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert!(
+            closed,
+            "still accepting bytes after {:?}",
+            started.elapsed()
+        );
+        // 读请求与回复之后丢弃输入各有一次时限
+        assert!(started.elapsed() < IO_TIMEOUT * 5);
+        // 之后的查询照常得到回答
+        assert!(query(&path).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
 

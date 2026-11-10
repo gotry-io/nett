@@ -277,6 +277,21 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         None => node_id(&args.config)?,
     };
     let key = PrivateKey::load(&args.key)?;
+    // 先装好信号处理：之后的任何时刻收到 SIGHUP（例如 `systemctl reload`）都只是重新读取，不会结束进程
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?;
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(nett_mesh::status::MAX_PENDING_RELOADS);
+    let (source, mut terminate, mut interrupt) = {
+        let _context = runtime.enter();
+        (
+            FileSource::new(args.config.clone(), reload_rx)
+                .context("installing the SIGHUP handler")?,
+            signal(SignalKind::terminate()).context("installing the SIGTERM handler")?,
+            signal(SignalKind::interrupt()).context("installing the SIGINT handler")?,
+        )
+    };
     #[cfg(feature = "lab")]
     let sink: Box<dyn EventSink + Send> = match &args.lab.events {
         Some(path) => Box::new(
@@ -328,7 +343,6 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     );
     let worker = worker.context("starting the mesh worker thread")?;
     // 本机接口只是给人和 nett-node 用的：套接字建不起来时记录下来，组网照常（硬性规则 8）
-    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(nett_mesh::status::MAX_PENDING_RELOADS);
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
@@ -337,17 +351,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         }
     };
 
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("starting the async runtime")?;
     runtime.block_on(async move {
-        let source =
-            FileSource::new(args.config, reload_rx).context("installing the SIGHUP handler")?;
-        let mut terminate =
-            signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
-        let mut interrupt =
-            signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
         let shutdown = async move {
             tokio::select! {
                 _ = terminate.recv() => {}

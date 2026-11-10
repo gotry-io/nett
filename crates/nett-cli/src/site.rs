@@ -30,16 +30,14 @@ const STATE_FILE: &str = "state.json";
 const RECOVERY_FILE: &str = "recovery.pk8";
 const NODES_DIR: &str = "nodes";
 const DESIRED_FILE: &str = "desired.json";
-/// 读入的期望状态文件的上限：256 个节点的准入材料和规则集远小于它（硬性规则 14）。
-const MAX_DESIRED_BYTES: u64 = 4 << 20;
 const DEFAULT_LISTEN_PORT: u16 = 41820;
 const DEFAULT_ORIGIN: &str = "https://nett.invalid";
 /// 签名载荷的有效期：节点首次接受自己的节点策略时检查（design/auth.md 第 10.2 节）。
 const PAYLOAD_VALIDITY_SECS: i64 = 30 * 24 * 3600;
 /// 已签的节点策略离过期不到这么久时，生成时换一个新版本重签。
 const RESIGN_BEFORE_SECS: i64 = 7 * 24 * 3600;
-/// 一个站点最多的节点数（硬性规则 14）。
-const MAX_NODES: usize = 256;
+/// 一个站点最多的节点数：组网进程接受的成员数（硬性规则 14）。
+const MAX_NODES: usize = nett_mesh::config::MAX_MEMBERS;
 
 pub const USAGE: &str = "usage: nett site init [--dir <site>] [--origin https://<console host>]\n       \
 nett site apply [--dir <site>]\n\n\
@@ -351,19 +349,35 @@ pub(crate) fn find_desired_for(
     Ok(found.pop())
 }
 
-/// 读一份期望状态文件：只读普通文件（不读设备、管道），大小有上限。不存在或不是普通文件时返回 `None`。
+/// 读一份期望状态文件：只读普通文件（不读设备、管道，不跟随符号链接），大小有上限。不存在或不是普通
+/// 文件时返回 `None`。`sudo nett install` 以 root 从用户可写的目录读它：先打开再检查打开的文件，检查与
+/// 读取之间换不了文件；以非阻塞方式打开，换成管道也不会让它卡住。
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn read_desired(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
+    use nett_mesh::config::MAX_DESIRED_BYTES;
     use std::io::Read as _;
-    match std::fs::metadata(path) {
-        Ok(meta) if meta.is_file() => {}
-        Ok(_) => return Ok(None),
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // 符号链接：O_NOFOLLOW 打开失败（ELOOP）
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    if !file
+        .metadata()
+        .with_context(|| format!("reading {}", path.display()))?
+        .is_file()
+    {
+        return Ok(None);
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|f| f.take(MAX_DESIRED_BYTES + 1).read_to_end(&mut bytes))
+    file.take(MAX_DESIRED_BYTES + 1)
+        .read_to_end(&mut bytes)
         .with_context(|| format!("reading {}", path.display()))?;
     ensure!(
         bytes.len() as u64 <= MAX_DESIRED_BYTES,
@@ -1049,6 +1063,29 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&dir.join(RECOVERY_FILE)), 0o600);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reads_only_regular_files_without_following_links_or_blocking() {
+        let dir = temp_dir("read-desired");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let file = dir.join("desired.json");
+        std::fs::write(&file, b"{}").expect("written");
+        assert_eq!(read_desired(&file).expect("readable"), Some(b"{}".to_vec()));
+        assert_eq!(read_desired(&dir.join("missing")).expect("no error"), None);
+        let link = dir.join("link.json");
+        std::os::unix::fs::symlink(&file, &link).expect("symlink");
+        assert_eq!(read_desired(&link).expect("no error"), None);
+        // 换成管道：以非阻塞方式打开，立刻发现不是普通文件，不等写入方
+        let fifo = dir.join("fifo.json");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        assert_eq!(read_desired(&fifo).expect("no error"), None);
+        assert_eq!(read_desired(&dir).expect("no error"), None);
+        std::fs::remove_dir_all(&dir).expect("cleaned up");
     }
 
     #[test]

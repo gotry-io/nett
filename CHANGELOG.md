@@ -26,6 +26,10 @@ User-visible changes by version; versions follow Semantic Versioning.
   `nett reload` reports a desired state for another node (a different node ID) as rejected and exits with 1.
   A new version of this machine's own node policy is refused once it has expired. The desired state file
   and its member and revocation counts are bounded.
+- macOS：`sudo nett install` 在服务配置变化时卸下再载入服务，换上新的配置；读期望状态文件时不跟随符号链接。
+  macOS: when the service configuration changes, `sudo nett install` unloads and reloads the service so the
+  new configuration takes effect; it does not follow symbolic links when reading the desired state file.
+
 ## [0.1.5] - 2026-11-10
 
 - 命令按作用范围重新整理（`nett help` 按组列出，任何命令加 `--help` 显示用法）：本机的命令都在顶层，

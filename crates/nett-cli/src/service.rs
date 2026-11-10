@@ -220,7 +220,17 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
                 "Run `sudo nett install` again after `nett site apply` or `brew upgrade nett`."
             ),
         )
-    } else if binary_changed || plist_changed {
+    } else if plist_changed {
+        // launchd 保留的是载入时的配置：配置变了要卸下再载入，kickstart 只会按旧的参数重启
+        if !launchctl(&["bootout", &target])? {
+            bail!("launchctl could not stop {LABEL}");
+        }
+        wait_unloaded()?;
+        (
+            launchctl(&["bootstrap", "system", PLIST])?,
+            "Restarted the mesh service with the new configuration.",
+        )
+    } else if binary_changed {
         // 换用新的副本：重启
         (
             launchctl(&["kickstart", "-k", &target])?,
