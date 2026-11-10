@@ -7,5 +7,21 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# nett-node 与 Hub 之间的控制协议（design/protocol.md）：Protobuf 消息（由 nett-proto-gen 从 proto/ 生成）、
+# Noise_IK_25519_ChaChaPoly_BLAKE2s 通道与分片。加密只用依赖树中已有的 ring、x25519-dalek 与 blake2
+
 [lints]
 workspace = true
+
+[dependencies]
+blake2.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+ring.workspace = true
+thiserror.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# 只在测试中与一个独立的 Noise 实现互通，确认握手与传输消息按规范计算
+snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom", "std"] }
