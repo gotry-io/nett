@@ -3,7 +3,7 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.1.4] - 2026-11-10
 
 - 新命令 `nett status`：本机的地址与运行方式，每个对端是否连通、走哪条路径、往返时间与丢包、最近一次握手，以及
   被拒绝的期望状态、成员和访问规则；`nett status <对端>` 显示候选路径和最近的切换，`--json` 输出完整的状态。
