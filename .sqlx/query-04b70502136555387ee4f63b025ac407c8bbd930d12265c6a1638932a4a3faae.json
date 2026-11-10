@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE hub SET link_secret_hash = NULL, link_expires_at = NULL, trust_anchors = ?3,\n                 owner_token_id = ?4, owner_token_hash = ?5\n             WHERE id = 1 AND link_secret_hash = ?1 AND link_expires_at > ?2 AND owner_token_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "04b70502136555387ee4f63b025ac407c8bbd930d12265c6a1638932a4a3faae"
+}

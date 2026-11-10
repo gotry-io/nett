@@ -1,0 +1,30 @@
+# nett 的控制代理 nett-node（design/hub.md 第 5、7 节）：连接 Hub，把期望状态写成 /etc/nett/desired.json，经
+# 本机套接字请组网进程重新读取，上报状态。Hub 的配置在 /etc/nett/hub.json，身份私钥在 /etc/nett/identity.key。
+# 由 `sudo nett install <token>` 安装；组网不依赖它（硬性规则 8），两个服务各自由 systemd 重启。
+[Unit]
+Description=nett node agent
+After=network-online.target nett-mesh.service
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nett node --dir /etc/nett
+# root：写期望状态文件；本机套接字所在的 /run/nett 只给组网进程的身份，root 经 CAP_DAC_OVERRIDE 进入
+# （design/status.md 第 3 节）。不监听端口，不执行外部命令（硬性规则 1、9）
+CapabilityBoundingSet=CAP_DAC_OVERRIDE
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/etc/nett
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 空闲 ≤ 5 MB（硬性规则 14）；上限留出收到大份期望状态时的余量
+MemoryMax=32M
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

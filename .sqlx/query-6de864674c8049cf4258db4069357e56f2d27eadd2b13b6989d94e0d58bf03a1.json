@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO hub (id, url, link_secret_hash, link_expires_at) VALUES (1, ?1, ?2, ?3)\n             ON CONFLICT (id) DO UPDATE SET url = ?1, link_secret_hash = ?2, link_expires_at = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6de864674c8049cf4258db4069357e56f2d27eadd2b13b6989d94e0d58bf03a1"
+}

@@ -23,6 +23,7 @@ use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{PortRange, Protocol};
 
+use crate::hub::SiteHub;
 use crate::layout::{key_values, table};
 
 const DEFAULT_ORIGIN: &str = "https://nett.invalid";
@@ -30,6 +31,7 @@ const DEFAULT_ORIGIN: &str = "https://nett.invalid";
 pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
 
   init [--origin https://<host>]       create a site: recovery key and mesh prefixes
+  link <link code>                     link the site to a Hub; printed by `nett-hub init`
   add <name> --keys \"<mesh key> <identity key>\" [--public] [--ipv4 <address>]
              [--ipv6 <address>] [--port <port>]
                                        add a machine; --keys is the line printed on it by
@@ -37,7 +39,8 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
   set <name> [--public | --dial-only] [--ipv4 <address>|none] [--ipv6 <address>|none]
              [--port <port>|default]   change how other machines reach it
   remove <name>                        remove a machine; rules that name it go with it
-  invite <name>                        sign its node policy again and rewrite its desired state
+  invite <name>                        with a Hub: print the command that connects it to the Hub;
+                                       without: sign its node policy again, rewrite its desired state
   edge <name> <prefix>... | --none     the Edge containers on this machine
   routes <name> <prefix>... | --none   the routes this machine advertises
   allow <from> <to> [<ports>] [--note <text>]
@@ -46,9 +49,11 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        22/tcp or 60000-61000/udp, all ports when left out
   rules [--json]                       list the access rules
   rules remove <id>                    remove an access rule, for example r2
-  status [--json]                      list the machines and their connections
+  status [<name>] [--json]             list the machines and their connections; with a Hub, also
+                                       whether each one is online and applied the latest change
 
 Changes are listed before they are signed; --yes signs without asking (needed when not on a terminal).
+With a Hub, signed changes are pushed to it and reach the machines from there.
 The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it is not set.";
 
 /// 一次修改：在站点状态的副本上进行。
@@ -89,7 +94,9 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let machine = |s: &str| -> anyhow::Result<NodeName> { Ok(s.parse()?) };
     let change: Change = match words.as_slice() {
         ["init"] => return init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN)),
-        ["status"] => return status(&dir, json),
+        ["link", code] => return crate::hub::link(&dir, code),
+        ["status"] => return status(&dir, None, json),
+        ["status", name] => return status(&dir, Some(&machine(name)?), json),
         ["rules"] => return rules(&dir, json),
         ["invite", name] => return invite(&dir, &machine(name)?, yes),
         ["add", name] => {
@@ -206,19 +213,33 @@ fn modify(dir: &Path, yes: bool, force: &[NodeId], change: Change) -> anyhow::Re
             outputs.push((name.clone(), doc));
         }
     }
+    let hub = SiteHub::load(dir)?;
     if lines.is_empty() {
-        // 没有要签的：只补上缺少或不一致的期望状态文件
+        // 没有要签的：只补上缺少或不一致的期望状态文件；接了 Hub 时再推一次（上一次可能没有送到，
+        // 内容相同时 Hub 不换代数）
         let written = write_outputs(&site, &outputs)?;
         if written.is_empty() {
             println!("Nothing changed.");
         }
-        print_written(&site, &written);
+        match &hub {
+            Some(hub) => {
+                crate::hub::push(hub, &new)?;
+            }
+            None => print_written(&site, &written),
+        }
         return Ok(());
     }
     for line in &lines {
         println!("{line}");
     }
-    confirm(yes, "Sign?")?;
+    confirm(
+        yes,
+        if hub.is_some() {
+            "Sign and push?"
+        } else {
+            "Sign?"
+        },
+    )?;
     let written = write_outputs(&site, &outputs)?;
     for name in old
         .machines
@@ -228,7 +249,26 @@ fn modify(dir: &Path, yes: bool, force: &[NodeId], change: Change) -> anyhow::Re
         site.remove_desired(name)?;
     }
     site.save(&new)?;
-    print_written(&site, &written);
+    let Some(hub) = hub else {
+        print_written(&site, &written);
+        return Ok(());
+    };
+    let (status, failed) = crate::hub::push_and_wait(&hub, &new).with_context(|| {
+        "the change is signed and saved, but pushing it to the Hub failed; the next nett site \
+         command pushes it again"
+    })?;
+    // 还没有连过 Hub 的机器仍按文件应用
+    let offline: Vec<NodeName> = written
+        .into_iter()
+        .filter(|n| {
+            status
+                .machines
+                .iter()
+                .any(|m| m.name == n.as_str() && m.last_seen.is_none())
+        })
+        .collect();
+    print_written(&site, &offline);
+    ensure!(!failed, "some machines did not apply the change cleanly");
     Ok(())
 }
 
@@ -303,6 +343,14 @@ Next, for each machine:
 
 /// `nett site invite`（不接 Hub）：重签这台机器的节点策略，重写它的期望状态（design/site.md 第 3 节）。
 fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
+    if let Some(hub) = SiteHub::load(dir)? {
+        // 接了 Hub：已是成员的机器用自己的身份密钥连接 Hub，从那里接收期望状态（design/hub.md 第 3.5 节）
+        let state = SiteDir::open(dir)?.load()?;
+        crate::hub::push(&hub, &state)?;
+        let token = crate::hub::join_token(&hub, &state, name)?;
+        println!("{name} is already a member. On {name}, run:\n  sudo nett install {token}");
+        return Ok(());
+    }
     let node = {
         let site = SiteDir::open(dir)?;
         site.load()?.machine(name)?.node_id.clone()
@@ -310,8 +358,22 @@ fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
     modify(dir, yes, &[node], Box::new(|_| Ok(())))
 }
 
-fn status(dir: &Path, json: bool) -> anyhow::Result<()> {
+fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<()> {
     let state = SiteDir::open(dir)?.load()?;
+    match SiteHub::load(dir)? {
+        Some(hub) => match crate::hub::status(&hub, &state, machine, json) {
+            Ok(()) => return Ok(()),
+            // Hub 不在时照样列出站点中的机器
+            Err(e) if machine.is_none() => {
+                eprintln!("Cannot reach the Hub: {e:#}\nShowing the site only.\n")
+            }
+            Err(e) => return Err(e),
+        },
+        None if machine.is_some() => {
+            bail!("the site is not linked to a Hub; run `nett status` on the machine to see it")
+        }
+        None => {}
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&state.machines)?);
         return Ok(());

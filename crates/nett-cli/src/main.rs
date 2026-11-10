@@ -1,17 +1,27 @@
-//! `nett` 可执行文件：命令行（包括接入 Hub 之前的签名工具 `nett site`），以及 `nett mesh`、`nett transport`、
+//! `nett` 可执行文件：命令行（包括签名工具 `nett site`），以及 `nett mesh`、`nett node`、`nett transport`、
 //! `nett relay` 各进程的入口（ADR 0012）。命令按作用范围分三组：整张网、这台机器、服务进程
 //! （architecture.md 第 13.4 节）。
 
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod hub;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod install;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod join;
 mod layout;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mesh;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod node;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod relay;
 #[cfg(target_os = "macos")]
 mod service;
+#[cfg(target_os = "linux")]
+mod service_linux;
 mod site;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod status;
@@ -54,19 +64,19 @@ const COMMANDS: &[Command] = &[
         summary: "Re-read the desired state and show whether it was accepted",
         usage: status::RELOAD_USAGE,
     },
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
         name: "install",
         group: Group::Machine,
-        summary: "Install or update the mesh service",
-        usage: service::INSTALL_USAGE,
+        summary: "Install or update the services; with a token, connect to the Hub",
+        usage: install::INSTALL_USAGE,
     },
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
         name: "uninstall",
         group: Group::Machine,
-        summary: "Remove the mesh service; keys and desired state stay",
-        usage: service::UNINSTALL_USAGE,
+        summary: "Remove the services; keys and desired state stay",
+        usage: install::UNINSTALL_USAGE,
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
@@ -81,6 +91,13 @@ const COMMANDS: &[Command] = &[
         group: Group::Service,
         summary: "The mesh process",
         usage: mesh::USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "node",
+        group: Group::Service,
+        summary: "The control agent that connects this machine to its Hub",
+        usage: node::USAGE,
     },
     #[cfg(all(feature = "lab", target_os = "linux"))]
     Command {
@@ -145,14 +162,16 @@ fn run() -> anyhow::Result<()> {
         "status" => status::run(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "reload" => status::reload(parser),
-        #[cfg(target_os = "macos")]
-        "install" => service::install_command(parser),
-        #[cfg(target_os = "macos")]
-        "uninstall" => service::uninstall_command(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "install" => install::install_command(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "uninstall" => install::uninstall_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "keys" => mesh::keys(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "mesh" => mesh::run(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "node" => node::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
         "relay" => relay::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
@@ -164,12 +183,6 @@ fn run() -> anyhow::Result<()> {
 fn find(name: &str) -> anyhow::Result<&'static Command> {
     if let Some(command) = COMMANDS.iter().find(|c| c.name == name) {
         return Ok(command);
-    }
-    // 服务只在 macOS 上由 nett 安装；Linux 上用项目提供的 systemd 单元（README）
-    if cfg!(not(target_os = "macos")) && matches!(name, "install" | "uninstall") {
-        anyhow::bail!(
-            "`nett {name}` manages the macOS service; on Linux, use the systemd unit nett-mesh.service from the project's packaging/systemd directory"
-        );
     }
     anyhow::bail!("unknown command `{name}`; run `nett help` to list the commands")
 }

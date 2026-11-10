@@ -54,12 +54,20 @@ jobs:
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }} -p nett-cli
+      # Hub 只在 Linux 主机上运行（design/hub.md 第 8 节）
+      - if: runner.os == 'Linux'
+        run: cargo build --release --locked --target ${{ matrix.target }} -p nett-hub
       - name: 打包
         run: |
           mkdir dist
           tar -czf "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" nett \
             -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+          if [ "$RUNNER_OS" = Linux ]; then
+            tar -czf "dist/nett-hub-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
+              -C "target/${{ matrix.target }}/release" nett-hub \
+              -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist-${{ matrix.target }}

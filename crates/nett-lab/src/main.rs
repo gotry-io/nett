@@ -49,6 +49,7 @@ const USAGE: &str = "usage:
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab run access --topology access.toml --nett <path/to/nett> --out <dir>
+  nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir>   (nett-hub next to nett)
   nett-lab down --topology <file.toml>
   nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -180,6 +181,7 @@ fn run() -> anyhow::Result<bool> {
                 }
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
                 "access" => scenario::access(&topology, &nett()?, &out)?,
+                "hub" => scenario::hub(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,

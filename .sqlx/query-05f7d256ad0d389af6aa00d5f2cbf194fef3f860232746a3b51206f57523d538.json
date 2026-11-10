@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT generation, state FROM site WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "generation",
+        "ordinal": 0,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "site",
+            "name": "generation"
+          }
+        }
+      },
+      {
+        "name": "state",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "site",
+            "name": "state"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "05f7d256ad0d389af6aa00d5f2cbf194fef3f860232746a3b51206f57523d538"
+}

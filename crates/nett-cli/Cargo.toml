@@ -21,6 +21,10 @@ lexopt.workspace = true
 nett-core.workspace = true
 nett-mesh.workspace = true
 nett-site.workspace = true
+# 签名工具与 Hub 之间的 API 客户端、各台机器上的 nett-node（design/hub.md）
+nett-node.workspace = true
+nett-proto.workspace = true
+base64.workspace = true
 nett-trust = { workspace = true, features = ["signing"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -29,15 +33,16 @@ nett-transport = { workspace = true, optional = true }
 
 # 组网进程：Linux，以及 macOS 原生成员（design/userspace.md）
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-tokio = { workspace = true, features = ["rt", "signal", "macros", "net"] }
+tokio = { workspace = true, features = ["rt", "signal", "macros", "net", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+x25519-dalek.workspace = true
 
-# libc 已在依赖树中（nett-mesh 用它）：以不跟随符号链接、非阻塞的方式打开期望状态文件；macOS 上安装组网
-# 服务时确认以 root 运行，按 SUDO_UID 查运行 sudo 的用户的家目录
+# libc 已在依赖树中（nett-mesh 用它）：以不跟随符号链接、非阻塞的方式打开期望状态文件；安装服务时确认以
+# root 运行；macOS 上按 SUDO_UID 查运行 sudo 的用户的家目录
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
-rustix = { workspace = true, features = ["thread"] }
+rustix = { workspace = true, features = ["thread", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true

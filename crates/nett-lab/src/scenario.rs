@@ -14,6 +14,9 @@ use crate::material::{self, Generated, LabNode, key_from_wg_text};
 use crate::net::Underlay;
 use crate::topology::Topology;
 
+mod hub;
+pub use hub::hub;
+
 /// 连通性检查的最长等待时间。
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
 
