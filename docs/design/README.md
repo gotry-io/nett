@@ -7,6 +7,7 @@
 | [prototype.md](prototype.md) | 原型关卡（M1 第一步）：要验证的问题、范围、静态配置、实验环境、场景与通过标准、推进顺序 | 草案 |
 | [local-signing.md](local-signing.md) | 本地签名部署（M1 第二步，接入 Hub 之前）：签名工具与密钥、站点描述、分发与更新、访问控制与 Edge、替换已有的隧道 | 草案 |
 | [userspace.md](userspace.md) | 用户态数据面与 macOS 原生成员（M1，本地签名部署之后）：WireGuard 实现的选型、数据面结构与分流、进程内过滤、utun 与路由、与代理应用共存、运行方式、验证 | 草案 |
+| [status.md](status.md) | 本机状态（M1，接入 Hub 之前）：组网进程的本机套接字与只读查询、期望状态中的节点名、状态内容、`nett status` 的输出 | 草案 |
 | [release.md](release.md) | 发布与安装（M1）：版本与产物、发布工作流与签名、Homebrew 与 macOS 上的组网服务、Linux | 草案 |
 | [mesh.md](mesh.md) | 组网：地址规划、会话层与准入验证、中继、候选路径与打洞、测量、选路与切换、传输、局域网智能入口、主机名、访问控制、手机与移动网关、平台、故障与降级 | 草案 |
 | [auth.md](auth.md) | 认证与授权：信任模型、身份与凭据、初始化与恢复、API token、权限范围、node 入网、设备凭据、签名格式、撤销、信任锚、发布签名 | 草案 |

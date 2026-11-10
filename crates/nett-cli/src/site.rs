@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail, ensure};
 use nett_core::id::NodeId;
+use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
 use nett_trust::admission::{AdmissionMaterial, AdmissionProofDoc, AdmissionProofKind};
@@ -512,6 +513,11 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         .collect();
     let members: Vec<AdmissionMaterial> =
         state.nodes.values().map(|n| n.material.clone()).collect();
+    let names: BTreeMap<NodeId, NodeName> = site
+        .nodes
+        .iter()
+        .map(|n| Ok((state.nodes[&n.name].node_id.clone(), n.name.parse()?)))
+        .collect::<anyhow::Result<_>>()?;
     for node in &site.nodes {
         let me = &state.nodes[&node.name];
         let doc = DesiredMeshDoc {
@@ -532,6 +538,7 @@ fn build(dir: &Path) -> anyhow::Result<()> {
                 .values()
                 .filter_map(|n| n.routes.as_ref().map(|r| r.signed.clone()))
                 .collect(),
+            names: names.clone(),
         };
         // 生成的期望状态必须能被组网进程接受
         nett_mesh::config::DesiredMesh::from_doc(doc.clone())
@@ -573,15 +580,7 @@ fn validate(site: &Site) -> anyhow::Result<()> {
     );
     let mut names = BTreeSet::new();
     for node in &site.nodes {
-        ensure!(
-            !node.name.is_empty()
-                && node
-                    .name
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
-            "node name `{}` must be lower-case letters, digits or `-`",
-            node.name
-        );
+        node.name.parse::<NodeName>()?;
         ensure!(
             names.insert(node.name.as_str()),
             "duplicate node `{}`",

@@ -5,6 +5,11 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [Unreleased]
 
+- `nett site build` 把节点名写进期望状态（不签名，只用于显示）。之前的版本不接受这个字段：先升级节点上的 nett，
+  再换上新生成的期望状态；顺序反了时节点继续使用上一份期望状态。节点名最长 63 个字符。
+  `nett site build` puts node names into the desired state (unsigned, for display only). Earlier versions
+  reject the field: upgrade nett on the nodes before giving them the new desired state; in the other order a
+  node keeps using its previous desired state. Node names are at most 63 characters.
 - 命令行的提示和错误只用英文，写得更短。
   Command-line messages and errors are in English only, and shorter.
 

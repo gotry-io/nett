@@ -376,7 +376,7 @@ WireGuard 会根据最近一次通过认证的数据包的来源，自动更新�
 - `links` 资源：每条连接的当前路径、传输、质量、候选得分、最近一次切换及原因；
 - 测量与计数：`link.rtt`、`link.loss`、`link.jitter`、`link.bytes`、`relay.bytes`，经 `LinkReport` 上报，在控制台中显示；
 - 事件：路径切换、传输切换、中继超限、候选全部不可用、准入材料验证失败；
-- `nett status` 显示本机各连接的当前路径；`nett doctor` 检查端口可达性（按第 5.5 节的清单给出需要放行的端口）、WireGuard 状态、DNS、过滤规则。
+- `nett status` 显示本机各连接的当前路径与质量（design/status.md）；`nett doctor` 检查端口可达性（按第 5.5 节的清单给出需要放行的端口）、WireGuard 状态、DNS、过滤规则。
 
 ## 17. 资源预算
 

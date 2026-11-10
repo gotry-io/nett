@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use nett_core::id::NodeId;
+use nett_core::name::NodeName;
 use nett_core::transport::{CertFingerprint, MAX_TARGETS, TlsTarget, TransportConfig};
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::{AnchorsError, TrustAnchors, TrustAnchorsDoc};
@@ -38,6 +39,9 @@ pub struct DesiredMeshDoc {
     /// 智能入口宣告的网段，每份是一个签名载荷（design/mesh.md 第 10 节）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertised_routes: Vec<SignedPayload>,
+    /// 节点名，不签名，只用于显示（design/status.md 第 5 节）。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub names: BTreeMap<NodeId, NodeName>,
 }
 
 /// 节点的网络可达性（design/architecture.md 第 6.5 节）。
@@ -157,6 +161,7 @@ pub struct DesiredMesh {
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
+    pub names: BTreeMap<NodeId, NodeName>,
     /// 传输适配进程的 TLS 目标，与 [`DesiredMesh::tls_endpoints`] 同出一处。
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
@@ -248,6 +253,7 @@ impl DesiredMesh {
             paths,
             access_rules: doc.access_rules,
             advertised_routes: doc.advertised_routes,
+            names: doc.names,
             tls_targets: targets,
             tls_endpoints,
         })

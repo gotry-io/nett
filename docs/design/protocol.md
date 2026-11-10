@@ -146,7 +146,7 @@ message Error {
 | `policy` | 节点策略（提升权限时带签名） | M1 |
 | `hub_endpoints` | Hub 的端点列表 | M1 |
 | `release` | 目标版本与发布包地址；节点用嵌入 `nett` 的项目公钥（主备两把）验证发布包，只自动接受更高的版本（`auth.md` 第 11.3 节）。这是升级的唯一通路 | M1 |
-| `mesh` | 组网拓扑、准入材料与撤销记录。成员、宣告网段、访问规则集都是签名产物，由组网进程独立验证（`mesh.md` 第 4.1 节）；nett-node 只负责转交 | M1 |
+| `mesh` | 组网拓扑、准入材料与撤销记录。成员、宣告网段、访问规则集都是签名产物，由组网进程独立验证（`mesh.md` 第 4.1 节）；节点名不签名，只用于显示（`status.md` 第 5 节）；nett-node 只负责转交 | M1 |
 
 - 每个节点有一个单调递增的**代数**（generation），任一分区变化都会使代数加一；
 - `DesiredState` 携带 `generation`、`base_generation` 和若干分区：`base_generation` 为空时是完整快照，否则是相对该代数的增量；

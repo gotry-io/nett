@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, ensure};
 use nett_core::id::NodeId;
+use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
@@ -472,6 +473,10 @@ pub fn generate(
     write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints)?;
 
     let access_rules = signer.access_rules(topo, &nodes, &edges)?;
+    let names: BTreeMap<NodeId, NodeName> = nodes
+        .iter()
+        .map(|n| Ok((n.node_id.clone(), n.name.parse()?)))
+        .collect::<anyhow::Result<_>>()?;
     let mut first_desired = None;
     for (i, node) in topo.nodes.iter().enumerate() {
         let mut members: Vec<AdmissionMaterial> = materials.values().cloned().collect();
@@ -557,6 +562,7 @@ pub fn generate(
             paths,
             access_rules: access_rules.clone(),
             advertised_routes: routes.clone(),
+            names: names.clone(),
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {

@@ -179,6 +179,11 @@ impl Mesh {
                 .collect(),
             access_rules: None,
             advertised_routes: vec![],
+            names: self
+                .enrollment
+                .keys()
+                .map(|n| (node_id(*n), format!("node-{n}").parse().expect("name")))
+                .collect(),
         }
     }
 }
