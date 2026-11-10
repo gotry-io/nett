@@ -74,6 +74,7 @@ pub fn sign(
             &m.node_id,
             &m.routes,
             m.routes_signed.take(),
+            &mut m.routes_version,
             expires_at,
         )?;
     }
@@ -206,8 +207,10 @@ fn sign_routes(
     node_id: &NodeId,
     routes: &[IpPrefix],
     old: Option<SignedVersion>,
+    last_version: &mut u64,
     expires_at: Timestamp,
 ) -> Result<Option<SignedVersion>, SiteError> {
+    *last_version = (*last_version).max(old.as_ref().map_or(0, |o| o.version));
     if routes.is_empty() {
         return Ok(None);
     }
@@ -215,7 +218,8 @@ fn sign_routes(
     if let Some(old) = old.as_ref().filter(|o| o.input == input) {
         return Ok(Some(old.clone()));
     }
-    let version = old.map_or(1, |o| o.version + 1);
+    let version = *last_version + 1;
+    *last_version = version;
     let payload = PayloadDoc::EnrollmentPolicy {
         v: 1,
         artifacts: vec![Artifact::AdvertisedRoutes(AdvertisedRoutes {

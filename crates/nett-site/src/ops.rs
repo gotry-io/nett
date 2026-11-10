@@ -121,6 +121,7 @@ impl State {
                 routes: Vec::new(),
                 policy: None,
                 routes_signed: None,
+                routes_version: 0,
             },
         );
         self.check()

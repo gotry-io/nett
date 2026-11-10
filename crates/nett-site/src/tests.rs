@@ -502,3 +502,32 @@ fn inconsistent_machines_are_refused() {
     assert_eq!("r12".parse::<RuleId>().expect("id"), RuleId(12));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// 宣告网段全部去掉之后再宣告：版本接着增加。组网进程记着见过的最高版本，只接受更高的
+/// （design/mesh.md 第 4.2 节）。
+#[test]
+fn advertised_routes_keep_counting_after_they_are_removed() {
+    let dir = temp_dir("routes-version");
+    let (site, mut state) = site(&dir);
+    let nas = name("nas");
+    let version = |s: &State| {
+        s.machine(&nas)
+            .expect("nas")
+            .routes_signed
+            .as_ref()
+            .map(|r| r.version)
+    };
+    state
+        .set_routes(&nas, vec!["192.168.1.0/24".parse().expect("prefix")])
+        .expect("routes");
+    signed(&site, &mut state);
+    assert_eq!(version(&state), Some(1));
+    state.set_routes(&nas, vec![]).expect("no routes");
+    signed(&site, &mut state);
+    assert_eq!(version(&state), None);
+    state
+        .set_routes(&nas, vec!["192.168.2.0/24".parse().expect("prefix")])
+        .expect("routes again");
+    signed(&site, &mut state);
+    assert_eq!(version(&state), Some(2));
+}
