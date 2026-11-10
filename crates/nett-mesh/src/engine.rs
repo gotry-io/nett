@@ -123,6 +123,10 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
+    pub fn node_id(&self) -> &NodeId {
+        &self.node_id
+    }
+
     /// 最近一次接受的期望状态中的节点名。
     pub fn names(&self) -> &BTreeMap<NodeId, NodeName> {
         &self.names

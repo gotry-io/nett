@@ -227,11 +227,13 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
             "Restarted the mesh service with the new binary.",
         )
     } else if desired_changed {
-        // 只有期望状态变了：重新读取，不重启，进行中的连接不中断
-        (
-            launchctl(&["kill", "HUP", &target])?,
-            "Reloaded the desired state. The service was not restarted.",
-        )
+        // 只有期望状态变了：经本机接口重新读取，不重启、连接不中断，并显示它是否被接受（design/status.md
+        // 第 4.1 节）。程序没变，正在运行的就是这一版
+        print!(
+            "{}",
+            crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
+        );
+        return Ok(());
     } else {
         (true, "The mesh service is running. Nothing changed.")
     };

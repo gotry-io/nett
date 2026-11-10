@@ -392,6 +392,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性
 | 命令 | 作用 |
 |---|---|
 | `nett status` | 本机与各对端的状态（design/status.md） |
+| `nett reload` | 请组网进程重新读取期望状态文件，显示是否被接受（design/status.md 第 4.1 节） |
 | `nett install` | 把这台机器装成成员：生成密钥、安装服务、导入期望状态（macOS，design/release.md 第 4 节）；带入网 token 时向 Hub 入网（design/hub.md 第 6 节） |
 | `nett uninstall` | 停止并删除服务，保留密钥和期望状态，再次 `install` 即恢复 |
 | `nett keys` | 只生成本机密钥、打印写进站点描述的一行：用于容器内成员和自己写服务配置的机器 |

@@ -585,6 +585,24 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             result.is_ok(),
             result.err().map(|e| format!("{e:#}")).unwrap_or_default(),
         );
+        // 经本机接口重新加载同一份文件：报告已生效，并列出被拒绝的低版本材料（design/status.md 第 4.1 节）
+        let reloaded = run(
+            &nett.display().to_string(),
+            [
+                "reload".as_ref(),
+                "--socket".as_ref(),
+                a.dir.join("mesh.sock").as_os_str(),
+            ],
+        );
+        let peers_after = wg_peers(&ns_a)?;
+        report.check(
+            "reload:reports-rejection",
+            reloaded.as_ref().is_ok_and(|out| {
+                out.starts_with("Reloaded the desired state, with problems:")
+                    && out.contains(&format!("member {} rejected", b.name))
+            }) && peers_after == expected,
+            format!("{reloaded:?}; peers {peers_after:?}"),
+        );
     }
 
     // 组网进程停止期间，内核中的 WireGuard 照常工作；重启后沿用已有的接口和对端

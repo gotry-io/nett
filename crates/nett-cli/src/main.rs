@@ -46,6 +46,13 @@ const COMMANDS: &[Command] = &[
         summary: "Show this node and its peers",
         usage: status::USAGE,
     },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "reload",
+        group: Group::Machine,
+        summary: "Re-read the desired state and show whether it was accepted",
+        usage: status::RELOAD_USAGE,
+    },
     #[cfg(target_os = "macos")]
     Command {
         name: "install",
@@ -135,6 +142,8 @@ fn run() -> anyhow::Result<()> {
         "site" => site::run(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "status" => status::run(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "reload" => status::reload(parser),
         #[cfg(target_os = "macos")]
         "install" => service::install_command(parser),
         #[cfg(target_os = "macos")]
