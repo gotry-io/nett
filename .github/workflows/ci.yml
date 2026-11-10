@@ -66,10 +66,55 @@ jobs:
           sudo "$nett" mesh uninstall
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 
-  # 实验环境 A 的短场景，每次推送各跑一次 nett（design/prototype.md 第 7 节）
+  # 组网实验场景（design/prototype.md 第 7 节），每次推送全部跑一遍。场景之间互不依赖，按耗时分成几组并行，
+  # 每组约 4 分钟。一行一个场景：标题 | nett-lab run 的参数（本文件写定，不来自外部输入）。
   lab:
+    name: lab (${{ matrix.title }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: switch
+            title: 切换与中继
+            scenarios: |
+              场景 14：准入验证与直连通信 | admission --topology crates/nett-lab/topologies/direct.toml
+              经中继转发（真实的 WireGuard 握手与数据） | relay-smoke --topology crates/nett-lab/topologies/relay-only.toml
+              场景 1、8：直连失效切到中继，恢复后回到直连 | failover --topology crates/nett-lab/topologies/failover.toml
+              场景 2：当前中继失效，换到另一个中继 | relay-loss --topology crates/nett-lab/topologies/relays.toml
+              场景 3：重启当前中继，连接不中断 | relay-restart --topology crates/nett-lab/topologies/relays.toml
+              场景 7、9：UDP 全部被拦时改用 TLS，恢复后回到直连 | fallback --topology crates/nett-lab/topologies/fallback.toml
+              场景 16：双方都是 dial-only，经隧道提议后两端一起切换 | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
+              场景 17：双方都是 dial-only，当前中继失效，靠时间片汇合 | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
+          - group: nat
+            title: NAT、打洞、MTU 与访问控制
+            scenarios: |
+              场景 14：一端在锥形 NAT 之后 | admission --topology crates/nett-lab/topologies/cone-nat.toml
+              场景 10：两端锥形 NAT，打洞 | punch --topology crates/nett-lab/topologies/punch-cone.toml
+              场景 11：两端 IPv6 有状态防火墙，打洞 | punch --topology crates/nett-lab/topologies/punch-ipv6.toml
+              场景 13：两端对称型 NAT，不尝试打洞 | punch --topology crates/nett-lab/topologies/punch-symmetric.toml
+              场景 19：外层路径 MTU 为 1500、1360、1300（IPv4） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu4.toml
+              场景 19：外层路径 MTU 为 1500、1360、1300（IPv6） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
+              访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 8 节） | access --topology crates/nett-lab/topologies/access.toml
+          - group: handshake
+            title: WireGuard 握手
+            scenarios: |
+              场景 20(a)(b)：删除再添加对端后的握手，丢掉第一个握手发起后的重试 | wg-rehandshake --repeat 3 --topology crates/nett-lab/topologies/relays.toml
+              场景 20(c)：对端处于负载状态时经中继的 cookie | wg-cookie --topology crates/nett-lab/topologies/relays.toml
+          - group: rekey
+            title: 密钥轮换与 WireGuard 端口
+            scenarios: |
+              场景 20(b)(d)：密钥轮换（短版本，完整的 30 分钟在验收中跑） | wg-rekey --duration 150 --topology crates/nett-lab/topologies/relays.toml
+              场景 18：在 WireGuard 端口上探测 | wgport --topology crates/nett-lab/topologies/wgport.toml
+          - group: load
+            title: 拥塞与用户态数据面
+            scenarios: |
+              场景 24：拥塞（经中继，短版本，与 Tailscale 的对比在验收中跑） | congestion --duration 60 --topology crates/nett-lab/topologies/relay-only.toml
+              场景 24：拥塞（直连，短版本） | congestion --duration 60 --topology crates/nett-lab/topologies/fallback.toml
+              用户态数据面与内核 WireGuard 互通：准入与直连（design/userspace.md 第 8 节） | admission --userspace b --topology crates/nett-lab/topologies/direct.toml
+              用户态数据面：直连失效切到中继，恢复后回到直连 | failover --userspace b --topology crates/nett-lab/topologies/failover.toml
+              用户态数据面：两端锥形 NAT，打洞 | punch --userspace b --topology crates/nett-lab/topologies/punch-cone.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -93,160 +138,27 @@ jobs:
           --topology crates/nett-lab/topologies/direct.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-selftest"
-      - name: 场景 14：准入验证与直连通信
-        run: >-
-          sudo ./target/debug/nett-lab run admission
-          --topology crates/nett-lab/topologies/direct.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-14"
-      - name: 经中继转发（真实的 WireGuard 握手与数据）
-        run: >-
-          sudo ./target/debug/nett-lab run relay-smoke
-          --topology crates/nett-lab/topologies/relay-only.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-relay"
-      - name: 场景 1、8：直连失效切到中继，恢复后回到直连
-        run: >-
-          sudo ./target/debug/nett-lab run failover
-          --topology crates/nett-lab/topologies/failover.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-failover"
-      - name: 场景 2：当前中继失效，换到另一个中继
-        run: >-
-          sudo ./target/debug/nett-lab run relay-loss
-          --topology crates/nett-lab/topologies/relays.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-relay-loss"
-      - name: 场景 3：重启当前中继，连接不中断
-        run: >-
-          sudo ./target/debug/nett-lab run relay-restart
-          --topology crates/nett-lab/topologies/relays.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-relay-restart"
-      - name: 场景 18：在 WireGuard 端口上探测
-        run: >-
-          sudo ./target/debug/nett-lab run wgport
-          --topology crates/nett-lab/topologies/wgport.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-wgport"
-      - name: 场景 14：一端在锥形 NAT 之后
-        run: >-
-          sudo ./target/debug/nett-lab run admission
-          --topology crates/nett-lab/topologies/cone-nat.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-14-nat"
-      - name: 场景 7、9：UDP 全部被拦时改用 TLS，恢复后回到直连
-        run: >-
-          sudo ./target/debug/nett-lab run fallback
-          --topology crates/nett-lab/topologies/fallback.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-fallback"
-      - name: 场景 10：两端锥形 NAT，打洞
-        run: >-
-          sudo ./target/debug/nett-lab run punch
-          --topology crates/nett-lab/topologies/punch-cone.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-punch-cone"
-      - name: 场景 11：两端 IPv6 有状态防火墙，打洞
-        run: >-
-          sudo ./target/debug/nett-lab run punch
-          --topology crates/nett-lab/topologies/punch-ipv6.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-punch-ipv6"
-      - name: 场景 13：两端对称型 NAT，不尝试打洞
-        run: >-
-          sudo ./target/debug/nett-lab run punch
-          --topology crates/nett-lab/topologies/punch-symmetric.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-punch-symmetric"
-      - name: 场景 16：双方都是 dial-only，经隧道提议后两端一起切换
-        run: >-
-          sudo ./target/debug/nett-lab run dial-only-switch
-          --topology crates/nett-lab/topologies/dial-pair.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-16"
-      - name: 场景 17：双方都是 dial-only，当前中继失效，靠时间片汇合
-        run: >-
-          sudo ./target/debug/nett-lab run dial-only-outage
-          --clock-skew 1500
-          --topology crates/nett-lab/topologies/dial-pair.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-17"
-      - name: 场景 19：外层路径 MTU 为 1500、1360、1300（IPv4）
-        run: >-
-          sudo ./target/debug/nett-lab run mtu
-          --bytes 268435456
-          --topology crates/nett-lab/topologies/mtu4.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-19-v4"
-      - name: 场景 19：外层路径 MTU 为 1500、1360、1300（IPv6）
-        run: >-
-          sudo ./target/debug/nett-lab run mtu
-          --bytes 268435456
-          --topology crates/nett-lab/topologies/mtu6.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-19-v6"
-      - name: 场景 20(a)(b)：删除再添加对端后的握手，丢掉第一个握手发起后的重试
-        run: >-
-          sudo ./target/debug/nett-lab run wg-rehandshake
-          --repeat 3
-          --topology crates/nett-lab/topologies/relays.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-20ab"
-      - name: 场景 20(c)：对端处于负载状态时经中继的 cookie
-        run: >-
-          sudo ./target/debug/nett-lab run wg-cookie
-          --topology crates/nett-lab/topologies/relays.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-20c"
-      - name: 场景 20(b)(d)：密钥轮换（短版本，完整的 30 分钟在验收中跑）
-        run: >-
-          sudo ./target/debug/nett-lab run wg-rekey
-          --duration 150
-          --topology crates/nett-lab/topologies/relays.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-20bd"
-      - name: 场景 24：拥塞（经中继，短版本，与 Tailscale 的对比在验收中跑）
-        run: >-
-          sudo ./target/debug/nett-lab run congestion
-          --duration 60
-          --topology crates/nett-lab/topologies/relay-only.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-24-relay"
-      - name: 场景 24：拥塞（直连，短版本）
-        run: >-
-          sudo ./target/debug/nett-lab run congestion
-          --duration 60
-          --topology crates/nett-lab/topologies/fallback.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-24-direct"
-      - name: 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 8 节）
-        run: >-
-          sudo ./target/debug/nett-lab run access
-          --topology crates/nett-lab/topologies/access.toml
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-access"
-      - name: 用户态数据面与内核 WireGuard 互通：准入与直连（design/userspace.md 第 8 节）
-        run: >-
-          sudo ./target/debug/nett-lab run admission
-          --topology crates/nett-lab/topologies/direct.toml
-          --userspace b
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-userspace-14"
-      - name: 用户态数据面：直连失效切到中继，恢复后回到直连
-        run: >-
-          sudo ./target/debug/nett-lab run failover
-          --topology crates/nett-lab/topologies/failover.toml
-          --userspace b
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-userspace-failover"
-      - name: 用户态数据面：两端锥形 NAT，打洞
-        run: >-
-          sudo ./target/debug/nett-lab run punch
-          --topology crates/nett-lab/topologies/punch-cone.toml
-          --userspace b
-          --nett ./target/debug/nett
-          --out "$RUNNER_TEMP/lab-userspace-punch"
+      - name: 场景（${{ matrix.title }}）
+        env:
+          SCENARIOS: ${{ matrix.scenarios }}
+        run: |
+          i=0
+          # 从 fd 3 读：场景进程读不到、也读不走后面的行
+          while IFS='|' read -r -u 3 title args; do
+            [ -n "$title" ] || continue
+            i=$((i + 1))
+            title="${title% }"
+            read -ra argv <<< "$args"
+            echo "::group::$title"
+            if ! sudo ./target/debug/nett-lab run "${argv[@]}" \
+                --nett ./target/debug/nett --out "$RUNNER_TEMP/lab-$i"; then
+              echo "::endgroup::"
+              echo "::error title=lab::$title"
+              exit 1
+            fi
+            echo "::endgroup::"
+          done 3<<< "$SCENARIOS"
+          test "$i" -gt 0
 
   deny:
     runs-on: ubuntu-24.04
