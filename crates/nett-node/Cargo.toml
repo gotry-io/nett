@@ -7,5 +7,38 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+# 每台机器上的控制代理（design/hub.md 第 5 节）：连接 Hub，把期望状态交给组网进程，上报状态。不监听端口，
+# 不执行 shell，不访问 Docker（硬性规则 1、2、9）。也提供签名工具调用 Hub API 的 HTTPS 客户端
+
 [lints]
 workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+libc.workspace = true
+nett-core.workspace = true
+nett-mesh.workspace = true
+nett-proto.workspace = true
+nett-transport.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+ring.workspace = true
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+x25519-dalek.workspace = true
+
+[dev-dependencies]
+nett-site.workspace = true
+nett-trust.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

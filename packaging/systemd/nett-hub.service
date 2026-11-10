@@ -1,0 +1,36 @@
+# Hub（design/hub.md 第 8 节）原生运行：专用的系统用户 nett-hub，只在本机 127.0.0.1:8480 监听，由本机的反向代理
+# 转发 /api/v1/ 与 /node/v1/connect。数据目录 /var/lib/nett-hub（数据库与 Hub 身份私钥）。
+# 第一次使用：
+#   sudo useradd --system --home-dir /var/lib/nett-hub --shell /usr/sbin/nologin nett-hub
+#   sudo install -d -o nett-hub -g nett-hub -m 0700 /var/lib/nett-hub
+#   sudo -u nett-hub /usr/local/bin/nett-hub init --url https://hub.example.com
+#   sudo systemctl enable --now nett-hub
+[Unit]
+Description=nett Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/nett-hub serve --data /var/lib/nett-hub
+User=nett-hub
+Group=nett-hub
+StateDirectory=nett-hub
+StateDirectoryMode=0700
+# Hub 不需要任何能力，也不访问宿主的其他部分
+CapabilityBoundingSet=
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 稳定运行 ≤ 30–50 MB（硬性规则 14）；上限留出余量
+MemoryMax=128M
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT url, trust_anchors, owner_token_hash FROM hub WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "url",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hub",
+            "name": "url"
+          }
+        }
+      },
+      {
+        "name": "trust_anchors",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hub",
+            "name": "trust_anchors"
+          }
+        }
+      },
+      {
+        "name": "owner_token_hash",
+        "ordinal": 2,
+        "type_info": "Blob",
+        "origin": {
+          "Table": {
+            "table": "hub",
+            "name": "owner_token_hash"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "7f355880ebf19ffc26ff3d5dae42aee6b253070c4d9f272aceaedeb2904a62d3"
+}

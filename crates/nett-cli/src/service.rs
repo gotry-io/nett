@@ -1,31 +1,64 @@
-//! macOS 上组网服务的安装（design/release.md 第 4 节）：`sudo nett install` 在 root 专属的目录中生成密钥、
-//! 放入程序的副本和期望状态（从运行 sudo 的用户的站点目录中找到给本机的那一份），写入 launchd 与日志轮转的
-//! 配置并启动服务；`sudo nett uninstall` 停止服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务
-//! 只运行这份副本。
+//! macOS 上服务的安装（design/release.md 第 4 节，hub.md 第 7 节）：`sudo nett install` 在 root 专属的目录中生成
+//! 密钥、放入程序的副本，写入 launchd 与日志轮转的配置并启动组网服务；不接 Hub 时从运行 sudo 的用户的站点
+//! 目录中找到给本机的期望状态，接了 Hub 时（有 token，或已有 Hub 的配置）再启动 nett-node，期望状态由它从
+//! Hub 接收。`sudo nett uninstall` 停止服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务只运行
+//! 这份副本。
 
 use std::fs;
-use std::io::Write as _;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
+use nett_node::config::HubConfig;
+
+use crate::install::{
+    InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
+};
 
 const DIR: &str = "/Library/Application Support/nett";
 const BINARY: &str = "/Library/Application Support/nett/nett";
 const DESIRED: &str = "/Library/Application Support/nett/desired.json";
 const KEY: &str = "/Library/Application Support/nett/mesh.key";
 const LOG_DIR: &str = "/Library/Logs/nett";
-const PLIST: &str = "/Library/LaunchDaemons/io.gotry.nett.mesh.plist";
 const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
-const LABEL: &str = "io.gotry.nett.mesh";
 const LAUNCHCTL: &str = "/bin/launchctl";
-/// 等 launchctl 返回的上限（硬性规则 14）。
-const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(15);
+/// 等 launchctl 卸下服务的上限。
+const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// 一个 launchd 服务。
+struct Service {
+    label: &'static str,
+    plist: &'static str,
+    /// 运行 `nett` 的哪个命令。
+    args: &'static [&'static str],
+    log: &'static str,
+    /// 在帮助与报告中的说法。
+    what: &'static str,
+}
+
+const MESH: Service = Service {
+    label: "io.gotry.nett.mesh",
+    plist: "/Library/LaunchDaemons/io.gotry.nett.mesh.plist",
+    args: &["mesh", "--config", DESIRED, "--key", KEY],
+    log: "mesh.log",
+    what: "the mesh service",
+};
+
+const NODE: Service = Service {
+    label: "io.gotry.nett.node",
+    plist: "/Library/LaunchDaemons/io.gotry.nett.node.plist",
+    args: &["node", "--dir", DIR],
+    log: "node.log",
+    what: "nett-node",
+};
 
 /// launchd 配置：root 运行副本，开机启动，退出后重启（design/userspace.md 第 6.3 节）。
-fn plist() -> String {
+fn plist(service: &Service) -> String {
+    let args: String = service
+        .args
+        .iter()
+        .map(|a| format!("\n    <string>{a}</string>"))
+        .collect();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -33,15 +66,10 @@ fn plist() -> String {
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{LABEL}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>{BINARY}</string>
-    <string>mesh</string>
-    <string>--config</string>
-    <string>{DESIRED}</string>
-    <string>--key</string>
-    <string>{KEY}</string>
+    <string>{BINARY}</string>{args}
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -58,89 +86,43 @@ fn plist() -> String {
   <integer>63</integer>
   <!-- 运行日志写进系统日志；这个文件只记录启动失败，launchd 每次启动进程时重新打开它 -->
   <key>StandardErrorPath</key>
-  <string>{LOG_DIR}/mesh.log</string>
+  <string>{LOG_DIR}/{log}</string>
 </dict>
 </plist>
-"#
+"#,
+        label = service.label,
+        log = service.log,
     )
 }
 
 /// 启动失败记录的轮转：超过 1 MB 时轮转，保留 5 份，压缩旧的。
 fn newsyslog() -> String {
     format!(
-        "# 由 nett install 生成：组网服务启动失败记录的轮转（运行日志在系统日志中）\n\
+        "# 由 nett install 生成：服务启动失败记录的轮转（运行日志在系统日志中）\n\
          # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
-         {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n"
+         {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n\
+         {LOG_DIR}/node.log    root:wheel     600   5      1024      *     JN\n"
     )
 }
 
-fn require_root() -> anyhow::Result<()> {
-    if !rustix::process::geteuid().is_root() {
-        bail!("the mesh service runs as root; run this command with sudo");
-    }
-    Ok(())
-}
-
-/// 写到同一目录的临时文件再改名：读的一方不会看到写了一半的文件。
-fn write_atomic(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(mode)
-        .open(&tmp)
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    file.write_all(content)
-        .and_then(|()| file.sync_all())
-        .with_context(|| format!("writing {}", tmp.display()))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))
-        .with_context(|| format!("setting permissions of {}", tmp.display()))?;
-    fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
-}
-
-fn ensure_dir(path: &str, mode: u32) -> anyhow::Result<()> {
-    fs::create_dir_all(path).with_context(|| format!("creating {path}"))?;
-    fs::set_permissions(path, fs::Permissions::from_mode(mode))
-        .with_context(|| format!("setting permissions of {path}"))
-}
-
-/// 以参数数组调用 launchctl，带超时；返回它是否成功。
 fn launchctl(args: &[&str]) -> anyhow::Result<bool> {
-    let mut child = Command::new(LAUNCHCTL)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("running {LAUNCHCTL} {}", args.join(" ")))?;
-    let deadline = Instant::now() + LAUNCHCTL_TIMEOUT;
-    loop {
-        if let Some(status) = child.try_wait().context("waiting for launchctl")? {
-            return Ok(status.success());
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{LAUNCHCTL} {} did not finish in time", args.join(" "));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    crate::install::run(LAUNCHCTL, args)
 }
 
-fn loaded() -> anyhow::Result<bool> {
-    launchctl(&["print", &format!("system/{LABEL}")])
+fn loaded(service: &Service) -> anyhow::Result<bool> {
+    launchctl(&["print", &format!("system/{}", service.label)])
 }
 
 /// bootout 返回时进程可能还在退出（launchctl print 显示 `SIGTERMed`）。等到 launchd 中没有这个服务，
 /// 再删副本、报告已停止；紧接着重新安装时也不会遇到还没退出的旧服务。
-fn wait_unloaded() -> anyhow::Result<()> {
-    let deadline = Instant::now() + LAUNCHCTL_TIMEOUT;
-    while loaded()? {
+fn wait_unloaded(service: &Service) -> anyhow::Result<()> {
+    let deadline = Instant::now() + UNLOAD_TIMEOUT;
+    while loaded(service)? {
         if Instant::now() >= deadline {
             bail!(
-                "{LABEL} did not stop within {} seconds",
-                LAUNCHCTL_TIMEOUT.as_secs()
+                "{} did not stop within {} seconds",
+                service.label,
+                UNLOAD_TIMEOUT.as_secs()
             );
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -148,53 +130,99 @@ fn wait_unloaded() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 写入 `path`，内容与现有的相同时不动；返回是否写了。
-fn replace_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<bool> {
-    if fs::read(path).is_ok_and(|old| old == content) {
-        return Ok(false);
+fn stop(service: &Service) -> anyhow::Result<()> {
+    if loaded(service)? {
+        if !launchctl(&["bootout", &format!("system/{}", service.label)])? {
+            bail!("launchctl could not stop {}", service.label);
+        }
+        wait_unloaded(service)?;
     }
-    write_atomic(path, content, mode)?;
-    Ok(true)
+    Ok(())
 }
 
-/// 一个命令完成安装（design/release.md 第 4 节）：密钥、程序的副本、两份配置，`config` 给出时导入期望
-/// 状态；有期望状态时启动服务，已在运行时按变化重启或重新加载。
-fn install(config: Option<&Path>) -> anyhow::Result<()> {
+/// 让服务按新的配置、程序运行：没载入时载入；配置变了卸下再载入（launchd 保留的是载入时的配置，
+/// kickstart 只会按旧的参数重启）；程序或它读的配置变了时重启。返回报告的一句话，没有变化时为空。
+fn ensure_running(
+    service: &Service,
+    plist_changed: bool,
+    restart: bool,
+) -> anyhow::Result<Option<String>> {
+    let target = format!("system/{}", service.label);
+    let (ok, message) = if !loaded(service)? {
+        (
+            launchctl(&["bootstrap", "system", service.plist])?,
+            format!("Started {}.", service.what),
+        )
+    } else if plist_changed {
+        stop(service)?;
+        (
+            launchctl(&["bootstrap", "system", service.plist])?,
+            format!("Restarted {} with the new configuration.", service.what),
+        )
+    } else if restart {
+        (
+            launchctl(&["kickstart", "-k", &target])?,
+            format!("Restarted {}.", service.what),
+        )
+    } else {
+        return Ok(None);
+    };
+    if !ok {
+        bail!(
+            "launchctl could not start {}; see {LOG_DIR}/{}",
+            service.label,
+            service.log
+        );
+    }
+    Ok(Some(message))
+}
+
+/// 一个命令完成安装（design/release.md 第 4 节、hub.md 第 7 节）：密钥、程序的副本、服务配置；不接 Hub 时
+/// 导入期望状态；有期望状态时启动服务，已在运行时按变化重启或重新加载。
+pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
     ensure_dir(LOG_DIR, 0o700)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
+    let hub_changed = apply_token(
+        DIR,
+        nett_mesh::store::DEFAULT_STATE_DIR,
+        args.token.as_deref(),
+    )?;
+    let linked = HubConfig::load(Path::new(DIR))
+        .map_err(anyhow::Error::msg)?
+        .is_some();
 
+    // 接了 Hub 的机器上期望状态只由 nett-node 写（design/hub.md 第 5 节）
     let site = invoking_site_dir();
-    let imported = match config {
-        Some(path) => {
+    let imported = match (&args.config, linked) {
+        (Some(_), true) => {
+            bail!("this machine receives its desired state from its Hub; --config is not used")
+        }
+        (Some(path), false) => {
             let bytes = crate::site::read_desired(path)?
                 .with_context(|| format!("{} is not a regular file", path.display()))?;
             crate::site::check_desired_for(&bytes, &keys.0)?;
             Some(bytes)
         }
-        None => match &site {
+        (None, false) => match &site {
             Some(site) => crate::site::find_desired_for(site, &keys.0)?.map(|(path, bytes)| {
                 println!("Using {}", path.display());
                 bytes
             }),
             None => None,
         },
+        (None, true) => None,
     };
     let desired_changed = match imported {
         Some(bytes) => replace_if_changed(Path::new(DESIRED), &bytes, 0o600)?,
         None => false,
     };
-    let exe = std::env::current_exe().context("locating the running nett")?;
-    let exe = fs::canonicalize(&exe).unwrap_or(exe);
-    // 从副本自己运行时（重新写配置）不用复制
-    let binary_changed = if exe == Path::new(BINARY) {
-        false
-    } else {
-        let bytes = fs::read(&exe).with_context(|| format!("reading {}", exe.display()))?;
-        replace_if_changed(Path::new(BINARY), &bytes, 0o755)?
-    };
-    let plist_changed = replace_if_changed(Path::new(PLIST), plist().as_bytes(), 0o644)?;
+    let binary_changed = copy_self(BINARY)?;
+    let mesh_plist_changed =
+        replace_if_changed(Path::new(MESH.plist), plist(&MESH).as_bytes(), 0o644)?;
+    let node_plist_changed =
+        linked && replace_if_changed(Path::new(NODE.plist), plist(&NODE).as_bytes(), 0o644)?;
     replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
     // 公钥那一行只在本机还没有加进站点时需要
@@ -210,47 +238,40 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    let target = format!("system/{LABEL}");
-    let (ok, message) = if !loaded()? {
-        (
-            launchctl(&["bootstrap", "system", PLIST])?,
-            concat!(
-                "Started the mesh service.\n",
-                "Logs: log show --last 1h --predicate 'process == \"nett\"'\n",
-                "Run `sudo nett install` again after the site changes or `brew upgrade nett`."
-            ),
-        )
-    } else if plist_changed {
-        // launchd 保留的是载入时的配置：配置变了要卸下再载入，kickstart 只会按旧的参数重启
-        if !launchctl(&["bootout", &target])? {
-            bail!("launchctl could not stop {LABEL}");
+    let mut messages = Vec::new();
+    match ensure_running(&MESH, mesh_plist_changed, binary_changed)? {
+        Some(m) => messages.push(m),
+        None if desired_changed => {
+            // 只有期望状态变了：经本机接口重新读取，不重启、连接不中断，并显示它是否被接受（design/status.md
+            // 第 4.1 节）
+            print!(
+                "{}",
+                crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
+            );
         }
-        wait_unloaded()?;
-        (
-            launchctl(&["bootstrap", "system", PLIST])?,
-            "Restarted the mesh service with the new configuration.",
-        )
-    } else if binary_changed {
-        // 换用新的副本：重启
-        (
-            launchctl(&["kickstart", "-k", &target])?,
-            "Restarted the mesh service with the new binary.",
-        )
-    } else if desired_changed {
-        // 只有期望状态变了：经本机接口重新读取，不重启、连接不中断，并显示它是否被接受（design/status.md
-        // 第 4.1 节）。程序没变，正在运行的就是这一版
-        print!(
-            "{}",
-            crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
-        );
-        return Ok(());
-    } else {
-        (true, "The mesh service is running. Nothing changed.")
-    };
-    if !ok {
-        bail!("launchctl could not start {LABEL}; see {LOG_DIR}/mesh.log");
+        None => {}
     }
-    println!("{message}");
+    if linked
+        && let Some(m) = ensure_running(&NODE, node_plist_changed, binary_changed || hub_changed)?
+    {
+        messages.push(m);
+    }
+    if messages.is_empty() && !desired_changed {
+        messages.push("The services are running. Nothing changed.".to_owned());
+    }
+    for m in messages {
+        println!("{m}");
+    }
+    if mesh_plist_changed || node_plist_changed || binary_changed {
+        println!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
+        if linked {
+            println!("Run `sudo nett install` again after `brew upgrade nett`.");
+        } else {
+            println!(
+                "Run `sudo nett install` again after the site changes or `brew upgrade nett`."
+            );
+        }
+    }
     Ok(())
 }
 
@@ -299,48 +320,20 @@ mod passwd {
     }
 }
 
-pub const INSTALL_USAGE: &str = "usage: sudo nett install [--config <desired-state.json>]\n\n\
-Creates this machine's keys, copies nett into a root-only directory, imports this machine's\n\
-desired state from the site directory (or --config) and starts the service.\n\
-Run it again after the site changes or `brew upgrade nett`.";
-pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall";
-
-/// `sudo nett install [--config <期望状态>]`。
-pub fn install_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    let mut config = None;
-    while let Some(arg) = parser.next()? {
-        match arg {
-            lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
-            other => return Err(other.unexpected().into()),
-        }
-    }
-    install(config.as_deref())
-}
-
-/// `sudo nett uninstall`。
-pub fn uninstall_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    if let Some(arg) = parser.next()? {
-        return Err(arg.unexpected().into());
-    }
-    uninstall()
-}
-
-fn uninstall() -> anyhow::Result<()> {
+pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
-    if loaded()? {
-        if !launchctl(&["bootout", &format!("system/{LABEL}")])? {
-            bail!("launchctl could not stop {LABEL}");
-        }
-        wait_unloaded()?;
-    }
-    for path in [PLIST, NEWSYSLOG, BINARY] {
+    stop(&NODE)?;
+    stop(&MESH)?;
+    for path in [NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).with_context(|| format!("removing {path}")),
         }
     }
-    println!("Removed the mesh service. Keys, desired state and the trust store remain in {DIR}.");
+    println!(
+        "Removed the services. Keys, the desired state, the trust store and the Hub configuration remain in {DIR}."
+    );
     Ok(())
 }
 
@@ -350,14 +343,16 @@ mod tests {
 
     #[test]
     fn generated_configuration_names_the_root_copy() {
-        let p = plist();
+        let p = plist(&MESH);
         assert!(p.contains(&format!("<string>{BINARY}</string>")));
         assert!(p.contains(&format!("<string>{DESIRED}</string>")));
+        assert!(plist(&NODE).contains("<string>node</string>"));
         assert!(
             !p.contains("homebrew"),
             "the service never runs the Homebrew copy"
         );
         assert!(newsyslog().contains(&format!("{LOG_DIR}/mesh.log")));
+        assert!(newsyslog().contains(&format!("{LOG_DIR}/node.log")));
     }
 
     #[test]
@@ -373,13 +368,15 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nett-plist-{}", std::process::id()));
         fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("p.plist");
-        fs::write(&file, plist()).expect("write");
-        let status = Command::new("/usr/bin/plutil")
-            .args(["-lint", "-s"])
-            .arg(&file)
-            .status()
-            .expect("plutil");
+        for service in [&MESH, &NODE] {
+            fs::write(&file, plist(service)).expect("write");
+            let status = std::process::Command::new("/usr/bin/plutil")
+                .args(["-lint", "-s"])
+                .arg(&file)
+                .status()
+                .expect("plutil");
+            assert!(status.success(), "{}", service.label);
+        }
         let _ = fs::remove_dir_all(&dir);
-        assert!(status.success());
     }
 }

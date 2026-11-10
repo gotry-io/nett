@@ -18,6 +18,12 @@ lexopt.workspace = true
 nett-core.workspace = true
 nett-mesh.workspace = true
 nett-relay = { workspace = true, features = ["lab"] }
+# Hub 场景（design/hub.md 第 10 节）：站点状态、接入 token、Hub 的配置，以及模拟被攻破的 Hub 时直接改写它的数据库
+nett-hub.workspace = true
+nett-node.workspace = true
+nett-proto.workspace = true
+nett-site.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 nett-trust = { workspace = true, features = ["signing"] }
 base64.workspace = true
 ring.workspace = true

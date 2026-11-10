@@ -1,7 +1,9 @@
 //! nett-node 与 Hub 之间的控制协议（design/protocol.md）：Protobuf 消息、Noise 通道与分片。
 
+pub mod api;
 pub mod frame;
 pub mod noise;
+pub mod token;
 
 /// `nett.v1` 的消息，由 `cargo run -p nett-proto-gen` 从 `proto/nett/v1/control.proto` 生成。
 #[allow(clippy::all, clippy::pedantic)]

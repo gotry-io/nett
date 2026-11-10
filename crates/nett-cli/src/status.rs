@@ -133,7 +133,7 @@ fn find_peer(doc: &StatusDoc, wanted: &str) -> anyhow::Result<usize> {
 
 // ---- 总览（第 7.1 节） ----
 
-fn overview(doc: &StatusDoc, now: Timestamp) -> String {
+pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
     let mut out = String::new();
     let mut head = Vec::new();
     let node = &doc.node;
@@ -382,7 +382,7 @@ fn reachability(r: Reachability) -> &'static str {
     }
 }
 
-fn state(s: PeerState) -> &'static str {
+pub(crate) fn state(s: PeerState) -> &'static str {
     match s {
         PeerState::Connected => "connected",
         PeerState::Connecting => "connecting",
@@ -393,7 +393,7 @@ fn state(s: PeerState) -> &'static str {
     }
 }
 
-fn path_label(path: &PathStatus) -> String {
+pub(crate) fn path_label(path: &PathStatus) -> String {
     kind_label(path.kind, path.relay.as_ref(), path.punched)
 }
 
@@ -514,7 +514,7 @@ fn join<T: ToString>(items: &[T]) -> String {
 }
 
 /// 往返时间：不到 10 毫秒保留一位小数，其余取整。
-fn ms(v: f64) -> String {
+pub(crate) fn ms(v: f64) -> String {
     if v < 10.0 {
         format!("{v:.1} ms")
     } else {
@@ -550,7 +550,7 @@ fn bytes(n: u64) -> String {
     format!("{v:.1} {unit}")
 }
 
-fn ago(t: Timestamp, now: Timestamp) -> String {
+pub(crate) fn ago(t: Timestamp, now: Timestamp) -> String {
     let s = (now.unix_seconds() - t.unix_seconds()).max(0);
     match s {
         0..60 => format!("{s}s ago"),

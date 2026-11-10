@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT owner_token_id FROM hub WHERE id = 1",
+  "describe": {
+    "columns": [
+      {
+        "name": "owner_token_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "hub",
+            "name": "owner_token_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "173879e42c2710ddbdf3f0273eeb075018452076587627bcde7d46b7624f1c30"
+}

@@ -174,7 +174,7 @@ pub(crate) fn print_keys(
 
 /// 日志写到标准错误（Linux 上由 systemd 收进日志）。macOS 上以 launchd 服务运行时（标准错误不是终端）
 /// 写进系统日志：标准错误的文件只记录启动失败，launchd 每次启动进程时重新打开它，轮转才有效。
-fn init_logging() {
+pub(crate) fn init_logging() {
     let builder = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
         .with_ansi(std::io::stderr().is_terminal());

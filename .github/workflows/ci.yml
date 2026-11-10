@@ -13,6 +13,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Hub 的查询按提交的 .sqlx/ 在编译期检查：查询改了而离线数据没有更新时编译失败（CLAUDE.md "API、协议与数据库"）
+  SQLX_OFFLINE: "true"
 
 jobs:
   rust:
@@ -78,13 +80,42 @@ jobs:
           grep -F 'No peers.' status.log
           ! "$nett" status 2> status.err
           grep -F 'run with sudo' status.err
-          sudo "$nett" install | grep -F 'The mesh service is running. Nothing changed.'
+          sudo "$nett" install | grep -F 'The services are running. Nothing changed.'
           # 期望状态变了（内容相同、字节不同）：经本机接口重新加载，并报告结果
           python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json
           sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
           sudo "$nett" reload | grep -F 'Reloaded the desired state.'
           sudo "$nett" uninstall
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
+      # design/hub.md 第 3.5、7 节：已有的成员接入 Hub。Hub 用测试证书在本机终止 TLS，按指纹校验
+      - name: sudo nett install <token>：接入 Hub（需要 root）
+        run: |
+          cargo build --locked -p nett-cli -p nett-hub
+          nett="$PWD/target/debug/nett"
+          hub="$PWD/target/debug/nett-hub"
+          certs=crates/nett-hub/tests/data
+          data="$RUNNER_TEMP/hub"
+          code=$("$hub" init --data "$data" --url https://127.0.0.1:8443 --tls-cert "$certs/test-cert.pem" \
+            | grep -o 'nett_lnk_[A-Za-z0-9_-]*')
+          "$hub" serve --data "$data" --listen 127.0.0.1:8443 \
+            --tls-cert "$certs/test-cert.pem" --tls-key "$certs/test-key.pem" 2> hub.log &
+          for _ in $(seq 20); do grep -q 'Hub listening' hub.log && break; sleep 0.5; done
+          "$nett" site link "$code" | grep -F 'Linked to https://127.0.0.1:8443'
+          token=$("$nett" site invite ci | grep -o 'nett_enr_[A-Za-z0-9_-]*')
+          sudo "$nett" install "$token" | tee join.log
+          grep -F 'Connecting this machine to the Hub at https://127.0.0.1:8443' join.log
+          for _ in $(seq 40); do
+            "$nett" site status --json \
+              | jq -e '.machines[] | select(.name == "ci") | .online and .result == "applied"' && break
+            sleep 0.5
+          done
+          "$nett" site status | tee site-status.log
+          grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
+          sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
+          # 接了 Hub 的机器上期望状态只由 nett-node 写
+          ! sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json
+          sudo "$nett" uninstall
+          ! sudo launchctl print system/io.gotry.nett.node 2>/dev/null
 
   # 组网实验场景（design/prototype.md 第 7 节），每次推送全部跑一遍。场景之间互不依赖，按耗时分成几组并行，
   # 每组约 4 分钟。一行一个场景：标题 | nett-lab run 的参数（本文件写定，不来自外部输入）。
@@ -117,6 +148,7 @@ jobs:
               场景 19：外层路径 MTU 为 1500、1360、1300（IPv4） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu4.toml
               场景 19：外层路径 MTU 为 1500、1360、1300（IPv6） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
               访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 8 节） | access --topology crates/nett-lab/topologies/access.toml
+              Hub：推送、应用、Hub 停止时组网照常、恢复后补齐、伪造的成员与旧版本的规则被拒绝（design/hub.md 第 10 节） | hub --topology crates/nett-lab/topologies/direct.toml
           - group: handshake
             title: WireGuard 握手
             scenarios: |
@@ -152,7 +184,7 @@ jobs:
           sudo modprobe wireguard
           sudo ip link add wgcheck type wireguard
           sudo ip link del wgcheck
-      - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
+      - run: cargo build --locked -p nett-cli -p nett-lab -p nett-hub --features nett-cli/lab
       - name: 实验工具自检（测量与故障注入）
         run: >-
           sudo ./target/debug/nett-lab run selftest

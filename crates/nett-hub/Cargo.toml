@@ -13,3 +13,36 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+futures-util.workspace = true
+lexopt.workspace = true
+nett-core.workspace = true
+nett-mesh.workspace = true
+nett-proto.workspace = true
+nett-site.workspace = true
+nett-trust.workspace = true
+prost.workspace = true
+prost-types.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+tokio-rustls.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+x25519-dalek.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+nett-node.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
+# axum 已经依赖 tower 的 util：用它把请求直接交给路由
+tower = { version = "0.5.3", default-features = false, features = ["util"] }

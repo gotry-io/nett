@@ -732,7 +732,7 @@ const TLS_KEY: &str = "tls-key.pem";
 
 /// 中继的自签证书（只用于实验；正式部署中由中继节点自己生成，私钥不离开节点）。返回叶证书 DER 的
 /// SHA-256。
-fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFingerprint> {
+pub(crate) fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFingerprint> {
     let (cert, key) = (dir.join(TLS_CERT), dir.join(TLS_KEY));
     cmd::run(
         "openssl",

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO nodes (node_id, last_seen, nett_version) VALUES (?1, ?2, ?3)\n             ON CONFLICT (node_id) DO UPDATE SET last_seen = ?2, nett_version = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "588e0e5e3879848010b8bbce80bf0e04ad0fbaf4b51c6b8e474ec7002d5f2e4c"
+}

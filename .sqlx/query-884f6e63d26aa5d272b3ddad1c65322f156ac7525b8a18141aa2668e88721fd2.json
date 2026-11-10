@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE nodes SET applied_generation = ?2, ack_result = ?3, ack_reason = ?4 WHERE node_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "884f6e63d26aa5d272b3ddad1c65322f156ac7525b8a18141aa2668e88721fd2"
+}

@@ -18,13 +18,18 @@ nett-mesh = { path = "crates/nett-mesh" }
 nett-site = { path = "crates/nett-site" }
 nett-proto = { path = "crates/nett-proto" }
 nett-node = { path = "crates/nett-node" }
+nett-hub = { path = "crates/nett-hub" }
 nett-relay = { path = "crates/nett-relay" }
 nett-transport = { path = "crates/nett-transport" }
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "tokio", "ws"] }
 base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 blake2 = { version = "0.11.0", default-features = false }
 bytes = { version = "1.12.1", default-features = false, features = ["std"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+http-body-util = { version = "0.1.5", default-features = false }
+hyper = { version = "1.12.0", default-features = false, features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 # 用户态 WireGuard 的会话层：只用 noise 层，AEAD 用 ring（design/userspace.md 第 3 节）
 gotatun = { version = "=0.10.2", default-features = false, features = ["ring"] }
 lexopt = { version = "0.3.2", default-features = false }
@@ -34,8 +39,11 @@ libc = { version = "0.2.191", default-features = false }
 ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rustix = { version = "1.1.6", default-features = false, features = ["std", "net"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+# Hub 有公网证书时（在反向代理之后）按系统的根证书校验（硬性规则 11）
+rustls-native-certs = { version = "0.8.5", default-features = false }
 serde = { version = "1.0.229", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "1.0.154", default-features = false, features = ["std"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "sqlite", "macros", "migrate"] }
 thiserror = { version = "2.0.21", default-features = false }
 tokio = { version = "1.54.1", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }

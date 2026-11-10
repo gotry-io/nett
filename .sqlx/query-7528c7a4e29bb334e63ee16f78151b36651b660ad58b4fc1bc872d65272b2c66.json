@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO site (id, generation, state, pushed_at) VALUES (1, ?1, ?2, ?3)\n             ON CONFLICT (id) DO UPDATE SET generation = ?1, state = ?2, pushed_at = ?3",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "7528c7a4e29bb334e63ee16f78151b36651b660ad58b4fc1bc872d65272b2c66"
+}

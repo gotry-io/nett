@@ -4,7 +4,12 @@
 all-features = true
 
 [advisories]
-ignore = []
+ignore = [
+    # sqlx 0.9.0 把 libsqlite3-sys 限制在 0.38 以下，修复在 0.39（SQLite 3.54）。只有打开由权限更低的一方写过的
+    # 数据库与 -wal 文件时才受影响；Hub 只打开自己数据目录（0700）中自己写的数据库。sqlx 放开限制后升级并删去
+    # 这一条；从备份恢复（design/hub.md 第 9 节 H5）之前必须升级
+    { id = "RUSTSEC-2026-0459", reason = "Hub opens only its own database; upgrade when sqlx allows libsqlite3-sys 0.39" },
+]
 
 [licenses]
 allow = [
