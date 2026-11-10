@@ -5,7 +5,7 @@
 
 ## 1. 目标
 
-推送版本标签后，CI 构建各平台的 `nett`，用项目的发布钥匙签名（ADR 0020），发布 GitHub Release，并更新 Homebrew 配方。macOS 用户用 Homebrew 安装和升级；Linux 服务器用发布包手动安装。经 Hub 分发的安装脚本和节点的自动升级在接入 Hub 时实现，不在本文范围内。
+推送版本标签后，CI 构建各平台的 `nett`，用项目的发布钥匙签名（ADR 0020），发布 GitHub Release，并更新 Homebrew 配方。macOS 用户用 Homebrew 安装和升级；Linux 服务器用发布包手动安装。接入 Hub 之后的入网命令和节点的自动升级见 hub.md，不在本文范围内。
 
 ## 2. 版本与产物
 

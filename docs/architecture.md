@@ -130,7 +130,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <token>
 
 Hub 被攻破后，攻击者**能**：查看组网的状态；执行低风险操作；确认中风险操作，例如修改连接的策略；让组网连接断开；对从未收到某条撤销记录的成员隐瞒它。攻击者**不能**：提升任何节点的权限；加入组网成员或放宽组网访问（包括借助改标签，以及让 Edge 专用地址访问更多目标）；让节点降级；伪造节点身份；用重发旧签名产物的方式恢复已撤销的权限。
 
-**前提**：用户在此期间没有用被攻破的 Hub 提供的安装脚本安装节点。签名的内容由用户电脑上的签名工具计算并显示，不经 Hub；节点上的 `nett trust log` 可以事后核对节点接受过哪些授权（design/auth.md 第 2 节；ADR 0006、0012、0014、0024）。
+这些都不需要用户避开被攻破的 Hub 提供的东西：签名的内容由用户电脑上的签名工具计算并显示，入网命令写明发布包的哈希，都不经 Hub；节点上的 `nett trust log` 可以事后核对节点接受过哪些授权（design/auth.md 第 2 节；ADR 0006、0012、0014、0024）。
 
 ## 6. 组网
 
@@ -367,12 +367,13 @@ nett site link nett_lnk_…                     # 用户自己的电脑上
 **节点**：在用户的电脑上 `nett site add <名字>`，在那台机器上运行它打印的命令（design/hub.md 第 3.3 节）：
 
 ```bash
-curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- nett_enr_…
+curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-<版本>-<目标>.tar.gz \
+  && echo "<SHA-256>  nett.tar.gz" | sha256sum -c && tar -xzf nett.tar.gz && sudo ./nett install nett_enr_…
 ```
 
-- **安装脚本和二进制都由用户自己的 Hub 提供**：脚本中预置 Hub 的公钥；可执行文件用项目的发布签名验证（主备两把公钥在构建时嵌入 `nett`，首次安装时可对照项目主页公布的指纹核对，ADR 0020）；Hub 缓存经过签名的发布包，节点无需访问公共代码托管平台（在网络受限的地区更可靠）；
+- **安装不运行 Hub 提供的代码**：入网命令由签名工具生成，写明发布包的 SHA-256，签名工具先用嵌入的发布公钥核对过发布签名（主备两把公钥在构建时嵌入 `nett`，ADR 0020）。发布包可以从 Hub 的缓存下载（节点无需访问公共代码托管平台，在网络受限的地区更可靠），也可以从项目的发布页下载，核对哈希之后才运行（design/hub.md 第 3.3 节）；
 - token 一次性有效且很快过期；
-- 不使用 `curl | sh` 时，可手动下载、校验签名后执行 `sudo nett install <token>`；
+- 也可以手动下载、用 minisign 核对签名后执行 `sudo nett install <token>`；
 - macOS 也可以通过 Homebrew 安装后执行 `sudo nett install <token>`。
 
 **手机**：无需安装 nett。设备凭据与移动网关实现之后，由 `nett site` 的命令生成标准 WireGuard 配置（配置文件与二维码，ADR 0008），用任意 WireGuard 客户端导入；也可以导出 Surge、mihomo、sing-box 的配置，直连家里不通时自动改走网关。
@@ -398,6 +399,8 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- nett_enr_…
 | `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
 | `nett upgrade` | 手动升级；默认由 Hub 经 `release` 分区推送，校验发布签名、拒绝降级后替换，失败自动回滚 |
 | `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
+
+Hub 主机上的 `nett-hub` 是另一个可执行文件，它的命令见 design/hub.md 第 8 节。
 
 **服务进程**：由 systemd、launchd 或容器运行，用户不直接运行：`nett mesh`（组网进程）、`nett node`（控制代理）、`nett relay`、`nett transport`（第 13.2 节）。
 
@@ -435,7 +438,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- nett_enr_…
 
 | 类别 | 首批支持 | 扩展方式 |
 |---|---|---|
-| Hub 前的反向代理 | Caddy（由 Hub 安装脚本生成配置，ADR 0009） | — |
+| Hub 前的反向代理 | Caddy（项目提供的 Compose 示例中，ADR 0009） | — |
 
 ### 14.3 语言
 

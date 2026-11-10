@@ -33,7 +33,7 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
   - Hub 与 nett-node（原生运行）：入网、能力探测（WireGuard、TUN、包过滤、能否被外部连入）；node 经公网 HTTPS 连接 Hub，不依赖组网；node 把 `trust` 和 `mesh` 分区转交组网进程；按 H1–H5 推进（design/hub.md 第 9 节）
   - 站点：用 `nett site` 的命令维护机器、权限与访问规则，连接由访问规则推导（design/site.md）
   - 认证：恢复密钥与备份密钥、站点的 API token、node 密钥与准入证明、信任锚；签名在用户自己的电脑上由签名工具完成（ADR 0024）
-  - 安装：`nett-hub` 的发布包与容器镜像，默认与 Caddy 一起用 Compose 运行（包括按 SNI 转交 nett-relay 的一段），一次性初始化并与站点关联（design/hub.md 第 3.1、8 节）；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew（macOS）；Home Assistant 加载项仓库；发布工作流（CI 构建，单独的签名任务自动签名）与发布公钥作为构建参数；自动升级与回滚（项目发布签名、防降级）
+  - 安装：`nett-hub` 的发布包与容器镜像，默认与 Caddy 一起用 Compose 运行（包括按 SNI 转交 nett-relay 的一段），一次性初始化并与站点关联（design/hub.md 第 3.1、8 节）；节点一条命令入网（入网命令写明发布包的哈希，发布包可由 Hub 缓存）；Homebrew（macOS）；Home Assistant 加载项仓库；发布工作流（CI 构建，单独的签名任务自动签名）与发布公钥作为构建参数；自动升级与回滚（项目发布签名、防降级）
   - 可用性：node 和组网进程在本地保存配置；Hub 备份（含身份私钥，加密后由其他节点拉取）与重建手册
 - 组网进程独立于 nett-node 运行，TLS 传输适配单独以低权限运行（ADR 0013）；核心逻辑与平台无关，数据面按平台分后端，为 M3 的客户端预留（ADR 0018）
 - 会话层：Linux 内核 WireGuard；DSM 和旧内核使用 Rust 用户态实现，运行在组网进程中；macOS 原生加入（用户态 WireGuard + utun；铺开前先实测与代理类 VPN 应用共存），需要访客真实 IP 的容器服务另用容器内成员；Home Assistant OS 加载项可做智能入口；成员准入验证（签名的成员表、网段、访问规则）
