@@ -22,13 +22,13 @@ nett is for individuals and small teams with a few scattered machines, for examp
 - **macOS** (native member and the signing tool `nett site`):
   ```bash
   brew install gotry-io/tap/nett
-  sudo nett install    # creates this machine's keys and prints the line for the site description
-  # add this node to the site description (~/.config/nett/site.toml by default)
-  nett site apply
-  sudo nett install    # finds this machine's desired state, checks and imports it, starts the mesh service
+  nett site init                              # once, on the computer that holds the site
+  sudo nett install                           # creates this machine's keys and prints the line for nett site add
+  nett site add mac --keys "<the printed line>"   # adds this machine to the site
+  sudo nett install                           # finds this machine's desired state, checks and imports it, starts the mesh service
   ```
-  Run the same command whenever the desired state changes (it reloads without a restart); if the site is on another machine, add `--config <this node's desired.json>`. The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
-- **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, create this machine's keys with `sudo nett keys --dir /etc/nett`, and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service). When the desired state changes, put it in `/etc/nett/desired.json` and run `sudo nett reload`.
+  The site is kept with commands: `nett site add`, `allow`, `rules`, `status` and more; every change lists what will be signed and signs it once you confirm ([design/site.md](docs/design/site.md), in Chinese). Run `sudo nett install` whenever the desired state changes (it reloads without a restart); if the site is on another machine, add `--config <this node's desired.json>`. The mesh service runs as root (creating the utun interface needs root) from a copy in a root-only directory, so run `sudo nett install` again after every `brew upgrade nett` ([design/release.md](docs/design/release.md) section 4, in Chinese).
+- **Linux**: download the static build for your architecture from [Releases](https://github.com/gotry-io/nett/releases), verify its signature ([keys/](keys/README.md)), install it to `/usr/local/bin`, create this machine's keys with `sudo nett keys --dir /etc/nett`, add it on the computer that holds the site with `nett site add <name> --keys "…"` (with `--public --ipv4 <address>` when other machines connect to it), and use [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service). When the desired state changes, put it in `/etc/nett/desired.json` and run `sudo nett reload`.
 - **Commands**: `nett help` lists every command; add `--help` to any command for its usage.
 - **Check the status**: `sudo nett status` lists this node and every peer: whether it is connected, the path, round-trip time and loss, and any rejected configuration; `sudo nett status <peer>` shows one peer's candidate paths and recent switches ([design/status.md](docs/design/status.md), in Chinese).
 

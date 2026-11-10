@@ -700,17 +700,15 @@ dependencies = [
  "nett-core",
  "nett-mesh",
  "nett-relay",
+ "nett-site",
  "nett-transport",
  "nett-trust",
- "ring",
  "rustix",
  "serde",
  "serde_json",
  "tokio",
- "toml",
  "tracing",
  "tracing-subscriber",
- "zeroize",
 ]
 
 [[package]]
@@ -788,6 +786,21 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
+]
+
+[[package]]
+name = "nett-site"
+version = "0.1.5"
+dependencies = [
+ "nett-core",
+ "nett-mesh",
+ "nett-trust",
+ "ring",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "zeroize",
 ]
 
 [[package]]

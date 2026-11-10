@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+mod layout;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mesh;
 #[cfg(all(feature = "lab", target_os = "linux"))]

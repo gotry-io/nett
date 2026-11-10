@@ -5,6 +5,20 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [未发布 · Unreleased]
 
+- 站点改为用命令维护（design/site.md）：`nett site add`、`set`、`remove`、`invite`、`edge`、`routes`、`allow`、
+  `rules`、`status`。每条修改命令先列出要签名的内容（选择器展开后的地址和端口、增减的连接），确认后签名并重写
+  有变化的机器的期望状态；不是终端时要加 `--yes`。哪些机器之间建立连接由访问规则推导：规则涉及的每一对，加上每个
+  dial-only 机器与全部 public 机器；两端都是 dial-only 时提示可能连不上。移除机器时，引用它的规则一起清理。
+  `site.toml` 与 `nett site apply` 取消，0.1.x 的站点要转换一次；`nett keys` 与 `sudo nett install` 打印的是
+  `nett site add --keys` 要用的一行。
+  The site is kept with commands (design/site.md): `nett site add`, `set`, `remove`, `invite`, `edge`, `routes`,
+  `allow`, `rules`, `status`. Every change first lists what will be signed (addresses and ports after selectors
+  expand, connections added or removed), then signs once you confirm and rewrites the desired state of the
+  machines it affects; pass `--yes` when not on a terminal. Which machines connect follows from the access rules:
+  every pair a rule names, plus each dial-only machine with every public one; a pair of two dial-only machines
+  is flagged as possibly unable to connect. Removing a machine also cleans up the rules that name it.
+  `site.toml` and `nett site apply` are gone, and a 0.1.x site needs converting once; `nett keys` and
+  `sudo nett install` print the line for `nett site add --keys`.
 - 组网进程在本机保存信任存储（design/mesh.md 第 4.2 节）：第一次接受期望状态时固定这台机器的信任锚，之后
   信任锚不同的期望状态整份拒绝；撤销记录和各签名产物已生效的版本写入磁盘，重启之后旧版本的产物、被撤销的
   成员同样不接受；启动时期望状态文件被拒绝，改用最近一次整份接受的那一份。已经在运行的机器升级之后，以当时的

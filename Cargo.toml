@@ -15,6 +15,7 @@ publish = false
 nett-core = { path = "crates/nett-core" }
 nett-trust = { path = "crates/nett-trust" }
 nett-mesh = { path = "crates/nett-mesh" }
+nett-site = { path = "crates/nett-site" }
 nett-relay = { path = "crates/nett-relay" }
 nett-transport = { path = "crates/nett-transport" }
 anyhow = { version = "1.0.104", default-features = false, features = ["std"] }

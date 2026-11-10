@@ -17,7 +17,7 @@
 |---|---|---|
 | 机器：名字、可达性、公网地址与端口 | `add`、`set`、`remove` | 不签名；移除生成撤销记录 |
 | 机器的公钥 | 不接 Hub 时 `add --keys`；接了 Hub 时由机器入网时交给 Hub（hub.md 第 6 节） | 写入准入材料 |
-| 权限：Edge、宣告的网段、访问规则 | `edge`、`routes`、`allow`、`rules remove` | 放宽需要签名，收窄直接生效 |
+| 权限：Edge、宣告的网段、访问规则 | `edge`、`routes`、`allow`、`rules remove` | 放宽与收窄都以新的版本签名（第 7 节） |
 | 连接与候选路径 | 由访问规则推导（第 6 节） | 不签名 |
 
 站点的全部内容由工具保存在站点目录中（第 8 节），没有需要手工编辑的文件。规则按机器 ID 记录：移除一台机器时，引用它的规则随之清理，以后用同一个名字加入的机器不会继承它们（第 4 节）。
@@ -46,9 +46,9 @@
 
 ```
 $ nett site add edge-vps --public --ipv4 203.0.113.10 --keys "…"
-Adding edge-vps (public, 203.0.113.10:41820), 100.88.0.1
++ edge-vps (public, 203.0.113.10:41820), 100.88.0.1
 Sign? [y/N] y
-Wrote the desired state for edge-vps in ~/.config/nett/nodes/edge-vps/desired.json.
+Wrote the desired state for edge-vps in ~/.config/nett/nodes/<machine>/desired.json.
 ```
 
 - **名字**：小写字母、数字和 `-`，最长 63 个字符（status.md 第 5 节），站点内唯一。名字用于显示和在命令中指代机器，不作为身份依据；
@@ -56,14 +56,16 @@ Wrote the desired state for edge-vps in ~/.config/nett/nodes/edge-vps/desired.js
 - **端口**：`public` 机器的 WireGuard 端口默认是 `41820`，`--port` 改用别的（例如同一台主机上有两个 `public` 成员）。端口不能是组网进程自己在本机用的端口：组网地址上的探测端口 `41821`（mesh.md 第 7.2 节）和 TLS 中继的回环端口（`41830`–`41845`，mesh.md 第 5.3 节）；WireGuard 的套接字绑定本机全部地址，相同时后绑定的一方失败。`dial-only` 机器的端口由系统分配（mesh.md 第 5.5 节），不写端口和公网地址；
 - **公钥**：不接 Hub 时 `--keys` 必填，是机器上 `nett keys`（macOS 上 `sudo nett install`）打印的一行。接了 Hub 时不写：公钥由机器入网时交给 Hub（hub.md 第 6 节）；
 - **加入**时分配节点 ID 和组网地址，签名它的节点策略；地址不回收（mesh.md 第 3 节）。`set` 改可达性、公网地址与端口，这些不签名，同样先列出、确认，再送达；
-- **移除**（`remove`）是降低权限，不需要签名，立刻送达，从不因为别的原因被挡住：机器被攻破时，移除必须马上生效。工具生成身份撤销记录，所有成员删除这台机器，任何版本的签名产物都不能恢复它（auth.md 第 10.4 节）；规则中引用它的部分随之删除（第 5.1 节），并在输出中列出：
+- **移除**（`remove`）是降低权限，从不因为别的原因被挡住：机器被攻破时，移除必须马上生效。工具生成身份撤销记录，所有成员删除这台机器，任何版本的签名产物都不能恢复它（auth.md 第 10.4 节）；规则中引用它的部分随之删除（第 5.1 节），并在输出中列出：
 
   ```
   $ nett site remove nas
-  Removing nas (node_01JD…). Every member drops it.
+  - nas (node_01JD…): every member drops it
   Access rules v5 -> v6:
-    - r5  mac -> nas  22/tcp
-  Remove? [y/N] y
+    - r5  mac (100.88.0.4) -> nas (100.88.0.6)  22/tcp
+  Connections:
+    - mac - nas
+  Sign? [y/N] y
   ```
 
 - 同一个名字以后再 `add` 时是一台新机器：新的节点 ID 和地址，没有原来的规则、Edge 和网段。机器自己退出（`nett leave`，auth.md 第 8.3 节）时按同样的方式处理（hub.md 第 4 节）。
@@ -92,7 +94,7 @@ $ nett site rules remove r2
 - **编号**：`r1`、`r2`……按加入的顺序分配，删除之后不复用，所以一个编号始终指同一条规则；
 - **只有放行，没有顺序**：任何一条规则匹配就放行，规则之间互不影响，加、删一条都不用考虑位置。签名产物的格式支持拒绝规则和按顺序匹配（mesh.md 第 12 节）；签名工具只生成放行规则，按编号排列；
 - **引用的东西没了**：一条规则引用的机器被移除、Edge 或网段被去掉时，规则中引用它的选择器随之删除；一边只剩空时，整条规则删除。这些都属于收窄，列在同一次变化中；
-- 删除规则是收窄，直接生效，不需要签名；同样先列出、确认：删错一条规则会断掉正在使用的服务。
+- 删除规则是收窄，以新的版本签名（第 7 节）；同样先列出、确认：删错一条规则会断掉正在使用的服务。
 
 ### 5.2 Edge 与宣告的网段
 
@@ -103,7 +105,7 @@ $ nett site routes mac-app 172.30.0.10/32
 
 - **Edge**：写 Edge 所在容器的地址（ADR 0015，local-signing.md 第 6 节）。这台机器的节点策略带上 `edge` 角色，并分配一对 Edge 专用地址；
 - **宣告的网段**：这台机器的节点策略带上 `subnet_router` 角色，网段另签一份带版本号的产物（auth.md 第 10.5 节）。网段不能与组网网段或其他机器宣告的网段重叠；
-- 每次写这台机器的完整列表；`--none` 去掉。设置或扩大需要签名，去掉或缩小直接生效，引用它的规则按第 5.1 节清理。
+- 每次写这台机器的完整列表；`--none` 去掉。节点策略与宣告的网段随之以新的版本签名（第 7 节），去掉时引用它的规则按第 5.1 节清理。
 
 ## 6. 连接
 
@@ -130,9 +132,9 @@ $ nett site routes mac-app 172.30.0.10/32
 
 每条修改命令：读取站点状态 → 算出修改之后的状态并校验 → 列出变化 → 确认 → 签名 → 送达 → 保存站点状态。
 
-- **列出的就是要签名的内容**：选择器展开后的地址和端口、产物的版本变化、增减的连接与成员；放宽的项目以 `+` 标出，收窄的以 `-` 标出；
+- **列出的就是要签名的内容**：选择器展开后的地址和端口、产物的版本变化、增减的连接与成员；放宽的项目以 `+` 标出，收窄的以 `-` 标出，其余的变化以 `~` 标出；
 - **签名**：内容变化的产物版本加一并重新签名，不变的沿用原来的签名，节点视为幂等（auth.md 第 10.2 节）；已签的节点策略离过期不到 7 天的，换一个新版本重签（local-signing.md 第 5 节）；
-- **收窄**（移除机器、删除规则、去掉 Edge 或网段）不需要签名：工具生成撤销记录（auth.md 第 10.4 节），重发旧的签名产物不能恢复被收窄的权限；
+- **收窄**：移除机器生成身份撤销记录（auth.md 第 10.4 节）；删除规则、去掉 Edge 或网段以更高的版本重新签名。节点按版本只增不减（mesh.md 第 4.2 节），重发旧的签名产物不能恢复被收窄的权限；
 - **送达**：接了 Hub 时推送给 Hub，等待各台机器应用（hub.md 第 3.2 节）；没接时为期望状态有变化的每台机器重写 `nodes/<机器>/desired.json`，列出这些机器和应用的方法（local-signing.md 第 5 节）；
 - 校验失败时整条命令不做任何改动，说明哪里不对；
 - 站点目录加锁，同一时间只有一个修改命令在运行。
@@ -144,7 +146,14 @@ $ nett site init
 Created a site in ~/.config/nett.
 recovery.pk8 signs everything in this network. Back it up offline now:
 without it, every machine has to leave and join again.
-Next: nett site add <name>, or nett site link <code> after setting up a Hub.
+
+Next, for each machine:
+  1. On the machine, create its keys:
+       macOS  sudo nett install
+       Linux  sudo nett keys --dir /etc/nett
+  2. Here: nett site add <name> --keys "<the printed line>"
+     (with --public --ipv4 <address> when other machines connect to it)
+  3. Allow what may connect: nett site allow <from> <to> <ports>
 ```
 
 - `init` 建立目录时权限设为 `0700`。组网网段在建立时确定，之后不能改：IPv4 为 `100.88.0.0/16`，IPv6 为随机生成的 ULA `/48`（mesh.md 第 3 节）；

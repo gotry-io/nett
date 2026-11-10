@@ -14,6 +14,8 @@ use nett_mesh::status::{
 };
 use nett_trust::encoding::Timestamp;
 
+use crate::layout::{key_values, table};
+
 pub const USAGE: &str = "usage: nett status [<peer>] [--json] [--socket <path>]";
 pub const RELOAD_USAGE: &str = "usage: nett reload [--socket <path>]\n\n\
 On Linux, run it with sudo. In a container member: docker exec <container> /nett reload";
@@ -556,39 +558,6 @@ fn ago(t: Timestamp, now: Timestamp) -> String {
         3_600..86_400 => format!("{}h ago", s / 3_600),
         _ => format!("{}d ago", s / 86_400),
     }
-}
-
-/// 键值两列，键按最长的对齐。
-fn key_values(rows: &[(&str, String)]) -> String {
-    let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-    rows.iter()
-        .map(|(k, v)| format!("{k:width$}  {v}\n"))
-        .collect()
-}
-
-/// 按列对齐，列之间两个空格，最后一列不补空格。
-fn table<const N: usize>(rows: &[[String; N]]) -> String {
-    let mut widths = [0usize; N];
-    for row in rows {
-        for (w, cell) in widths.iter_mut().zip(row) {
-            *w = (*w).max(cell.chars().count());
-        }
-    }
-    let mut out = String::new();
-    for row in rows {
-        let mut line = String::new();
-        for (i, cell) in row.iter().enumerate() {
-            if i + 1 == N {
-                line.push_str(cell);
-            } else {
-                let pad = widths[i] - cell.chars().count();
-                write!(line, "{cell}{}  ", " ".repeat(pad)).ok();
-            }
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out
 }
 
 #[cfg(test)]

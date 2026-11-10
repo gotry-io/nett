@@ -203,7 +203,7 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
         println!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
         println!(
-            "Add the keys line above to site.toml, run `nett site apply`, then run `sudo nett install` again."
+            "Once the machine is in the site, run `sudo nett install` again: it imports its desired state."
         );
         println!(
             "If the site is on another machine, use `sudo nett install --config <desired.json>`."
@@ -217,7 +217,7 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
             concat!(
                 "Started the mesh service.\n",
                 "Logs: log show --last 1h --predicate 'process == \"nett\"'\n",
-                "Run `sudo nett install` again after `nett site apply` or `brew upgrade nett`."
+                "Run `sudo nett install` again after the site changes or `brew upgrade nett`."
             ),
         )
     } else if plist_changed {
@@ -302,7 +302,7 @@ mod passwd {
 pub const INSTALL_USAGE: &str = "usage: sudo nett install [--config <desired-state.json>]\n\n\
 Creates this machine's keys, copies nett into a root-only directory, imports this machine's\n\
 desired state from the site directory (or --config) and starts the service.\n\
-Run it again after `nett site apply` or `brew upgrade nett`.";
+Run it again after the site changes or `brew upgrade nett`.";
 pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall";
 
 /// `sudo nett install [--config <期望状态>]`。
