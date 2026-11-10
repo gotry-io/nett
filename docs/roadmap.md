@@ -46,7 +46,7 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
   - 先做签名和生成私钥的页面：初始化（注册 passkey，离线保存恢复密钥和备份密钥）、添加节点（浏览器生成入网密钥）、添加设备（浏览器生成设备私钥，导出配置和二维码）、变更的审批与签名
   - 再做查看与管理：节点、成员与设备、访问规则；每对节点的当前路径、传输方式、延迟、丢包，先用表格呈现，拓扑图放在 M1 后段、组网稳定之后
   - 中英双语
-- OpenAPI（覆盖本阶段的资源）；`nett status`、`nett doctor`、`nett leave`、`nett whois`，命令行输出中英双语；排障手册（中英双语）
+- OpenAPI（覆盖本阶段的资源）；`nett status`、`nett doctor`、`nett leave`、`nett whois`（命令行只用英文，architecture.md 第 14.3 节）；排障手册（中英双语）
 - 首批平台：Linux、Synology DSM、macOS（原生成员；容器内成员可选）、Home Assistant OS（加载项）
 - 可用性：至少两个可用中继（位于不同主机）；`dial-only` 节点至少连接两个 `public` 节点
 

@@ -47,7 +47,7 @@ struct LabArgs {
 
 const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key>\n       \
 nett mesh keys --dir <directory>\n       \
-sudo nett mesh install [--config <desired-state.json>] | uninstall    (macOS service, design/release.md section 4)";
+sudo nett mesh install [--config <desired-state.json>] | uninstall    (macOS service)";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
 [--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
@@ -151,11 +151,10 @@ pub(crate) fn print_keys(
     (mesh, identity): (X25519PublicKey, X25519PublicKey),
 ) {
     println!(
-        "{}",
-        crate::text::NODE_KEYS
-            .get()
-            .replace("{dir}", &dir.display().to_string())
+        "Private keys are in {} (mode 0600) and stay on this machine.",
+        dir.display()
     );
+    println!("Add this line to the node's entry in site.toml:");
     println!("keys = \"{mesh} {identity}\"");
 }
 

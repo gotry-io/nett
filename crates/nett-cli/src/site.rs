@@ -24,8 +24,6 @@ use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 use serde::{Deserialize, Serialize};
 
-use crate::text;
-
 const SITE_FILE: &str = "site.toml";
 const STATE_FILE: &str = "state.json";
 const RECOVERY_FILE: &str = "recovery.pk8";
@@ -187,11 +185,18 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         ["init"] => {
             init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN))?;
             println!(
-                "{}",
-                text::SITE_CREATED
-                    .get()
-                    .replace("{dir}", &dir.display().to_string())
-                    .replace("{build}", &build_command)
+                "Created a site in {}.
+
+recovery.pk8 is the recovery key, the site's only trust anchor. Keep an offline copy:
+without it, the site has to be created again and every node enrolled again.
+
+Next:
+  1. On each node, create its keys:
+       macOS  sudo nett mesh install
+       Linux  nett mesh keys --dir <directory>
+  2. Add the printed keys line to that node's entry in site.toml.
+  3. Run `{build_command}`.",
+                dir.display()
             );
             Ok(())
         }
@@ -272,10 +277,8 @@ fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
         0o644,
     )?;
     let site = format!(
-        "# {}\n[mesh]\nipv4 = \"{}\"\nipv6 = \"{}\"\nlisten_port = {DEFAULT_LISTEN_PORT}\n",
-        text::SITE_TEMPLATE.get(),
-        prefixes.ipv4,
-        prefixes.ipv6
+        "# nett site. The mesh prefixes cannot change after the site is created.\n[mesh]\nipv4 = \"{}\"\nipv6 = \"{}\"\nlisten_port = {DEFAULT_LISTEN_PORT}\n",
+        prefixes.ipv4, prefixes.ipv6
     );
     write_new(&dir.join(SITE_FILE), site.as_bytes(), 0o644)?;
     Ok(())
@@ -549,11 +552,16 @@ fn build(dir: &Path) -> anyhow::Result<()> {
     std::fs::rename(&tmp, &state_path)
         .with_context(|| format!("updating {}", state_path.display()))?;
     println!(
-        "{}",
-        text::SITE_BUILT
-            .get()
-            .replace("{n}", &site.nodes.len().to_string())
-            .replace("{dir}", &out.display().to_string())
+        "Built the desired state for {} in {}/<node>/desired.json.
+The files contain no private keys. To apply one on its node:
+  Linux      copy it to /etc/nett/desired.json, then run `systemctl reload nett-mesh`
+  macOS      sudo nett mesh install --config <desired.json>
+  container  replace the mounted desired.json, then run `docker kill -s HUP <container>`",
+        match site.nodes.len() {
+            1 => "1 node".to_owned(),
+            n => format!("{n} nodes"),
+        },
+        out.display()
     );
     Ok(())
 }

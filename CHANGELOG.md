@@ -3,6 +3,11 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
+## [Unreleased]
+
+- 命令行的提示和错误只用英文，写得更短。
+  Command-line messages and errors are in English only, and shorter.
+
 ## [0.1.3] - 2026-11-10
 
 - `dial-only` 节点的 WireGuard 端口由系统分配：站点描述中不再为它写 `listen_port`、`ipv4`、`ipv6`，

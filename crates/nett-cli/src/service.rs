@@ -12,8 +12,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 
-use crate::text;
-
 const DIR: &str = "/Library/Application Support/nett";
 const BINARY: &str = "/Library/Application Support/nett/nett";
 const DESIRED: &str = "/Library/Application Support/nett/desired.json";
@@ -78,7 +76,7 @@ fn newsyslog() -> String {
 
 fn require_root() -> anyhow::Result<()> {
     if !rustix::process::geteuid().is_root() {
-        bail!("{}", text::SERVICE_NEEDS_ROOT.get());
+        bail!("the mesh service runs as root; run this command with sudo");
     }
     Ok(())
 }
@@ -178,12 +176,7 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
         }
         None => match &site {
             Some(site) => crate::site::find_desired_for(site, &keys.0)?.map(|(path, bytes)| {
-                println!(
-                    "{}",
-                    text::SERVICE_FOUND_DESIRED
-                        .get()
-                        .replace("{path}", &path.display().to_string())
-                );
+                println!("Using {}", path.display());
                 bytes
             }),
             None => None,
@@ -207,12 +200,12 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
 
     if !Path::new(DESIRED).exists() {
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
+        println!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
         println!(
-            "{}",
-            text::SERVICE_INSTALLED_NOT_STARTED
-                .get()
-                .replace("{dir}", DIR)
-                .replace("{site}", &site)
+            "Add the keys line above to site.toml, run `nett site build`, then run `sudo nett mesh install` again."
+        );
+        println!(
+            "If the site is on another machine, use `sudo nett mesh install --config <desired.json>`."
         );
         return Ok(());
     }
@@ -220,33 +213,31 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     let (ok, message) = if !loaded()? {
         (
             launchctl(&["bootstrap", "system", PLIST])?,
-            &text::SERVICE_STARTED,
+            concat!(
+                "Started the mesh service.\n",
+                "Logs: log show --last 1h --predicate 'process == \"nett\"'\n",
+                "Run `sudo nett mesh install` again after `nett site build` or `brew upgrade nett`."
+            ),
         )
     } else if binary_changed || plist_changed {
         // 换用新的副本：重启
         (
             launchctl(&["kickstart", "-k", &target])?,
-            &text::SERVICE_RESTARTED,
+            "Restarted the mesh service with the new binary.",
         )
     } else if desired_changed {
         // 只有期望状态变了：重新读取，不重启，进行中的连接不中断
         (
             launchctl(&["kill", "HUP", &target])?,
-            &text::SERVICE_RELOADED,
+            "Reloaded the desired state. The service was not restarted.",
         )
     } else {
-        (true, &text::SERVICE_UNCHANGED)
+        (true, "The mesh service is running. Nothing changed.")
     };
     if !ok {
         bail!("launchctl could not start {LABEL}; see {LOG_DIR}/mesh.log");
     }
-    println!(
-        "{}",
-        message
-            .get()
-            .replace("{label}", LABEL)
-            .replace("{binary}", BINARY)
-    );
+    println!("{message}");
     Ok(())
 }
 
@@ -310,7 +301,7 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(e) => return Err(e).with_context(|| format!("removing {path}")),
         }
     }
-    println!("{}", text::SERVICE_UNINSTALLED.get().replace("{dir}", DIR));
+    println!("Removed the mesh service. Keys and desired state remain in {DIR}.");
     Ok(())
 }
 
