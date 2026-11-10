@@ -383,9 +383,8 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- enroll <一次性 
 | `nett status` | 本机状态：模块、Hub 连接、组网当前路径 |
 | `nett doctor` | 自动诊断，给出通俗的说明和处理建议 |
 | `nett upgrade` | 手动升级；默认由 Hub 经 `release` 分区推送，校验发布签名、拒绝降级后替换，失败自动回滚 |
-| `nett leave` | 退出组网并卸载，通知 Hub 把本节点标记为已移除（降低权限，不需要签名） |
+| `nett leave` | 退出这张网（root）：通知 Hub，拆掉组网接口，删除本机的密钥、信任锚和期望状态，卸载服务；之后可以加入任何网（design/auth.md 第 8.3 节） |
 | `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
-| `nett trust reset` | 恢复密钥也丢失时，重置本机的信任锚（需要 root） |
 | `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
 | `nett whois <地址>` | 按本机已验证的准入材料，查询一个组网地址属于哪个节点、设备或 Edge |
 | `nett mesh keys`、`nett site` | 接入 Hub 之前：在节点上生成密钥；在用户电脑上签名并生成各节点的期望状态文件（design/local-signing.md） |
