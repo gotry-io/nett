@@ -164,7 +164,6 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     ensure_dir(DIR, 0o700)?;
     ensure_dir(LOG_DIR, 0o700)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
-    crate::mesh::print_keys(Path::new(DIR), keys);
 
     let site = invoking_site_dir();
     let imported = match config {
@@ -198,7 +197,9 @@ pub fn install(config: Option<&Path>) -> anyhow::Result<()> {
     let plist_changed = replace_if_changed(Path::new(PLIST), plist().as_bytes(), 0o644)?;
     replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
+    // 公钥那一行只在本机还没有加进站点时需要
     if !Path::new(DESIRED).exists() {
+        crate::mesh::print_keys(Path::new(DIR), keys);
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
         println!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
         println!(
