@@ -389,7 +389,7 @@ mod tests {
         let mut mac = MacTun::open().expect("routing socket");
         let spec = InterfaceSpec {
             name: "nett0".into(),
-            listen_port: 0,
+            listen_port: None,
             mtu: MESH_MTU,
             addresses: vec![
                 InterfaceAddress {

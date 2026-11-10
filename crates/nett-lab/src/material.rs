@@ -11,7 +11,9 @@ use anyhow::{Context as _, ensure};
 use nett_core::id::NodeId;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
-use nett_mesh::config::{Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken};
+use nett_mesh::config::{
+    Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken, Reachability,
+};
 use nett_relay::lab::{MemberDoc, RelayConfig, TlsDoc};
 use nett_trust::admission::{
     AdmissionMaterial, AdmissionProof, AdmissionProofDoc, AdmissionProofKind,
@@ -64,7 +66,7 @@ impl Addresses for Topology {
     }
 }
 
-/// 组网进程的 WireGuard 端口（design/mesh.md 第 4 节的默认值）。
+/// `public` 节点的 WireGuard 端口（design/mesh.md 第 5.5 节的默认值）。
 pub const LISTEN_PORT: u16 = 41820;
 /// 实验中 nett-relay 的中继端口。
 pub const RELAY_PORT: u16 = 41900;
@@ -514,10 +516,17 @@ pub fn generate(
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
                         None if c == "punch" => Some(Candidate::Punch),
-                        // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址
-                        None if c == "direct6" => Some(Candidate::Direct {
-                            endpoint: SocketAddr::new(addresses.ipv6(other)?.into(), LISTEN_PORT),
-                        }),
+                        // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址。
+                        // 只指向 public 节点：dial-only 节点的端口由系统分配，由它主动连过来
+                        None if c == "direct6" => {
+                            let public = topo.node(other)?.reachability == Reachability::Public;
+                            public.then_some(Candidate::Direct {
+                                endpoint: SocketAddr::new(
+                                    addresses.ipv6(other)?.into(),
+                                    LISTEN_PORT,
+                                ),
+                            })
+                        }
                         None => Some(Candidate::Direct {
                             endpoint: SocketAddr::new(
                                 addresses.public_ipv4(other)?.into(),
@@ -536,7 +545,8 @@ pub fn generate(
         let doc = DesiredMeshDoc {
             node_id: nodes[i].node_id.clone(),
             reachability: node.reachability,
-            listen_port: LISTEN_PORT,
+            // 与站点工具相同：public 节点用固定端口，dial-only 节点由系统分配（design/mesh.md 第 5.5 节）
+            listen_port: (node.reachability == Reachability::Public).then_some(LISTEN_PORT),
             prefixes: MeshPrefixes {
                 ipv4: topo.mesh.ipv4,
                 ipv6: topo.mesh.ipv6,

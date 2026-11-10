@@ -31,6 +31,14 @@ pub enum Event {
     PeersApplied {
         peers: usize,
     },
+    /// 组网接口就绪，或 WireGuard 端口变了：期望状态不带端口时由系统分配（design/mesh.md 第 5.5 节）。
+    InterfaceReady {
+        listen_port: u16,
+    },
+    /// 交给传输适配进程的配置变了（design/mesh.md 第 5.3 节；实验构建写到本机文件）。
+    TransportConfigChanged {
+        config: nett_core::transport::TransportConfig,
+    },
     /// 数据面操作失败，保持现状并在下一份期望状态时重试。
     DataPlaneFailed {
         reason: String,
@@ -122,6 +130,14 @@ pub fn log_event(event: &Event) {
         },
         Event::MemberRemoved { node_id } => tracing::info!(%node_id, "member removed"),
         Event::PeersApplied { peers } => tracing::info!(peers, "peers applied"),
+        Event::InterfaceReady { listen_port } => {
+            tracing::info!(listen_port, "mesh interface ready")
+        }
+        Event::TransportConfigChanged { config } => tracing::debug!(
+            wireguard_port = config.wireguard_port,
+            targets = config.targets.len(),
+            "transport config changed"
+        ),
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),
         Event::AccessRulesRejected { reason } => {

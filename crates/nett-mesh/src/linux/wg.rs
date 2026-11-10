@@ -106,19 +106,22 @@ pub(crate) fn resolve_family(sock: &mut Socket) -> Result<u16, NlError> {
     Err(NlError::Malformed("no family id in reply"))
 }
 
-/// 设置私钥和监听端口。私钥与当前相同时内核不做任何改动，会话不受影响。
+/// 设置私钥和监听端口。私钥与当前相同时内核不做任何改动，会话不受影响。端口为空时不改：新建的接口
+/// 启用时由内核分配；`Some(0)` 让内核重新分配一个。
 pub(crate) fn set_device(
     sock: &mut Socket,
     family: u16,
     ifindex: u32,
     private_key: &[u8; 32],
-    listen_port: u16,
+    listen_port: Option<u16>,
 ) -> Result<(), NlError> {
     let mut m = Message::new(family, NLM_F_ACK);
     m.fixed(&genl_header(WG_CMD_SET_DEVICE, WG_GENL_VERSION));
     m.attr_u32(WGDEVICE_A_IFINDEX, ifindex);
     m.attr(WGDEVICE_A_PRIVATE_KEY, private_key);
-    m.attr_u16(WGDEVICE_A_LISTEN_PORT, listen_port);
+    if let Some(port) = listen_port {
+        m.attr_u16(WGDEVICE_A_LISTEN_PORT, port);
+    }
     sock.request(m).map(drop)
 }
 

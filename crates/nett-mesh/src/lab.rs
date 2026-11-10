@@ -6,9 +6,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 
 use crate::clock::Clock;
-use crate::config::{ConfigError, DesiredMesh};
 use crate::event::{Event, EventSink, log_event};
-use crate::run::Applier;
 
 /// 每个事件写一行 JSON，同时写日志。写文件失败只记日志，不影响组网。
 pub struct JsonLinesSink {
@@ -67,50 +65,36 @@ impl<C: Clock> Clock for LabClock<C> {
     }
 }
 
-/// 应用期望状态之前，把传输适配进程的配置写到本机文件（design/mesh.md 第 5.3 节）：原型中代替组网进程与
-/// 传输适配进程之间的本机接口（ADR 0013）。内容不变时不重写。
-pub struct TransportConfigWriter<A> {
-    inner: A,
+/// 组网进程交出传输适配进程的配置时（[`Event::TransportConfigChanged`]，在配置对端之前），写到本机文件
+/// （design/mesh.md 第 5.3 节）：原型中代替组网进程与传输适配进程之间的本机接口（ADR 0013）。
+pub struct TransportConfigWriter<E> {
+    inner: E,
     path: PathBuf,
-    written: Option<Vec<u8>>,
 }
 
-impl<A> TransportConfigWriter<A> {
-    pub fn new(inner: A, path: PathBuf) -> Self {
-        Self {
-            inner,
-            path,
-            written: None,
-        }
-    }
-
-    pub fn into_inner(self) -> A {
-        self.inner
+impl<E> TransportConfigWriter<E> {
+    pub fn new(inner: E, path: PathBuf) -> Self {
+        Self { inner, path }
     }
 }
 
-impl<A: Applier> Applier for TransportConfigWriter<A> {
-    fn apply(&mut self, desired: Result<DesiredMesh, ConfigError>) {
-        if let Ok(d) = &desired {
-            match serde_json::to_vec_pretty(&d.transport) {
-                Ok(bytes) if self.written.as_ref() != Some(&bytes) => {
-                    // 先写临时文件再改名：传输适配进程读到的总是一份完整的配置
-                    let tmp = self.path.with_extension("tmp");
-                    let result = std::fs::write(&tmp, &bytes)
-                        .and_then(|()| std::fs::rename(&tmp, &self.path));
-                    match result {
-                        Ok(()) => self.written = Some(bytes),
-                        Err(error) => tracing::warn!(
-                            %error,
-                            path = %self.path.display(),
-                            "writing the transport config failed"
-                        ),
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "encoding the transport config failed"),
+impl<E: EventSink> EventSink for TransportConfigWriter<E> {
+    fn emit(&mut self, event: Event) {
+        if let Event::TransportConfigChanged { config } = &event {
+            // 先写临时文件再改名：传输适配进程读到的总是一份完整的配置
+            let tmp = self.path.with_extension("tmp");
+            let result = serde_json::to_vec_pretty(config)
+                .map_err(std::io::Error::other)
+                .and_then(|bytes| std::fs::write(&tmp, bytes))
+                .and_then(|()| std::fs::rename(&tmp, &self.path));
+            if let Err(error) = result {
+                tracing::warn!(
+                    %error,
+                    path = %self.path.display(),
+                    "writing the transport config failed"
+                );
             }
         }
-        self.inner.apply(desired);
+        self.inner.emit(event);
     }
 }

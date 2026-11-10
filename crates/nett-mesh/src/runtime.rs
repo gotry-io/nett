@@ -92,7 +92,7 @@ impl Runtime {
                         Ok(Msg::Desired(desired)) => match *desired {
                             Ok(desired) => {
                                 worker.engine.apply(&desired, &mut worker.events);
-                                worker.ensure_sockets(&desired);
+                                worker.ensure_sockets();
                             }
                             Err(e) => worker.events.emit(Event::ConfigRejected {
                                 reason: e.to_string(),
@@ -166,15 +166,15 @@ struct Worker<D, E> {
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
     /// 组网接口就绪后创建探测用的套接字和接收线程（只创建一次）。
-    fn ensure_sockets(&mut self, desired: &DesiredMesh) {
+    fn ensure_sockets(&mut self) {
         if self.sockets.is_some() {
             return;
         }
         let Some(interface) = self.engine.interface() else {
             return;
         };
-        let addrs: Vec<IpAddr> = interface.addresses.iter().map(|a| a.addr).collect();
-        match self.open(&addrs, desired.listen_port) {
+        let addrs: Vec<IpAddr> = interface.spec.addresses.iter().map(|a| a.addr).collect();
+        match self.open(&addrs, interface.listen_port) {
             Ok(sockets) => self.sockets = Some(sockets),
             Err(e) => self.events.emit(Event::DataPlaneFailed {
                 reason: format!("opening probe sockets: {e}"),

@@ -25,7 +25,8 @@ mod dataplane {
     use super::worker::{Command, ProbeQueue, ProbeSender, Worker};
     use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
     use crate::dataplane::{
-        DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, PeerSpec, PeerStat,
+        DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
+        automatic_port,
     };
     use crate::key::PrivateKey;
 
@@ -56,6 +57,8 @@ mod dataplane {
         spec: InterfaceSpec,
         public_key: X25519PublicKey,
         socket: UdpSocket,
+        /// WireGuard 套接字实际绑定的端口。
+        listen_port: u16,
         probes: Option<ProbeQueue>,
     }
 
@@ -76,6 +79,23 @@ mod dataplane {
         /// WireGuard 端口的本地地址（接口就绪之后）。
         pub fn wireguard_addr(&self) -> Option<SocketAddr> {
             self.running.as_ref()?.socket.local_addr().ok()
+        }
+
+        /// 绑定 WireGuard 端口；不带端口时由系统分配（[`automatic_port`]）。
+        fn bind_wireguard(&self, port: Option<u16>) -> Result<(UdpSocket, u16), DataPlaneError> {
+            let bind = |port| {
+                let os = |source| DataPlaneError::Os {
+                    op: "bind the WireGuard port",
+                    source,
+                };
+                let socket = self.platform.bind_underlay(port).map_err(os)?;
+                let bound = socket.local_addr().map_err(os)?.port();
+                Ok((socket, bound))
+            };
+            match port {
+                Some(port) => bind(port),
+                None => automatic_port(|| bind(0)),
+            }
         }
 
         fn worker(&self) -> Result<&Worker, DataPlaneError> {
@@ -118,12 +138,19 @@ mod dataplane {
             &mut self,
             spec: &InterfaceSpec,
             private_key: &PrivateKey,
-        ) -> Result<X25519PublicKey, DataPlaneError> {
+        ) -> Result<InterfaceState, DataPlaneError> {
             if let Some(running) = &mut self.running {
+                let state = InterfaceState {
+                    public_key: running.public_key,
+                    listen_port: running.listen_port,
+                };
                 if running.spec == *spec {
-                    return Ok(running.public_key);
+                    return Ok(state);
                 }
-                if running.spec.listen_port != spec.listen_port || running.spec.name != spec.name {
+                // 不带端口时沿用当前的端口
+                if spec.listen_port.is_some_and(|p| p != running.listen_port)
+                    || running.spec.name != spec.name
+                {
                     return Err(DataPlaneError::Unsupported(
                         "changing the WireGuard port or interface name without a restart",
                     ));
@@ -132,16 +159,10 @@ mod dataplane {
                 let addrs = local(spec);
                 running.worker.call(|r| Command::SetLocal(addrs, r))?;
                 running.spec = spec.clone();
-                return Ok(running.public_key);
+                return Ok(state);
             }
             let tun = self.platform.create(spec)?;
-            let socket = self
-                .platform
-                .bind_underlay(spec.listen_port)
-                .map_err(|source| DataPlaneError::Os {
-                    op: "bind the WireGuard port",
-                    source,
-                })?;
+            let (socket, listen_port) = self.bind_wireguard(spec.listen_port)?;
             let mut plane = Plane::new(Gotatun::new(private_key));
             plane.set_local(local(spec));
             let os = |op| move |source| DataPlaneError::Os { op, source };
@@ -156,9 +177,13 @@ mod dataplane {
                 spec: spec.clone(),
                 public_key,
                 socket,
+                listen_port,
                 probes: Some(probes),
             });
-            Ok(public_key)
+            Ok(InterfaceState {
+                public_key,
+                listen_port,
+            })
         }
 
         fn sync_peers(&mut self, peers: &[PeerSpec]) -> Result<(), DataPlaneError> {
@@ -321,25 +346,41 @@ mod dataplane {
             let private = PrivateKey::generate().expect("key");
             let mesh: IpAddr = mesh.parse().expect("ip");
             let mut plane = UserspaceDataPlane::new(Fake::default());
-            let spec = InterfaceSpec {
+            let mut spec = InterfaceSpec {
                 name: "nett0".into(),
-                listen_port: 0,
+                listen_port: None,
                 mtu: MESH_MTU,
                 addresses: vec![InterfaceAddress {
                     addr: mesh,
                     prefix_len: 16,
                 }],
             };
-            let key = plane.ensure_interface(&spec, &private).expect("interface");
-            assert_eq!(key, private.public_key());
-            // 同一份接口描述再来一次：沿用
-            plane.ensure_interface(&spec, &private).expect("again");
-            let host = plane.platform.host.take().expect("tun host side");
+            let state = plane.ensure_interface(&spec, &private).expect("interface");
+            assert_eq!(state.public_key, private.public_key());
             let at = plane.wireguard_addr().expect("bound");
+            // 不带端口：系统分配，报告实际绑定的端口
+            assert_eq!(state.listen_port, at.port());
+            // 同一份接口描述再来一次：沿用
+            assert_eq!(
+                plane.ensure_interface(&spec, &private).expect("again"),
+                state
+            );
+            // 期望状态写上当前的端口：沿用；换成别的端口要重启
+            spec.listen_port = Some(state.listen_port);
+            assert_eq!(
+                plane.ensure_interface(&spec, &private).expect("same port"),
+                state
+            );
+            spec.listen_port = Some(state.listen_port.wrapping_add(1));
+            assert!(matches!(
+                plane.ensure_interface(&spec, &private),
+                Err(DataPlaneError::Unsupported(_))
+            ));
+            let host = plane.platform.host.take().expect("tun host side");
             Node {
                 plane,
                 host,
-                key,
+                key: state.public_key,
                 mesh,
                 at,
             }

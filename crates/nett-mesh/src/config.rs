@@ -24,7 +24,9 @@ use crate::probe::TUNNEL_PROBE_PORT;
 pub struct DesiredMeshDoc {
     pub node_id: NodeId,
     pub reachability: Reachability,
-    pub listen_port: u16,
+    /// WireGuard 端口。`public` 节点必须有；`dial-only` 节点不带时由系统分配（design/mesh.md 第 5.5 节）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
     pub prefixes: MeshPrefixes,
     pub trust_anchors: TrustAnchorsDoc,
     pub members: Vec<AdmissionMaterial>,
@@ -92,6 +94,12 @@ pub enum Candidate {
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
+/// 组网进程和传输适配进程自己在本机用的端口：组网地址上的探测端口与 TLS 中继的回环端口。WireGuard 的
+/// 套接字绑定本机全部地址，用了其中一个时后绑定的一方失败（design/local-signing.md 第 4 节）。
+pub fn is_reserved_port(port: u16) -> bool {
+    port == TUNNEL_PROBE_PORT || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
+}
+
 /// 成员与中继之间的探测令牌。`Debug` 不输出内容（硬性规则 10）。
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -116,8 +124,10 @@ pub enum ConfigError {
     Document(String),
     #[error(transparent)]
     Anchors(#[from] AnchorsError),
-    #[error("listen port must not be 0")]
+    #[error("listen port must not be 0; leave it out to have the system pick one")]
     ListenPort,
+    #[error("a public node needs a listen port: other members dial it")]
+    PublicWithoutPort,
     #[error(
         "listen port {0} is one nett itself uses on this host: {TUNNEL_PROBE_PORT} for probes on mesh \
          addresses and {TLS_LOOPBACK_BASE}-{last} for TLS relays on loopback; pick another WireGuard port",
@@ -139,7 +149,7 @@ pub enum ConfigError {
 pub struct DesiredMesh {
     pub node_id: NodeId,
     pub reachability: Reachability,
-    pub listen_port: u16,
+    pub listen_port: Option<u16>,
     pub prefixes: MeshPrefixes,
     pub anchors: TrustAnchors,
     pub members: Vec<AdmissionMaterial>,
@@ -147,8 +157,8 @@ pub struct DesiredMesh {
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
-    /// 交给传输适配进程的配置，与 [`DesiredMesh::tls_endpoints`] 同出一处。
-    pub transport: TransportConfig,
+    /// 传输适配进程的 TLS 目标，与 [`DesiredMesh::tls_endpoints`] 同出一处。
+    tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
 }
 
@@ -158,6 +168,14 @@ impl DesiredMesh {
         &self.tls_endpoints
     }
 
+    /// 交给传输适配进程的配置：WireGuard 端口取接口实际监听的端口（可能由系统分配）。
+    pub fn transport(&self, wireguard_port: u16) -> TransportConfig {
+        TransportConfig {
+            wireguard_port,
+            targets: self.tls_targets.clone(),
+        }
+    }
+
     pub fn from_json(bytes: &[u8]) -> Result<Self, ConfigError> {
         let doc: DesiredMeshDoc =
             serde_json::from_slice(bytes).map_err(|e| ConfigError::Document(e.to_string()))?;
@@ -165,14 +183,15 @@ impl DesiredMesh {
     }
 
     pub fn from_doc(doc: DesiredMeshDoc) -> Result<Self, ConfigError> {
-        if doc.listen_port == 0 {
-            return Err(ConfigError::ListenPort);
-        }
-        // WireGuard 的套接字绑定全部地址，与组网进程和传输适配进程自己的端口相同时，后绑定的一方失败
-        if doc.listen_port == TUNNEL_PROBE_PORT
-            || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&doc.listen_port)
-        {
-            return Err(ConfigError::ListenPortInUse(doc.listen_port));
+        match doc.listen_port {
+            Some(0) => return Err(ConfigError::ListenPort),
+            Some(port) if is_reserved_port(port) => {
+                return Err(ConfigError::ListenPortInUse(port));
+            }
+            None if doc.reachability == Reachability::Public => {
+                return Err(ConfigError::PublicWithoutPort);
+            }
+            _ => {}
         }
         for prefix in [doc.prefixes.ipv4, doc.prefixes.ipv6] {
             if !is_sensible_mesh_prefix(&prefix) {
@@ -229,10 +248,7 @@ impl DesiredMesh {
             paths,
             access_rules: doc.access_rules,
             advertised_routes: doc.advertised_routes,
-            transport: TransportConfig {
-                wireguard_port: doc.listen_port,
-                targets,
-            },
+            tls_targets: targets,
             tls_endpoints,
         })
     }
@@ -290,21 +306,33 @@ mod tests {
     fn listen_port_avoids_the_ports_nett_uses_itself() {
         use crate::testutil::Mesh;
         let mesh = Mesh::new(&[1]);
-        let with_port = |port| {
+        let with_port = |reachability, port| {
             let mut doc = mesh.desired(1, vec![]);
+            doc.reachability = reachability;
             doc.listen_port = port;
             DesiredMesh::from_doc(doc).map(|d| d.listen_port)
         };
-        assert_eq!(with_port(0).err(), Some(ConfigError::ListenPort));
-        for port in [TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, TLS_LOOPBACK_LAST] {
+        for reachability in [Reachability::Public, Reachability::DialOnly] {
             assert_eq!(
-                with_port(port).err(),
-                Some(ConfigError::ListenPortInUse(port))
+                with_port(reachability, Some(0)).err(),
+                Some(ConfigError::ListenPort)
             );
+            for port in [TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, TLS_LOOPBACK_LAST] {
+                assert_eq!(
+                    with_port(reachability, Some(port)).err(),
+                    Some(ConfigError::ListenPortInUse(port))
+                );
+            }
+            for port in [41820, 41822, TLS_LOOPBACK_BASE - 1, TLS_LOOPBACK_LAST + 1] {
+                assert_eq!(with_port(reachability, Some(port)), Ok(Some(port)));
+            }
         }
-        for port in [41820, 41822, TLS_LOOPBACK_BASE - 1, TLS_LOOPBACK_LAST + 1] {
-            assert_eq!(with_port(port), Ok(port));
-        }
+        // 没有端口：dial-only 由系统分配，public 不行（别人按端口连它）
+        assert_eq!(with_port(Reachability::DialOnly, None), Ok(None));
+        assert_eq!(
+            with_port(Reachability::Public, None).err(),
+            Some(ConfigError::PublicWithoutPort)
+        );
     }
 
     #[test]
@@ -336,9 +364,10 @@ mod tests {
             (port(8), port(9)),
             (TLS_LOOPBACK_BASE, TLS_LOOPBACK_BASE + 1)
         );
-        assert_eq!(desired.transport.targets.len(), 2);
-        assert_eq!(desired.transport.wireguard_port, 41820);
-        assert_eq!(desired.transport.validate(), Ok(()));
+        let transport = desired.transport(51000);
+        assert_eq!(transport.targets.len(), 2);
+        assert_eq!(transport.wireguard_port, 51000);
+        assert_eq!(transport.validate(), Ok(()));
         // 同一个中继给了两个不同的指纹
         doc.paths[1].candidates = vec![tls(9, 7)];
         assert!(matches!(

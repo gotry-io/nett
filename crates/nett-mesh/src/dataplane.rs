@@ -16,10 +16,37 @@ pub const MESH_MTU: u32 = 1280;
 /// 组网接口的名称。
 pub const INTERFACE_NAME: &str = "nett0";
 
+/// 系统分配的端口是保留端口（[`crate::config::is_reserved_port`]）时，最多重新分配几次。
+const PORT_ATTEMPTS: usize = 8;
+
+/// 期望状态不带端口时由系统分配 WireGuard 端口（design/mesh.md 第 5.5 节）。`assign` 取得一个端口与持有
+/// 它的句柄；分到组网进程自己用的端口（Linux 的临时端口范围包含它们）时再取一次。分到保留端口的句柄留到
+/// 选定之后再释放，系统不会把同一个端口再分一次。
+pub(crate) fn automatic_port<T>(
+    mut assign: impl FnMut() -> Result<(T, u16), DataPlaneError>,
+) -> Result<(T, u16), DataPlaneError> {
+    let mut reserved = Vec::new();
+    for _ in 0..=PORT_ATTEMPTS {
+        let (handle, port) = assign()?;
+        if !crate::config::is_reserved_port(port) {
+            return Ok((handle, port));
+        }
+        reserved.push((handle, port));
+    }
+    Err(DataPlaneError::Protocol {
+        op: "pick a WireGuard port",
+        detail: format!(
+            "the system kept assigning ports nett uses itself: {:?}",
+            reserved.iter().map(|(_, p)| p).collect::<Vec<_>>()
+        ),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceSpec {
     pub name: String,
-    pub listen_port: u16,
+    /// WireGuard 端口。为空时沿用接口当前的端口，新建的接口由系统分配（design/mesh.md 第 5.5 节）。
+    pub listen_port: Option<u16>,
     pub mtu: u32,
     /// 本机的组网地址，前缀长度取组网网段的长度：发往整个组网网段的流量都进入这个接口。
     pub addresses: Vec<InterfaceAddress>,
@@ -92,14 +119,21 @@ pub struct PeerStat {
     pub last_handshake: Option<SystemTime>,
 }
 
+/// 接口就绪后实际使用的公钥与 WireGuard 端口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterfaceState {
+    pub public_key: X25519PublicKey,
+    pub listen_port: u16,
+}
+
 pub trait DataPlane: Send {
-    /// 创建或沿用组网接口，设置私钥、监听端口、MTU 和地址并启用。返回接口实际使用的公钥。
-    /// 已有的对端保持不变：组网进程重启时，进行中的连接不中断。
+    /// 创建或沿用组网接口，设置私钥、监听端口、MTU 和地址并启用。已有的对端保持不变：组网进程重启时，
+    /// 进行中的连接不中断。
     fn ensure_interface(
         &mut self,
         spec: &InterfaceSpec,
         private_key: &PrivateKey,
-    ) -> Result<X25519PublicKey, DataPlaneError>;
+    ) -> Result<InterfaceState, DataPlaneError>;
 
     /// 让接口上的对端恰好是 `peers`：增加缺少的、更新变化的、删除多余的。`endpoint` 为空的对端保留
     /// 内核当前的 endpoint。
@@ -145,4 +179,31 @@ pub trait DataPlane: Send {
     /// 发往底层网络的双栈套接字（发往中继的探测）。macOS 上绑定承载默认路由的物理接口，不经过代理应用的
     /// TUN（design/userspace.md 第 6.2 节）。
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TLS_LOOPBACK_BASE;
+    use crate::probe::TUNNEL_PROBE_PORT;
+
+    #[test]
+    fn automatic_port_skips_the_ports_nett_uses_itself() {
+        let mut ports = vec![TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, 50_000].into_iter();
+        let mut calls = 0;
+        let got = automatic_port(|| {
+            calls += 1;
+            Ok(((), ports.next().expect("port")))
+        });
+        assert_eq!(got.expect("picked").1, 50_000);
+        assert_eq!(calls, 3);
+
+        let mut calls = 0;
+        let stuck = automatic_port(|| {
+            calls += 1;
+            Ok(((), TUNNEL_PROBE_PORT))
+        });
+        assert!(matches!(stuck, Err(DataPlaneError::Protocol { .. })));
+        assert_eq!(calls, PORT_ATTEMPTS + 1);
+    }
 }

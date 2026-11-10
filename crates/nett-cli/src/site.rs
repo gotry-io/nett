@@ -65,6 +65,7 @@ struct Site {
 struct SiteMesh {
     ipv4: IpPrefix,
     ipv6: IpPrefix,
+    /// `public` 节点的 WireGuard 端口（design/local-signing.md 第 4 节）。
     #[serde(default = "default_listen_port")]
     listen_port: u16,
 }
@@ -84,7 +85,8 @@ struct SiteNode {
     ipv4: Option<Ipv4Addr>,
     ipv6: Option<Ipv6Addr>,
     edge: Option<SiteEdge>,
-    /// 这个节点的 WireGuard 端口，不写时用 `[mesh]` 中的（design/local-signing.md 第 4 节）。
+    /// `public` 节点自己的 WireGuard 端口，不写时用 `[mesh]` 中的；`dial-only` 节点的端口由系统分配
+    /// （design/local-signing.md 第 4 节）。
     listen_port: Option<u16>,
     /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
     #[serde(default)]
@@ -512,7 +514,10 @@ fn build(dir: &Path) -> anyhow::Result<()> {
         let doc = DesiredMeshDoc {
             node_id: me.node_id.clone(),
             reachability: node.reachability,
-            listen_port: node.listen_port.unwrap_or(site.mesh.listen_port),
+            listen_port: match node.reachability {
+                Reachability::Public => Some(node.listen_port.unwrap_or(site.mesh.listen_port)),
+                Reachability::DialOnly => None,
+            },
             prefixes: state.prefixes,
             trust_anchors: state.trust_anchors.clone(),
             members: members.clone(),
@@ -577,6 +582,14 @@ fn validate(site: &Site) -> anyhow::Result<()> {
         ensure!(
             node.reachability != Reachability::Public || node.ipv4.is_some() || node.ipv6.is_some(),
             "public node `{}` needs ipv4 or ipv6",
+            node.name
+        );
+        // 没有人按地址连 dial-only 节点，端口由系统分配；能被连入的节点写成 public
+        ensure!(
+            node.reachability != Reachability::DialOnly
+                || (node.ipv4.is_none() && node.ipv6.is_none() && node.listen_port.is_none()),
+            "dial-only node `{}` takes no ipv4, ipv6 or listen_port: nobody dials it and the system \
+             picks its WireGuard port; a node others connect to is public",
             node.name
         );
         if let Some(edge) = &node.edge {
@@ -1092,39 +1105,70 @@ mod tests {
     }
 
     #[test]
-    fn node_port_applies_to_the_node_and_direct_candidates_to_it() {
+    fn public_nodes_have_fixed_ports_and_dial_only_nodes_automatic_ones() {
         let dir = temp_dir("port");
         init(&dir, DEFAULT_ORIGIN).expect("init");
         let nodes = format!(
             "[[node]]\nname = \"vps\"\nreachability = \"public\"\nipv4 = \"203.0.113.10\"\nlisten_port = 51000\nkeys = \"{}\"\n\
+             [[node]]\nname = \"vps2\"\nreachability = \"public\"\nipv4 = \"203.0.113.11\"\nkeys = \"{}\"\n\
              [[node]]\nname = \"app\"\nreachability = \"dial-only\"\nkeys = \"{}\"\n\
-             [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nlisten_port = 41822\nkeys = \"{}\"\n\
+             [[node]]\nname = \"mac\"\nreachability = \"dial-only\"\nkeys = \"{}\"\n\
              [[link]]\npeers = [\"vps\", \"app\"]\ncandidates = [\"direct\"]\n\
+             [[link]]\npeers = [\"vps2\", \"app\"]\ncandidates = [\"direct\"]\n\
              [[link]]\npeers = [\"vps\", \"mac\"]\ncandidates = [\"direct\"]\n",
+            keys(),
             keys(),
             keys(),
             keys()
         );
         write_site(&dir, &nodes);
         build(&dir).expect("build");
-        assert_eq!(desired(&dir, "vps").listen_port, 51000);
-        assert_eq!(desired(&dir, "app").listen_port, DEFAULT_LISTEN_PORT);
-        let vps = state(&dir).nodes["vps"].node_id.clone();
-        let expected = vec![Candidate::Direct {
-            endpoint: "203.0.113.10:51000".parse().expect("endpoint"),
-        }];
-        for node in ["app", "mac"] {
-            assert_eq!(
-                desired(&dir, node).paths[&vps].candidates,
-                expected,
-                "{node}"
-            );
-        }
-        assert_eq!(desired(&dir, "mac").listen_port, 41822);
+        assert_eq!(desired(&dir, "vps").listen_port, Some(51000));
+        assert_eq!(desired(&dir, "vps2").listen_port, Some(DEFAULT_LISTEN_PORT));
+        // dial-only：系统分配，同一台主机上的几个成员不争用端口
+        assert_eq!(desired(&dir, "app").listen_port, None);
+        assert_eq!(desired(&dir, "mac").listen_port, None);
+        let id = |name: &str| state(&dir).nodes[name].node_id.clone();
+        let direct = |endpoint: &str| {
+            vec![Candidate::Direct {
+                endpoint: endpoint.parse().expect("endpoint"),
+            }]
+        };
+        let (app, mac) = (desired(&dir, "app"), desired(&dir, "mac"));
+        assert_eq!(
+            app.paths[&id("vps")].candidates,
+            direct("203.0.113.10:51000")
+        );
+        assert_eq!(
+            app.paths[&id("vps2")].candidates,
+            direct("203.0.113.11:41820")
+        );
+        assert_eq!(
+            mac.paths[&id("vps")].candidates,
+            direct("203.0.113.10:51000")
+        );
+
+        let refused = |nodes: String| {
+            format!("{:#}", {
+                write_site(&dir, &nodes);
+                build(&dir).expect_err("refused")
+            })
+        };
         // 组网进程自己用的端口在生成时就拒绝，不等到节点上绑定失败
-        write_site(&dir, &nodes.replace("41822", "41821"));
-        let err = format!("{:#}", build(&dir).expect_err("probe port"));
-        assert!(err.contains("node `mac`") && err.contains("41821"), "{err}");
+        let err = refused(nodes.replace("51000", "41821"));
+        assert!(err.contains("node `vps`") && err.contains("41821"), "{err}");
+        // dial-only 节点不写端口和地址：没有人按地址连它
+        for extra in [
+            "listen_port = 41822",
+            "ipv4 = \"203.0.113.20\"",
+            "ipv6 = \"2001:db8::20\"",
+        ] {
+            let err = refused(nodes.replace(
+                "name = \"mac\"\nreachability = \"dial-only\"\n",
+                &format!("name = \"mac\"\nreachability = \"dial-only\"\n{extra}\n"),
+            ));
+            assert!(err.contains("dial-only node `mac`"), "{extra}: {err}");
+        }
         std::fs::remove_dir_all(&dir).ok();
     }
 

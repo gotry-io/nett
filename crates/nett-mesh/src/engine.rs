@@ -9,6 +9,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::id::NodeId;
+use nett_core::transport::TransportConfig;
 use nett_trust::admission::Member;
 use nett_trust::keys::X25519PublicKey;
 
@@ -30,13 +31,23 @@ pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
 /// 读取各对端状态（流量、endpoint）的间隔：endpoint 被漫游改掉后在这个时间内纠正（第 8.3 节）。
 const STATS_INTERVAL: Duration = Duration::from_millis(100);
 
+/// 已经就绪的组网接口。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Interface {
+    /// 最近一次成功应用的接口配置。
+    pub spec: InterfaceSpec,
+    /// WireGuard 实际监听的端口：期望状态不带端口时由系统分配（design/mesh.md 第 5.5 节）。
+    pub listen_port: u16,
+}
+
 pub struct Engine<D> {
     node_id: NodeId,
     private_key: PrivateKey,
     dataplane: D,
     members: MemberSet,
-    /// 最近一次成功应用的接口配置。
-    interface: Option<InterfaceSpec>,
+    interface: Option<Interface>,
+    /// 最近一次交给传输适配进程的配置。
+    transport: Option<TransportConfig>,
     reachability: Reachability,
     prober: Option<Prober>,
     /// 已经配置到数据面的对端：经漫游跟随的一方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
@@ -67,6 +78,7 @@ impl<D: DataPlane> Engine<D> {
             dataplane,
             members: MemberSet::default(),
             interface: None,
+            transport: None,
             reachability: Reachability::Public,
             prober: None,
             configured: HashSet::new(),
@@ -95,7 +107,7 @@ impl<D: DataPlane> Engine<D> {
     }
 
     /// 组网接口已经就绪（探测套接字可以绑定到组网地址上）。
-    pub fn interface(&self) -> Option<&InterfaceSpec> {
+    pub fn interface(&self) -> Option<&Interface> {
         self.interface.as_ref()
     }
 
@@ -126,14 +138,24 @@ impl<D: DataPlane> Engine<D> {
         };
 
         let spec = interface_spec(me, desired);
-        if self.interface.as_ref() != Some(&spec) {
+        if self.interface.as_ref().map(|i| &i.spec) != Some(&spec) {
             match self.dataplane.ensure_interface(&spec, &self.private_key) {
-                Ok(public_key) if public_key == me.mesh_public_key => self.interface = Some(spec),
-                Ok(public_key) => {
+                Ok(state) if state.public_key == me.mesh_public_key => {
+                    if self.interface.as_ref().map(|i| i.listen_port) != Some(state.listen_port) {
+                        events.emit(Event::InterfaceReady {
+                            listen_port: state.listen_port,
+                        });
+                    }
+                    self.interface = Some(Interface {
+                        spec,
+                        listen_port: state.listen_port,
+                    });
+                }
+                Ok(state) => {
                     events.emit(Event::DataPlaneFailed {
                         reason: format!(
-                            "interface public key {public_key} does not match this node's admitted mesh key {}",
-                            me.mesh_public_key
+                            "interface public key {} does not match this node's admitted mesh key {}",
+                            state.public_key, me.mesh_public_key
                         ),
                     });
                     return;
@@ -149,6 +171,7 @@ impl<D: DataPlane> Engine<D> {
 
         let own_key = me.mesh_public_key;
         let edge = EdgeSpec::of(me);
+        self.update_transport(desired, events);
         if !self.apply_access(desired, edge, events) {
             // 访问控制装不上：不与任何对端通信
             self.sync_peers(Vec::new(), events);
@@ -287,6 +310,21 @@ impl<D: DataPlane> Engine<D> {
                 });
                 false
             }
+        }
+    }
+
+    /// 传输适配进程的配置（design/mesh.md 第 5.3 节）：TLS 目标与 WireGuard 的实际端口，变化时交出。在配置
+    /// 对端之前调用：WireGuard 发往回环端口的包到达时，传输适配进程已经在监听。
+    fn update_transport(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        let Some(interface) = &self.interface else {
+            return;
+        };
+        let config = desired.transport(interface.listen_port);
+        if self.transport.as_ref() != Some(&config) {
+            events.emit(Event::TransportConfigChanged {
+                config: config.clone(),
+            });
+            self.transport = Some(config);
         }
     }
 
@@ -548,7 +586,7 @@ fn peer_spec(
 mod tests {
     use super::*;
     use crate::event::VecSink;
-    use crate::testutil::{FakeDataPlane, Mesh, mesh_key, node_id, validated};
+    use crate::testutil::{FAKE_AUTO_PORT, FakeDataPlane, Mesh, mesh_key, node_id, validated};
     use nett_trust::revocation::Revocation;
 
     fn engine(me: u8) -> Engine<FakeDataPlane> {
@@ -622,6 +660,35 @@ mod tests {
             Some(DIAL_ONLY_KEEPALIVE_SECS)
         );
         assert!(events.0.contains(&Event::PeersApplied { peers: 2 }));
+    }
+
+    #[test]
+    fn without_a_port_the_assigned_one_is_reported_and_handed_to_the_transport() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.listen_port = None;
+        let mut events = VecSink::default();
+        e.apply(&validated(doc.clone()), &mut events);
+        assert_eq!(e.dataplane.interfaces[0].listen_port, None);
+        assert_eq!(e.interface().map(|i| i.listen_port), Some(FAKE_AUTO_PORT));
+        assert!(events.0.contains(&Event::InterfaceReady {
+            listen_port: FAKE_AUTO_PORT
+        }));
+        // 传输适配进程拿到的是实际的端口，而且在配置对端之前
+        let at = |pred: &dyn Fn(&Event) -> bool| events.0.iter().position(pred);
+        let transport = at(
+            &|e| matches!(e, Event::TransportConfigChanged { config } if config.wireguard_port == FAKE_AUTO_PORT),
+        );
+        let peers = at(&|e| matches!(e, Event::PeersApplied { .. }));
+        assert!(transport.expect("transport config") < peers.expect("peers"));
+        // 没有变化时不再报告
+        let mut again = VecSink::default();
+        e.apply(&validated(doc), &mut again);
+        assert!(!again.0.iter().any(|e| matches!(
+            e,
+            Event::InterfaceReady { .. } | Event::TransportConfigChanged { .. }
+        )));
     }
 
     #[test]

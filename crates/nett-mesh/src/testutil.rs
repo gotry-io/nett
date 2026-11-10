@@ -17,7 +17,7 @@ use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
 use crate::dataplane::{
-    DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, PeerSpec, PeerStat,
+    DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
 };
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
@@ -150,7 +150,7 @@ impl Mesh {
         DesiredMeshDoc {
             node_id: node_id(me),
             reachability: Reachability::DialOnly,
-            listen_port: 41820,
+            listen_port: Some(41820),
             prefixes: MeshPrefixes {
                 ipv4: "100.88.0.0/16".parse().expect("prefix"),
                 ipv6: "fd00:88::/48".parse().expect("prefix"),
@@ -187,10 +187,15 @@ pub fn validated(doc: DesiredMeshDoc) -> DesiredMesh {
     DesiredMesh::from_doc(doc).expect("valid desired state")
 }
 
+/// 替身数据面在期望状态不带端口时"分配"的端口。
+pub const FAKE_AUTO_PORT: u16 = 50_000;
+
 /// 替身数据面：记录调用，`ensure_interface` 返回预设的公钥（相当于内核由私钥算出的公钥）。
 pub struct FakeDataPlane {
     pub public_key: X25519PublicKey,
     pub interfaces: Vec<InterfaceSpec>,
+    /// 接口当前的 WireGuard 端口：不带端口时沿用，第一次是 [`FAKE_AUTO_PORT`]。
+    pub listen_port: Option<u16>,
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
     pub rehandshakes: Vec<PeerSpec>,
@@ -212,6 +217,7 @@ impl FakeDataPlane {
         Self {
             public_key,
             interfaces: vec![],
+            listen_port: None,
             peers: None,
             fail_peers: false,
             rehandshakes: Vec::new(),
@@ -231,9 +237,17 @@ impl DataPlane for FakeDataPlane {
         &mut self,
         spec: &InterfaceSpec,
         _private_key: &PrivateKey,
-    ) -> Result<X25519PublicKey, DataPlaneError> {
+    ) -> Result<InterfaceState, DataPlaneError> {
         self.interfaces.push(spec.clone());
-        Ok(self.public_key)
+        let listen_port = spec
+            .listen_port
+            .or(self.listen_port)
+            .unwrap_or(FAKE_AUTO_PORT);
+        self.listen_port = Some(listen_port);
+        Ok(InterfaceState {
+            public_key: self.public_key,
+            listen_port,
+        })
     }
 
     fn sync_peers(&mut self, peers: &[PeerSpec]) -> Result<(), DataPlaneError> {

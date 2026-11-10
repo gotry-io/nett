@@ -23,7 +23,7 @@ use self::wgport::WgPort;
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::dataplane::{
     DataPlane, DataPlaneError, DirectProbes, DirectRecv, DirectSend, INTERFACE_NAME, InterfaceSpec,
-    PeerSpec, PeerStat,
+    InterfaceState, PeerSpec, PeerStat, automatic_port,
 };
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
@@ -145,7 +145,7 @@ impl DataPlane for KernelWireGuard {
         &mut self,
         spec: &InterfaceSpec,
         private_key: &PrivateKey,
-    ) -> Result<X25519PublicKey, DataPlaneError> {
+    ) -> Result<InterfaceState, DataPlaneError> {
         rtnl::create_wireguard(&mut self.route, &spec.name)
             .map_err(kernel("create wireguard interface"))?;
         let link = rtnl::get_link(&mut self.route, &spec.name)
@@ -168,13 +168,42 @@ impl DataPlane for KernelWireGuard {
         rtnl::set_mtu_up(&mut self.route, link.index, spec.mtu)
             .map_err(kernel("set interface mtu and up"))?;
         sync_addresses(&mut self.route, link.index, spec)?;
-        let device =
-            retry_interrupted(|| wg::get_device(&mut self.generic, self.family, link.index))
-                .map_err(kernel("read wireguard device"))?;
+        let read = |generic: &mut Socket| {
+            retry_interrupted(|| wg::get_device(generic, self.family, link.index))
+                .map_err(kernel("read wireguard device"))
+        };
+        let device = match spec.listen_port {
+            Some(_) => read(&mut self.generic)?,
+            // 新建的接口启用时由内核分配；分到保留端口时让内核重新分配
+            None => {
+                let mut first = true;
+                let generic = &mut self.generic;
+                automatic_port(|| {
+                    if !std::mem::take(&mut first) {
+                        wg::set_device(
+                            generic,
+                            self.family,
+                            link.index,
+                            private_key.as_bytes(),
+                            Some(0),
+                        )
+                        .map_err(kernel("reassign the wireguard port"))?;
+                    }
+                    let device = read(generic)?;
+                    let port = device.listen_port;
+                    Ok((device, port))
+                })?
+                .0
+            }
+        };
         self.ifindex = Some(link.index);
-        device.public_key.ok_or(DataPlaneError::Protocol {
+        let public_key = device.public_key.ok_or(DataPlaneError::Protocol {
             op: "read wireguard device",
             detail: "no public key after setting the private key".to_owned(),
+        })?;
+        Ok(InterfaceState {
+            public_key,
+            listen_port: device.listen_port,
         })
     }
 

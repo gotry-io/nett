@@ -289,6 +289,11 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         ),
         None => Box::new(LogSink),
     };
+    #[cfg(feature = "lab")]
+    let sink: Box<dyn EventSink + Send> = match args.lab.transport_config.clone() {
+        Some(path) => Box::new(TransportConfigWriter::new(sink, path)),
+        None => sink,
+    };
     #[cfg(not(feature = "lab"))]
     let sink: Box<dyn EventSink + Send> = Box::new(LogSink);
     #[cfg(feature = "lab")]
@@ -336,17 +341,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        #[cfg(feature = "lab")]
-        let worker = match args.lab.transport_config {
-            Some(path) => {
-                let writer = TransportConfigWriter::new(worker, path);
-                nett_mesh::run::run(source, writer, shutdown)
-                    .await?
-                    .into_inner()
-            }
-            None => nett_mesh::run::run(source, worker, shutdown).await?,
-        };
-        #[cfg(not(feature = "lab"))]
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
         tokio::task::spawn_blocking(move || worker.shutdown())
             .await

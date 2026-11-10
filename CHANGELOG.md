@@ -5,6 +5,13 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [Unreleased]
 
+- `dial-only` 节点的 WireGuard 端口由系统分配：站点描述中不再为它写 `listen_port`、`ipv4`、`ipv6`，
+  同一台主机上的原生成员与容器内成员不再争用端口；日志中的 `mesh interface ready` 写着实际的端口。
+  之前的版本不接受不带端口的期望状态：先升级 `dial-only` 节点上的 nett，再换上新生成的期望状态。
+  A `dial-only` node's WireGuard port is picked by the system: the site description no longer sets
+  `listen_port`, `ipv4` or `ipv6` for it, so a native member and a container member on the same host no
+  longer compete for a port; `mesh interface ready` in the log shows the port in use. Earlier versions
+  reject a desired state without a port: upgrade nett on `dial-only` nodes before giving them the new one.
 - WireGuard 端口不能用组网进程自己在本机用的端口（组网地址上的探测端口 `41821`、TLS 中继的回环端口
   `41830`–`41845`）：`nett site build` 生成时即报错。之前这样设置时组网照常连通，但不收发探测，测不到路径、
   也发现不了故障。
