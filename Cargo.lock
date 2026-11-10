@@ -692,7 +692,7 @@ dependencies = [
 
 [[package]]
 name = "nett-cli"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "lexopt",
@@ -715,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "nett-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -724,11 +724,11 @@ dependencies = [
 
 [[package]]
 name = "nett-hub"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "nett-lab"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -745,7 +745,7 @@ dependencies = [
 
 [[package]]
 name = "nett-mesh"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -766,15 +766,15 @@ dependencies = [
 
 [[package]]
 name = "nett-node"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "nett-proto"
-version = "0.1.4"
+version = "0.1.5"
 
 [[package]]
 name = "nett-relay"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "blake2 0.11.0",
  "futures-util",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "nett-transport"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "futures-util",
  "nett-core",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "nett-trust"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
  "nett-core",

@@ -3,7 +3,7 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.1.5] - 2026-11-10
 
 - 命令按作用范围重新整理（`nett help` 按组列出，任何命令加 `--help` 显示用法）：本机的命令都在顶层，
   `nett mesh` 只是由服务管理器运行的组网进程。改名：`nett mesh install` / `uninstall` → `nett install` /
