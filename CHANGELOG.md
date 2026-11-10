@@ -3,7 +3,7 @@
 用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
 User-visible changes by version; versions follow Semantic Versioning.
 
-## [Unreleased]
+## [0.1.2] - 2026-11-10
 
 - 站点描述的节点可以写 `listen_port`，用自己的 WireGuard 端口：同一台主机上的原生成员与容器内成员各用一个。
   A node in the site description can set `listen_port` for its own WireGuard port, so a native member and a
