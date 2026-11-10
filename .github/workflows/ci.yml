@@ -62,7 +62,16 @@ jobs:
             sleep 0.5
           done
           sudo launchctl print system/io.gotry.nett.mesh | grep 'state = running'
-          sudo "$nett" mesh install | grep 'neither the program nor the desired state changed'
+          # 本机状态（design/status.md）：root 能读，普通用户得到提示
+          for _ in $(seq 20); do
+            sudo test -S /var/run/nett/mesh.sock && break
+            sleep 0.5
+          done
+          sudo "$nett" status | tee status.log
+          grep -F 'No peers.' status.log
+          ! "$nett" status 2> status.err
+          grep -F 'run with sudo' status.err
+          sudo "$nett" mesh install | grep -F 'The mesh service is running. Nothing changed.'
           sudo "$nett" mesh uninstall
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 
