@@ -5,6 +5,38 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [未发布 · Unreleased]
 
+- 接入 Hub（design/hub.md 第 9 节 H1）：新的 `nett-hub`（`serve`、`init`、`reset`；Linux 的静态版本、
+  [packaging/hub/](packaging/hub/) 中 Hub 与 Caddy 的 Compose 示例、原生运行的 systemd 单元）。`nett site link`
+  把站点关联到 Hub；之后每条修改命令签名后推送，Hub 逐份按关联时固定的信任锚验证签名产物（伪造、版本倒退、
+  同版本不同内容、恢复已撤销的机器都整份拒绝），为每台机器组成期望状态（与不接 Hub 时写出的文件相同）；
+  命令最多等 10 秒，报告哪些机器已经应用、哪些拒绝或仍有问题。`nett site invite <名字>` 为已有的机器打印
+  `sudo nett install nett_enr_…`，它在本机核对节点 ID 与信任锚，写入 Hub 的配置并启动新的 `nett node` 服务
+  （控制代理 nett-node：经 WebSocket 上的 Noise IK 连接 Hub，写期望状态文件、请组网进程重新读取、上报状态；
+  Hub 不在时组网照常）。`nett site status` 接了 Hub 时列出每台机器的在线、版本、确认与问题，以及各对机器之间的
+  状态、路径与往返时间；`nett site status <名字>` 显示那台机器的本机状态。
+  Hub (design/hub.md section 9, H1): the new `nett-hub` (`serve`, `init`, `reset`; static Linux builds, a
+  Compose example with Caddy in [packaging/hub/](packaging/hub/), a systemd unit for running it natively).
+  `nett site link` links the site to a Hub; from then on every change is signed and pushed, and the Hub checks
+  each signed artifact against the trust anchors pinned when linking (forged artifacts, older versions, the same
+  version with other content, and bringing back a removed machine are refused whole) and composes each machine's
+  desired state (identical to the file written without a Hub). The command waits up to 10 seconds and reports
+  which machines applied the change and which rejected it or still have problems. `nett site invite <name>`
+  prints `sudo nett install nett_enr_…` for an existing machine; it checks the node ID and trust anchors on the
+  machine, writes the Hub configuration and starts the new `nett node` service (the control agent nett-node:
+  connects to the Hub with Noise IK over WebSocket, writes the desired state file, asks the mesh process to
+  reload it, reports its status; the mesh keeps working while the Hub is down). With a Hub, `nett site status`
+  lists each machine's connection, version, acknowledgement and problems, and the state, path and round-trip
+  time between each pair; `nett site status <name>` shows that machine's own status.
+- Linux 上也用 `sudo nett install` 安装：把 `nett` 装到 `/usr/local/bin`，在 `/etc/nett` 生成或沿用密钥，
+  写入编译时嵌入的 systemd 单元并启动；`--config` 导入期望状态，期望状态变了时只重新加载。`sudo nett uninstall`
+  停止并删除服务，保留密钥与期望状态。
+  On Linux, `sudo nett install` installs too: it puts `nett` in `/usr/local/bin`, creates or keeps the keys in
+  `/etc/nett`, writes the systemd units built into it and starts them; `--config` imports the desired state,
+  and a changed desired state is only reloaded. `sudo nett uninstall` stops and removes the services and keeps
+  the keys and the desired state.
+- 修复：一台机器的宣告网段全部去掉之后再宣告时，版本号从 1 重新开始，被组网进程拒绝；现在接着增加。
+  Fixed: advertising routes again after removing all of them restarted the version at 1, which the mesh process
+  rejected; the version now keeps counting.
 - 站点改为用命令维护（design/site.md）：`nett site add`、`set`、`remove`、`invite`、`edge`、`routes`、`allow`、
   `rules`、`status`。每条修改命令先列出要签名的内容（选择器展开后的地址和端口、增减的连接），确认后签名并重写
   有变化的机器的期望状态；不是终端时要加 `--yes`。哪些机器之间建立连接由访问规则推导：规则涉及的每一对，加上每个

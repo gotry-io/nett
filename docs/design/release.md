@@ -38,11 +38,12 @@
     - 导入期望状态：到运行 `sudo` 的用户的站点目录（site.md 第 8 节，默认 `~/.config/nett`）的 `nodes/` 中，找出给本机的那一份（其中本节点准入材料的组网公钥与本机的组网私钥相符），复制进来。签名工具不在这台机器上、或站点放在别处时，用 `--config <desired.json>` 指定，同样先核对。只读普通文件，大小有上限。站点目录中的恢复密钥本来就只受这个用户的权限保护，能改写这个目录的程序已经能签名，从这里导入不扩大风险；
     - 有期望状态时启动服务。服务已在运行时：程序变了（升级之后）重启它，换用新的副本；只有期望状态变了时经本机接口让它重新加载（`nett reload` 的同一个请求，status.md 第 4.1 节），不重启、连接不中断，并显示是否被接受；都没变时不动。还没有期望状态时只安装，并说明下一步；
   - 首次安装：`sudo nett install` → 在持有站点的电脑上 `nett site add <名字> --keys "<打印的一行>"`（site.md 第 4 节）→ 再执行一次 `sudo nett install`。期望状态更新后执行同一个命令；
-  - 升级：`brew upgrade nett` 之后执行 `sudo nett install`。接入 Hub 之后由 nett-node 的签名自动升级接管（ADR 0020）；
-  - `sudo nett uninstall`：停止服务，删除副本与两份配置；密钥、期望状态和信任存储（`state/`，mesh.md 第 4.2 节）保留；
+  - 接入 Hub：`sudo nett install <token>`（hub.md 第 3.5、7 节）另写 `io.gotry.nett.node.plist`，运行同一份副本的 `nett node`；之后期望状态由它从 Hub 接收，`sudo nett install` 不再从站点目录导入，也不接受 `--config`；
+  - 升级：`brew upgrade nett` 之后执行 `sudo nett install`。接入 Hub 之后由 nett-node 的签名自动升级接管（ADR 0020，hub.md 第 9 节 H3）；
+  - `sudo nett uninstall`：停止服务，删除副本与配置；密钥、期望状态、信任存储（`state/`，mesh.md 第 4.2 节）和 Hub 的配置保留；
   - 启停服务调用 `/bin/launchctl`，以参数数组传参、带超时（硬性规则 9、14）；
 - 安装与每次升级各需要一次 sudo。不用 sudo 的方式是带 Network Extension 的 App，需要 Apple 开发者账号签名（ADR 0018 中的 M3 客户端）。
 
 ## 5. Linux
 
-服务器下载对应的压缩包，核对签名后安装到 `/usr/local/bin`，使用 `packaging/systemd/nett-mesh.service`；容器内成员的镜像用 `aarch64` 或 `x86_64` 的静态版本构建（`packaging/container/`）。
+服务器下载对应的压缩包，核对签名后解压，`sudo ./nett install` 把它装到 `/usr/local/bin`，写入 systemd 单元并启动（hub.md 第 7 节）：单元是 `packaging/systemd/` 中的文件，编译时嵌入；调用 `systemctl` 以参数数组传参、带超时。容器内成员的镜像用 `aarch64` 或 `x86_64` 的静态版本构建（`packaging/container/`）。Hub 只在 Linux 上运行：`nett-hub-<版本>-<目标>.tar.gz` 与 `nett` 的压缩包一起发布、同样签名，镜像与 Compose 示例在 `packaging/hub/`。
