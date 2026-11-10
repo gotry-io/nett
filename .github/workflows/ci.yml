@@ -52,9 +52,9 @@ jobs:
           cargo build --locked -p nett-cli
           nett="$PWD/target/debug/nett"
           "$nett" site init
-          keys=$(sudo "$nett" install | grep '^keys = ')
-          printf '[[node]]\nname = "ci"\nreachability = "dial-only"\n%s\n' "$keys" >> ~/.config/nett/site.toml
-          "$nett" site apply
+          keys=$(sudo "$nett" install | sed -n 's/^  nett site add <name> --keys "\(.*\)"$/\1/p')
+          test -n "$keys"
+          "$nett" site add ci --keys "$keys" --yes
           sudo "$nett" install | tee install.log
           grep -F "$HOME/.config/nett/nodes/ci/desired.json" install.log
           for _ in $(seq 20); do

@@ -1,0 +1,25 @@
+[package]
+name = "nett-site"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# 站点：机器、权限与访问规则的模型，签名，以及按模型组成各台机器的期望状态（design/site.md）。签名工具
+# `nett site` 与 Hub 共用这一份逻辑（design/hub.md 第 4 节）
+
+[lints]
+workspace = true
+
+[dependencies]
+nett-core.workspace = true
+nett-mesh.workspace = true
+nett-trust = { workspace = true, features = ["signing"] }
+ring.workspace = true
+rustix = { workspace = true, features = ["fs"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

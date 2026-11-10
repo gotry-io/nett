@@ -22,13 +22,13 @@
 - **macOS**（原生成员与签名工具 `nett site`）：
   ```bash
   brew install gotry-io/tap/nett
-  sudo nett install    # 生成本机密钥，打印写进站点描述的一行
-  # 在站点描述（默认 ~/.config/nett/site.toml）中加上这个节点
-  nett site apply
-  sudo nett install    # 找到给本机的期望状态，核对、导入并启动组网服务
+  nett site init                              # 只在持有站点的这台电脑上做一次
+  sudo nett install                           # 生成本机密钥，打印 nett site add 要用的一行
+  nett site add mac --keys "<打印的那一行>"   # 把这台机器加进站点
+  sudo nett install                           # 找到给本机的期望状态，核对、导入并启动组网服务
   ```
-  期望状态更新后执行同一个命令（只重新加载，不重启）；站点不在这台机器上时加 `--config <这个节点的 desired.json>`。组网服务以 root 运行（创建 utun 需要 root），运行的是复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett install`（[design/release.md](docs/design/release.md) 第 4 节）。
-- **Linux**：从 [Releases](https://github.com/gotry-io/nett/releases) 下载对应架构的静态版本，核对签名（[keys/](keys/README.md)）后安装到 `/usr/local/bin`；`sudo nett keys --dir /etc/nett` 生成本机密钥，使用 [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service)。期望状态更新后放到 `/etc/nett/desired.json`，运行 `sudo nett reload`。
+  站点用命令维护：`nett site add`、`allow`、`rules`、`status` 等，每条修改命令先列出要签名的内容，确认后签名（[design/site.md](docs/design/site.md)）。期望状态更新后执行 `sudo nett install`（只重新加载，不重启）；站点不在这台机器上时加 `--config <这个节点的 desired.json>`。组网服务以 root 运行（创建 utun 需要 root），运行的是复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett install`（[design/release.md](docs/design/release.md) 第 4 节）。
+- **Linux**：从 [Releases](https://github.com/gotry-io/nett/releases) 下载对应架构的静态版本，核对签名（[keys/](keys/README.md)）后安装到 `/usr/local/bin`；`sudo nett keys --dir /etc/nett` 生成本机密钥，在持有站点的电脑上用 `nett site add <名字> --keys "…"` 加入它（能被连入的机器加 `--public --ipv4 <地址>`），使用 [packaging/systemd/nett-mesh.service](packaging/systemd/nett-mesh.service)。期望状态更新后放到 `/etc/nett/desired.json`，运行 `sudo nett reload`。
 - **命令**：`nett help` 列出全部命令，任何命令加 `--help` 显示用法。
 - **查看状态**：`sudo nett status` 列出本机和每个对端的连通情况、路径、往返时间与丢包，以及被拒绝的配置；`sudo nett status <对端>` 看一个对端的候选路径和最近的切换（[design/status.md](docs/design/status.md)）。
 

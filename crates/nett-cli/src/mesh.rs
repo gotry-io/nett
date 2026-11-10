@@ -167,8 +167,9 @@ pub(crate) fn print_keys(
         "Private keys are in {} (mode 0600) and stay on this machine.",
         dir.display()
     );
-    println!("Add this line to the node's entry in site.toml:");
-    println!("keys = \"{mesh} {identity}\"");
+    println!("On the computer that holds the site, add this machine with:");
+    println!("  nett site add <name> --keys \"{mesh} {identity}\"");
+    println!("(with --public --ipv4 <address> when other machines connect to it)");
 }
 
 /// 日志写到标准错误（Linux 上由 systemd 收进日志）。macOS 上以 launchd 服务运行时（标准错误不是终端）
