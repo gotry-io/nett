@@ -2,9 +2,10 @@
 # 只把 Edge 专用地址发来、访问规则放行的连接转给宣告的服务地址，来源换成自己的地址。服务保留自己的网络，
 # 也使用固定地址；容器内成员重启不影响服务。
 #
-# 第一次使用：docker compose run --rm nett mesh keys --dir /etc/nett，把输出的一行写进站点描述，在其中
-# 写上 routes = ["172.30.0.10/32"]；nett site build 生成的 desired.json 放进
-# ./nett；之后更新时 docker compose kill -s HUP nett。
+# 第一次使用：docker run --rm --network none -v ./nett:/etc/nett nett mesh keys --dir /etc/nett，把输出的
+# 一行写进站点描述，在其中写上 routes = ["172.30.0.10/32"]；nett site build 生成的 desired.json 放进
+# ./nett；之后更新时 docker compose kill -s HUP nett。一次性任务不用 docker compose run：临时容器会继承
+# 服务的固定地址，与运行中的容器冲突（design/local-signing.md 第 6 节）。
 services:
   nett:
     image: nett
