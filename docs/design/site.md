@@ -114,6 +114,7 @@ $ nett site routes mac-app 172.30.0.10/32
 3. 每条连接的候选路径按 mesh.md 第 6 节生成：一端是 `public` 时，另一端直连它的公网地址（有 IPv4、IPv6 地址时分别生成）；两端都是 `dial-only` 时打洞直连；经中继的候选在中继实现之后加入。
 
 - 连接只是通道：访问仍由规则决定，默认拒绝（ADR 0023）。没有规则涉及的两台机器之间没有连接，`nett status` 中这一对为 `no path`；
+- 两端都是 `dial-only` 的连接只有打洞候选：两端都在对称型 NAT 后时打不通（mesh.md 第 6.1 节），经中继的候选加入之前可能连不上。列出变化时为这样的连接写明 `punch only; may not connect`；
 - 规则变化时，连接随之增减，列在同一次变化中：
 
   ```
@@ -121,7 +122,7 @@ $ nett site routes mac-app 172.30.0.10/32
   Access rules v4 -> v5:
     + r5  mac (100.88.0.4) -> nas (100.88.0.6)  22/tcp
   Connections:
-    + mac - nas  punch
+    + mac - nas  punch only; may not connect
   Sign? [y/N] y
   ```
 
@@ -148,7 +149,7 @@ Next: nett site add <name>, or nett site link <code> after setting up a Hub.
 
 - `init` 建立目录时权限设为 `0700`。组网网段在建立时确定，之后不能改：IPv4 为 `100.88.0.0/16`，IPv6 为随机生成的 ULA `/48`（mesh.md 第 3 节）；
 - 目录中有：恢复密钥 `recovery.pk8`（`0600`，只在签名时读取）；站点状态 `state.json`：信任锚清单、组网网段、各台机器（节点 ID、名字、可达性、地址与端口、公钥、Edge、网段、已签的产物与版本）、访问规则（编号、选择器、端口、说明，以及展开后签名的规则集与版本）、撤销记录、已分配的地址；不接 Hub 时还有生成的期望状态 `nodes/<机器>/desired.json`；
-- 备份这个目录即可，恢复密钥另存一份离线备份（local-signing.md 第 3 节）。接了 Hub 时，Hub 保存最近一次推送的副本（hub.md 第 4 节），站点状态以这个目录为准。
+- 备份这个目录即可，恢复密钥另存一份离线备份（local-signing.md 第 3 节）。接了 Hub 时，Hub 保存最近一次推送的副本，经 Hub 入网的机器的准入证明也取回保存在这里（hub.md 第 4 节），站点状态以这个目录为准。
 
 ## 9. 验证
 
