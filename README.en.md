@@ -9,12 +9,12 @@ nett is for individuals and small teams with a few scattered machines, for examp
 - A GoTry project · Homepage `nett.gotry.io` (under construction)
 - CLI: `nett`
 - Services:
-  - `nett-hub`: the mesh control plane and web console
+  - `nett-hub`: the mesh control plane, operated with the `nett` command line; a web console comes later (ADR 0024)
   - `nett-node`: the control agent on every machine; handles enrollment, the connection to the Hub, and upgrades
   - `nett-mesh`: the mesh process; handles WireGuard, path selection and switching, DNS, and access rules
   - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
   - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
-- Status: **M1 in development**. Before the Hub is ready, you can deploy a mesh with local signing ([design/local-signing.md](docs/design/local-signing.md), in Chinese): Linux uses kernel WireGuard, macOS joins as a native member, and container services on a Mac that need real client IPs use a container member. The Hub and the console are not done yet
+- Status: **M1 in development**. Before the Hub is ready, you can deploy a mesh with local signing ([design/local-signing.md](docs/design/local-signing.md), in Chinese): Linux uses kernel WireGuard, macOS joins as a native member, and container services on a Mac that need real client IPs use a container member. The Hub is not done yet ([design/hub.md](docs/design/hub.md), in Chinese)
 - License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
 
 ## Install

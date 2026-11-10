@@ -244,7 +244,7 @@ fn install(config: Option<&Path>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 运行 `sudo` 的用户的站点目录（design/local-signing.md 第 4 节）。sudo 可能把 `HOME` 换成 root 的，
+/// 运行 `sudo` 的用户的站点目录（design/site.md 第 8 节）。sudo 可能把 `HOME` 换成 root 的，
 /// 所以按 `SUDO_UID` 从用户数据库查家目录；不经 sudo 运行时用 `HOME`。
 fn invoking_site_dir() -> Option<PathBuf> {
     let home = match std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {

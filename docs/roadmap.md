@@ -30,9 +30,10 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - **原型关卡**（第一步，只在 Linux 上，用静态配置代替 Hub）：签名准入、UDP 中继与切换到新中继、双方都是 `dial-only` 时的切换与时间片汇合、漫游纠正、中继重启、MTU（大包 TCP）、TLS 回退、打洞（在 WireGuard 端口上探测，成功率），断开、波动、回退、恢复与 Tailscale 的对比（ADR 0021），以及所选 WireGuard 实现的实际行为（索引冲突重试、删除再添加对端后的握手时间）；**性能基准**：在同一组机器上与原生 WireGuard、Tailscale 对比吞吐、延迟和 CPU 占用。切换时间和性能达到下面的验收标准后，再做其他平台、CONNECT 和智能入口。场景与通过标准见 [design/prototype.md](design/prototype.md)。已通过；跨公网直连的满速对比和 1 vCPU 中继的最大转发吞吐留到下面的验收（prototype.md 第 9 节）
 - **本地签名部署**（第二步，接入 Hub 之前）：用户电脑上的签名工具 `nett site`（恢复密钥是唯一的信任锚）、节点本机生成密钥、正式构建读本地的期望状态文件；访问控制、Edge 专用地址、容器内成员；用它替换已有的手工 WireGuard 隧道。见 [design/local-signing.md](design/local-signing.md)
 - **组网离不开的基础**：
-  - Hub 与 nett-node（原生运行）：入网、能力探测（WireGuard、TUN、包过滤、能否被外部连入）；node 经公网 HTTPS 连接 Hub，不依赖组网；node 把 `trust` 和 `mesh` 分区转交组网进程
-  - 认证：passkey 登录、恢复密钥与备份密钥、API token、node 密钥与准入证明、信任锚；变更集最小版本与浏览器内 passkey 签名
-  - 安装：Hub 安装脚本与一次性初始化，生成 Hub 前的反向代理配置（默认 Caddy，包括按 SNI 转交 nett-relay 的一段）；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew（macOS）；Home Assistant 加载项仓库；发布工作流（CI 构建，单独的签名任务自动签名）与发布公钥作为构建参数；自动升级与回滚（项目发布签名、防降级）
+  - Hub 与 nett-node（原生运行）：入网、能力探测（WireGuard、TUN、包过滤、能否被外部连入）；node 经公网 HTTPS 连接 Hub，不依赖组网；node 把 `trust` 和 `mesh` 分区转交组网进程；按 H1–H5 推进（design/hub.md 第 9 节）
+  - 站点：用 `nett site` 的命令维护机器、权限与访问规则，连接由访问规则推导（design/site.md）
+  - 认证：恢复密钥与备份密钥、站点的 API token、node 密钥与准入证明、信任锚；签名在用户自己的电脑上由签名工具完成（ADR 0024）
+  - 安装：`nett-hub` 的发布包与容器镜像，默认与 Caddy 一起用 Compose 运行（包括按 SNI 转交 nett-relay 的一段），一次性初始化并与站点关联（design/hub.md 第 3.1、8 节）；节点一键入网（安装脚本与签名发布包由 Hub 分发）；Homebrew（macOS）；Home Assistant 加载项仓库；发布工作流（CI 构建，单独的签名任务自动签名）与发布公钥作为构建参数；自动升级与回滚（项目发布签名、防降级）
   - 可用性：node 和组网进程在本地保存配置；Hub 备份（含身份私钥，加密后由其他节点拉取）与重建手册
 - 组网进程独立于 nett-node 运行，TLS 传输适配单独以低权限运行（ADR 0013）；核心逻辑与平台无关，数据面按平台分后端，为 M3 的客户端预留（ADR 0018）
 - 会话层：Linux 内核 WireGuard；DSM 和旧内核使用 Rust 用户态实现，运行在组网进程中；macOS 原生加入（用户态 WireGuard + utun；铺开前先实测与代理类 VPN 应用共存），需要访客真实 IP 的容器服务另用容器内成员；Home Assistant OS 加载项可做智能入口；成员准入验证（签名的成员表、网段、访问规则）
@@ -42,10 +43,6 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - 局域网智能入口（subnet router + 按来源分类的源地址转换）；Edge 专用地址（`edge` 角色，Edge 是用户自己的反向代理）；宣告网段默认拒绝
 - 节点身份与身份查询接口（`whois`）、节点主机名与别名（`hostnames`）、主机名解析、访问控制
 - 手机：移动网关 + 直连家里的双路径；设备与凭据模型；导出标准 WireGuard 配置（配置文件和二维码），以及 Surge、mihomo、sing-box 的配置（两条出站放进自动回落的策略组）
-- Web 控制台（原型关卡之后，与 Hub 一起开始）：
-  - 先做签名和生成私钥的页面：初始化（注册 passkey，离线保存恢复密钥和备份密钥）、添加节点（浏览器生成入网密钥）、添加设备（浏览器生成设备私钥，导出配置和二维码）、变更的审批与签名
-  - 再做查看与管理：节点、成员与设备、访问规则；每对节点的当前路径、传输方式、延迟、丢包，先用表格呈现，拓扑图放在 M1 后段、组网稳定之后
-  - 中英双语
 - OpenAPI（覆盖本阶段的资源）；`nett status`、`nett doctor`、`nett leave`、`nett whois`（命令行只用英文，architecture.md 第 14.3 节）；排障手册（中英双语）
 - 首批平台：Linux、Synology DSM、macOS（原生成员；容器内成员可选）、Home Assistant OS（加载项）
 - 可用性：至少两个可用中继（位于不同主机）；`dial-only` 节点至少连接两个 `public` 节点
@@ -79,6 +76,10 @@ nett 只做组网（ADR 0019）。M1 写到可以开工的程度；M2、M3 只�
 - iOS、Android App：完整成员，在 Network Extension（iOS）、VpnService（Android）中运行用户态 WireGuard 和路径层
 - Windows 成员：wireguard-nt 内核驱动，过滤使用 Windows 防火墙（WFP）
 - 复用 M1 起与平台无关的组网核心，只新增各平台的数据面后端和 App 外壳（ADR 0018）；iOS 需要 Apple 开发者账号（付费）
+
+## 未排期
+
+- **Web 控制台与 passkey**（ADR 0024）：同一套 API 上的图形界面，在站点状态移到 Hub（design/hub.md 第 9 节的 H5）之后加入。先做查看：节点、成员与设备、访问规则，每对节点的当前路径、传输方式、延迟、丢包；再做 passkey 登录与签名、变更集（design/changes.md）。中英双语
 
 ## 待讨论
 

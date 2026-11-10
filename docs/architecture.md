@@ -5,14 +5,14 @@
 ## 1. 总览
 
 ```
-┌──────────────────────────── 浏览器 ─────────────────────────────┐
-│ Web 控制台：React SPA，WebAuthn（passkey 登录与签名）             │
+┌──────────────────────────── 用户的电脑 ──────────────────────────┐
+│ nett site：维护站点；在本机计算、显示并签名（恢复密钥）           │
 └───────────────┬────────────────────────────────────────────────┘
-                │ HTTPS：REST/JSON + SSE
+                │ HTTPS：REST/JSON
 ┌───────────────▼─────────────────── Hub 主机 ──────────────────────┐
 │ 反向代理（默认 Caddy）：Hub 的 HTTPS；按 SNI 转交 nett-relay      │
-│ nett-hub：对外 API · 认证 · 期望状态 · 变更集 · 审计                 │
-│           SQLite · node 网关 · 内嵌 Web 前端                          │
+│ nett-hub：对外 API · 认证 · 期望状态 · 审计                         │
+│           SQLite · node 网关                                         │
 │ nett-relay：中继与公网传输入口（低权限）                              │
 │ nett-node                                                       │
 └───────────────┬────────────────────────────────────────────────┘
@@ -45,13 +45,13 @@
 | **传输适配进程** | TLS 传输适配，只经手密文（ADR 0013） | 持有任何密钥；任何管理功能 | 低 | 否（主动连出） |
 | **nett-relay** | 中继转发加密数据包；接收 TCP/TLS 等传输；探测应答；按连接转发（CONNECT） | 解密组网流量；任何管理功能 | 低 | 是 |
 | **Edge** | 用户自己在入口节点上运行的反向代理（任何实现）：TLS 终止，按域名把请求经组网转发到服务；nett 不生成、不管理它的配置（第 8 节） | 任何管理功能 | 低 | 是 |
-| **用户的 passkey** | 签名批准提升权限的变更 | — | 持有签名私钥 | — |
+| **签名工具**（`nett site`） | 在用户自己的电脑上维护站点；计算、显示并签名提升权限的变更（design/site.md） | 常驻运行；直接连接节点 | 持有恢复密钥 | 否 |
 
 **三条原则**
 
 1. **管理和流量分离**：Hub 和 node 都停止时，网站和组网照常工作，只是暂时无法变更。
 2. **有权限的不对外，对外的没权限**：nett-node 和组网进程都不监听公网地址（组网进程只在组网地址上提供 DNS 和探测应答；局域网地址上的探测应答只在存在局域网直连候选时开启，且不响应未认证的探测）；所有公网监听都交给独立的低权限进程（Edge、nett-relay）。WireGuard 的 UDP 端口由内核或组网进程监听，只应答带认证的探测，对未认证的数据包不作任何响应。
-3. **决定和执行分离，提升权限必须签名**：Hub 被攻破也无法越权，前提是用户没有在被攻破的控制台上完成签名（控制台页面由 Hub 提供，见 design/auth.md 第 2 节）。组网成员、宣告网段和访问规则同样由签名产物构成（ADR 0014）。
+3. **决定和执行分离，提升权限必须签名**：Hub 被攻破也无法越权：签名在用户自己的电脑上完成，签名的内容由签名工具在本机计算并显示，不经 Hub（ADR 0024，design/auth.md 第 2 节）。组网成员、宣告网段和访问规则同样由签名产物构成（ADR 0014）。
 
 ## 3. nett-node
 
@@ -94,44 +94,43 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <token>
 
 ## 4. Hub
 
-- **对外 API**：REST + JSON，资源化；从代码生成 OpenAPI 3.1；Web、脚本和以后的移动端都使用同一套 API；
-- **实时数据**：SSE；
+- **对外 API**：REST + JSON，资源化；从代码生成 OpenAPI 3.1；命令行、脚本，以及以后的 Web 控制台和移动端都使用同一套 API；
 - **node 网关**：WebSocket + Protobuf；
 - **组网控制**：分配地址、分发公钥和候选路径、维护中继名单和线路质量矩阵；
 - **存储**：SQLite（WAL）；
-- **HTTPS**：Hub 位于本机的反向代理之后。Hub 安装脚本为 Hub 的控制台域名生成反向代理配置（默认 Caddy，ADR 0009），并在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay。这台反向代理也可以同时是用户的 Edge，但 nett 只生成 Hub 和 nett-relay 这两段配置。
+- **HTTPS**：Hub 位于本机的反向代理之后，默认与 Caddy 一起用 Compose 运行（ADR 0009，design/hub.md 第 8 节）。Caddy 的配置中包括在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay；Hub 主机上已有反向代理时，`nett-hub init` 打印这两段配置。这台反向代理也可以同时是用户的 Edge，但 nett 只提供 Hub 和 nett-relay 这两段配置。
 
-**资源保护**：所有队列、缓存和通道设置上限；限制 SSE 连接数；数据和审计有保留策略；上线前做 24 小时浸泡测试。前端运行在浏览器中，对 Hub 只增加约 1 MB 二进制体积。
+**资源保护**：所有队列、缓存和通道设置上限；数据和审计有保留策略；上线前做 24 小时浸泡测试。
 
 ## 5. 认证与授权
 
 | 身份 | 认证方式 |
 |---|---|
-| 用户 | passkey（WebAuthn）+ 恢复密钥；短期会话 Cookie |
-| API token | 只有 `script` 类型；带权限范围、有过期时间、可吊销；固定前缀；服务端只存哈希 |
-| node | 一次性入网 token → X25519 身份密钥；入网私钥由浏览器生成，节点用它签署准入证明（ADR 0014）；连接时在 WebSocket 内层用 Noise 协议双向认证并端到端加密 |
+| 用户 | 恢复密钥，由用户电脑上的签名工具使用（design/site.md 第 8 节）；passkey 与会话随 Web 控制台加入（ADR 0024） |
+| API token | `owner`（关联站点时发给签名工具，design/hub.md 第 4 节）与 `script`；带权限范围、有过期时间、可吊销；固定前缀；服务端只存哈希 |
+| node | 一次性入网 token → X25519 身份密钥；入网私钥由签名工具生成，节点用它签署准入证明（ADR 0014）；连接时在 WebSocket 内层用 Noise 协议双向认证并端到端加密 |
 | 手机设备 | 设备凭据（WireGuard 密钥，或 CONNECT 凭据） |
 
 ```
 请求 → 识别身份 → 检查权限范围 → 检查策略 → 执行 → 写入审计
 ```
 
-**token 只能提议高风险变更，不能批准。**批准由用户用 passkey 签名：把变更内容的哈希作为 WebAuthn 挑战，浏览器里即可完成。
+**token 只能提议高风险变更，不能批准。**批准由用户在自己的电脑上用签名工具签名，签名的内容在本机显示（ADR 0024）；Web 控制台加入之后，也可以用 passkey 签名（design/auth.md 第 10.2 节）。
 
-入网时，Hub 分配节点 ID 和地址，浏览器生成入网密钥对；token 携带 Hub 的完整公钥（Noise IK 需要它）和入网私钥；节点用入网私钥签署准入证明；其他成员凭"签名策略 + 准入证明"验证这个节点，不凭 Hub 的一面之词（design/auth.md 第 8 节）。
+入网时，签名工具分配节点 ID 和地址、生成入网密钥对（design/hub.md 第 6 节）；token 携带 Hub 的完整公钥（Noise IK 需要它）和入网私钥；节点用入网私钥签署准入证明；其他成员凭"签名策略 + 准入证明"验证这个节点，不凭 Hub 的一面之词（design/auth.md 第 8 节）。
 
 **信任链**
 
 | 信任根 | 签什么 | 谁验证 |
 |---|---|---|
-| 用户的 passkey 与恢复密钥 | 信任锚更新；变更批准；节点策略；组网准入材料（成员、设备凭据、宣告网段、访问规则集）；允许降级 | 节点独立验证，不信任 Hub |
-| 浏览器生成的一次性入网私钥 | 准入证明（绑定节点 ID、身份公钥、组网公钥） | Hub 与所有组网成员 |
+| 用户的恢复密钥（以后加上 passkey） | 信任锚更新；变更批准；节点策略；组网准入材料（成员、设备凭据、宣告网段、访问规则集）；允许降级 | 节点独立验证，不信任 Hub |
+| 签名工具生成的一次性入网私钥 | 准入证明（绑定节点 ID、身份公钥、组网公钥） | Hub 与所有组网成员 |
 | 项目的发布签名密钥（主备两把，ADR 0020） | 发布包 | 节点（公钥在构建时嵌入 `nett`） |
 | 用户的备份密钥 | 加密 Hub 备份 | 只有持有离线私钥的用户能解开 |
 
 Hub 被攻破后，攻击者**能**：查看组网的状态；执行低风险操作；确认中风险操作，例如修改连接的策略；让组网连接断开；对从未收到某条撤销记录的成员隐瞒它。攻击者**不能**：提升任何节点的权限；加入组网成员或放宽组网访问（包括借助改标签，以及让 Edge 专用地址访问更多目标）；让节点降级；伪造节点身份；用重发旧签名产物的方式恢复已撤销的权限。
 
-**前提**：用户在此期间没有在被攻破的控制台上签名或生成设备配置，也没有用它提供的安装脚本安装节点。控制台页面由 Hub 提供，被攻破的 Hub 可以显示一项操作、实际请求签名另一项；节点上的 `nett trust log` 可以事后核对节点接受过哪些授权（design/auth.md 第 2 节；ADR 0006、0012、0014）。
+**前提**：用户在此期间没有用被攻破的 Hub 提供的安装脚本安装节点。签名的内容由用户电脑上的签名工具计算并显示，不经 Hub；节点上的 `nett trust log` 可以事后核对节点接受过哪些授权（design/auth.md 第 2 节；ADR 0006、0012、0014、0024）。
 
 ## 6. 组网
 
@@ -181,7 +180,7 @@ Hub 被攻破后，攻击者**能**：查看组网的状态；执行低风险操
 - **所有 `public` 节点都具备中继能力**（`dial-only` 节点和手机不能为其他节点中转）。Hub 根据位置、实测质量、流量配额和资源余量决定实际使用哪些中继。
 - **中继只转发加密后的数据包，看不到内容**，端到端加密不受影响。
 - 中继由独立的低权限进程 nett-relay 承担，只在转发流量时消耗资源。
-- 每个中继只使用一个 UDP 端口。在 Hub 主机上与 Hub 控制台共用 443：由 Hub 前的反向代理按 SNI 把 nett-relay 的域名转交给 nett-relay（第 4 节，ADR 0011）。
+- 每个中继只使用一个 UDP 端口。在 Hub 主机上与 Hub 共用 443：由 Hub 前的反向代理按 SNI 把 nett-relay 的域名转交给 nett-relay（第 4 节，ADR 0011）。
 
 ### 6.5 网络可达性
 
@@ -259,14 +258,14 @@ nett 不含 AI 逻辑。AI 和其他外部程序一样，只经 Hub API（`scrip
 
 | 部分 | 选择 |
 |---|---|
-| Hub | Rust：axum、SQLite + sqlx、utoipa、webauthn-rs、rustls、rust-embed |
+| Hub | Rust：axum、SQLite + sqlx、utoipa、rustls；Web 控制台加入时加上 webauthn-rs、rust-embed（ADR 0024） |
 | node | Rust：tokio（单线程）、tokio-tungstenite、prost、hyper；WireGuard 通过 netlink 管理内核实现（只编码用到的几种消息，不引入 netlink 库） |
 | 各组件共用 | serde、serde_json；ring（签名验证、哈希、HMAC、HKDF，也作为 rustls 的加密后端）；x25519-dalek（由组网私钥派生成员之间直连探测的密钥，ring 不能导入已有的私钥）；rustix（netlink 与原始套接字的系统调用；nftables 规则也经 netlink 下发，不调用 `nft` 命令）；lexopt（命令行解析） |
 | nett-relay | Rust：tokio、rustls（经 tokio-rustls）、tokio-tungstenite（TLS 传输入口的 WebSocket）、hyper（HTTP/2 CONNECT）；blake2（按 WireGuard 协议计算 `mac1`）；后期 quinn（QUIC） |
 | nett-transport | Rust：tokio（单线程）、rustls（经 tokio-rustls，按指纹校验证书）、tokio-tungstenite |
 | 用户态 WireGuard | gotatun 的 `noise` 层，用于无内核模块的平台（design/userspace.md 第 3 节） |
-| 协议 | 对外 REST + JSON + SSE（OpenAPI 3.1）；内部 WebSocket + Protobuf |
-| Web | React + Vite、TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow |
+| 协议 | 对外 REST + JSON（OpenAPI 3.1），Web 控制台加入时加上 SSE；内部 WebSocket + Protobuf |
+| Web（控制台，ADR 0024） | React + Vite、TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow |
 | Hub 前的反向代理 | Caddy（默认，ADR 0009） |
 
 ## 11. 代码组织
@@ -283,9 +282,10 @@ nett/
 │   ├── nett-mesh/      # 组网进程：与平台无关的核心（准入、测量、选路、切换）+ 各平台的数据面后端（ADR 0018）
 │   ├── nett-transport/ # 传输适配进程
 │   ├── nett-relay/
+│   ├── nett-site/      # 站点模型与期望状态的组成（签名工具与 Hub 共用，design/site.md）
 │   ├── nett-cli/       # nett 命令
 │   └── nett-lab/       # 实验工具：生成实验配置、搭建拓扑、注入故障、采集测量（只用于开发和测试，不进发布包）
-├── web/                # React SPA；src/api 由 OpenAPI 生成
+├── web/                # Web 控制台（React SPA，ADR 0024）；src/api 由 OpenAPI 生成
 ├── keys/               # 发布签名公钥（ADR 0020）
 ├── packaging/          # systemd 单元、容器镜像与 Homebrew 配方模板（第 13.2 节）
 └── docs/
@@ -311,7 +311,7 @@ Hub 是控制面，node 是执行者：
 | **Hub 进程停止**（崩溃、升级、重启） | 节点间组网与自动切换、Edge 回源、手机接入 | 配置变更、新节点入网 | 服务管理器自动重启（第 13.2 节） |
 | **nett-node 停止**（崩溃、升级、被 OOM 杀掉） | 组网与自动切换、DNS、Edge 回源 | 状态上报、配置变更、升级 | 服务管理器自动重启；组网进程独立运行（ADR 0013） |
 | **组网进程停止** | 内核 WireGuard 保持当前路径 | 路径切换；用户态平台上全部路径中断 | 服务管理器自动重启，加载已保存的配置（design/mesh.md 第 15 节） |
-| **Hub 前的反向代理停止** | 组网 | 控制台；节点经这台主机连接 Hub | 节点改用 Hub 端点列表中的其他端点 |
+| **Hub 前的反向代理停止** | 组网 | Hub 的 API；节点经这台主机连接 Hub | 节点改用 Hub 端点列表中的其他端点 |
 | **Hub 主机宕机** | 不经过该主机的路径和服务 | 上述全部，以及该主机上的反向代理、中继、移动网关 | 路径层自动绕开；见 12.3 |
 | **某个节点宕机** | 其余节点；以它为中继的路径自动绕开 | 该节点上的服务 | — |
 | **某条路径变差或中断** | — | — | 路径层在几秒内切换，连接不中断 |
@@ -331,7 +331,7 @@ Hub 是控制面，node 是执行者：
 | 发布物 | 包含 | 安装位置 |
 |---|---|---|
 | **`nett`** | 一个可执行文件，按子命令运行为不同角色：命令行、`nett node`、`nett mesh`、`nett transport`、`nett relay` | 所有节点 |
-| **`nett-hub`** | Hub 与内嵌的 Web 前端 | 只在 Hub 主机 |
+| **`nett-hub`** | Hub（可执行文件与容器镜像，design/hub.md 第 8 节） | 只在 Hub 主机 |
 | **HA 加载项** | `nett` 的容器镜像与加载项仓库（ADR 0017） | 运行 Home Assistant OS 的设备 |
 
 代码层面 node、mesh、transport、relay、cli 仍是独立的 crate，最终链接成同一个可执行文件。这样安装和升级只有一次、版本不会错配；多个进程映射同一个文件，代码页由系统共享，总内存更低。安全隔离依靠运行用户和权限，与是否同一个文件无关。
@@ -347,7 +347,7 @@ Linux 上的 `nett`（x86_64、aarch64）静态链接 musl：同一个文件可�
 | `nett-transport` | 专用的低权限用户 | 无 | 不监听（主动连出） | 存在 TLS 传输候选时由 nett-node 启用 |
 | `nett-relay` | 专用的低权限用户 | 中继的 TLS 证书私钥；不持有组网私钥 | 公网：一个中继 UDP 端口、TLS 443 | 由 Hub 按节点可达性和签名策略决定启用，nett-node 负责启用或停用，配置从组网进程获取；`dial-only` 节点不运行 |
 | `nett-hub` | 专用的低权限用户；也可以用容器运行（Hub 不需要访问宿主） | Hub 身份密钥 | 本机（经 Hub 前的反向代理暴露） | Hub 主机 |
-| Hub 前的反向代理 | 低权限 | 控制台域名的证书私钥 | 公网 80、443 | Hub 主机 |
+| Hub 前的反向代理 | 低权限 | Hub 域名的证书私钥 | 公网 80、443 | Hub 主机 |
 
 用户自己的 Edge 不属于 nett，不在此列。公网端口清单见 design/mesh.md 第 5.5 节。
 
@@ -355,18 +355,19 @@ Linux 上的 `nett`（x86_64、aarch64）静态链接 musl：同一个文件可�
 
 ### 13.3 安装
 
-**Hub（一次）**
+**Hub（一次）**：在 Hub 主机上用项目提供的 Compose 示例运行 nett-hub 与 Caddy，也可以原生运行（design/hub.md 第 8 节），然后：
 
 ```bash
-curl -fsSL https://<项目主页>/install.sh | sudo sh -s -- hub --domain hub.example.com
+nett-hub init --url https://hub.example.com   # Hub 主机上：打印一次性关联码
+nett site link nett_lnk_…                     # 用户自己的电脑上
 ```
 
-脚本下载并校验发布签名，安装服务，为 Hub 的控制台域名生成反向代理配置（第 4 节），然后在终端打印**一次性初始化链接**；在浏览器中打开它注册 passkey，并离线保存恢复密钥和备份密钥。初始化链接只能使用一次，防止他人抢先完成注册。Hub 也提供容器镜像。
+关联码 1 小时内有效，只能使用一次，防止他人抢先关联；`nett site link` 把站点的信任锚交给 Hub（design/hub.md 第 3.1 节）。恢复密钥在 `nett site init` 时生成，只保存在用户的电脑上（design/site.md 第 8 节）。
 
-**节点**：在控制台"添加节点"并勾选模块和角色，复制生成的命令：
+**节点**：在用户的电脑上 `nett site add <名字>`，在那台机器上运行它打印的命令（design/hub.md 第 3.3 节）：
 
 ```bash
-curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性 token>
+curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- nett_enr_…
 ```
 
 - **安装脚本和二进制都由用户自己的 Hub 提供**：脚本中预置 Hub 的公钥；可执行文件用项目的发布签名验证（主备两把公钥在构建时嵌入 `nett`，首次安装时可对照项目主页公布的指纹核对，ADR 0020）；Hub 缓存经过签名的发布包，节点无需访问公共代码托管平台（在网络受限的地区更可靠）；
@@ -374,18 +375,13 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性
 - 不使用 `curl | sh` 时，可手动下载、校验签名后执行 `sudo nett install <token>`；
 - macOS 也可以通过 Homebrew 安装后执行 `sudo nett install <token>`。
 
-**手机**：无需安装 nett。控制台"添加设备"（passkey 确认）后导出标准 WireGuard 配置，用任意 WireGuard 客户端导入；也可以导出 Surge、mihomo、sing-box 的配置，直连家里不通时自动改走网关。
+**手机**：无需安装 nett。设备凭据与移动网关实现之后，由 `nett site` 的命令生成标准 WireGuard 配置（配置文件与二维码，ADR 0008），用任意 WireGuard 客户端导入；也可以导出 Surge、mihomo、sing-box 的配置，直连家里不通时自动改走网关。
 
 ### 13.4 命令
 
 命令按作用范围分三组，每个命令只做一件事。`nett` 或 `nett help` 按这三组列出全部命令，任何命令加 `--help` 显示它的用法。
 
-**整张网**：只在持有站点的那台电脑上运行（design/local-signing.md）。
-
-| 命令 | 作用 |
-|---|---|
-| `nett site init` | 建立站点：恢复密钥与空的站点描述 |
-| `nett site apply` | 签名变化的产物，生成各节点的期望状态。不接 Hub 时写成文件；接了 Hub 时推送给 Hub（design/hub.md 第 3.2 节） |
+**整张网**：只在持有站点的那台电脑上运行。`nett site` 的命令维护机器、Edge 与宣告的网段、访问规则，并与 Hub 关联；每条修改命令列出要签名的内容，确认后签名并送达。命令与用法见 design/site.md 第 3 节。
 
 **这台机器**：在每台机器上运行，多数需要 root。
 
@@ -395,7 +391,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性
 | `nett reload` | 请组网进程重新读取期望状态文件，显示是否被接受（design/status.md 第 4.1 节） |
 | `nett install` | 把这台机器装成成员：生成密钥、安装服务、导入期望状态（macOS，design/release.md 第 4 节）；带入网 token 时向 Hub 入网（design/hub.md 第 6 节） |
 | `nett uninstall` | 停止并删除服务，保留密钥和期望状态，再次 `install` 即恢复 |
-| `nett keys` | 只生成本机密钥、打印写进站点描述的一行：用于容器内成员和自己写服务配置的机器 |
+| `nett keys` | 只生成本机密钥、打印 `nett site add --keys` 要用的一行：用于容器内成员和自己写服务配置的机器 |
 | `nett leave` | 退出这张网（root）：通知 Hub，拆掉组网接口，删除本机的密钥、信任锚和期望状态，卸载服务；之后可以加入任何网（design/auth.md 第 8.3 节） |
 | `nett doctor` | 自动诊断，给出通俗的说明和处理建议 |
 | `nett whois <地址>` | 按本机已验证的准入材料，查询一个组网地址属于哪个节点、设备或 Edge |
@@ -409,7 +405,7 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <一次性
 
 | 形态 | 典型机器 | 运行的进程 | 组网 | 备注 |
 |---|---|---|---|---|
-| Hub 主机 | 能使用控制台域名的公网 VPS | nett-hub、Hub 前的反向代理（默认 Caddy）、nett-node、组网进程、nett-relay | 内核 WireGuard，`public` | 控制台只有这一个地址（design/auth.md 第 5 节） |
+| Hub 主机 | 能使用 Hub 域名的公网 VPS | nett-hub、Hub 前的反向代理（默认 Caddy）、nett-node、组网进程、nett-relay | 内核 WireGuard，`public` | Web 控制台加入后只用这一个地址（design/auth.md 第 5 节） |
 | 公网节点 | 普通 VPS | nett-node、组网进程、nett-relay，可选用户自己的 Edge | 内核 WireGuard，`public` | 都具备中继能力 |
 | NAT 节点 | NAT 型 VPS | nett-node、组网进程、传输适配进程 | 内核 WireGuard，`dial-only` | 至少连接两个 `public` 节点 |
 | 智能入口 | 家里常开的 NAS 或小主机 | nett-node、组网进程、可选 nett-relay | 内核或用户态（在组网进程中） | 宣告局域网段；路由器映射端口后为 `public` |
@@ -463,9 +459,9 @@ Web 界面、API 错误信息，以及面向用户的文档（README、安装、
 |---|---|
 | 发布签名属于项目，主备两把：主钥匙只在 CI 中单独的签名任务里可用，备用钥匙只离线保存；节点只自动接受更高版本，降级需要签名；升级只经 `release` 分区 | design/auth.md 第 11.3 节、ADR 0012、0020 |
 | 备份包含 Hub 身份私钥，用备份公钥加密，由其他节点定时拉取 | design/auth.md 第 12 节、design/protocol.md 第 5 节 |
-| 恢复密钥在浏览器本地签名，Hub 从未见过恢复私钥 | design/auth.md 第 4 节 |
+| 恢复密钥只在用户的电脑上由签名工具使用，Hub 从未见过恢复私钥 | design/site.md 第 8 节、design/auth.md 第 4 节 |
 | 节点不在云主机的"局域网地址"上提供 DNS；局域网地址上的探测应答不响应未认证的探测 | design/mesh.md 第 7、11 节 |
-| 控制台页面由 Hub 提供：签名承诺的前提；`nett trust log` 事后核对 | design/auth.md 第 2 节 |
+| 签名的内容由签名工具在本机计算并显示，不经 Hub；`nett trust log` 事后核对 | design/auth.md 第 2 节、ADR 0024 |
 | 撤销记录：旧的签名产物不能恢复已撤销的权限；准入材料不按批准的过期时间拒绝 | design/auth.md 第 10.2、10.4 节 |
 | 访问规则签名展开后的结果，改标签不能扩大访问 | design/mesh.md 第 12 节、design/api-resources.md 第 5.5 节 |
 | Edge 专用地址防冒用；CONNECT 由 nett-relay 逐连接授权 | ADR 0015；design/mesh.md 第 5.4、12 节 |

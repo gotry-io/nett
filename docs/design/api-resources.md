@@ -118,7 +118,7 @@
 - **降低权限**（关闭模块、吊销 token、禁用设备、收窄访问规则）始终视为低风险，可以直接执行；
 - 修改标签本身是低风险，但如果它让某条访问规则的展开结果变大（例如给节点加上被 allow 规则选中的标签），这次修改就是放宽访问，按高风险处理（第 5.5 节）；
 - 每类写入的风险等级由动作目录（`action-types`）定义，`changes.md` 给出完整列表；
-- 变更集从 M1 起提供，只用于组网动作，每个变更集只有一个步骤（ADR 0019）。
+- 变更集随 Web 控制台加入，只用于组网动作，每个变更集只有一个步骤（ADR 0019）。在此之前，中、高风险的修改由签名工具在用户的电脑上签名，以签名产物经 `site` 资源推送（hub.md 第 4 节），Hub 只验证签名与版本，不经变更集（ADR 0024）。
 
 ### 3.1 资源上的动作
 
@@ -387,7 +387,8 @@ changes ─► 任意资源（target）；events.change_id ─► changes
 
 | 阶段 | 资源 |
 |---|---|
-| M1 | `owner`、`trust`、`passkeys`、`sessions`、`api-tokens`、`nodes`、`enrollment-tokens`、`node-policies`、`events`、`hub`、`releases`、`backups`、`changes`、`action-types`；组网：`links`、`devices`、`device-credentials`、`access-rules`、`hostnames`（节点名与别名）、`whois` |
+| M1 | `owner`、`trust`、`nodes`、`enrollment-tokens`、`node-policies`、`events`、`hub`、`releases`、`backups`；站点：`site`（推送的站点模型，hub.md 第 4 节）；组网：`links`、`devices`、`device-credentials`、`access-rules`、`hostnames`（节点名与别名）、`whois` |
+| 随 Web 控制台加入（ADR 0024） | `passkeys`、`sessions`、`api-tokens`（`script`）、`changes`、`action-types` |
 
 ## 9. 待定问题
 
