@@ -137,6 +137,36 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
                 out.push_str(&format!("\n   {file}:\n    {}", tail(&path, n)));
             }
         }
+        // 本机状态：用户态成员没有内核 WireGuard 接口，`wg show` 读不到它的对端（design/status.md 第 9 节）
+        if let Ok(doc) = nett_mesh::status::query(&node.dir.join("mesh.sock")) {
+            out.push_str("\n   status:");
+            for p in &doc.peers {
+                let path = p.path.as_ref().map(|path| {
+                    format!(
+                        "{:?} via {:?} {:?}",
+                        path.kind,
+                        path.relay.as_ref().map(|r| r.id.to_string()),
+                        path.endpoint
+                    )
+                });
+                out.push_str(&format!(
+                    "\n    {}: {:?} {:?} rtt {:?} handshake {:?}",
+                    p.name
+                        .as_ref()
+                        .map_or_else(|| p.id.to_string(), ToString::to_string),
+                    p.state,
+                    path,
+                    p.rtt_ms,
+                    p.last_handshake.map(|t| t.to_string())
+                ));
+            }
+            for problem in &doc.problems {
+                out.push_str(&format!(
+                    "\n    problem {:?}: {}",
+                    problem.kind, problem.reason
+                ));
+            }
+        }
         // 只读不含密钥的字段：`wg show ... dump` 的第一行有接口私钥（硬性规则 10）
         if let Some(net) = lab.underlay.node(&node.name) {
             for field in ["endpoints", "latest-handshakes", "transfer"] {
@@ -178,6 +208,21 @@ fn wait_for(
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// 经 `nett status --json` 读一个节点的本机状态（design/status.md）。套接字按路径连接，不受网络命名空间限制。
+fn nett_status(nett: &Path, node: &LabNode) -> anyhow::Result<nett_mesh::status::StatusDoc> {
+    let socket = node.dir.join("mesh.sock");
+    let out = run(
+        &nett.display().to_string(),
+        [
+            "status".as_ref(),
+            "--json".as_ref(),
+            "--socket".as_ref(),
+            socket.as_os_str(),
+        ],
+    )?;
+    serde_json::from_str(&out).context("parsing nett status --json")
 }
 
 fn wg_peers(netns: &str) -> anyhow::Result<BTreeSet<String>> {
@@ -278,6 +323,8 @@ impl Lab {
             dir.join("events.jsonl").into(),
             "--transport-config".into(),
             transport_config.clone().into(),
+            "--socket".into(),
+            dir.join("mesh.sock").into(),
         ];
         if node.userspace {
             args.push("--userspace".into());
@@ -439,6 +486,78 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
                 |o| o.lines().last().unwrap_or_default().to_owned(),
             ),
         );
+    }
+
+    // 本机状态（design/status.md 第 9 节）：每个成员列出其他成员和它们的名字；刚 ping 过的一对已连通、
+    // 有路径；反例在 a 上列为问题。用户态成员（`--userspace`）上同样可读
+    for node in &generated.nodes {
+        let status = nett_status(nett, node);
+        let (listed, connected) = match &status {
+            Ok(doc) => {
+                let listed: BTreeSet<(String, Option<String>)> = doc
+                    .peers
+                    .iter()
+                    .map(|p| (p.id.to_string(), p.name.as_ref().map(ToString::to_string)))
+                    .collect();
+                let other = if node.name == a.name { b } else { a };
+                let connected = doc.peers.iter().any(|p| {
+                    p.id == other.node_id
+                        && p.state == nett_mesh::status::PeerState::Connected
+                        && p.path.is_some()
+                });
+                (listed, connected)
+            }
+            Err(_) => (BTreeSet::new(), false),
+        };
+        let expected: BTreeSet<(String, Option<String>)> = generated
+            .nodes
+            .iter()
+            .filter(|n| n.name != node.name)
+            .map(|n| (n.node_id.to_string(), Some(n.name.clone())))
+            .collect();
+        report.check(
+            &format!("status:{}:peers-listed", node.name),
+            listed == expected,
+            format!(
+                "{listed:?}; expected {expected:?}; {:?}",
+                status.as_ref().err()
+            ),
+        );
+        if node.name == a.name || node.name == b.name {
+            report.check(
+                &format!("status:{}:connected", node.name),
+                connected,
+                format!("{:?}", status.as_ref().map(|d| &d.peers)),
+            );
+        }
+        if node.name == a.name {
+            let problems: Vec<String> = status
+                .iter()
+                .flat_map(|d| &d.problems)
+                .filter(|p| p.kind == nett_mesh::status::ProblemKind::MemberRejected)
+                .filter_map(|p| p.node.as_ref().map(|n| n.id.to_string()))
+                .collect();
+            let missing: Vec<String> = generated
+                .negatives
+                .iter()
+                .filter_map(|n| n.node_id.as_ref().map(ToString::to_string))
+                .filter(|id| !problems.contains(id))
+                .collect();
+            report.check(
+                "status:a:rejections-listed",
+                status.is_ok() && missing.is_empty(),
+                format!("member_rejected problems {problems:?}; missing {missing:?}"),
+            );
+            let text = run(
+                &nett.display().to_string(),
+                [
+                    "status".as_ref(),
+                    "--socket".as_ref(),
+                    node.dir.join("mesh.sock").as_os_str(),
+                ],
+            );
+            report.record("status:a", text.unwrap_or_else(|e| format!("{e:#}")));
+        }
     }
 
     // 重新加载一份只带低版本材料的期望状态：被拒绝，已生效的对端保持不变

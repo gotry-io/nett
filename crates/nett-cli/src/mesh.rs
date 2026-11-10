@@ -20,6 +20,7 @@ use nett_mesh::linux::{KernelWireGuard, SystemClock};
 use nett_mesh::macos::{MacTun, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
+use nett_mesh::status::StatusServer;
 use nett_mesh::userspace::UserspaceDataPlane;
 use nett_trust::keys::X25519PublicKey;
 use tokio::signal::unix::{SignalKind, signal};
@@ -27,6 +28,8 @@ use tokio::signal::unix::{SignalKind, signal};
 struct Args {
     config: PathBuf,
     key: PathBuf,
+    /// 本机状态的套接字（design/status.md 第 3 节）。
+    socket: PathBuf,
     #[cfg(feature = "lab")]
     lab: LabArgs,
 }
@@ -45,7 +48,7 @@ struct LabArgs {
     userspace: bool,
 }
 
-const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key>\n       \
+const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>]\n       \
 nett mesh keys --dir <directory>\n       \
 sudo nett mesh install [--config <desired-state.json>] | uninstall    (macOS service)";
 #[cfg(feature = "lab")]
@@ -54,12 +57,14 @@ const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-con
 
 fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
     let (mut config, mut key) = (None, None);
+    let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
     #[cfg(feature = "lab")]
     let mut lab = LabArgs::default();
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
             #[cfg(feature = "lab")]
             lexopt::Arg::Long(name) => {
                 let name = name.to_owned();
@@ -74,6 +79,7 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
         (Some(config), Some(key)) => Ok(Args {
             config,
             key,
+            socket,
             #[cfg(feature = "lab")]
             lab,
         }),
@@ -323,6 +329,14 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         clock,
     );
     let worker = worker.context("starting the mesh worker thread")?;
+    // 状态查询只是给人看的：套接字建不起来时记录下来，组网照常（硬性规则 8）
+    let status = match StatusServer::spawn(&args.socket, worker.status_source()) {
+        Ok(server) => Some(server),
+        Err(e) => {
+            tracing::warn!(socket = %args.socket.display(), error = %e, "status socket unavailable; `nett status` will not work");
+            None
+        }
+    };
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -341,6 +355,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             }
         };
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
+        drop(status);
         tokio::task::spawn_blocking(move || worker.shutdown())
             .await
             .context("stopping the mesh worker")?

@@ -10,6 +10,8 @@ mod relay;
 #[cfg(target_os = "macos")]
 mod service;
 mod site;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod status;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod transport;
 
@@ -38,6 +40,8 @@ fn run() -> anyhow::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         lexopt::Arg::Value(cmd) if cmd == "mesh" => mesh::run(parser),
         lexopt::Arg::Value(cmd) if cmd == "site" => site::run(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        lexopt::Arg::Value(cmd) if cmd == "status" => status::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
         lexopt::Arg::Value(cmd) if cmd == "relay" => relay::run(parser),
         #[cfg(all(feature = "lab", target_os = "linux"))]
