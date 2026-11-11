@@ -105,7 +105,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     if !matches!(words.as_slice(), ["init"] | ["link", _])
         && let Some(hub) = SiteHub::load(&dir)?
     {
-        sync(&dir, &hub)?;
+        sync(&dir, &hub, json)?;
     }
     let change: Change = match words.as_slice() {
         ["init"] => return init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN)),
@@ -219,7 +219,15 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 /// (narrowing), and learned public addresses are recorded. These are only recording and narrowing,
 /// so no confirmation is needed. Skipped when the Hub is unreachable: the push after the command
 /// reports it.
-fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
+fn sync(dir: &Path, hub: &SiteHub, json: bool) -> anyhow::Result<()> {
+    // With --json the report goes to standard error, so that standard output stays JSON
+    let say = |line: String| {
+        if json {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
     let Ok(updates) = crate::hub::fetch_updates(hub) else {
         return Ok(());
     };
@@ -233,22 +241,24 @@ fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
         return Ok(());
     }
     sign(&mut next, &site.recovery()?, Timestamp::now(), &[])?;
-    println!("From the Hub:");
+    say("From the Hub:".to_owned());
     for name in &applied.joined {
-        println!("  + {name} joined through the Hub");
+        say(format!("  + {name} joined through the Hub"));
     }
     for name in &applied.left {
-        println!("  - {name} left the site (`nett leave` on the machine)");
+        say(format!(
+            "  - {name} left the site (`nett leave` on the machine)"
+        ));
     }
     for line in describe(&stored, &next) {
-        println!("  {line}");
+        say(format!("  {line}"));
     }
     save_with_outputs(&site, &stored, &next, &outputs(&next)?)?;
     // If it cannot be delivered, the next command pushes again
     if let Err(e) = crate::hub::push(hub, &next) {
-        println!("  (pushing this to the Hub failed: {e:#})");
+        say(format!("  (pushing this to the Hub failed: {e:#})"));
     }
-    println!();
+    say(String::new());
     Ok(())
 }
 
