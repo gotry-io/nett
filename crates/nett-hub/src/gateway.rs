@@ -21,7 +21,7 @@ use nett_proto::noise::{MAX_MESSAGE, Responder, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
     AckResult, DesiredState, Envelope, Error as ProtoError, ErrorCode, Hello, Partition,
-    PartitionKind, Pong, Welcome,
+    PartitionKind, PathSwitch, Pong, Welcome,
 };
 use nett_site::state::{AddressSource, Learned, LearnedIp};
 use prost::Message as _;
@@ -322,8 +322,17 @@ async fn session(
         .seen(node.as_str(), now(), &hello.node_version)
         .await
         .map_err(|e| e.to_string())?;
-    let replaced = hub.connected(&node).await;
-    let result = serve(&hub, &node, &mut socket, transport, &replaced, observed).await;
+    let (replaced, switches) = hub.connected(&node).await;
+    let result = serve(
+        &hub,
+        &node,
+        &mut socket,
+        transport,
+        &replaced,
+        switches,
+        observed,
+    )
+    .await;
     hub.disconnected(&node, &replaced).await;
     hub.db
         .seen(node.as_str(), now(), &hello.node_version)
@@ -392,6 +401,7 @@ async fn serve(
     socket: &mut WebSocket,
     transport: Transport,
     replaced: &tokio::sync::Notify,
+    mut switches: tokio::sync::mpsc::Receiver<(NodeId, Vec<u8>)>,
     observed: Option<IpAddr>,
 ) -> Result<(), String> {
     let mut out = Outbox {
@@ -449,6 +459,13 @@ async fn serve(
                     return Ok(());
                 }
                 send_release(hub, socket, &mut out).await?;
+            }
+            Some((from, message)) = switches.recv() => {
+                out.send(socket, Body::PathSwitch(PathSwitch {
+                    node_id: from.to_string(),
+                    message,
+                }))
+                .await?;
             }
             () = replaced.notified() => return Ok(()),
             () = &mut idle => return Err("no message within the keepalive window".into()),
@@ -565,6 +582,16 @@ async fn handle(
                 if let Err(e) = hub.learn(node, change, now()).await {
                     tracing::warn!(node_id = %node, error = %e, "recording the relay fingerprint");
                 }
+            }
+        }
+        // Opaque to the Hub: authenticated end to end by the two mesh processes (design/mesh.md section
+        // 8.4); checked here only for size and that the pair is connected
+        Some(Body::PathSwitch(p)) => {
+            if let Ok(to) = p.node_id.parse::<NodeId>()
+                && p.message.len() <= nett_mesh::coord::MAX_MESSAGE
+                && !hub.path_switch(node, &to, p.message).await
+            {
+                tracing::debug!(node_id = %node, to = %to, "switch message not passed on");
             }
         }
         Some(Body::Goodbye(_)) => return Ok(false),

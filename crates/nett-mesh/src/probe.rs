@@ -47,6 +47,9 @@ const PUNCH_LEN: usize = 32;
 const RELAY_REPORT_LEN: usize = 12;
 
 const DIRECT_KEY_LABEL: &[u8] = b"nett direct probe v1";
+const SWITCH_KEY_LABEL: &[u8] = b"nett path switch v1";
+/// A switch message relayed through the Hub: the message, the send time and the checksum.
+pub const HUB_SWITCH_LEN: usize = SWITCH_LEN + 8 + MAC_LEN;
 
 /// 8-byte identifier of a public key (or other identity): the first 8 bytes of SHA-256.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -75,6 +78,16 @@ impl ProbeKey {
     /// Returns `None` when the peer's public key is a small-order point or otherwise makes the shared
     /// value all zeros.
     pub fn direct(own: &PrivateKey, peer: &X25519PublicKey) -> Option<Self> {
+        Self::derive(own, peer, DIRECT_KEY_LABEL)
+    }
+
+    /// The key of switch messages relayed through the Hub (design/mesh.md section 8.4): derived like the
+    /// direct probe key, for another purpose, so that only the two members can compute it.
+    pub fn path_switch(own: &PrivateKey, peer: &X25519PublicKey) -> Option<Self> {
+        Self::derive(own, peer, SWITCH_KEY_LABEL)
+    }
+
+    fn derive(own: &PrivateKey, peer: &X25519PublicKey, label: &[u8]) -> Option<Self> {
         let secret = StaticSecret::from(*own.as_bytes());
         let own_public = PublicKey::from(&secret);
         let shared = secret.diffie_hellman(&PublicKey::from(*peer.as_bytes()));
@@ -87,7 +100,7 @@ impl ProbeKey {
             (*peer.as_bytes(), own_public.to_bytes())
         };
         let mut okm = Zeroizing::new([0u8; 32]);
-        let info: [&[u8]; 3] = [DIRECT_KEY_LABEL, &lo, &hi];
+        let info: [&[u8]; 3] = [label, &lo, &hi];
         hkdf::Salt::new(hkdf::HKDF_SHA256, &[])
             .extract(shared.as_bytes())
             .expand(&info, HmacKeyLen)
@@ -318,6 +331,33 @@ impl SwitchMessage {
     }
 }
 
+impl SwitchMessage {
+    /// The message relayed through the Hub: `message | send time (Unix ms) | checksum`. The Hub cannot
+    /// forge it; the send time limits replay.
+    pub fn seal(&self, sent_ms: u64, key: &ProbeKey) -> [u8; HUB_SWITCH_LEN] {
+        let mut b = [0u8; HUB_SWITCH_LEN];
+        b[..SWITCH_LEN].copy_from_slice(&self.encode());
+        b[SWITCH_LEN..SWITCH_LEN + 8].copy_from_slice(&sent_ms.to_be_bytes());
+        let mac = key.mac(&b[..SWITCH_LEN + 8]);
+        b[SWITCH_LEN + 8..].copy_from_slice(&mac);
+        b
+    }
+
+    /// Opens a message relayed through the Hub: `None` when it is malformed, does not authenticate, or
+    /// was sent more than [`MAX_CLOCK_SKEW_MS`] from this machine's clock.
+    pub fn open(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<Self> {
+        if b.len() != HUB_SWITCH_LEN || !key.verify(&b[..SWITCH_LEN + 8], &b[SWITCH_LEN + 8..]) {
+            return None;
+        }
+        let mut sent = [0u8; 8];
+        sent.copy_from_slice(&b[SWITCH_LEN..SWITCH_LEN + 8]);
+        if now_ms.abs_diff(u64::from_be_bytes(sent)) > MAX_CLOCK_SKEW_MS {
+            return None;
+        }
+        Self::decode(&b[..SWITCH_LEN])
+    }
+}
+
 /// The type of NAT this machine is behind (design/mesh.md section 6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -442,6 +482,36 @@ pub const UNSPECIFIED: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn switch_messages_through_the_hub_authenticate_and_expire() {
+        let own = PrivateKey::from_bytes([3; 32]);
+        let peer_secret = PrivateKey::from_bytes([4; 32]);
+        let peer = peer_secret.public_key();
+        let key = ProbeKey::path_switch(&own, &peer).expect("key");
+        let theirs = ProbeKey::path_switch(&peer_secret, &own.public_key()).expect("key");
+        let message = SwitchMessage {
+            kind: SWITCH_PROPOSAL,
+            round: 7,
+            target: SwitchTarget::Relay(KeyId([5; 8])),
+        };
+        let sealed = message.seal(1_000_000, &key);
+        assert_eq!(
+            SwitchMessage::open(&sealed, &theirs, 1_000_000),
+            Some(message)
+        );
+        assert_eq!(
+            SwitchMessage::open(&sealed, &theirs, 1_000_000 + MAX_CLOCK_SKEW_MS + 1),
+            None,
+            "too old"
+        );
+        let mut forged = sealed;
+        forged[5] ^= 1;
+        assert_eq!(SwitchMessage::open(&forged, &theirs, 1_000_000), None);
+        // The direct probe key is a different key
+        let direct = ProbeKey::direct(&peer_secret, &own.public_key()).expect("key");
+        assert_eq!(SwitchMessage::open(&sealed, &direct, 1_000_000), None);
+    }
 
     fn keypair(n: u8) -> (PrivateKey, X25519PublicKey) {
         let secret = StaticSecret::from([n; 32]);

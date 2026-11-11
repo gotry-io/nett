@@ -42,6 +42,11 @@ pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
 /// decider switches as usual, and a later outage enters rotation (section 8.4).
 const PROPOSAL_RETRY: Duration = Duration::from_millis(300);
 const PROPOSAL_TRIES: u32 = 7;
+/// Through the Hub (design/mesh.md section 8.4): the decider resends its proposal every second, 3 times,
+/// and then rotates by time slot; the follower waits this long for a proposal before it rotates.
+const HUB_PROPOSAL_RETRY: Duration = Duration::from_secs(1);
+const HUB_PROPOSAL_TRIES: u32 = 3;
+const HUB_WAIT: Duration = Duration::from_secs(4);
 /// How long the follower waits after sending the confirmation before switching: the confirmation is sent
 /// through the current session, and switching deletes that session.
 const ACK_GRACE: Duration = Duration::from_millis(100);
@@ -60,6 +65,8 @@ pub enum Outgoing {
     Relay { to: SocketAddr, data: Vec<u8> },
     /// Sent from the WireGuard port (section 7.1).
     Direct { to: SocketAddr, data: Vec<u8> },
+    /// Handed to nett-node, which relays it through the Hub to the peer's nett-node (section 8.4).
+    Hub { peer: NodeId, data: Vec<u8> },
 }
 
 /// Where a received packet came from.
@@ -123,6 +130,8 @@ struct Peer {
     public_key: X25519PublicKey,
     mesh_addrs: [IpAddr; 2],
     direct_key: Option<ProbeKey>,
+    /// Key of the switch messages relayed through the Hub.
+    switch_key: Option<ProbeKey>,
     /// The first `configured` come from the desired state, followed by punched direct paths.
     routes: Vec<(Route, PathKind)>,
     meta: Vec<CandidateMeta>,
@@ -150,6 +159,9 @@ struct Together {
     accepted: Option<(usize, Instant)>,
     /// The current path is broken and rotation is in progress.
     rotation: Option<Rotation>,
+    /// Follower: the current path is broken and the Hub is up; until then it waits for the decider's
+    /// proposal through the Hub before it rotates.
+    hub_wait: Option<Instant>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +172,8 @@ struct Proposal {
     reason: SwitchReason,
     next_send: Instant,
     sent: u32,
+    /// Sent through the Hub because the current path is broken; otherwise through the tunnel.
+    via_hub: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -212,6 +226,8 @@ pub struct Prober {
     /// The local clock error is within 2 seconds: rotation uses time slices; otherwise random intervals
     /// (section 8.4).
     clock_trusted: bool,
+    /// nett-node reports its Hub session up: switch proposals can go through the Hub (section 8.4).
+    hub: bool,
     /// The mapped address that `public` nodes report to this machine (design/mesh.md section 6.1).
     observations: Observations,
     /// Events to be reported by the caller.
@@ -321,6 +337,7 @@ impl Prober {
             round: 0,
             ready: Vec::new(),
             clock_trusted: false,
+            hub: false,
             observations: Observations::default(),
             events: Vec::new(),
         }
@@ -457,6 +474,7 @@ impl Prober {
                         IpAddr::V6(member.addresses.ipv6),
                     ],
                     direct_key: ProbeKey::direct(private_key, &member.mesh_public_key),
+                    switch_key: ProbeKey::path_switch(private_key, &member.mesh_public_key),
                     routes,
                     meta,
                     configured,
@@ -672,11 +690,11 @@ impl Prober {
                             switches.push(switch);
                         }
                     }
-                    Action::Lost => self.start_rotation(&id),
+                    Action::Lost => self.lost(&id, now, now_ms),
                 }
             }
             // A new proposal is sent immediately; those already waiting are resent at intervals
-            out.extend(self.send_proposal(&id, now));
+            out.extend(self.send_proposal(&id, now, now_ms));
             out.extend(self.punch_tick(&id, now, now_ms));
         }
 
@@ -750,6 +768,7 @@ impl Prober {
                     reason,
                     next_send: now,
                     sent: 0,
+                    via_hub: false,
                 });
                 None
             }
@@ -761,9 +780,61 @@ impl Prober {
         }
     }
 
-    /// Sends (or resends) the proposal awaiting confirmation; when the resends are used up with still no
-    /// confirmation, the decider switches as usual (section 8.4).
-    fn send_proposal(&mut self, id: &NodeId, now: Instant) -> Vec<Outgoing> {
+    /// nett-node reports whether its Hub session is up (design/status.md section 4.2).
+    pub fn set_hub(&mut self, up: bool) {
+        self.hub = up;
+    }
+
+    /// Both sides `dial-only` and the current path is broken (section 8.4): with the Hub up, the decider
+    /// proposes the best other relay through it and the follower waits for that proposal; otherwise both
+    /// rotate by time slot. A recovery already under way continues.
+    fn lost(&mut self, id: &NodeId, now: Instant, now_ms: u64) {
+        let round = self.next_round(now_ms);
+        let hub = self.hub;
+        let Some(peer) = self.peers.get_mut(id) else {
+            return;
+        };
+        let (Some(paths), Some(together)) = (peer.paths.as_mut(), peer.together.as_mut()) else {
+            return;
+        };
+        if together.rotation.is_some() || together.proposal.is_some() || together.hub_wait.is_some()
+        {
+            return;
+        }
+        if hub && peer.switch_key.is_some() {
+            match paths.role() {
+                Role::DecideTogether => {
+                    if let Some(index) = paths.best_other_relay(now)
+                        && let Some((Route::Relay { relay, .. }, _)) = peer.routes.get(index)
+                    {
+                        paths.set_hold(true);
+                        together.proposal = Some(Proposal {
+                            round,
+                            target: SwitchTarget::Relay(*relay),
+                            index,
+                            reason: SwitchReason::Unreachable,
+                            next_send: now,
+                            sent: 0,
+                            via_hub: true,
+                        });
+                        return;
+                    }
+                }
+                Role::FollowTogether => {
+                    paths.set_hold(true);
+                    together.hub_wait = Some(now + HUB_WAIT);
+                    return;
+                }
+                Role::Decide => {}
+            }
+        }
+        self.start_rotation(id);
+    }
+
+    /// Sends (or resends) the proposal awaiting confirmation. Through the tunnel, when the resends are used
+    /// up with still no confirmation, the decider switches as usual; through the Hub, it rotates by time
+    /// slot (section 8.4).
+    fn send_proposal(&mut self, id: &NodeId, now: Instant, now_ms: u64) -> Vec<Outgoing> {
         let Some(peer) = self.peers.get_mut(id) else {
             return vec![];
         };
@@ -776,6 +847,27 @@ impl Prober {
         };
         if now < p.next_send {
             return vec![];
+        }
+        if p.via_hub {
+            let Some(key) = &peer.switch_key else {
+                return vec![];
+            };
+            if p.sent >= HUB_PROPOSAL_TRIES {
+                together.proposal = None;
+                together.rotation = Some(Rotation::default());
+                return vec![];
+            }
+            p.sent += 1;
+            p.next_send = now + HUB_PROPOSAL_RETRY;
+            let message = SwitchMessage {
+                kind: SWITCH_PROPOSAL,
+                round: p.round,
+                target: p.target,
+            };
+            return vec![Outgoing::Hub {
+                peer: id.clone(),
+                data: message.seal(now_ms, key).to_vec(),
+            }];
         }
         if p.sent >= PROPOSAL_TRIES {
             let (index, reason) = (p.index, p.reason);
@@ -818,6 +910,7 @@ impl Prober {
     /// in-tunnel probe gets a reply (section 8.4).
     fn coordinate(&mut self, id: &NodeId, now: Instant, now_ms: u64) -> Vec<Action> {
         let trusted = self.clock_trusted;
+        let hub = self.hub;
         let Some(peer) = self.peers.get_mut(id) else {
             return vec![];
         };
@@ -829,11 +922,21 @@ impl Prober {
         {
             together.accepted = None;
             together.rotation = None;
+            together.hub_wait = None;
             paths.set_hold(false);
             return paths
                 .adopt(index, SwitchReason::Proposed, now)
                 .into_iter()
                 .collect();
+        }
+        // The follower waits for the decider's proposal through the Hub, and rotates when none comes in
+        // time or the Hub goes down
+        if let Some(deadline) = together.hub_wait {
+            if together.accepted.is_some() || (now < deadline && hub) {
+                return vec![];
+            }
+            together.hub_wait = None;
+            together.rotation = Some(Rotation::default());
         }
         let Some(rotation) = together.rotation.as_mut() else {
             return vec![];
@@ -1036,46 +1139,76 @@ impl Prober {
         message: SwitchMessage,
         at: Instant,
     ) -> Vec<Outgoing> {
-        let Some(peer) = self.peers.get_mut(sender) else {
+        self.on_switch(sender, message, at)
+            .map(|ack| Outgoing::Tunnel {
+                to: from,
+                data: ack.encode().to_vec(),
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// A switch proposal or confirmation relayed through the Hub (section 8.4): it must authenticate with
+    /// the key only the two members can derive, and the confirmation goes back the same way.
+    pub fn on_hub_message(
+        &mut self,
+        sender: &NodeId,
+        data: &[u8],
+        at: Instant,
+        now_ms: u64,
+    ) -> Vec<Outgoing> {
+        let Some(key) = self.peers.get(sender).and_then(|p| p.switch_key.clone()) else {
             return vec![];
         };
+        let Some(message) = SwitchMessage::open(data, &key, now_ms) else {
+            return vec![];
+        };
+        self.on_switch(sender, message, at)
+            .map(|ack| Outgoing::Hub {
+                peer: sender.clone(),
+                data: ack.seal(now_ms, &key).to_vec(),
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Handles a switch proposal or confirmation, wherever it came from; returns the confirmation to send
+    /// back.
+    fn on_switch(
+        &mut self,
+        sender: &NodeId,
+        message: SwitchMessage,
+        at: Instant,
+    ) -> Option<SwitchMessage> {
+        let peer = self.peers.get_mut(sender)?;
         let public_key = peer.public_key;
         let (Some(paths), Some(together)) = (peer.paths.as_mut(), peer.together.as_mut()) else {
-            return vec![];
+            return None;
         };
         match (message.kind, paths.role()) {
             (SWITCH_PROPOSAL, Role::FollowTogether) => {
                 let index = match message.target {
                     SwitchTarget::Relay(relay) => paths.relay_index(relay),
                     SwitchTarget::Punched => paths.punched_index(),
-                };
-                let Some(index) = index else {
-                    return vec![];
-                };
+                }?;
                 if message.round < together.accepted_round {
-                    return vec![];
+                    return None;
                 }
                 if message.round > together.accepted_round {
                     together.accepted_round = message.round;
                     together.accepted = Some((index, at + ACK_GRACE));
                 }
                 // A resend of the same round: the previous confirmation was lost, so confirm once more
-                let ack = SwitchMessage {
+                Some(SwitchMessage {
                     kind: SWITCH_ACK,
                     ..message
-                };
-                vec![Outgoing::Tunnel {
-                    to: from,
-                    data: ack.encode().to_vec(),
-                }]
+                })
             }
             (SWITCH_ACK, Role::DecideTogether) => {
-                let Some(p) = together
+                let p = together
                     .proposal
-                    .take_if(|p| p.round == message.round && p.target == message.target)
-                else {
-                    return vec![];
-                };
+                    .take_if(|p| p.round == message.round && p.target == message.target)?;
+                together.rotation = None;
                 paths.set_hold(false);
                 if let Some(switch) = paths
                     .adopt(p.index, p.reason, at)
@@ -1083,9 +1216,9 @@ impl Prober {
                 {
                     self.ready.push(switch);
                 }
-                vec![]
+                None
             }
-            _ => vec![],
+            _ => None,
         }
     }
 
@@ -1685,6 +1818,8 @@ mod tests {
         mapped: [SocketAddr; 2],
         opened: [std::collections::HashSet<SocketAddr>; 2],
         direct_sent: [usize; 2],
+        /// nett-node and the Hub relay switch messages between the two ends.
+        hub: bool,
     }
 
     impl Pair {
@@ -1802,6 +1937,7 @@ mod tests {
                 mapped: [addr("198.51.100.201:41820"), addr("198.51.100.202:41820")],
                 opened: Default::default(),
                 direct_sent: [0, 0],
+                hub: false,
             }
         }
 
@@ -1883,6 +2019,29 @@ mod tests {
                                 now,
                                 now_ms,
                             );
+                        }
+                    }
+                }
+                Outgoing::Hub { peer, data } => {
+                    if !self.hub {
+                        return;
+                    }
+                    let (src, dst) = if from_a {
+                        (&mut self.a, &mut self.b)
+                    } else {
+                        (&mut self.b, &mut self.a)
+                    };
+                    if peer != dst.id {
+                        return;
+                    }
+                    let src_id = src.id.clone();
+                    let dst_id = dst.id.clone();
+                    for reply in dst.prober.on_hub_message(&src_id, &data, now, now_ms) {
+                        if let Outgoing::Hub { peer, data } = reply
+                            && peer == src_id
+                        {
+                            let src = if from_a { &mut self.a } else { &mut self.b };
+                            src.prober.on_hub_message(&dst_id, &data, now, now_ms);
                         }
                     }
                 }
@@ -2072,6 +2231,85 @@ mod tests {
         };
         let gap = at(true).max(at(false)) - at(true).min(at(false));
         assert!(gap <= Duration::from_millis(500), "gap {gap:?}");
+    }
+
+    #[test]
+    fn dial_only_pair_switches_through_the_hub_after_an_outage() {
+        let mut pair = Pair::new();
+        pair.hub = true;
+        pair.a.prober.set_hub(true);
+        pair.b.prober.set_hub(true);
+        pair.run(Duration::from_secs(10));
+        let (start, _) = pair.endpoints();
+        let failed = pair
+            .relays
+            .iter()
+            .position(|r| Some(*r) == start)
+            .expect("on a relay");
+        pair.relay_up[failed] = false;
+        let down = pair.now;
+        pair.run(Duration::from_secs(10));
+        let (a, b) = pair.endpoints();
+        assert_eq!(a, b, "{:?}", pair.switches);
+        assert_ne!(a, start);
+        let after: Vec<(bool, SwitchReason)> = pair
+            .switches
+            .iter()
+            .filter(|(t, _, _)| *t > down)
+            .map(|(_, from_a, s)| (*from_a, s.reason))
+            .collect();
+        // The decider proposes the other relay through the Hub and both move there once, without
+        // rotating by time slot
+        assert!(
+            after.contains(&(true, SwitchReason::Unreachable)),
+            "{after:?}"
+        );
+        assert!(
+            after.contains(&(false, SwitchReason::Proposed)),
+            "{after:?}"
+        );
+        assert!(
+            !after.iter().any(|(_, r)| *r == SwitchReason::Rotation),
+            "{after:?}"
+        );
+        let moved = pair
+            .switches
+            .iter()
+            .filter(|(t, _, _)| *t > down)
+            .map(|(t, _, _)| *t)
+            .max()
+            .expect("switched");
+        assert!(
+            moved - down <= Duration::from_secs(6),
+            "both ends moved {:?} after the outage",
+            moved - down
+        );
+    }
+
+    #[test]
+    fn dial_only_pair_rotates_when_the_hub_does_not_answer() {
+        let mut pair = Pair::new();
+        // nett-node reports the Hub up, but nothing gets through it
+        pair.a.prober.set_hub(true);
+        pair.b.prober.set_hub(true);
+        pair.run(Duration::from_secs(10));
+        let (start, _) = pair.endpoints();
+        let failed = pair
+            .relays
+            .iter()
+            .position(|r| Some(*r) == start)
+            .expect("on a relay");
+        pair.relay_up[failed] = false;
+        pair.run(Duration::from_secs(45));
+        let (a, b) = pair.endpoints();
+        assert_eq!(a, b, "{:?}", pair.switches);
+        assert_ne!(a, start);
+        assert!(
+            pair.switches
+                .iter()
+                .any(|(_, _, s)| s.reason == SwitchReason::Rotation),
+            "falls back to the time slots"
+        );
     }
 
     #[test]

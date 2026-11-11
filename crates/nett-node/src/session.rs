@@ -21,7 +21,7 @@ use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
     AckResult, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
-    PartitionAck, PartitionKind, Ping, StateAck,
+    PartitionAck, PartitionKind, PathSwitch, Ping, StateAck,
 };
 use prost::Message as _;
 use tokio::net::TcpStream;
@@ -98,9 +98,10 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
     }
     let mut upgrading: Upgrading = None;
     let mut backoff = BACKOFF_MIN;
+    let coordination = crate::coord::Coordination::start(node.socket.clone());
     loop {
         let result = tokio::select! {
-            r = node.session(&mut upgrading) => r,
+            r = node.session(&mut upgrading, &coordination) => r,
             () = &mut shutdown => return Exit::Shutdown,
         };
         match result {
@@ -379,11 +380,20 @@ pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), Se
 }
 
 impl Node {
-    /// One connection, until it disconnects.
-    /// One connection, until it ends. `upgrading` outlives the connection.
-    pub async fn session(&self, upgrading: &mut Upgrading) -> Result<Exit, SessionError> {
+    /// One connection, until it ends. `upgrading` outlives the connection; `coordination` passes switch
+    /// messages between the mesh process and the Hub (design/mesh.md section 8.4).
+    pub async fn session(
+        &self,
+        upgrading: &mut Upgrading,
+        coordination: &crate::coord::Coordination,
+    ) -> Result<Exit, SessionError> {
         let (mut ws, transport, local) = connect(&self.config, &self.identity, Vec::new()).await?;
         tracing::info!(url = %self.config.url, "connected to the Hub");
+        // The mesh process may relay switch messages through the Hub while this session lasts
+        let _hub_up = HubUp::new(&coordination.hub);
+        let mut from_mesh = coordination.from_mesh.lock().await;
+        // Messages from before this session are stale: their rounds have passed
+        while from_mesh.try_recv().is_ok() {}
         if let Some(upgrader) = &self.upgrader {
             upgrader.settled();
         }
@@ -464,8 +474,26 @@ impl Node {
                             tracing::info!(reason = %g.reason, "the Hub closed the session");
                             return Ok(Exit::Shutdown);
                         }
+                        // From another member's mesh process: checked and handed over as data; only the mesh
+                        // process can authenticate it (hard rule 13)
+                        Some(Body::PathSwitch(p)) => {
+                            if let Ok(peer) = p.node_id.parse()
+                                && p.message.len() <= nett_mesh::coord::MAX_MESSAGE
+                            {
+                                let _ = coordination.to_mesh.try_send(nett_mesh::coord::PathSwitchLine {
+                                    peer,
+                                    message: p.message,
+                                });
+                            }
+                        }
                         _ => {}
                     }
+                }
+                Some(p) = from_mesh.recv() => {
+                    out.send(&mut ws, Body::PathSwitch(PathSwitch {
+                        node_id: p.peer.to_string(),
+                        message: p.message,
+                    })).await?;
                 }
                 _ = ping.tick() => {
                     if missed >= MISSED_PINGS {
@@ -645,6 +673,22 @@ impl Node {
             Ok(outcome) => ack_for(outcome),
             Err(e) => (AckResult::Pending, e.to_string()),
         }
+    }
+}
+
+/// Tells the mesh process the Hub session is up for as long as this lives.
+struct HubUp<'a>(&'a tokio::sync::watch::Sender<bool>);
+
+impl<'a> HubUp<'a> {
+    fn new(hub: &'a tokio::sync::watch::Sender<bool>) -> Self {
+        hub.send_replace(true);
+        Self(hub)
+    }
+}
+
+impl Drop for HubUp<'_> {
+    fn drop(&mut self) {
+        self.0.send_replace(false);
     }
 }
 

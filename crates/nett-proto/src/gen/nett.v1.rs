@@ -9,7 +9,7 @@ pub struct Envelope {
     pub reply_to: u64,
     #[prost(message, optional, tag = "3")]
     pub sent_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 40")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 40")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
@@ -38,6 +38,8 @@ pub mod envelope {
         Inventory(super::Inventory),
         #[prost(message, tag = "31")]
         LinkReport(super::LinkReport),
+        #[prost(message, tag = "32")]
+        PathSwitch(super::PathSwitch),
         /// An Envelope that exceeds the single-message limit is sent in fragments (protocol.md section
         /// 4.1)
         #[prost(message, tag = "40")]
@@ -162,6 +164,17 @@ pub struct Inventory {
 pub struct LinkReport {
     #[prost(bytes = "vec", tag = "1")]
     pub status: ::prost::alloc::vec::Vec<u8>,
+}
+/// Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
+/// down (design/mesh.md section 8.4). node → Hub: node_id is the peer it is for; Hub → node: the
+/// peer it came from. The message is authenticated end to end by the two mesh processes and opaque
+/// to nett-node and the Hub, which passes it on only between members the site connects
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct PathSwitch {
+    #[prost(string, tag = "1")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(bytes = "vec", tag = "2")]
+    pub message: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Chunk {

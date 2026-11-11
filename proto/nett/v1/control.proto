@@ -25,6 +25,7 @@ message Envelope {
     StateAck state_ack = 21;
     Inventory inventory = 30;
     LinkReport link_report = 31;
+    PathSwitch path_switch = 32;
     // An Envelope that exceeds the single-message limit is sent in fragments (protocol.md section
     // 4.1)
     Chunk chunk = 40;
@@ -143,6 +144,15 @@ message Inventory {
 // nett site status
 message LinkReport {
   bytes status = 1;
+}
+
+// Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
+// down (design/mesh.md section 8.4). node → Hub: node_id is the peer it is for; Hub → node: the
+// peer it came from. The message is authenticated end to end by the two mesh processes and opaque
+// to nett-node and the Hub, which passes it on only between members the site connects
+message PathSwitch {
+  string node_id = 1;
+  bytes message = 2;
 }
 
 message Chunk {
