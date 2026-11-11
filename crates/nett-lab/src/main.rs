@@ -51,7 +51,9 @@ const USAGE: &str = "usage:
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab run access --topology access.toml --nett <path/to/nett> --out <dir>
-  nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir>   (nett-hub next to nett)
+  nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir> [--soak SECONDS]
+      (nett-hub next to nett; --soak then keeps changing and pinging, samples memory into
+      soak.csv, rests 10 minutes and checks that memory stayed flat)
   nett-lab down --topology <file.toml>
   nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -93,6 +95,7 @@ fn run() -> anyhow::Result<bool> {
     let mut bytes = None::<u64>;
     let mut key = None::<String>;
     let mut userspace = Vec::new();
+    let mut soak = None::<u64>;
     while let Some(arg) = parser.next()? {
         match arg {
             Value(v) => words.push(v.string()?),
@@ -111,6 +114,7 @@ fn run() -> anyhow::Result<bool> {
             Long("bytes") => bytes = Some(parser.value()?.string()?.parse()?),
             Long("key") => key = Some(parser.value()?.string()?),
             Long("userspace") => userspace.push(parser.value()?.string()?),
+            Long("soak") => soak = Some(parser.value()?.string()?.parse()?),
             Long("help") => {
                 println!("{USAGE}");
                 return Ok(true);
@@ -187,7 +191,7 @@ fn run() -> anyhow::Result<bool> {
                 }
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
                 "access" => scenario::access(&topology, &nett()?, &out)?,
-                "hub" => scenario::hub(&topology, &nett()?, &out)?,
+                "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,
