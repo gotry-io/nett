@@ -7,15 +7,15 @@
 
 See on a node, with one command, how the mesh is doing right now: the machine's addresses and how it runs, whether each peer is reachable, which path it uses and with what quality, why it last switched, and whether the desired state and access rules have been rejected. It does not depend on the Hub, so existing nodes can use it right away.
 
-Status comes from the mesh process's local interface. This is the local interface between nett-node and the mesh process described in ADR 0013: this step implements two kinds of request: reading status, and asking the mesh process to re-read its desired state file (section 4.1). After joining the Hub, nett-node reads link status through the same interface and reports it to the Hub (`LinkReport`, protocol.md section 5), and after writing the desired state file it uses the same request to have the mesh process apply it (hub.md section 5); identity lookup (mesh.md section 11) will be added here later.
+Status comes from the mesh process's local interface. This is the local interface between nett-node and the mesh process described in ADR 0013: reading status, and asking the mesh process to re-read its desired state file (section 4.1). After joining the Hub, nett-node reads link status through the same interface and reports it to the Hub (`LinkReport`, protocol.md section 5), and after writing the desired state file it uses the same request to have the mesh process apply it (hub.md section 5). Identity lookup (`whois`), names, `nett ping` and `nett doctor` are in names-and-diagnostics.md.
 
 ## 2. Scope
 
 | Included | Not included |
 |---|---|
-| The mesh process's local socket: status query; re-reading the desired state file (`nett reload`) | Identity lookup (`whois`) |
-| Node name in the desired state (unsigned, for display only, section 5) | Hostname resolution and DNS (mesh.md section 11) |
-| `nett status`, `nett status <peer>`, `--json` | `nett doctor`, continuously refreshing views |
+| The mesh process's local socket: status query; re-reading the desired state file (`nett reload`) | Identity lookup, names, `nett ping`, `nett doctor` (names-and-diagnostics.md) |
+| Node name in the desired state (unsigned, for display only, section 5) | Continuously refreshing views |
+| `nett status`, `nett status <peer>`, `--json` | |
 | Linux (kernel and userspace WireGuard), macOS, container member | |
 
 ## 3. Local socket

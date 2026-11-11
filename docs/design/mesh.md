@@ -323,7 +323,7 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 - The suffix defaults to `nett.internal` (`.internal` is a top-level domain reserved for private networks) and can be changed when the Hub is initialized;
 - Each node automatically gets `<node name>.nett.internal`; users can add aliases (the `hostnames` resource), for example naming a service and pointing it to the member where it runs;
 - Hosts on the LAN do not need nett installed; when a name is needed, the user adds an alias pointing to its LAN address within an advertised prefix;
-- The mesh process runs a minimal DNS responder only on the mesh address, answering names under that suffix;
+- The mesh process runs a minimal DNS responder only on the mesh address, answering names under that suffix (names-and-diagnostics.md section 2);
 - **Upstream forwarding**: only the mobile gateway and smart gateway forward other queries for devices, accept queries only from device addresses, and rate-limit them, so they do not become open forwarders;
 - Local resolver configuration: on Linux, split-domain resolution for that suffix is set on `nett0` through systemd-resolved; on macOS, `/etc/resolver/<suffix>` is written;
 - Devices: the exported WireGuard configuration lists two DNS servers, the mesh addresses of the mobile gateway and the smart gateway;
