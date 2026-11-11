@@ -179,8 +179,11 @@ enum Pending {
         index: usize,
         local: u32,
     },
+    /// A probe of a relay outside path selection: over UDP it measures the relay for the peer, over TLS it
+    /// keeps the standby connection authenticated.
     Monitor {
         relay: KeyId,
+        tls: bool,
     },
     /// Hole punching probe.
     Punch,
@@ -197,8 +200,11 @@ pub struct Prober {
     wire_seq: u32,
     /// This machine's measurements to each relay, carried to the peer with in-tunnel replies.
     relay_stats: HashMap<KeyId, PathStats>,
-    /// Relays the follower must measure: number -> (address, token).
-    monitored: HashMap<KeyId, (SocketAddr, ProbeKey, Option<Instant>)>,
+    /// Relays probed outside path selection: (number, over TLS) -> (address, token, last probe). Over UDP
+    /// the follower measures each relay, for the peer to estimate the other leg of the relay path; over TLS
+    /// the follower of a pair of `dial-only` members keeps its standby connection authenticated, since it
+    /// may have to move there together with the decider (design/mesh.md sections 5.3 and 8.4).
+    monitored: HashMap<(KeyId, bool), (SocketAddr, ProbeKey, Option<Instant>)>,
     /// The round of the most recent switch proposal.
     round: u32,
     /// The switch to perform after a confirmation is received, handed out at the next [`Prober::tick`].
@@ -427,29 +433,19 @@ impl Prober {
                 ),
                 (None, None) => (None, None),
             };
-            for m in &meta {
-                // The follower measures only UDP relays: the measurement lets the peer estimate the other leg of the
-                // relay path
-                if let CandidateMeta::Relay {
-                    relay,
-                    key,
-                    tls: false,
-                } = m
-                {
-                    let endpoint = routes
-                        .iter()
-                        .find_map(|(r, _)| match r {
-                            Route::Relay {
-                                relay: rid,
-                                endpoint,
-                            } if rid == relay => Some(*endpoint),
-                            _ => None,
-                        })
-                        .unwrap_or(probe::UNSPECIFIED);
-                    self.monitored
-                        .entry(*relay)
-                        .or_insert_with(|| (endpoint, key.clone(), None));
+            let follows_together = role == Some(Role::FollowTogether);
+            for (m, (route, _)) in meta.iter().zip(&routes) {
+                let (CandidateMeta::Relay { relay, key, tls }, Route::Relay { endpoint, .. }) =
+                    (m, route)
+                else {
+                    continue;
+                };
+                if *tls && !follows_together {
+                    continue;
                 }
+                self.monitored
+                    .entry((*relay, *tls))
+                    .or_insert_with(|| (*endpoint, key.clone(), None));
             }
             next.insert(
                 id.clone(),
@@ -588,7 +584,9 @@ impl Prober {
             .map(|(seq, _)| *seq)
             .collect();
         for seq in expired {
-            if let Some((_, Pending::Monitor { relay }, _)) = self.outstanding.remove(&seq) {
+            if let Some((_, Pending::Monitor { relay, tls: false }, _)) =
+                self.outstanding.remove(&seq)
+            {
                 self.relay_stats.entry(relay).or_default().record_loss();
             }
         }
@@ -682,8 +680,9 @@ impl Prober {
             out.extend(self.punch_tick(&id, now, now_ms));
         }
 
-        // The follower also measures relays, for the peer to estimate the other leg of the relay path
-        let due: Vec<KeyId> = self
+        // The follower also measures relays, for the peer to estimate the other leg of the relay path, and
+        // keeps its TLS standby connections authenticated
+        let due: Vec<(KeyId, bool)> = self
             .monitored
             .iter()
             .filter(|(_, (_, _, last))| {
@@ -692,12 +691,12 @@ impl Prober {
             .map(|(id, _)| *id)
             .collect();
         let any_peer = self.peers.keys().next().cloned();
-        for relay in due {
+        for (relay, tls) in due {
             let Some(owner) = any_peer.clone() else { break };
-            let Some(wire) = self.remember(&owner, Pending::Monitor { relay }, now) else {
+            let Some(wire) = self.remember(&owner, Pending::Monitor { relay, tls }, now) else {
                 break;
             };
-            if let Some((endpoint, key, last)) = self.monitored.get_mut(&relay) {
+            if let Some((endpoint, key, last)) = self.monitored.get_mut(&(relay, tls)) {
                 *last = Some(now);
                 let probe = OuterProbe {
                     kind: RELAY_PROBE,
@@ -1235,8 +1234,8 @@ impl Prober {
             return;
         };
         let (relay, key, tls) = match pending {
-            Pending::Monitor { relay } => match self.monitored.get(&relay) {
-                Some((_, key, _)) => (relay, key, false),
+            Pending::Monitor { relay, tls } => match self.monitored.get(&(relay, tls)) {
+                Some((_, key, _)) => (relay, key, tls),
                 None => return,
             },
             Pending::Candidate { index, .. } => {
@@ -1953,6 +1952,81 @@ mod tests {
         assert!(a.is_some());
         pair.run(Duration::from_secs(10));
         assert!(pair.switches.is_empty(), "{:?}", pair.switches);
+    }
+
+    /// Both ends `dial-only`: the follower does not probe candidates, but it may have to move to a TLS
+    /// relay together with the decider, so it keeps its standby TLS connection authenticated with a probe
+    /// of its own (design/mesh.md sections 5.3 and 8.4).
+    #[test]
+    fn the_dial_only_follower_keeps_its_tls_relays_authenticated() {
+        let mesh = Mesh::new(&[1, 2]);
+        let (a_priv, a_pub) = keypair(1);
+        let (_, b_pub) = keypair(2);
+        let anchors =
+            TrustAnchors::from_doc(&mesh.desired(1, vec![]).trust_anchors).expect("anchors");
+        let members: BTreeMap<NodeId, Member> = [(1, a_pub), (2, b_pub)]
+            .into_iter()
+            .map(|(n, key)| {
+                let m = admit(
+                    &mesh.material_for(mesh.policy(n, 1), key),
+                    &anchors,
+                    &Revocations::default(),
+                )
+                .expect("admitted");
+                (m.node_id.clone(), m)
+            })
+            .collect();
+        let loopback = addr("127.0.0.1:41830");
+        let candidates = vec![
+            Candidate::Relay {
+                relay: node_id(9),
+                endpoint: addr("198.51.100.9:41822"),
+                token: ProbeToken(TOKEN_A),
+            },
+            Candidate::RelayTls {
+                relay: node_id(9),
+                address: addr("198.51.100.9:443"),
+                fingerprint: nett_core::transport::CertFingerprint([7; 32]),
+                token: ProbeToken(TOKEN_A),
+            },
+        ];
+        let tls: BTreeMap<NodeId, SocketAddr> = [(node_id(9), loopback)].into();
+        let probes_to = |me: u8, private: &PrivateKey, public: &X25519PublicKey| {
+            let peer = node_id(if me == 1 { 2 } else { 1 });
+            let mut prober = Prober::new(public);
+            prober.update(
+                &node_id(me),
+                Reachability::DialOnly,
+                private,
+                &members,
+                &[(
+                    peer,
+                    PeerPathConfig {
+                        reachability: Reachability::DialOnly,
+                        candidates: candidates.clone(),
+                    },
+                )]
+                .into(),
+                &tls,
+            );
+            let (out, _) = prober.tick(Instant::now(), 1_700_000_000_000);
+            out.into_iter()
+                .filter_map(|o| match o {
+                    Outgoing::Relay { to, .. } => Some(to),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        // Node 2 follows node 1 (the smaller node ID decides)
+        let (b_priv, _) = keypair(2);
+        let follower = probes_to(2, &b_priv, &b_pub);
+        assert!(follower.contains(&loopback), "{follower:?}");
+        assert!(
+            follower.contains(&addr("198.51.100.9:41822")),
+            "{follower:?}"
+        );
+        let decider = probes_to(1, &a_priv, &a_pub);
+        assert!(decider.contains(&loopback), "{decider:?}");
     }
 
     #[test]
