@@ -27,6 +27,7 @@ pub mod punch;
 pub mod routes;
 pub mod run;
 pub mod runtime;
+pub mod sockbuf;
 pub mod source;
 pub mod status;
 pub mod store;
