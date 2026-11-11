@@ -331,7 +331,7 @@ The Hub is the control plane and the node is the executor:
 2. **At least two usable relays**, on different hosts. This is a redundancy floor, not a limit on the number of relays.
 3. **The mesh does not depend on the control plane being online**: the topology and keys are persisted locally on each node and do not expire; when the Hub is absent, nodes keep selecting paths and switching.
 4. **Multiple mobile gateways can be deployed**; the phone also keeps its direct path to home.
-5. **Backup and rebuild**: the Hub's database, together with the Hub identity private key, is encrypted with the backup public key and pulled periodically by other nodes (the Hub never connects to nodes); an operations manual for rebuilding the Hub on another host is provided. The node's endpoint list includes a backup entry, so after the Hub moves, nodes connect to the new Hub automatically. A backup always lags behind the state of the nodes, and on restore the nodes send back the signed artifacts in effect (protocol.md section 6.4).
+5. **Backup and rebuild**: the Hub's database, together with the Hub identity private key, is encrypted with the backup public key and pulled periodically by other nodes (the Hub never connects to nodes); an operations manual for rebuilding the Hub on another host is provided. The node's endpoint list includes a backup entry, so after the Hub moves, nodes connect to the new Hub automatically. A backup always lags behind the state of the nodes; on restore the site directory pushes back the signed artifacts in effect, and once the site state lives on the Hub, the nodes send them back (protocol.md section 6.4, design/hub.md section 8.2).
 
 ## 13. Packaging, installation and operation
 

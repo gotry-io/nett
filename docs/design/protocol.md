@@ -128,8 +128,8 @@ A fatal error (such as a revoked node or a refused enrollment) is sent and then 
 | Events | node → Hub | `NodeEvent` | Events that occur on the node: policy rejected, upgrade result, etc. |
 | Tasks | Hub → node | `Task` | A request to execute a change set step on the node (section 7) |
 | | node → Hub | `TaskUpdate` | Accepted, running, succeeded, failed, interrupted (`interrupted`), and the result |
-| Backup | node → Hub | `BackupFetch` | The node that stores backups periodically pulls the latest encrypted backup (the Hub never initiates connections to nodes) |
-| | Hub → node | `BackupChunk` | A chunk of the encrypted backup |
+| Backup | node → Hub | `BackupFetch` | Asks for the latest encrypted backup of the Hub, with the SHA-256 of the one the node has; sent on connect and every 6 hours (the Hub never initiates connections to nodes, hub.md section 8.2) |
+| | Hub → node | `Backup` | The encrypted backup and its SHA-256, when the node does not have it yet; up to 4 MiB, sent in chunks (section 4.1) |
 | Mesh | Hub → node | The mesh partition in `DesiredState` | Addresses, peer public keys and admission material, candidate paths, relay list |
 | | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh process's local state (`status.md` section 6), sent when it changes |
 | | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4): node → Hub names the peer it is for, Hub → node the peer it came from, and carries the mesh process's message (at most 64 bytes), authenticated end to end with a key only the two members can derive. The Hub passes it on only between two members that the site connects (site.md section 6) and only to a node that is connected at the time; it is not queued, and the mesh processes resend |
@@ -168,7 +168,7 @@ The desired state is organized in partitions, each versioned independently:
 
 ### 6.4 After the Hub is restored from a backup
 
-A backup always lags behind the nodes: a node may already have applied a higher generation, higher-versioned signed artifacts, or received newer revocations. A restored Hub must not require nodes to go backwards:
+A backup always lags behind the nodes: a node may already have applied a higher generation, higher-versioned signed artifacts, or received newer revocations. A restored Hub must not require nodes to go backwards. While the site directory on the user's computer holds the whole site (hub.md section 4), the push that follows a restore brings back everything signed since the backup (hub.md section 8.2); nodes accept artifacts by signature and version, never by generation, so the restored Hub's generations may start lower than before. Once the site state lives only on the Hub (H5 in hub.md section 9), the nodes send it back instead:
 
 - The Hub first enters the **recovery state**: it only collects and does not deliver desired state;
 - When a node connects, it reports `applied_generation` in `Hello` and sends back the signed artifacts in effect, the trust anchor update chain, revocations, and local narrowing through `ArtifactSync`. Signed artifacts carry the user's signature, so the Hub verifies them and fills in the database without the user approving again; revocations and narrowing never needed a signature, so the Hub merges them directly (they can only make privileges smaller);
