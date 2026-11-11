@@ -1,442 +1,442 @@
-# 组网
+# Mesh
 
-- 状态：草案
-- 阶段：P0 设计；M1 实现第一版，M2 增强（见第 18 节）
-- 相关：ADR [0007](../adr/0007-own-mesh-wireguard-session-path-layer.md)、[0008](../adr/0008-mobile-dual-path.md)、[0011](../adr/0011-nett-relay.md)、[0013](../adr/0013-mesh-and-transport-processes.md)、[0014](../adr/0014-signed-mesh-membership.md)、[0015](../adr/0015-origin-identity-and-lan-default-deny.md)、[0016](../adr/0016-macos-container-member.md)、[0018](../adr/0018-client-platforms.md)；[protocol.md](protocol.md)、[auth.md](auth.md)、[architecture.md](../architecture.md)
+- Status: draft
+- Phase: P0 design; M1 implements the first version, M2 extends it (see section 18)
+- Related: ADR [0007](../adr/0007-own-mesh-wireguard-session-path-layer.md), [0008](../adr/0008-mobile-dual-path.md), [0011](../adr/0011-nett-relay.md), [0013](../adr/0013-mesh-and-transport-processes.md), [0014](../adr/0014-signed-mesh-membership.md), [0015](../adr/0015-origin-identity-and-lan-default-deny.md), [0016](../adr/0016-macos-container-member.md), [0018](../adr/0018-client-platforms.md); [protocol.md](protocol.md), [auth.md](auth.md), [architecture.md](../architecture.md)
 
-## 1. 目标
+## 1. Goals
 
-节点之间有多条候选路径和多种传输方式；持续测量，自动选择最优路径；路径抖动、中断或节点离线时自动切换，**进行中的连接不中断**，断开、波动、回退、恢复时的体验不比 Tailscale 差（ADR 0021）；没有单点；Hub 离线不影响组网；**nett-node 停止也不影响组网**，选路、切换和 DNS 照常（ADR 0013）。
+Nodes have multiple candidate paths and multiple transports between them. The mesh measures continuously and selects the best path automatically. When a path jitters, breaks, or a node goes offline, it switches automatically and **connections in progress are not interrupted**; the experience on disconnect, fluctuation, fallback and recovery is no worse than Tailscale (ADR 0021). There is no single point of failure. The Hub being offline does not affect the mesh. **nett-node being stopped does not affect the mesh either**: path selection, switching and DNS carry on as usual (ADR 0013).
 
-不在本期范围：每条连接独立选路（同一对节点的所有流量共用一条路径）；不同站点之间网段重叠的自动处理；Windows 和手机 App（M3，ADR 0018）。
+Out of scope for this phase: per-connection path selection (all traffic between the same pair of nodes shares one path); automatic handling of overlapping prefixes between different sites; Windows and the mobile app (M3, ADR 0018).
 
-## 2. 术语
+## 2. Terms
 
-| 术语 | 含义 |
+| Term | Meaning |
 |---|---|
-| 成员 | 加入组网的节点或设备 |
-| 连接（link） | 一对成员之间的 WireGuard 会话 |
-| 候选路径 | 一条连接可能使用的路径：局域网直连、公网直连、经中继、多跳接力 |
-| 传输 | 承载 WireGuard 数据包的方式：UDP、TLS（WebSocket）、后期的 QUIC |
-| `public` / `dial-only` | 能否被外部连入（见 architecture.md 第 6.5 节） |
-| 中继 | 运行 nett-relay、为其他成员转发密文的 `public` 节点 |
-| 智能入口 | 把整个局域网段接入组网的节点 |
-| 移动网关 | 接受设备连接、把设备流量送入组网的节点 |
-| 组网进程 | `nett mesh`：承担本文描述的全部组网工作，独立于 nett-node 运行（ADR 0013） |
-| 传输适配进程 | `nett transport`：TLS 传输适配，专用低权限用户，只经手密文（ADR 0013） |
-| 撤销记录 | 移除成员、吊销凭据、撤销网段、收窄规则时留下的记录，防止旧的签名产物恢复权限（auth.md 第 10.4 节） |
-| 准入材料 | 证明一个对端可以加入组网的签名产物（第 4.1 节） |
-| Edge | 用户自己在入口节点上运行的反向代理，任何实现都可以（Caddy、nginx、Traefik 等）；nett 不生成、也不管理它的配置（ADR 0019） |
-| Edge 专用地址 | 具有 `edge` 角色的节点上，专供 Edge 发出流量使用的组网地址（ADR 0015） |
-| 完整成员 | 运行组网进程、自己验证准入材料并选路的成员，其他成员可以直接连到它。使用标准 WireGuard 或代理客户端的设备不是完整成员 |
-| 容器内成员 | 在宿主的 Docker Linux 虚拟机中运行的成员，用于 Mac 上需要访客真实 IP 的容器服务（ADR 0016） |
+| Member | A node or device that has joined the mesh |
+| Link | A WireGuard session between a pair of members |
+| Candidate path | A path a link may use: LAN direct, public direct, via relay, multi-hop relay |
+| Transport | The way WireGuard packets are carried: UDP, TLS (WebSocket), later QUIC |
+| `public` / `dial-only` | Whether a node can be reached from outside (see architecture.md section 6.5) |
+| Relay | A `public` node that runs nett-relay and forwards ciphertext for other members |
+| Smart gateway | A node that brings an entire LAN prefix into the mesh |
+| Mobile gateway | A node that accepts device connections and carries device traffic into the mesh |
+| Mesh process | `nett mesh`: does all the mesh work described in this document, runs independently of nett-node (ADR 0013) |
+| Transport adapter | `nett transport`: the TLS transport adapter, runs as a dedicated low-privilege user and handles only ciphertext (ADR 0013) |
+| Revocation | The record left when a member is removed, credentials are revoked, a prefix is revoked or a rule is narrowed; it prevents old signed artifacts from restoring privileges (auth.md section 10.4) |
+| Admission material | Signed artifacts that prove a peer may join the mesh (section 4.1) |
+| Edge | A reverse proxy the user runs on the entry node; any implementation works (Caddy, nginx, Traefik, etc.); nett neither generates nor manages its configuration (ADR 0019) |
+| Edge address | On a node with the `edge` role, the mesh address reserved for traffic sent by Edge (ADR 0015) |
+| Full member | A member that runs the mesh process, verifies admission material itself and selects paths; other members can connect to it directly. A device using a standard WireGuard or proxy client is not a full member |
+| Container member | A member that runs in the host's Docker Linux virtual machine, used on a Mac for container services that need the visitor's real IP (ADR 0016) |
 
-## 3. 地址规划
+## 3. Address plan
 
-| 地址 | 规则 |
+| Address | Rule |
 |---|---|
-| IPv4 组网网段 | 默认 `100.88.0.0/16`，在 Hub 初始化时可修改；避开部分云厂商在 `100.100.0.0/16` 上提供的内部服务 |
-| IPv6 组网网段 | Hub 初始化时随机生成一个 ULA `/48` |
-| 成员地址 | 每个节点一个 IPv4 和一个 IPv6 地址，在创建入网 token 时分配；设备的每份 WireGuard 凭据一对地址（同一设备的多份凭据会同时作为网关的不同对端，而 WireGuard 不允许对端的 `AllowedIPs` 重叠），在创建凭据时分配。地址写入签名产物，终身不变；**首版不回收**：移除的成员和凭据的地址不再分配（`/16` 足够少量机器使用很久），从而不会让新成员继承旧地址上残留的授权 |
-| Edge 专用地址 | 每个具有 `edge` 角色的节点额外一对地址，写入签名节点策略 |
-| CONNECT 出口地址 | 每个提供 CONNECT 代理的中继节点额外一对地址，写入签名节点策略，出现在该节点对端的 `AllowedIPs` 中；远端只允许它访问 CONNECT 规则允许的目标（第 5.4 节） |
-| 局域网网段 | 由智能入口宣告（第 10 节） |
+| IPv4 mesh prefix | Default `100.88.0.0/16`, can be changed when the Hub is initialized; avoids the internal services some cloud vendors provide on `100.100.0.0/16` |
+| IPv6 mesh prefix | A random ULA `/48` generated when the Hub is initialized |
+| Member address | One IPv4 and one IPv6 address per node, assigned when the enrollment token is created; one pair of addresses per WireGuard credential of a device (multiple credentials of the same device act as different peers of the gateway at the same time, and WireGuard does not allow peers' `AllowedIPs` to overlap), assigned when the credential is created. Addresses are written into signed artifacts and never change. **They are not reclaimed in the first release**: addresses of removed members and credentials are not assigned again (a `/16` is enough for a small number of machines for a long time), so a new member never inherits authorization left over on an old address |
+| Edge address | One extra pair of addresses per node with the `edge` role, written into the signed node policy |
+| CONNECT egress address | One extra pair of addresses per relay node that provides a CONNECT proxy, written into the signed node policy and appearing in the `AllowedIPs` of that node's peers; the far side may only reach the targets allowed by CONNECT rules (section 5.4) |
+| LAN prefix | Advertised by the smart gateway (section 10) |
 
-Hub 在分配地址和宣告网段时检测冲突，以下情况都会被拒绝并提示：组网网段与任何成员的局域网网段或上报的外网地址重叠（家宽运营商的 CGNAT 地址同样位于 `100.64.0.0/10`）；两个站点宣告的网段重叠；启用了 tailscale 后备，而它的地址池没有排除组网网段（ADR 0007）。
+When allocating addresses and advertising prefixes, the Hub detects conflicts and rejects the following with a message: the mesh prefix overlaps any member's LAN prefix or reported external address (CGNAT addresses of home broadband carriers also lie in `100.64.0.0/10`); two sites advertise overlapping prefixes; the tailscale fallback is enabled and its address pool does not exclude the mesh prefix (ADR 0007).
 
-## 4. 会话层
+## 4. Session layer
 
-- 每个节点一个 WireGuard 接口 `nett0`，监听一个 UDP 端口（默认 `41820`，可配置）；
-- 对端：所有其他节点；设备只作为智能入口和移动网关的对端（第 13 节）；
-- 每个对端的 `AllowedIPs`：它的组网地址；它的 Edge 专用地址和 CONNECT 出口地址（如有）；它宣告的局域网网段（如有）；以它为当前网关的设备凭据地址（如有，仅限具有 `gateway` 角色的节点）。**本机直接以某份设备凭据为对端时（例如智能入口），这份凭据的地址只配在设备对端上，不出现在网关对端上**；
-- **WireGuard 私钥在本机生成，不离开节点**；公钥连同准入材料经 Hub 分发（期望状态的 `mesh` 分区）；
-- Linux 使用内核 WireGuard，由组网进程通过 netlink 配置；无内核模块的平台（Synology DSM、旧内核）使用 Rust 用户态实现与 TUN 设备，运行在组网进程中；
-- `dial-only` 成员对每个对端设置 25 秒的持久保活，维持 NAT 映射；
-- **MTU**：`nett0` 的 MTU 固定为 1280（IPv6 的最小值）。加上 WireGuard 和外层 IP、UDP 头，外层包最大约 1360 字节：外层路径 MTU 不小于 1360 时（常见网络都满足）不分片，也不依赖路径 MTU 发现。更小时靠分片：外层的 IPv4 包不设 DF，由瓶颈处的路由器分片；IPv6 由瓶颈处的路由器回 ICMPv6"包太大"，发送端此后按它分片。实测外层路径 MTU 为 1300 时两种都传输完整（prototype.md 第 9 节，场景 19）。已知限制：IPv6 的这条路依赖 ICMPv6 能回到发送端；路径上丢弃 ICMPv6、外层路径 MTU 又小于 1360 时，大包悄悄丢失而小的探测照常通过，路径层察觉不到。处理办法留到遇到实际案例时再定（例如定期发一个填满 MTU 的隧道内探测，丢了就按故障处理）。TLS 传输由 TCP 自己分段，不受影响。移动网关和智能入口对转发的 TCP 做 MSS 钳制；本机发出的 TCP 按接口 MTU 自动确定 MSS。
+- Each node has one WireGuard interface `nett0`, listening on one UDP port (default `41820`, configurable);
+- Peers: all other nodes; devices are peers only of the smart gateway and the mobile gateway (section 13);
+- `AllowedIPs` of each peer: its mesh address; its Edge address and CONNECT egress address (if any); the LAN prefixes it advertises (if any); the device credential addresses for which it is the current gateway (if any, only for nodes with the `gateway` role). **When this machine has a device credential directly as a peer (for example a smart gateway), that credential's address is configured only on the device peer and does not appear on the gateway peer**;
+- **The WireGuard private key is generated on the machine and never leaves the node**; the public key is distributed through the Hub together with the admission material (the `mesh` partition of the desired state);
+- Linux uses kernel WireGuard, configured by the mesh process through netlink; platforms without the kernel module (Synology DSM, old kernels) use a Rust userspace implementation with a TUN device, running in the mesh process;
+- `dial-only` members set a persistent keepalive of 25 seconds on every peer to maintain the NAT mapping;
+- **MTU**: the MTU of `nett0` is fixed at 1280 (the IPv6 minimum). With the WireGuard and outer IP and UDP headers, the largest outer packet is about 1360 bytes: when the outer path MTU is at least 1360 (true for common networks) there is no fragmentation and no dependence on path MTU discovery. When it is smaller, fragmentation takes over: outer IPv4 packets do not set DF, and the router at the bottleneck fragments them; for IPv6 the router at the bottleneck returns ICMPv6 "packet too big" and the sender fragments from then on. With an outer path MTU of 1300, both were measured to transfer completely (prototype.md section 9, scenario 19). Known limitation: the IPv6 route depends on ICMPv6 getting back to the sender; if ICMPv6 is dropped on the path and the outer path MTU is below 1360, large packets are silently lost while small probes pass as usual, and the path layer does not notice. The remedy is left until a real case appears (for example, periodically send an in-tunnel probe that fills the MTU and treat a loss as a failure). The TLS transport is segmented by TCP itself and is not affected. The mobile gateway and smart gateway clamp the MSS of forwarded TCP; TCP originated on the machine determines its MSS from the interface MTU automatically.
 
-**切换路径 = 修改对端的 endpoint**。WireGuard 会话、密钥和上层的 TCP 连接都不受影响。组网进程负责测量、选路和设置 endpoint，不依赖 nett-node 在线。切换到一个尚未经手这条连接的中继时还需要重新握手（第 8.4 节）。
+**Switching path = changing the peer's endpoint**. The WireGuard session, keys and upper-layer TCP connections are not affected. The mesh process does the measuring, path selection and endpoint setting, and does not depend on nett-node being online. Switching to a relay that has not yet handled this link also requires a new handshake (section 8.4).
 
-### 4.1 准入验证
+### 4.1 Admission verification
 
-成员只为能验证签名链条的对端配置 WireGuard（ADR 0014）：
+A member configures WireGuard only for peers whose chain of signatures it can verify (ADR 0014):
 
-| 对端属性 | 验证依据 |
+| Peer attribute | Verified against |
 |---|---|
-| 节点的组网公钥和地址 | 信任锚 → 含 mesh 模块的签名节点策略（含节点 ID、地址、入网公钥）→ 准入证明（入网私钥对节点 ID、身份公钥、组网公钥的签名） |
-| Edge 专用地址 | 签名节点策略中的 `edge` 角色与地址分配 |
-| 设备的组网公钥和地址 | `device.add` / `device_credential.create` 的签名产物 |
-| 局域网网段 | `node.advertise_routes` 的签名产物 |
-| 设备地址出现在某个节点对端上 | 该节点的签名策略具有 `gateway` 或智能入口角色 |
-| 访问规则 | 整份规则集的签名产物（选择器展开后的成员、地址和端口），版本号只增不减 |
+| Node's mesh public key and address | Trust anchor -> signed node policy with the mesh module (containing node ID, address, enrollment public key) -> admission proof (signature by the enrollment private key over node ID, identity public key and mesh public key) |
+| Edge address | The `edge` role and address assignment in the signed node policy |
+| Device's mesh public key and address | The signed artifact of `device.add` / `device_credential.create` |
+| LAN prefix | The signed artifact of `node.advertise_routes` |
+| Device address appearing on a node's peer | That node's signed policy has the `gateway` or smart gateway role |
+| Access rules | The signed artifact of the whole rule set (members, addresses and ports after selector expansion), version number only increases |
 
-验证失败的对端不配置，并以事件上报。移除成员、撤销网段、收窄规则可以不带签名，直接生效，并留下撤销记录；验证其他成员的准入材料时不检查批准的过期时间，只检查签名、版本和撤销记录（auth.md 第 10.2、10.4 节）。验证的基准是本机的信任存储，不是期望状态文件（第 4.2 节）。
+Peers that fail verification are not configured, and an event is reported. Removing a member, revoking a prefix and narrowing rules can take effect directly without a signature, leaving a revocation; when verifying other members' admission material, the approval expiry time is not checked, only the signature, version and revocations (auth.md sections 10.2 and 10.4). The baseline for verification is the local trust store, not the desired state file (section 4.2).
 
-### 4.2 本机的信任存储
+### 4.2 The local trust store
 
-组网进程把它接受过的授权保存在本机，作为验证的基准；期望状态文件只是输入，改写它不能改变验证的基准（auth.md 第 10.4、11.2 节，protocol.md 第 6.2 节）。
+The mesh process keeps the authorizations it has accepted on the local machine as the baseline for verification; the desired state file is only an input, and rewriting it cannot change the verification baseline (auth.md sections 10.4 and 11.2, protocol.md section 6.2).
 
-| 保存的内容 | 作用 |
+| Saved content | Purpose |
 |---|---|
-| 本机的节点 ID 与信任锚清单 | 第一次接受期望状态时固定。之后信任锚不同的期望状态整份拒绝；信任锚只能由当前信任锚签名的更新改变（auth.md 第 11.2 节），只在本机以 root 执行 `nett leave` 时清除（auth.md 第 8.3 节） |
-| 撤销记录 | 永久保存，启动时先于任何授权生效 |
-| 每份签名产物已生效的版本与哈希：各成员的准入材料、访问规则集、各成员宣告的网段 | 版本只增不减，重启之后同样如此：旧版本的产物、同版本不同内容的产物都被拒绝 |
-| 最近一次整份接受的期望状态 | 期望状态文件整份被拒绝（读不出、格式不对、不是给本机的、信任锚不同）时，启动时改用它，运行中继续使用已生效的状态 |
+| The machine's node ID and trust anchor list | Fixed when the desired state is first accepted. A desired state with different trust anchors is afterwards rejected as a whole; trust anchors can only be changed by an update signed by the current trust anchors (auth.md section 11.2), and are cleared only by `nett leave` run as root on the machine (auth.md section 8.3) |
+| Revocations | Kept permanently, take effect at startup before any authorization |
+| The version and hash in effect for each signed artifact: each member's admission material, the access rule set, each member's advertised prefixes | Versions only increase, also across restarts: artifacts of an old version, and artifacts of the same version with different content, are rejected |
+| The most recent desired state accepted as a whole | When the desired state file is rejected as a whole (unreadable, malformed, not for this machine, different trust anchors), it is used instead at startup, and the state already in effect continues to be used at run time |
 
-- **位置**：`nett mesh --state <目录>`。Linux 为 `/var/lib/nett`（systemd 单元的 `StateDirectory`），macOS 为 `/Library/Application Support/nett/state`（root 专属目录中）；容器镜像中为 `/etc/nett/state`，与期望状态在同一个挂载目录中，容器重建之后仍然保留。目录 `0700`，文件 `0600`，先写临时文件再改名；
-- **启动**：先读信任存储，再读期望状态文件。本机的节点 ID 取自信任存储，没有信任存储时取自期望状态文件；
-- **建立**：没有信任存储时，以第一份整份接受的期望状态为基准建立它，这一次不检查本机节点策略的过期时间。已经在运行的成员升级之后第一次启动就是这种情况，所以第一份期望状态要经可信的通道送到（local-signing.md 第 5 节；接入 Hub 时由入网 token 中的信任锚指纹核对，auth.md 第 8.1 节）；
-- **本机节点策略的过期时间**：信任存储建立之后，本机节点策略出现新版本时检查它没有过期（auth.md 第 10.2 节第 6 项）；过期的不接受，继续使用已生效的版本；
-- **读写失败**：信任存储写不进时，组网进程照常运行（硬性规则 8），以内存中的状态验证，并列为需要处理的问题（status.md 第 6 节）：这期间重启可能接受旧版本的产物。信任存储损坏时保留为 `trust.json.bad`，按"建立"重新建立，同样列为问题；
-- 大小与数量有上限（第 17 节）。
+- **Location**: `nett mesh --state <directory>`. On Linux `/var/lib/nett` (the `StateDirectory` of the systemd unit), on macOS `/Library/Application Support/nett/state` (in a root-only directory); in the container image `/etc/nett/state`, in the same mounted directory as the desired state, so it is kept after the container is rebuilt. Directory `0700`, files `0600`, written to a temporary file and then renamed;
+- **Startup**: read the trust store first, then the desired state file. The machine's node ID is taken from the trust store, or from the desired state file when there is no trust store;
+- **Establishment**: when there is no trust store, it is established from the first desired state accepted as a whole, and this time the expiry time of the local node policy is not checked. This is the case at the first start after an already-running member is upgraded, so the first desired state must arrive through a trusted channel (local-signing.md section 5; when joining a Hub, it is checked against the trust anchor fingerprint in the enrollment token, auth.md section 8.1);
+- **Expiry of the local node policy**: after the trust store is established, when a new version of the local node policy appears its expiry is checked (auth.md section 10.2, item 6); an expired one is not accepted and the version already in effect continues to be used;
+- **Read/write failure**: when the trust store cannot be written, the mesh process keeps running as usual (hard rule 8), verifies against the state in memory, and lists it as a problem needing attention (status.md section 6): a restart in this period may accept artifacts of an old version. A corrupted trust store is kept as `trust.json.bad` and re-established as under "Establishment", also listed as a problem;
+- Size and count have limits (section 17).
 
-## 5. 中继
+## 5. Relay
 
-### 5.1 转发模型
+### 5.1 Forwarding model
 
-中继不参与 WireGuard 会话，只转发密文。**每个中继只使用一个 UDP 端口**，按 WireGuard 消息本身判断去向（ADR 0011）：
+The relay does not take part in the WireGuard session and only forwards ciphertext. **Each relay uses only one UDP port** and decides the destination from the WireGuard message itself (ADR 0011):
 
-| 消息 | 中继怎样判断去向 |
+| Message | How the relay decides the destination |
 |---|---|
-| 握手发起（type 1） | `mac1` 以接收方公钥为密钥计算（BLAKE2s，按 WireGuard 协议）；中继用分配给它的连接中的公钥逐个试算，确定接收方；记下发起方的会话索引和来源（待定表项） |
-| 握手应答（type 2） | 同样用 `mac1` 确定接收方；记下双方的会话索引，待定表项转为正式表项 |
-| cookie 应答（type 3） | 按接收方索引查表，可能先于握手应答到达，所以也查待定表项 |
-| 数据（type 4） | 按接收方索引查表；查不到就丢弃 |
+| Handshake initiation (type 1) | `mac1` is computed with the receiver's public key as the key (BLAKE2s, per the WireGuard protocol); the relay tries the public keys of the links assigned to it one by one to determine the receiver; it records the initiator's session index and source (a pending entry) |
+| Handshake response (type 2) | The receiver is determined the same way by `mac1`; it records the session indexes of both sides, and the pending entry becomes a regular entry |
+| Cookie reply (type 3) | Looked up by receiver index; it may arrive before the handshake response, so pending entries are also searched |
+| Data (type 4) | Looked up by receiver index; dropped if not found |
 
 ```
-A 的 WireGuard ──► R:p ──(按 mac1 / 会话索引)──► B 的 WireGuard
-A 的 WireGuard ◄── R:p ◄─(按 mac1 / 会话索引)─── B 的 WireGuard
+A's WireGuard ──► R:p ──(by mac1 / session index)──► B's WireGuard
+A's WireGuard ◄── R:p ◄─(by mac1 / session index)─── B's WireGuard
 ```
 
-- 经 R 的连接中，A 把 B 的 endpoint 设为 `R:p`，B 把 A 的 endpoint 也设为 `R:p`；同一个中继可以同时是多个对端的 endpoint；
-- R 记录每个成员的实际地址，把数据包转给另一端；
-- **多跳**：R1 不直接转给 B，而是转给 R2，R2 同样按消息判断去向；
-- 会话索引冲突时，中继丢弃冲突的握手，WireGuard 会自动以新索引重试；表项按会话的空闲时间老化。
+- On a link through R, A sets B's endpoint to `R:p` and B also sets A's endpoint to `R:p`; the same relay can be the endpoint of several peers at once;
+- R records each member's actual address and passes packets to the other end;
+- **Multi-hop**: R1 does not pass the packet directly to B but to R2, and R2 likewise decides the destination from the message;
+- On a session index collision, the relay drops the colliding handshake and WireGuard automatically retries with a new index; entries age out according to the session's idle time.
 
-### 5.2 分配与授权
+### 5.2 Assignment and authorization
 
-- 哪些连接经过哪个中继由 Hub 计算，经期望状态下发给中继所在节点，由组网进程通过本机接口交给 nett-relay；分配内容只包括两端的组网公钥、`public` 一端的地址，以及每个成员与这个中继之间的探测令牌（32 字节随机值，同时下发给该成员，第 7.2 节）；中继只为分配给它的连接转发；
-- **地址绑定**：成员的实际地址只在**对端针对新地址上的握手发起发回了应答**之后才更新，而且握手应答只接受来自对端当前绑定地址的。首次绑定时，`public` 成员的地址随分配下发；`dial-only` 成员的地址是它发出握手发起的地址，同样在对端应答之后绑定。两端都是 `dial-only`、都还没有地址时，握手发起只能认出接收方，中继先把它留在待定表中；另一端的握手发起到达时，中继把它转发给可能是接收方的地址（待定表中、以接收方的某个已分配对端为接收方的握手发起的来源，最多 4 个），接收方从其中一个地址发回应答，两端的地址一起绑定。中继没有任何密钥，验证不了握手消息的真假：能伪造来源地址的攻击者仍可能伪造应答、改掉绑定。后果是这条连接的密文被送往错误的地址，也就是断线，内容不会泄露。因此另加两条：绑定变化限速；新绑定后 10 秒内收不到来自新地址的数据，就恢复旧绑定。路径层发现中断后照常切换；
-- nett-relay 启动时从组网进程（常驻）取中继分配和 CONNECT 所需的已验证材料（设备凭据、访问规则、撤销记录），不依赖 nett-node；
-- **重启不断连**：nett-relay 每秒一次、以及退出之前，把索引表和地址绑定保存到本机的状态目录（只有会话索引和地址，没有密钥；写盘不在转发循环中进行，磁盘卡顿只推迟保存，不让转发停顿），启动时恢复，经它的连接不中断（升级时也是如此）。崩溃时，最近一秒内新建的会话不在保存的表中，按第 8.4 节重新握手；
-- 每个中继的流量和带宽上限由用户在控制台为节点设置，经 Hub 下发；超过上限时，Hub 不再为它分配新的连接；
-- 试算 `mac1` 的次数和索引表的大小都有上限。
+- Which links go through which relay is computed by the Hub and delivered through the desired state to the node where the relay runs; the mesh process hands it to nett-relay through a local interface. The assignment contains only the mesh public keys of the two ends, the address of the `public` end, and the probe token between each member and this relay (a 32-byte random value, also delivered to that member, section 7.2); the relay forwards only for links assigned to it;
+- **Address binding**: a member's actual address is updated only after **the peer has returned a response to a handshake initiation from the new address**, and a handshake response is accepted only from the peer's currently bound address. For the first binding, the address of a `public` member is delivered with the assignment; the address of a `dial-only` member is the address from which it sent a handshake initiation, likewise bound after the peer responds. When both ends are `dial-only` and neither has an address yet, a handshake initiation can identify only the receiver, and the relay keeps it in the pending table; when the other end's handshake initiation arrives, the relay forwards it to the addresses that may be the receiver (sources of pending handshake initiations whose receiver is one of the assigned peers, at most 4); the receiver returns a response from one of them, and the addresses of both ends are bound together. The relay holds no keys and cannot verify whether handshake messages are genuine: an attacker who can forge source addresses may still forge a response and change the binding. The consequence is that the ciphertext of this link is sent to a wrong address, which is a disconnection; no content is leaked. Two further measures therefore apply: binding changes are rate-limited; if no data arrives from the new address within 10 seconds after a new binding, the old binding is restored. The path layer switches as usual after detecting the interruption;
+- At startup nett-relay obtains the relay assignment and the verified material needed for CONNECT (device credentials, access rules, revocations) from the mesh process (resident), without depending on nett-node;
+- **Restart without disconnection**: once per second and before exiting, nett-relay saves the index table and address bindings to the local state directory (only session indexes and addresses, no keys; writing to disk is not done in the forwarding loop, so a disk stall only delays the save and does not stall forwarding), and restores them at startup; connections through it are not interrupted (also during upgrades). On a crash, sessions created in the last second are not in the saved table and handshake again per section 8.4;
+- The traffic and bandwidth limit of each relay is set by the user in the console for the node and delivered through the Hub; beyond the limit, the Hub assigns no new links to it;
+- The number of `mac1` trials and the size of the index table both have limits.
 
-### 5.3 TLS 传输
+### 5.3 TLS transport
 
-当 UDP 不可用时：
+When UDP is unavailable:
 
 ```
-A 的 WireGuard ─► 127.0.0.1:x（传输适配进程）─► WebSocket/TLS 443 ─► R 的 nett-relay ─► B
+A's WireGuard ─► 127.0.0.1:x (transport adapter) ─► WebSocket/TLS 443 ─► R's nett-relay ─► B
 ```
 
-- 传输适配进程为每个 TLS 中继在本机回环地址上开一个 UDP 端口，作为 WireGuard 中这条候选的 endpoint；每个收到的数据包作为 WebSocket 的一个二进制消息发出，反方向同理。它只经手密文，以专用低权限用户运行。回环端口由组网进程分配，随 TLS 目标与证书指纹一起交给传输适配进程（ADR 0013；原型中组网进程把这份配置写到本机文件）；
-- 发往 TLS 中继的探测（`0x90`，第 7.2 节）经同一个回环端口与 WebSocket 连接收发，TLS 候选与 UDP 中继一样测量；传输适配进程按消息类型分发反方向的消息：中继应答交还发出探测的组网进程端口，其余交给 WireGuard 端口；
-- **连接的认证**：WebSocket 连接上的第一条消息必须是带认证的中继探测，中继据此认出是哪个成员（令牌只在组网进程中，传输适配进程只是转交）；30 秒内收不到就关闭连接，在此之前不转发任何消息、不作任何应答。之后这条连接就是这个成员的一个地址，绑定规则与 UDP 相同（第 5.2 节）；TLS 连接数、等待认证的连接数和每条连接的发送队列都有上限；
-- 入口节点上，由那里的反向代理按域名把 WebSocket 转给 nett-relay。Hub 主机上的这段配置在项目提供的 Compose 示例中，或由 `nett-hub init` 打印（hub.md 第 8 节、ADR 0009），其他入口节点上由用户在自己的反向代理中配置；
-- 其他 `public` 节点上，nett-relay 直接在 443 上提供 TLS；证书可以是自签的，指纹由 Hub 随中继名单下发，客户端按指纹校验。节点没有可用域名时（例如所在地区要求域名在该云厂商备案），客户端按 IP 连接，不发送 SNI。这条传输和其他候选一样，是否可用由测量决定（第 7 节），被拦截时路径层自动不选，不需要预先测试；
-- TLS 传输中，WireGuard 承载的 TCP 在丢包时性能会下降（TCP 套 TCP），因此只在 UDP 不可用时使用；
-- **离开 TLS 路径后挡住旧路径**：TLS 路径上排队的包比 UDP 多得多，切走之后还会陆续送到，对端被这些包改回经中继，它的包又经 TLS 回来、把本端也改回 TLS（WireGuard 的漫游，第 8.3 节），两端互相拉扯，可以持续数秒。所以没有对端在用某个 TLS 中继时，组网进程在本机丢弃从它的回环端口进入 WireGuard 端口的包：切到 TLS 之前先放开，切走之后再挡住。只涉及本机选用的回环端口，规则装不上时只是切回变慢；
-- **备用连接**：存在 TLS 候选的 `dial-only` 成员，组网进程照常探测这些候选（第 7 节）；传输适配进程收到发往某个 TLS 中继的第一个探测时连上它，之后一直保持（每 25 秒保活），回退时不必临时建立 TLS 连接（ADR 0021）。
+- For each TLS relay, the transport adapter opens a UDP port on the local loopback address, which serves as the endpoint of this candidate in WireGuard; each received packet is sent as one binary WebSocket message, and likewise in the other direction. It handles only ciphertext and runs as a dedicated low-privilege user. The loopback port is allocated by the mesh process and handed to the transport adapter together with the TLS target and certificate fingerprint (ADR 0013; in the prototype the mesh process writes this configuration to a local file);
+- Probes sent to a TLS relay (`0x90`, section 7.2) are sent and received through the same loopback port and WebSocket connection, and TLS candidates are measured like UDP relays; the transport adapter dispatches messages in the other direction by message type: relay responses go back to the mesh process port that sent the probe, and the rest go to the WireGuard port;
+- **Connection authentication**: the first message on a WebSocket connection must be an authenticated relay probe, from which the relay identifies the member (the token is only in the mesh process, and the transport adapter merely passes it along); if it is not received within 30 seconds the connection is closed, and until then no message is forwarded and no response is made. After that the connection is one address of this member, with the same binding rules as UDP (section 5.2); the number of TLS connections, the number of connections waiting for authentication and the send queue of each connection all have limits;
+- On an entry node, the reverse proxy there passes the WebSocket to nett-relay by domain name. This configuration on the Hub host is in the Compose example provided by the project, or printed by `nett-hub init` (hub.md section 8, ADR 0009); on other entry nodes the user configures it in their own reverse proxy;
+- On other `public` nodes, nett-relay serves TLS directly on 443; the certificate may be self-signed, the fingerprint is delivered by the Hub with the relay list, and clients verify against the fingerprint. When a node has no usable domain name (for example, the region requires the domain to be filed with the cloud vendor), clients connect by IP and send no SNI. Like the other candidates, whether this transport is usable is decided by measurement (section 7); when it is blocked the path layer simply does not select it, and no advance test is needed;
+- In the TLS transport, the performance of TCP carried by WireGuard degrades under packet loss (TCP over TCP), so it is used only when UDP is unavailable;
+- **Blocking the old path after leaving the TLS path**: far more packets queue on the TLS path than on UDP, and after switching away they keep arriving; the peer is changed back to the relay by these packets, its packets come back over TLS and change this end back to TLS (WireGuard roaming, section 8.3), and the two ends pull each other back and forth, which can last several seconds. So when no peer is using a given TLS relay, the mesh process drops, on the local machine, packets entering the WireGuard port from that relay's loopback port: it opens them before switching to TLS and blocks them again after switching away. This involves only the loopback port this machine selected; if the rule cannot be installed, switching back is merely slower;
+- **Standby connection**: for `dial-only` members with TLS candidates, the mesh process probes these candidates as usual (section 7); the transport adapter connects to a TLS relay when it receives the first probe addressed to it, and keeps the connection afterwards (keepalive every 25 seconds), so no TLS connection has to be established on the spot during fallback (ADR 0021).
 
-### 5.4 CONNECT 代理
+### 5.4 CONNECT proxy
 
-- HTTP/2 over TLS，按连接转发，可以串联多个中继；
-- 入口节点上与网站共用 443：反向代理按"方法为 CONNECT 且 TLS 的 SNI 为 nett-relay 的域名"转交，不能按 Host 转交（CONNECT 请求的 `:authority` 是目标地址）。实测标准 Caddy 2.10.2 能转发 HTTP/2 CONNECT 隧道，但不能转发 HTTP/1.1 CONNECT 隧道，因此经 Caddy 时只提供 HTTP/2 CONNECT，其他反向代理以实测为准。Hub 主机上的这段配置由 Hub 安装脚本生成；其他 `public` 节点上的 nett-relay 两种都支持；
-- 客户端凭据是设备凭据的一种（`kind = connect`，见 api-resources.md 第 5.4 节），新增需要签名；
-- CONNECT 的出口使用中继节点上的 CONNECT 出口地址（第 3 节），所有设备共用。目标节点按来源区分不了设备，所以**由 nett-relay 按凭据逐连接授权**：对每条 CONNECT 连接，按凭据对应的设备检查签名的访问规则（relay 是 `device_credential` 和 `access_rule_set` 的验证方）；按最终实际连接的地址检查，而不是请求中的名称；
-- CONNECT 的目标只能是组网地址（包括经智能入口宣告的网段），不直接连接中继所在主机或其所在局域网；组网进程报告过滤规则就绪之前，nett-relay 不开放 CONNECT；
-- **边界**：被攻破的 nett-relay 能以 CONNECT 出口地址访问 CONNECT 规则允许的全部目标（所有 CONNECT 设备权限的并集），这超过了一个普通低权限进程的能力；只为确实需要 CONNECT 的设备创建这类凭据；
-- Edge 所在主机本身是组网成员，回源直接走组网，不使用 CONNECT。
+- HTTP/2 over TLS, forwarded per connection, can chain multiple relays;
+- On an entry node it shares 443 with the website: the reverse proxy hands over requests "whose method is CONNECT and whose TLS SNI is the nett-relay domain name", and cannot hand over by Host (the `:authority` of a CONNECT request is the target address). Measured: standard Caddy 2.10.2 can forward HTTP/2 CONNECT tunnels but not HTTP/1.1 CONNECT tunnels, so through Caddy only HTTP/2 CONNECT is provided; for other reverse proxies, rely on measurement. This configuration on the Hub host is generated by the Hub install script; nett-relay on other `public` nodes supports both;
+- The client credential is a kind of device credential (`kind = connect`, see api-resources.md section 5.4), and adding one requires a signature;
+- The CONNECT egress uses the CONNECT egress address on the relay node (section 3), shared by all devices. The target node cannot tell devices apart by source, so **nett-relay authorizes each connection per credential**: for each CONNECT connection, it checks the signed access rules for the device corresponding to the credential (relay is a verifier of `device_credential` and `access_rule_set`); the check is on the address finally connected to, not the name in the request;
+- CONNECT targets can only be mesh addresses (including prefixes advertised through smart gateways); the host the relay runs on and its LAN are not connected to directly; nett-relay does not open CONNECT until the mesh process reports that filter rules are ready;
+- **Boundary**: a compromised nett-relay can reach, using the CONNECT egress address, all targets allowed by CONNECT rules (the union of the privileges of all CONNECT devices), which exceeds what an ordinary low-privilege process can do; create such credentials only for devices that really need CONNECT;
+- The host where Edge runs is itself a mesh member, and origin traffic goes directly over the mesh without CONNECT.
 
-### 5.5 公网端口与安全组
+### 5.5 Public ports and security groups
 
-nett 不能修改云厂商的安全组，而有的云厂商默认拒绝全部入方向 UDP。每种角色需要的端口如下，由用户在云控制台放行一次；`nett doctor` 和控制台检测到端口不通时，会说明应该放行哪个端口。
+nett cannot modify a cloud vendor's security group, and some cloud vendors deny all inbound UDP by default. The ports needed by each role are listed below, to be opened once by the user in the cloud console; when `nett doctor` and the console detect that a port is unreachable, they state which port should be opened.
 
-| 角色 | 协议与端口 | 用途 |
+| Role | Protocol and port | Purpose |
 |---|---|---|
-| 所有 `public` 节点 | UDP 41820（可配置） | WireGuard |
-| 运行 nett-relay 的节点 | UDP 中继端口（一个，可配置） | 中继转发、探测应答 |
-| | TCP 443 | TLS 传输入口、CONNECT；入口节点上与 Edge 共用 |
-| 入口节点 | TCP 80、443 | 网站、证书验证 |
-| 智能入口（家宽） | 路由器映射 WireGuard 端口和中继端口 | 设备直连家里；可做中继 |
-| M2 | UDP 443 | QUIC 传输 |
+| All `public` nodes | UDP 41820 (configurable) | WireGuard |
+| Nodes running nett-relay | UDP relay port (one, configurable) | Relay forwarding, probe responses |
+| | TCP 443 | TLS transport entry, CONNECT; shared with Edge on an entry node |
+| Entry node | TCP 80, 443 | Website, certificate validation |
+| Smart gateway (home broadband) | Router maps the WireGuard port and relay port | Devices connect directly to home; can act as a relay |
+| M2 | UDP 443 | QUIC transport |
 
-`dial-only` 成员的 WireGuard 端口由系统分配，期望状态中不带端口：没有人按事先约定的地址连它：公网直连候选指向 `public` 节点，打洞用的是运行时观察到的映射地址（第 6.1 节），Hub 生成的指向它的局域网直连和 IPv6 直连候选（第 6 节）用它上报的实际端口。同一台主机上的多个成员因此不争用端口，例如 Mac 上的原生成员与容器内成员（容器的 UDP 经端口转发出去时可能保留原端口）。分到组网进程自己在本机用的端口时重新分配：第 7.2 节的探测端口与第 5.3 节的 TLS 回环端口在 Linux 的临时端口范围之内。端口在接口存在期间不变：Linux 上接口在组网进程重启后保留，端口随之保留；用户态平台上接口随进程重建，端口随之变化，连接由 `dial-only` 一端发起，对端从新端口来的握手得知新地址（WireGuard 的漫游）。期望状态从带端口改为不带时沿用当前的端口。
+The WireGuard port of a `dial-only` member is assigned by the system and the desired state carries no port: nobody connects to it at a pre-agreed address. Public direct candidates point to `public` nodes, hole punching uses the mapped address observed at run time (section 6.1), and the LAN direct and IPv6 direct candidates generated by the Hub that point to it (section 6) use the actual port it reports. Multiple members on the same host therefore do not contend for ports, for example the native member and the container member on a Mac (the container's UDP may keep its original port when forwarded out). If a port that the mesh process itself uses locally is assigned, it is reallocated: the probe port of section 7.2 and the TLS loopback port of section 5.3 are within the Linux ephemeral port range. The port does not change while the interface exists: on Linux the interface persists across mesh process restarts and so does the port; on userspace platforms the interface is rebuilt with the process and the port changes with it, the connection is initiated by the `dial-only` end, and the peer learns the new address from the handshake arriving from the new port (WireGuard roaming). When the desired state changes from carrying a port to carrying none, the current port is kept.
 
-可达性检测：WireGuard 端口对未认证的数据包不作响应，无法从外部直接探测，通过实际握手是否成功来判断；中继端口和 443 由其他 `public` 节点发起带认证的探测。
+Reachability detection: the WireGuard port does not respond to unauthenticated packets and cannot be probed directly from outside, so reachability is judged by whether an actual handshake succeeds; the relay port and 443 are probed with authenticated probes initiated by other `public` nodes.
 
-## 6. 候选路径
+## 6. Candidate paths
 
-Hub 为需要连接的每一对成员（由访问规则推导，site.md 第 6 节）计算候选路径列表，经 `mesh` 分区下发；成员在本地测量并选择。
+For every pair of members that need to connect (derived from access rules, site.md section 6), the Hub computes a list of candidate paths and delivers it through the `mesh` partition; members measure and select locally.
 
-| 候选路径 | 生成条件 |
+| Candidate path | Generation condition |
 |---|---|
-| 局域网直连 | 双方上报的局域网地址处于同一网段，且探测确认可达 |
-| 公网直连 | 至少一方为 `public`。可达性按 IPv4、IPv6 分别判断：IPv4 在 NAT 后、但 IPv6 可从外部连入的成员，在 IPv6 上算作 `public` |
-| 经中继 | 选取若干中继：优先地理和线路上位于两端之间的中继，结合线路质量矩阵 |
-| 多跳接力（M2） | 单跳中继质量不佳，而两段接力明显更优 |
-| 打洞直连 | 双方都为 `dial-only`，并且都有全局 IPv6 地址，或者至少一方在锥形 NAT 后（第 6.1 节）；两端都在对称型 NAT 后时的打洞在 M2 |
+| LAN direct | The LAN addresses reported by both sides are in the same prefix, and a probe confirms reachability |
+| Public direct | At least one side is `public`. Reachability is judged separately for IPv4 and IPv6: a member behind NAT on IPv4 but reachable from outside on IPv6 counts as `public` on IPv6 |
+| Via relay | Select several relays: prefer relays located between the two ends geographically and in terms of routes, combined with the line quality matrix |
+| Multi-hop relay (M2) | Single-hop relay quality is poor and a two-segment relay is clearly better |
+| Hole-punched direct | Both sides are `dial-only` and both have a global IPv6 address, or at least one is behind a cone NAT (section 6.1); hole punching when both ends are behind symmetric NAT is in M2 |
 
-每种路径还可以与传输方式组合（UDP、TLS）。候选数量有上限（默认每对成员 6 条）。`dial-only` 成员的候选中，至少包括经两个不同 `public` 节点的路径（architecture.md 第 12.3 节）。
+Each path can also be combined with a transport (UDP, TLS). The number of candidates has a limit (default 6 per pair of members). The candidates of a `dial-only` member include at least paths through two different `public` nodes (architecture.md section 12.3).
 
-**活跃连接**（最近 10 分钟有流量）完整测量；**空闲连接**只做低频测量，第一次有流量时立即按最优候选建立。
+**Active links** (with traffic in the last 10 minutes) are measured fully; **idle links** are measured only at a low frequency, and the first time there is traffic, the link is established immediately on the best candidate.
 
-### 6.1 打洞直连
+### 6.1 Hole-punched direct
 
-两端都在 NAT 或防火墙后时，双方同时向对方发包，在各自的 NAT 上打开映射，然后直连。打洞的探测**从 WireGuard 端口发出**，走的就是 WireGuard 自己的 NAT 映射（第 7.1 节）。打洞期间流量照常走当前路径，打洞路径测通之后再切换，失败不影响连接（ADR 0021）：
+When both ends are behind NAT or a firewall, both sides send packets to each other at the same time, open mappings on their respective NATs, and then connect directly. Hole-punching probes are **sent from the WireGuard port** and use WireGuard's own NAT mapping (section 7.1). During hole punching, traffic continues on the current path, switching happens after the punched path is verified, and failure does not affect the connection (ADR 0021):
 
-- **映射地址**：`public` 节点看到的、某个成员 WireGuard 端口的实际来源地址，就是 NAT 为它分配的映射地址，在对该成员探测的应答中附上（只告诉成员自己）：直连探测本来就从 WireGuard 端口发出（第 7.1 节），对端应答中的来源地址就是它；发往中继的探测从组网进程自己的端口发出，nett-relay 在应答中附上的是按第 5.2 节绑定的这个成员的 WireGuard 地址（还没有绑定时是探测的来源）。组网进程据此得到本机的映射地址，经 `LinkReport` 上报 Hub（Hub 据此生成打洞候选；原型中打洞候选写在静态配置里），并在打洞提议中直接告诉对端；
-- **NAT 类型**：`dial-only` 成员至少连接两个 `public` 节点（第 6 节）。两个 `public` 节点看到的映射地址（IP 和端口）相同，判为锥形 NAT（映射与目的地址无关），不同则判为对称型。至少一端是锥形时尝试打洞：对称型一端为新目的地分配的端口对方无法预知，能否打通取决于锥形一端的过滤方式，而尝试本身不影响连接；两端都是对称型时不尝试。网络变化后重新判断；
-- **IPv6**：双方都有全局 IPv6 地址时不需要映射地址，路由器的有状态防火墙会放行对方回来的包，双方同时发包即可。使用的地址以 `public` 节点看到的来源地址为准（本机启用了临时地址时，出站使用的地址会变化）；没有经 IPv6 连接的 `public` 节点时，取本机到对端地址的路由所选的源地址；
-- **过程**：决定方经当前隧道发出带轮次的打洞提议（与第 8.4 节的切换提议是同一套机制，消息见第 7.2 节），附上本机的 NAT 类型、IPv4 映射地址与 IPv6 地址；对方确认，并附上它的这三项。两端都是对称型时就此放弃。否则双方随即从 WireGuard 端口向对方的各个地址连续发送直连探测（`0x82`），每 200 毫秒一次，最多 10 秒。收到自己探测的应答，就说明两个方向都通了；打通的地址以实际收到探测或应答的来源为准：对称型 NAT 为新目的地分配的端口对方无法预知，锥形一端从对方探测的来源得知。打通的路径作为一条直连候选，按第 8.2 节与当前路径比较；要切过去时，因为双方都是 `dial-only`，按第 8.4 节两端一起切换（经隧道提议，目标是打通的直连）。改 endpoint 不需要重新握手，现有的会话直接经新路径发送；
-- **失败**：10 秒内没有打通就放弃，连接一直走当前路径，不受影响；
-- **何时尝试**：连接刚建立或有流量时都可以尝试；同一对成员失败后按指数退避重试（最长 1 小时）；映射地址或 NAT 类型变化后立即重新评估。打通之后按第 8.2 节与当前路径比较，不如当前路径时不切；
-- **保持**：双方都设置 25 秒持久保活，维持映射（第 4 节）。对端换了网络后映射地址随之变化，打洞路径失效，按故障切换处理（第 8.2 节），之后在新网络上重新评估；
-- **M2**：两端都在对称型 NAT 后时的打洞（猜测端口）。
+- **Mapped address**: the actual source address of a member's WireGuard port as seen by a `public` node is the mapped address the NAT allocated for it, attached to the response to a probe of that member (told only to that member). Direct probes are sent from the WireGuard port anyway (section 7.1), and the source address in the peer's response is that address; probes sent to a relay are sent from the mesh process's own port, and what nett-relay attaches to the response is the WireGuard address of this member bound per section 5.2 (when not yet bound, the source of the probe). From this the mesh process obtains the machine's mapped address, reports it to the Hub through `LinkReport` (the Hub generates hole-punching candidates from it; in the prototype hole-punching candidates are written in static configuration), and tells the peer directly in the hole-punching proposal;
+- **NAT type**: a `dial-only` member connects to at least two `public` nodes (section 6). If the mapped addresses (IP and port) seen by two `public` nodes are the same, it is judged a cone NAT (mapping independent of destination address), and if different, a symmetric NAT. Hole punching is attempted when at least one end is a cone NAT: the port a symmetric end allocates for a new destination cannot be predicted by the other side, whether it succeeds depends on the filtering behavior of the cone end, and the attempt itself does not affect the connection; it is not attempted when both ends are symmetric. It is re-judged after a network change;
+- **IPv6**: when both sides have a global IPv6 address no mapped address is needed; the stateful firewall of the router lets packets coming back from the other side through, and both sides simply send at the same time. The address used is the source address seen by the `public` node (when temporary addresses are enabled on the machine, the address used for outbound traffic changes); when there is no `public` node reachable over IPv6, the source address chosen by the machine's route to the peer's address is used;
+- **Procedure**: the decider sends a hole-punching proposal carrying a round number through the current tunnel (the same mechanism as the switch proposal of section 8.4, messages in section 7.2), attaching this machine's NAT type, IPv4 mapped address and IPv6 address; the peer confirms, attaching its own three items. When both ends are symmetric it gives up here. Otherwise both sides immediately send direct probes (`0x82`) from the WireGuard port to each of the other side's addresses, once every 200 milliseconds, for at most 10 seconds. Receiving a response to its own probe shows that both directions work; the punched address is the source from which a probe or response was actually received: the port a symmetric NAT allocates for a new destination cannot be predicted by the other side, and the cone end learns it from the source of the peer's probe. The punched path serves as a direct candidate and is compared with the current path per section 8.2; to switch over, because both sides are `dial-only`, both ends switch together per section 8.4 (proposal through the tunnel, the target being the punched direct path). Changing the endpoint needs no new handshake, and the existing session sends directly over the new path;
+- **Failure**: if it is not punched through within 10 seconds it is given up, and the connection stays on the current path, unaffected;
+- **When to attempt**: it may be attempted when a link has just been established or when there is traffic; after a failure for the same pair of members it is retried with exponential backoff (at most 1 hour); it is re-evaluated immediately after a change of mapped address or NAT type. After a path is punched through, it is compared with the current path per section 8.2 and not switched to if it is no better than the current path;
+- **Keeping**: both sides set a persistent keepalive of 25 seconds to maintain the mapping (section 4). When the peer changes network its mapped address changes and the punched path becomes invalid; this is handled as a failure switch (section 8.2), and it is re-evaluated on the new network afterwards;
+- **M2**: hole punching when both ends are behind symmetric NAT (port guessing).
 
-## 7. 测量
+## 7. Measurement
 
-| 测量 | 方式 | 频率 |
+| Measurement | Method | Frequency |
 |---|---|---|
-| 当前路径 | 在隧道内发送探测（到对端组网地址），测往返时间和丢包；当前路径是直连时另从 WireGuard 端口向对端发直连探测，应答带回本机的映射地址（第 6.1 节） | 隧道内：活跃连接每 1 秒，疑似故障时加探（第 8.2 节）；直连探测与候选相同（活跃连接每 15 秒） |
-| 候选路径 | 隧道外的探测包，按路径分段测量：成员 → 中继、中继 → 成员、成员 → `public` 成员；直连候选的探测从 WireGuard 端口发出（第 7.1 节）；经中继的路径由各段组合估算 | 活跃连接每 15 秒；从未应答过的候选，第一次探测后的 1 分钟内每 1 秒（启动时对端可能还没起来）；当前路径明显变差时（往返时间比切到它以来的最好值翻倍、且至少多 10 毫秒，或最近 10 次隧道内探测丢失 2 次以上），同类候选每 3 秒；当前路径不是最优类型时，更优类型的候选每 1 秒；刚因第一次故障从一条更优类型的路径切走时，15 秒内每 50 毫秒探测它一次（第一次有应答后立即再探测一次确认，应答一到就处理，不等下一次定时推进）；疑似故障时全部候选立即一次；空闲连接每 5 分钟 |
-| 线路质量矩阵 | 汇总各段测量，上报 Hub | 每分钟 |
+| Current path | Send probes inside the tunnel (to the peer's mesh address) and measure round-trip time and packet loss; when the current path is direct, additionally send direct probes from the WireGuard port to the peer, and the response carries back the machine's mapped address (section 6.1) | In the tunnel: every 1 second for active links, extra probes when a failure is suspected (section 8.2); direct probes as for candidates (every 15 seconds for active links) |
+| Candidate paths | Probe packets outside the tunnel, measured per path segment: member -> relay, relay -> member, member -> `public` member; direct candidates are probed from the WireGuard port (section 7.1); paths via a relay are estimated by combining segments | Every 15 seconds for active links; for a candidate that has never responded, every 1 second within 1 minute after the first probe (the peer may not have started yet at startup); when the current path is clearly worse (round-trip time doubled relative to the best value since switching to it and at least 10 milliseconds more, or 2 or more of the last 10 in-tunnel probes lost), candidates of the same kind every 3 seconds; when the current path is not of the best kind, candidates of better kinds every 1 second; right after switching away from a better-kind path because of its first failure, that path is probed every 50 milliseconds for 15 seconds (after the first response, probe once more immediately to confirm, and handle a response as soon as it arrives without waiting for the next timer tick); when a failure is suspected, all candidates once immediately; idle links every 5 minutes |
+| Line quality matrix | Aggregates the segment measurements and reports to the Hub | Every minute |
 
-- 指标：往返时间（指数滑动平均；一次测量与平均值相差一倍以上时直接采用新值，路径变化后不必等平均值慢慢跟上）、丢包率（滑动窗口）、抖动；
-- 隧道内探测的超时：往返时间的两倍加 100 毫秒，限制在 300 毫秒到 1 秒之间，只用来进入疑似故障（第 8.2 节）。超时的探测再等 10 秒：迟到的应答照常计入往返时间；被后发探测的应答越过，或 10 秒仍没有应答，才记为丢失。自己的流量塞满一段慢链路、队列很深时（限速的 VPS、上传缓冲很深的家庭宽带），应答会迟到几秒，这是排队，不是丢包；
-- 有流量的连接：最近 30 秒内 WireGuard 对这个对端的收发字节数有变化；
-- 探测包带认证：成员之间用双方 WireGuard 密钥派生的密钥计算校验码；发往中继的探测使用分配时下发的令牌；
-- 应答方：发往中继的探测由 nett-relay 在中继端口上应答；隧道内的探测由组网进程在组网地址上应答；直连候选（公网直连、局域网直连、打洞）的探测发往对端的 WireGuard 端口，由对端的组网进程应答（第 7.1 节），其中局域网地址上的应答**只在 Hub 判定存在局域网直连候选时开启**。云主机网卡上的"局域网地址"往往通过 1:1 NAT 对应公网地址，因此所有应答方**对未认证的探测都不作任何响应**；
-- 探测流量有预算：每对活跃连接不超过约 1 KiB/s；只有刚因故障切走后的 15 秒内例外，快速恢复的探测往返约 2.5 KB/s。
+- Metrics: round-trip time (exponential moving average; when one measurement differs from the average by more than a factor of two the new value is adopted directly, so there is no need to wait for the average to catch up after a path change), packet loss rate (sliding window), jitter;
+- Timeout of in-tunnel probes: twice the round-trip time plus 100 milliseconds, bounded between 300 milliseconds and 1 second, used only to enter suspected failure (section 8.2). A timed-out probe waits another 10 seconds: a late response is still counted in the round-trip time; it is recorded as lost only when overtaken by the response to a later probe, or when there is still no response after 10 seconds. When the machine's own traffic fills a slow link and the queue is deep (rate-limited VPS, home broadband with a very deep upload buffer), responses are delayed by several seconds; this is queuing, not packet loss;
+- A link with traffic: the number of bytes WireGuard sent or received for this peer changed within the last 30 seconds;
+- Probe packets carry authentication: between members a checksum is computed with a key derived from the two sides' WireGuard keys; probes sent to a relay use the token delivered at assignment;
+- Responders: probes sent to a relay are answered by nett-relay on the relay port; in-tunnel probes are answered by the mesh process on the mesh address; probes of direct candidates (public direct, LAN direct, hole-punched) are sent to the peer's WireGuard port and answered by the peer's mesh process (section 7.1), where the response on a LAN address is **enabled only when the Hub determines that a LAN direct candidate exists**. The "LAN address" on a cloud host's network card often corresponds to a public address through 1:1 NAT, so all responders **make no response at all to unauthenticated probes**;
+- Probe traffic has a budget: no more than about 1 KiB/s per pair of active links; the only exception is the 15 seconds right after switching away because of a failure, where the quick-recovery probe round trips are about 2.5 KB/s.
 
-### 7.1 在 WireGuard 端口上探测
+### 7.1 Probing on the WireGuard port
 
-直连候选的探测和打洞（第 6.1 节）必须走 WireGuard 自己的 NAT 映射，所以从 WireGuard 端口发出（ADR 0021）：
+Probes of direct candidates and hole punching (section 6.1) must use WireGuard's own NAT mapping, so they are sent from the WireGuard port (ADR 0021):
 
-- **Linux 内核 WireGuard**：组网进程用原始套接字构造源端口为 WireGuard 端口的 UDP 包发出（因此需要 `CAP_NET_RAW`）。接收用 nftables：组网进程经 netlink 在 input 链上加规则，只把发往 WireGuard 端口、首字节为探测类型的包，以及 WireGuard 的 cookie 应答（类型 3、64 字节，第 8.4 节）的副本（`log`，nfnetlink_log）交给自己；其他包只多一次规则匹配，不复制。cookie 应答照常交给 WireGuard，组网进程只读不应答。这些探测包不是 WireGuard 消息，内核 WireGuard 收到后直接丢弃。不用原始套接字接收：内核会把每个进来的 UDP 包先复制一份交给原始套接字再过滤，实测让 WireGuard 的吞吐下降约 7%（prototype.md 第 9 节）；
-- **用户态平台**：组网进程本来就持有 WireGuard 的 UDP 端口，按首个字节区分探测和 WireGuard 消息；收到 cookie 应答时按第 8.4 节处理，再照常交给 WireGuard；
-- 探测消息的首个字节与 WireGuard 的四种消息类型都不同；探测带认证（见上），未认证的包不作任何响应，WireGuard 端口对外的表现不变；
-- 发往中继的探测从组网进程自己的端口发出，由 nett-relay 在中继端口上应答。
+- **Linux kernel WireGuard**: the mesh process uses a raw socket to build UDP packets with the WireGuard port as source port and sends them (so `CAP_NET_RAW` is needed). Receiving uses nftables: the mesh process adds a rule on the input chain through netlink, handing to itself only copies (`log`, nfnetlink_log) of packets addressed to the WireGuard port whose first byte is a probe type, and of WireGuard's cookie replies (type 3, 64 bytes, section 8.4); other packets only incur one extra rule match and are not copied. Cookie replies are handed to WireGuard as usual, and the mesh process only reads and does not respond. These probe packets are not WireGuard messages, and kernel WireGuard drops them on receipt. A raw socket is not used for receiving: the kernel first copies every incoming UDP packet to the raw socket and then filters, which was measured to reduce WireGuard throughput by about 7% (prototype.md section 9);
+- **Userspace platforms**: the mesh process already holds the WireGuard UDP port and distinguishes probes from WireGuard messages by the first byte; a received cookie reply is handled per section 8.4 and then handed to WireGuard as usual;
+- The first byte of a probe message differs from all four WireGuard message types; probes carry authentication (see above), unauthenticated packets get no response, and the externally visible behavior of the WireGuard port is unchanged;
+- Probes sent to a relay are sent from the mesh process's own port and answered by nett-relay on the relay port.
 
-### 7.2 探测消息
+### 7.2 Probe messages
 
-探测消息的首个字节是类型，与 WireGuard 的四种消息（1–4）都不同。所有字段定长，格式不对或认证不过的包不作任何响应。
+The first byte of a probe message is the type, different from all four WireGuard messages (1-4). All fields have fixed length, and packets that are malformed or fail authentication get no response.
 
-| 类型 | 发送方与目的地 | 内容 |
+| Type | Sender and destination | Content |
 |---|---|---|
-| `0x80` 隧道内探测 | 成员 → 对端组网地址上的探测端口 `41821`（只在 `nett0` 上监听） | 序号 |
-| `0x81` 隧道内应答 | 原路返回 | 序号；应答方到各个中继的最新测量（往返时间、丢包率），用来估算经中继路径的另一段 |
-| `0x84` 切换提议 | 决定方 → 对端组网地址上的探测端口（经当前隧道，第 8.4 节） | 轮次、目标的种类（中继，或这一对打通的直连）、目标中继的编号（中继节点 ID 的 SHA-256 前 8 字节） |
-| `0x85` 切换确认 | 原路返回 | 同上 |
-| `0x86` 打洞提议 | 决定方 → 对端组网地址上的探测端口（经当前隧道，第 6.1 节） | 轮次、NAT 类型（未知、锥形、对称型）、IPv4 映射地址、IPv6 地址（没有的为空） |
-| `0x87` 打洞确认 | 原路返回 | 轮次、应答方的 NAT 类型、IPv4 映射地址、IPv6 地址 |
-| `0x82` 直连探测 | 成员的 WireGuard 端口 → 对端 WireGuard 端口上的直连候选地址（第 7.1 节） | 发送方组网公钥的编号（公钥 SHA-256 的前 8 字节）、序号、发送时间、校验码 |
-| `0x83` 直连应答 | 原路返回 | 序号、应答方看到的来源地址（映射地址）、校验码 |
-| `0x90` 中继探测 | 成员（组网进程自己的端口）→ 中继端口；TLS 中继经传输适配进程转交（第 5.3 节） | 令牌编号、序号、发送时间、校验码 |
-| `0x91` 中继应答 | 中继 → 成员 | 序号、中继按第 5.2 节绑定的这个成员的 WireGuard 地址（映射地址，第 6.1 节；还没有绑定、或经 TLS 时是探测的来源）、校验码 |
+| `0x80` in-tunnel probe | Member -> probe port `41821` on the peer's mesh address (listening only on `nett0`) | Sequence number |
+| `0x81` in-tunnel response | Returns along the same path | Sequence number; the responder's latest measurements to each relay (round-trip time, packet loss rate), used to estimate the other segment of a path via a relay |
+| `0x84` switch proposal | Decider -> probe port on the peer's mesh address (through the current tunnel, section 8.4) | Round number, kind of target (relay, or the punched direct path of this pair), number of the target relay (first 8 bytes of the SHA-256 of the relay node ID) |
+| `0x85` switch confirmation | Returns along the same path | Same as above |
+| `0x86` hole-punching proposal | Decider -> probe port on the peer's mesh address (through the current tunnel, section 6.1) | Round number, NAT type (unknown, cone, symmetric), IPv4 mapped address, IPv6 address (empty if none) |
+| `0x87` hole-punching confirmation | Returns along the same path | Round number, the responder's NAT type, IPv4 mapped address, IPv6 address |
+| `0x82` direct probe | Member's WireGuard port -> direct candidate address on the peer's WireGuard port (section 7.1) | Number of the sender's mesh public key (first 8 bytes of the SHA-256 of the public key), sequence number, send time, checksum |
+| `0x83` direct response | Returns along the same path | Sequence number, the source address seen by the responder (mapped address), checksum |
+| `0x90` relay probe | Member (mesh process's own port) -> relay port; TLS relays are reached through the transport adapter (section 5.3) | Token number, sequence number, send time, checksum |
+| `0x91` relay response | Relay -> member | Sequence number, the WireGuard address of this member bound by the relay per section 5.2 (mapped address, section 6.1; the source of the probe when not yet bound or over TLS), checksum |
 
-- 隧道内探测不另加校验码：WireGuard 已按 `AllowedIPs` 认证了来源，组网进程只应答来源是已准入成员组网地址的探测；
-- 校验码都是 HMAC-SHA256，截断为 16 字节，覆盖消息的其余部分；发送时间与接收方时钟相差超过 30 秒的丢弃，限制重放；应答不比探测长，不能用来放大流量；
-- 直连探测的密钥由双方的组网密钥派生：X25519（本机组网私钥，对端组网公钥）的结果经 HKDF-SHA256（以"nett direct probe v1"区分用途，双方公钥按字节序排列后作为附加信息）得到 32 字节；只有已准入的成员能算出。中继探测的密钥是分配时下发的令牌；
-- 经中继的路径 A → R → B 的往返时间和丢包率，由 A 测得的 A ↔ R 与 B 在隧道内应答中带来的 B ↔ R 组合估算；隧道中断时用最近一次的值。
+- In-tunnel probes carry no separate checksum: WireGuard has already authenticated the source by `AllowedIPs`, and the mesh process answers only probes whose source is the mesh address of an admitted member;
+- All checksums are HMAC-SHA256, truncated to 16 bytes, covering the rest of the message; those whose send time differs from the receiver's clock by more than 30 seconds are dropped, limiting replay; a response is never longer than the probe, so it cannot be used to amplify traffic;
+- The key of direct probes is derived from the two sides' mesh keys: the result of X25519 (this machine's mesh private key, the peer's mesh public key) goes through HKDF-SHA256 (with "nett direct probe v1" distinguishing the purpose, and the two public keys ordered by bytes as additional information) to give 32 bytes; only admitted members can compute it. The key of relay probes is the token delivered at assignment;
+- The round-trip time and packet loss rate of the path A -> R -> B are estimated by combining A <-> R measured by A with B <-> R brought by B in the in-tunnel responses; when the tunnel is interrupted the most recent values are used.
 
-## 8. 选路与切换
+## 8. Path selection and switching
 
-### 8.1 评分
+### 8.1 Scoring
 
 ```
-得分 = 往返时间 + 丢包惩罚 + 抖动惩罚 + 路径类型偏好 + 传输惩罚 + 中继负载
+score = round-trip time + loss penalty + jitter penalty + path type preference + transport penalty + relay load
 ```
 
-- 路径类型偏好：局域网 < 公网直连（含打洞直连） < 经中继 < 多跳；
-- 传输惩罚：TLS 高于 UDP（在经中继的偏好之上再加 20 毫秒）；
-- 中继负载：中继接近用户为它设定的流量上限时提高。上限只是容量机制，nett 不关心机器如何计费、上层业务如何使用带宽；
-- 支持策略覆盖（`links` 的 `spec.policy`）：优先直连、固定经某个中继、固定传输方式。
+- Path type preference: LAN < public direct (including hole-punched direct) < via relay < multi-hop;
+- Transport penalty: TLS is higher than UDP (20 milliseconds added on top of the via-relay preference);
+- Relay load: rises when the relay approaches the traffic limit the user set for it. The limit is only a capacity mechanism; nett does not care how machines are billed or how upper-layer services use bandwidth;
+- Policy overrides are supported (`spec.policy` of `links`): prefer direct, pin to a given relay, pin the transport.
 
-### 8.2 切换规则
+### 8.2 Switching rules
 
-| 情形 | 规则 |
+| Situation | Rule |
 |---|---|
-| 当前路径疑似故障 | 隧道内连续 2 次探测没有应答：立即在当前路径上加探 3 次（间隔 200 毫秒），同时探测全部候选路径 |
-| 当前路径故障 | 加探全部丢失（从断开算起约 3 秒），或丢包率超过 30% 持续 3 秒：**立即**切换到刚测到的最优候选；UDP 候选全部不通时直接改用 TLS，不逐个尝试 UDP 中继。对端的包仍在到达时，加探全部丢失不算故障：疑似故障以来 WireGuard 对这个对端的接收字节数仍在增长（引擎每 100 毫秒读一次），且 10 秒内收到过隧道内应答（包括迟到的），说明路径是通的，只是在排队；所有路径都要过同一个瓶颈，切换和重新握手都无济于事，回到正常探测。对端的包在到达、10 秒内却没有任何应答（只有一个方向通），照常判为故障。同样，10 秒内收到过迟到的应答时（在排队），丢包率过高也不算故障：这时的丢包是队列满了被丢弃，换一条要过同一个瓶颈的路径无济于事；不共享瓶颈的路径往返时间短得多，按同类型的更优路径切过去 |
-| 更优类型的路径恢复 | 当前经中继而某条直连候选、或当前经 TLS 而某条 UDP 候选，连续 2 次探测有应答：切过去。这条路径第一次故障后，切走的 15 秒内每 50 毫秒探测一次，恢复后约 0.1 秒切回；这条路径 10 分钟内第二次故障起，等待时间按故障次数加倍（10 秒起，最长 5 分钟）；路径从未连通过就失败（例如首次握手还没完成）时，第一次不算故障 |
-| 同类型的更优路径 | 得分优于当前至少 15% 且至少 10 毫秒，并持续 30 秒，才切换（防抖）；当前路径最近 10 次隧道内探测丢失 2 次以上、而这个候选连续 2 次探测有应答时，持续 5 秒即切换 |
+| Current path suspected failed | 2 consecutive in-tunnel probes without response: immediately send 3 extra probes on the current path (200 milliseconds apart) and probe all candidate paths at the same time |
+| Current path failed | All extra probes lost (about 3 seconds from the disconnection), or packet loss above 30% for 3 seconds: switch **immediately** to the best candidate just measured; when all UDP candidates are unreachable, switch directly to TLS without trying UDP relays one by one. When the peer's packets are still arriving, all extra probes being lost is not a failure: since the suspected failure, the bytes WireGuard received from this peer are still growing (the engine reads every 100 milliseconds), and an in-tunnel response (including late ones) was received within 10 seconds, which shows the path works and is only queuing; all paths pass the same bottleneck, switching and re-handshaking are of no help, and normal probing resumes. When the peer's packets are arriving but no response at all within 10 seconds (only one direction works), it is judged a failure as usual. Likewise, when a late response was received within 10 seconds (queuing), a too-high packet loss rate is not a failure either: the loss is from a full queue dropping packets, and changing to a path that passes the same bottleneck is of no help; a path that does not share the bottleneck has a much shorter round-trip time, and is switched to as a better path of the same type |
+| Path of a better type recovers | Currently via relay while some direct candidate responds, or currently via TLS while some UDP candidate responds, in 2 consecutive probes: switch over. After the first failure of this path, it is probed every 50 milliseconds for 15 seconds after switching away, and after recovery the switch back takes about 0.1 seconds; from the second failure of this path within 10 minutes, the waiting time doubles with the failure count (starting at 10 seconds, at most 5 minutes); when a path fails without ever having connected (for example the first handshake has not completed), the first time does not count as a failure |
+| Better path of the same type | Switch only when the score is better than the current by at least 15% and at least 10 milliseconds, and this lasts 30 seconds (hysteresis); when 2 or more of the current path's last 10 in-tunnel probes were lost and this candidate responded to 2 consecutive probes, switch after 5 seconds |
 
-路径类型从优到劣：局域网直连、公网直连（含打洞直连）、经中继、多跳；同一路径上 UDP 优于 TLS。参数的依据是与 Tailscale 对齐（ADR 0021），以原型关卡的实测为准调整。
+Path types from best to worst: LAN direct, public direct (including hole-punched direct), via relay, multi-hop; on the same path UDP is better than TLS. The parameters are based on alignment with Tailscale (ADR 0021) and are adjusted according to measurements at the prototype gate.
 
-### 8.3 由谁决定
+### 8.3 Who decides
 
-WireGuard 会根据最近一次通过认证的数据包的来源，自动更新对端的 endpoint（漫游机制）。如果双方各自选择路径，会相互覆盖。因此**每一对成员由一方决定路径**：
+WireGuard automatically updates a peer's endpoint from the source of the most recent authenticated packet (the roaming mechanism). If both sides choose paths on their own, they overwrite each other. So **for each pair of members one side decides the path**:
 
-- 一方为 `dial-only`、另一方为 `public` 时，由 `dial-only` 一方决定；
-- 否则由成员 ID 较小的一方决定；
-- 另一方通过漫游机制自动跟随，不主动修改 endpoint（双方都是 `dial-only` 时例外，见第 8.4 节）。
+- When one side is `dial-only` and the other is `public`, the `dial-only` side decides;
+- Otherwise the side with the smaller member ID decides;
+- The other side follows automatically through the roaming mechanism and does not change the endpoint itself (except when both are `dial-only`, see section 8.4).
 
-内核 WireGuard 的漫游机制无法关闭：切换之后，旧路径上仍在途中或迟到的包到达时，会把决定方的 endpoint 改回旧路径（离开 TLS 路径时另有处理，见第 5.3 节）。因此决定方**持续维护期望的 endpoint**：在每次探测时检查，发现被改掉就改回，不设时间窗口。决定方的期望 endpoint 总是公网地址或中继地址，不会因为对端换了网络而变化，持续纠正不会误伤正常的漫游。打洞直连时期望 endpoint 是对端的映射地址，对端换了网络后这条路径失效，按第 6.1 节处理。
+The roaming mechanism of kernel WireGuard cannot be turned off: after a switch, packets still in flight or late on the old path change the decider's endpoint back to the old path when they arrive (leaving a TLS path is handled separately, see section 5.3). So the decider **keeps maintaining the desired endpoint**: it checks at every probe, changes it back if it finds it changed, with no time window. The decider's desired endpoint is always a public address or relay address and does not change when the peer changes network, so continuous correction does not harm normal roaming. For a hole-punched direct path the desired endpoint is the peer's mapped address; after the peer changes network this path becomes invalid and is handled per section 6.1.
 
-### 8.4 切换到中继路径
+### 8.4 Switching to a relay path
 
-中继只能转发它见过握手的会话（第 5.1 节）。路径切换到一个还没有经手这条连接的中继时，以及当前中继丢失了这条连接的索引时（例如崩溃前刚建立的会话；表现为当前中继仍能应答探测，而隧道内探测不通、对端的包也不再到达，疑似故障时先在同一中继上重新握手一次）：
+A relay can only forward sessions whose handshake it has seen (section 5.1). This applies when the path switches to a relay that has not yet handled this link, and when the current relay has lost the link's index (for example a session established just before a crash; it shows as the current relay still answering probes while in-tunnel probes fail and the peer's packets no longer arrive, and on a suspected failure the handshake is first redone once on the same relay):
 
-- **重新握手**：决定方把这个对端从 WireGuard 中删除，再按新的 endpoint 加回，下一个数据包随即触发新的握手，中继据此建立索引。代价是一次握手往返，上层的 TCP 连接不受影响；
-- **确认握手完成**：旧路径仍然可用时（例如换到更快的中继），切换前经它发出的包在切换后陆续到达对端；其中一个若恰好在对端处理握手发起、发出应答之间到达，对端 WireGuard 的漫游会把 endpoint 改回旧路径，应答随之发往没见过这次握手的旧中继而被丢弃。内核 WireGuard 的漫游不能关闭，因此重新握手后要确认它完成了：等待旧路径的往返时间与新路径往返时间的两倍中较大的一个，再加 20 毫秒（最长 1 秒；这段时间里旧路径上的包都已到达），期间运行时每 25 毫秒推进一次；到期时 WireGuard 报告的最近握手时间仍为空、也没有收到隧道内应答，而这个对端有流量，就在同一中继上再重新握手一次。再不成就交给疑似故障的检测（第 8.2 节）；
-- **对端处于负载状态时等 WireGuard 带 cookie 重试**：对端的 WireGuard 被大量握手发起压到负载状态时，只回 cookie 应答，只接受带 cookie（`mac2`）的握手发起；发起方的 WireGuard 收到 cookie 后约 5 秒（`REKEY_TIMEOUT`，另有最多 1/3 秒的抖动）才带着它重试。重新握手是删除再加回对端，会丢掉 cookie，所以组网进程从这个对端的当前 endpoint 收到 cookie 应答、而隧道还没建立时，不再重新握手、也不按疑似故障切走，等 5.4 秒加新路径往返时间的两倍再加 20 毫秒；期间又收到 cookie 就再等一轮，每次换到一条路径最多两轮（约 11 秒），握手完成后重新计数。cookie 应答本身没法验证：能伪造中继或对端源地址的攻击者，最多让一次故障切换推迟约 11 秒。实测见 prototype.md 第 9 节（场景 20）；
-- **双方都是 `dial-only` 时两端一起切**：跟随方的 NAT 上没有到新中继的映射，新中继的包到不了它，不能靠漫游跟随。两端从按中继编号排序的第一个中继开始，都测量隧道、检测中断并维持期望的 endpoint；择优只由决定方做。按当时的条件分三种做法：
-  - 当前路径可用（切换到更优路径，或丢包率过高但隧道仍能传递消息）：决定方经当前隧道（与隧道内探测同一个端口）发出带轮次编号的切换提议；跟随方回复确认，约 100 毫秒后切换（让确认先经旧的会话发出），决定方收到确认后切换。收不到确认每 300 毫秒重发，约 2 秒仍收不到就照常切换，之后若中断，按下面两种做法恢复。过期轮次的消息直接丢弃；轮次以 Unix 秒为下限，重启之后也只增不减；
-  - 当前路径已中断：经 Hub 转达提议和确认（`PathSwitch`，同样带轮次）；
-  - 当前路径和 Hub 都不可用：**按绝对时间片轮换**。双方用系统时钟计算 `slot = floor(unix 时间 / 15 秒)`，在按中继编号排序的候选中继中选第 `slot mod n` 个：发现中断时立即按当时的时间片选择并重新握手，之后每个时间片开始时再换；选择只取决于时间，与各自何时发现故障无关。各自以"本端的隧道内探测收到了应答"作为双向确认，确认后停在这个中继，之后再次中断就重新进入轮换。前提是双方时钟误差远小于 15 秒：本机时钟误差在 2 秒以内（以最近一次与 Hub 的比对和系统的时间同步状态为准；Linux 上是内核报告的最大误差，即 `adjtimex` 的 `maxerror`）才使用时间片，否则改用随机间隔重试：每隔 5–15 秒随机选一个中继重新握手；时钟跳变时按新时间重新计算。新中继上的首次地址绑定按第 5.2 节：先到的握手发起在中继的待定表中等另一端的握手发起 5 秒，过期后靠 WireGuard 自身约 5 秒的重试补上，所以时间片不短于 15 秒。双方的候选列表版本不同时可能无法汇合，只能等 Hub 恢复。这一种是尽力恢复，不承诺恢复时间；
-- 从开始切换到双向恢复的时间、中继重启后的恢复时间，在 M1 的原型关卡中实测（第 18 节）。
+- **Re-handshake**: the decider removes this peer from WireGuard and adds it back with the new endpoint; the next data packet immediately triggers a new handshake, from which the relay builds the index. The cost is one handshake round trip, and upper-layer TCP connections are not affected;
+- **Confirming the handshake completed**: when the old path is still usable (for example switching to a faster relay), packets sent over it before the switch keep arriving at the peer after the switch; if one of them arrives exactly between the peer processing the handshake initiation and sending the response, the roaming of the peer's WireGuard changes the endpoint back to the old path, and the response is then sent to the old relay, which has not seen this handshake, and dropped. The roaming of kernel WireGuard cannot be turned off, so after the re-handshake it must be confirmed to have completed: wait the larger of the old path's round-trip time and twice the new path's round-trip time, plus 20 milliseconds (at most 1 second; in this time all packets on the old path have arrived), advancing the runtime every 25 milliseconds meanwhile; at expiry, if the latest handshake time reported by WireGuard is still empty, no in-tunnel response has been received, and this peer has traffic, re-handshake once more on the same relay. If that still fails, it is left to the suspected-failure detection (section 8.2);
+- **When the peer is under load, wait for WireGuard to retry with the cookie**: when the peer's WireGuard is pressed into the under-load state by a large number of handshake initiations, it replies only with cookie replies and accepts only handshake initiations carrying the cookie (`mac2`); after receiving the cookie, the initiator's WireGuard retries with it only after about 5 seconds (`REKEY_TIMEOUT`, plus up to 1/3 second of jitter). A re-handshake removes and re-adds the peer, which loses the cookie, so when the mesh process receives a cookie reply from this peer's current endpoint while the tunnel is not yet established, it neither re-handshakes nor switches away as a suspected failure, but waits 5.4 seconds plus twice the new path's round-trip time plus 20 milliseconds; if a cookie is received again in the meantime it waits another round, at most two rounds per path (about 11 seconds), and the count restarts after the handshake completes. The cookie reply itself cannot be verified: an attacker who can forge the source address of a relay or peer can at most delay one failover by about 11 seconds. For measurements see prototype.md section 9 (scenario 20);
+- **When both sides are `dial-only`, both ends switch together**: the follower's NAT has no mapping to the new relay, packets from the new relay cannot reach it, and it cannot follow by roaming. Starting from the first relay in relay-number order, both ends measure the tunnel, detect interruptions and maintain the desired endpoint; only the decider chooses the optimum. Depending on the conditions at the time there are three ways:
+  - The current path is usable (switching to a better path, or the loss rate is too high but the tunnel can still carry messages): the decider sends a switch proposal carrying a round number through the current tunnel (the same port as in-tunnel probes); the follower replies with a confirmation and switches after about 100 milliseconds (letting the confirmation go out first over the old session), and the decider switches after receiving the confirmation. If no confirmation is received it is resent every 300 milliseconds, and if still none after about 2 seconds it switches as usual, and if an interruption follows, recovery is by the two ways below. Messages of expired rounds are dropped directly; the round number has Unix seconds as its lower bound and only increases across restarts too;
+  - The current path is interrupted: the proposal and confirmation are relayed through the Hub (`PathSwitch`, also carrying a round number);
+  - Neither the current path nor the Hub is available: **rotate by absolute time slot**. Both sides use the system clock to compute `slot = floor(unix time / 15 seconds)` and pick the `slot mod n`-th among the candidate relays sorted by relay number: on detecting an interruption they immediately choose by the current time slot and re-handshake, and change again at the start of each later time slot; the choice depends only on time, regardless of when each side detects the failure. Each side takes "the machine's in-tunnel probe received a response" as bidirectional confirmation, stops on this relay after confirmation, and re-enters rotation on the next interruption. The prerequisite is that the clock error between the two sides is far smaller than 15 seconds: time slots are used only when the machine's clock error is within 2 seconds (according to the most recent comparison with the Hub and the system's time synchronization status; on Linux the maximum error reported by the kernel, i.e. `maxerror` of `adjtimex`), otherwise it falls back to random-interval retries: every 5-15 seconds it picks a random relay and re-handshakes; on a clock jump it recomputes from the new time. The first address binding on the new relay follows section 5.2: a handshake initiation that arrives first waits in the relay's pending table for 5 seconds for the other end's handshake initiation, and after expiry WireGuard's own retry of about 5 seconds fills in, so the time slot is no shorter than 15 seconds. When the two sides' candidate list versions differ they may be unable to meet, and can only wait for the Hub to recover. This way is best-effort recovery and promises no recovery time;
+- The time from the start of a switch to bidirectional recovery, and the recovery time after a relay restart, are measured at the M1 prototype gate (section 18).
 
-### 8.5 Hub 或 nett-node 离线
+### 8.5 Hub or nett-node offline
 
-候选路径、中继分配、准入材料和密钥都保存在本地；测量、评分和切换完全在成员本地完成。Hub 离线期间，无法新增候选路径或中继分配，已有的仍然可用。nett-node 停止期间，组网进程照常测量、切换和应答 DNS（ADR 0013）。
+Candidate paths, relay assignments, admission material and keys are all kept locally; measurement, scoring and switching are done entirely locally on the member. While the Hub is offline, new candidate paths or relay assignments cannot be added, and existing ones remain usable. While nett-node is stopped, the mesh process measures, switches and answers DNS as usual (ADR 0013).
 
-## 9. 传输
+## 9. Transport
 
-| 传输 | 阶段 | 用途 |
+| Transport | Phase | Purpose |
 |---|---|---|
-| UDP | M1 | 默认 |
-| TLS（WebSocket，443） | M1 | UDP 不可用时；由传输适配进程适配 |
-| QUIC（UDP 443） | M2 | UDP 可用但端口受限或特征被识别时 |
-| 混淆包装 | M2 | 视需要 |
+| UDP | M1 | Default |
+| TLS (WebSocket, 443) | M1 | When UDP is unavailable; adapted by the transport adapter |
+| QUIC (UDP 443) | M2 | When UDP is available but ports are restricted or the traffic pattern is identified |
+| Obfuscation wrapper | M2 | As needed |
 
-## 10. 局域网智能入口
+## 10. LAN smart gateway
 
-- 智能入口宣告一个或多个局域网网段；**宣告网段扩大了组网可访问的范围，属于高风险变更**（动作 `node.advertise_routes`，需签名，签名产物由其他成员验证）；
-- 智能入口开启 IP 转发，对从组网进入局域网的流量做**源地址转换**，回包不会被局域网主机上的其他 VPN 或代理截走。智能入口在局域网中使用两个地址，**按来源分类转换**（ADR 0015）：
+- The smart gateway advertises one or more LAN prefixes; **advertising a prefix widens the range reachable from the mesh and is a high-risk change** (action `node.advertise_routes`, requires a signature, and the signed artifact is verified by the other members);
+- The smart gateway enables IP forwarding and performs **source NAT** on traffic entering the LAN from the mesh, so replies are not intercepted by other VPNs or proxies on LAN hosts. The smart gateway uses two addresses on the LAN, **translating by source class** (ADR 0015):
 
-| 组网来源 | 转换为 | 局域网服务如何对待 |
+| Mesh source | Translated to | How LAN services treat it |
 |---|---|---|
-| 某个入口节点的 Edge 专用地址 | 入口地址 | 需要真实 IP 的服务把它配置为可信代理，信任它发来的 `X-Forwarded-For` |
-| 其他成员和设备 | 普通地址 | 不信任任何转发头 |
+| The Edge address of an entry node | Entry address | Services that need the real IP configure it as a trusted proxy and trust the `X-Forwarded-For` it sends |
+| Other members and devices | Ordinary address | Trust no forwarding headers |
 
-- 转换后的地址**绝不能是回环地址**；转发到某台主机上的服务时，使用该主机的局域网地址（macOS 的 Docker 中，经 `host.docker.internal` 到达宿主的流量，来源会变成 `127.0.0.1`）；
-- 宣告网段默认拒绝访问（第 12 节）。宣告时，控制台提示："局域网中按来源网段信任的服务，会信任所有被放行的组网流量"；
-- 同一局域网中的其他成员可以发现彼此，优先走局域网直连；
-- 网关设备自带的 WireGuard 可以作为备用路径：作为一个固定 endpoint 的普通对端接入，不参与自动选路；
-- 在 NAS 一类系统上，智能入口需要的 TUN、IP 转发和 NAT 能力要由能力探测逐项确认；
-- macOS 的容器内成员是它所在容器网络的智能入口（ADR 0016）：宣告具体服务的地址，只转发来自 Edge 专用地址的流量，来源换成自己在这个网络中的固定地址。
+- The translated address **must never be a loopback address**; when forwarding to a service on a host, use that host's LAN address (in Docker on macOS, traffic reaching the host through `host.docker.internal` has source `127.0.0.1`);
+- Advertised prefixes deny access by default (section 12). When advertising, the console shows the notice: "Services in the LAN that trust by source prefix will trust all permitted mesh traffic";
+- Other members on the same LAN can discover each other and prefer LAN direct;
+- The gateway device's own WireGuard can serve as a backup path: it is attached as an ordinary peer with a fixed endpoint and does not take part in automatic path selection;
+- On NAS-type systems, the TUN, IP forwarding and NAT capabilities that the smart gateway needs are confirmed one by one by capability detection;
+- The container member on macOS is the smart gateway of the container network it is in (ADR 0016): it advertises the addresses of specific services, forwards only traffic from the Edge address, and rewrites the source to its own fixed address in this network.
 
-## 11. 主机名
+## 11. Hostnames
 
-- 后缀默认 `nett.internal`（`.internal` 为保留给私有网络使用的顶级域），可在 Hub 初始化时修改；
-- 每个节点自动获得 `<节点名>.nett.internal`；用户可以添加别名（`hostnames` 资源），例如给某个服务起一个名字，指向它所在的成员；
-- 局域网中的主机不需要安装 nett；需要名字时，用户添加别名，指向它在已宣告网段中的局域网地址；
-- 组网进程只在组网地址上运行一个精简的 DNS 应答器，回答该后缀下的名称；
-- **转发上游**：只有移动网关和智能入口为设备转发其他查询，只接受来自设备地址的查询，并限制速率，不成为开放的转发器；
-- 本机解析配置：Linux 通过 systemd-resolved 为 `nett0` 设置该后缀的分域解析；macOS 写入 `/etc/resolver/<后缀>`；
-- 设备：导出的 WireGuard 配置中列出两个 DNS 服务器，分别是移动网关和智能入口的组网地址；
-- Edge 配置中写组网地址，不写主机名：Edge 常运行在容器中，容器默认使用宿主的上游 DNS，解析不了组网后缀；
-- **主机名只用于定位，不作为身份依据**：主机名由 Hub 下发，没有签名。需要确认对方是谁时，使用本机的身份查询（`nett whois <地址>`，以及本机套接字上的同名接口），由组网进程按已验证的准入材料回答；Hub 的 `whois` 接口供控制台显示，结果是 Hub 的声明。
+- The suffix defaults to `nett.internal` (`.internal` is a top-level domain reserved for private networks) and can be changed when the Hub is initialized;
+- Each node automatically gets `<node name>.nett.internal`; users can add aliases (the `hostnames` resource), for example naming a service and pointing it to the member where it runs;
+- Hosts on the LAN do not need nett installed; when a name is needed, the user adds an alias pointing to its LAN address within an advertised prefix;
+- The mesh process runs a minimal DNS responder only on the mesh address, answering names under that suffix;
+- **Upstream forwarding**: only the mobile gateway and smart gateway forward other queries for devices, accept queries only from device addresses, and rate-limit them, so they do not become open forwarders;
+- Local resolver configuration: on Linux, split-domain resolution for that suffix is set on `nett0` through systemd-resolved; on macOS, `/etc/resolver/<suffix>` is written;
+- Devices: the exported WireGuard configuration lists two DNS servers, the mesh addresses of the mobile gateway and the smart gateway;
+- Edge configuration uses mesh addresses and not hostnames: Edge often runs in a container, which by default uses the host's upstream DNS and cannot resolve the mesh suffix;
+- **Hostnames are only for locating and are not a basis for identity**: hostnames are delivered by the Hub and are not signed. When you need to confirm who the other side is, use the local identity query (`nett whois <address>`, and the interface of the same name on the local socket), which the mesh process answers from verified admission material; the Hub's `whois` interface is for console display, and its result is a claim by the Hub.
 
-## 12. 访问控制
+## 12. Access control
 
-- **默认拒绝**（ADR 0023）：没有规则放行的新建连接一律拒绝，节点之间、宣告的网段、容器内成员都一样；
-- **用户的设备**：默认可以访问所有成员和宣告的局域网段；
-- **Edge 专用地址**：默认不能访问任何目标；能访问哪些主机和端口，由用户在访问规则中写（属于签名的访问规则集，放宽需要签名）。具有 `edge` 角色的节点上，组网进程按节点策略中声明的识别方式（Edge 所在容器的地址，或原生运行时的系统用户），把 Edge 发出的组网流量的来源换成 Edge 专用地址；并在本机输出和容器转发两个方向上，丢弃源地址为 Edge 专用地址、但不是来自 Edge 的数据包（ADR 0015）。Edge 回源到同一台主机上的服务时不经过组网，不受这些规则约束；
-- 规则集整体作为一份签名产物下发，版本号只增不减；新增 deny 规则、删除 allow 规则属于收窄，可以不签名直接生效；
-- **匹配**：规则只作用于新建的连接，已建立的连接和与它相关的包（回包、ICMP 错误）直接放行。按规则集的顺序匹配，第一条匹配的规则决定放行或拒绝；没有规则匹配时拒绝，来源是用户的设备时放行。组网自己的隧道内探测不受访问规则影响。没有规则集时同样如此；
-- **签名的是展开后的结果**：规则用节点、设备、标签这些选择器编写；来源还可以选某个节点的 Edge 专用地址（写作该节点的 `edge`），用来允许 Edge 访问指定的服务。签名产物中写的是展开后的成员 ID、地址和端口。标签的变化（例如给节点加标签）如果让展开结果变大，就是放宽访问，需要签名；节点只执行签名产物中的展开结果，不自己按标签展开；
-- 规则编译为每个成员本地的过滤规则：Linux 使用 nftables，挂在 `prerouting`、优先级在 Docker 的目的地址转换之前，匹配从 `nett0` 进入的流量，因此发往本机的、发往 Docker 发布端口的和需要转发的流量（移动网关、智能入口）都会经过；按来源组网地址、目的地址和端口匹配，IPv4 与 IPv6 同样处理。用户态平台由组网进程在转发前过滤；
-- **先拒绝再开放**：启动时先安装过滤规则，再添加对端；规则更新失败时保持拒绝，并上报事件；
-- WireGuard 的 `AllowedIPs` 保证来源地址无法伪造。
+- **Default deny** (ADR 0023): a new connection not allowed by any rule is always denied; the same applies between nodes, for advertised prefixes and for container members;
+- **The user's devices**: by default they can reach all members and advertised LAN prefixes;
+- **Edge address**: by default it cannot reach any target; which hosts and ports it can reach is written by the user in the access rules (part of the signed access rule set, and widening requires a signature). On a node with the `edge` role, the mesh process, according to the identification method declared in the node policy (the address of the container where Edge runs, or the system user when running natively), rewrites the source of mesh traffic sent by Edge to the Edge address; and in both directions, local output and container forwarding, drops packets whose source address is the Edge address but which do not come from Edge (ADR 0015). When Edge fetches from an origin service on the same host it does not pass through the mesh and is not bound by these rules;
+- The rule set is delivered as a whole as one signed artifact, with a version number that only increases; adding a deny rule or deleting an allow rule is narrowing and can take effect directly without a signature;
+- **Matching**: rules apply only to new connections; established connections and packets related to them (replies, ICMP errors) pass directly. Rules are matched in rule set order, and the first matching rule decides allow or deny; when no rule matches, the connection is denied, except that it is allowed when the source is a user's device. The mesh's own in-tunnel probes are not affected by access rules. The same holds when there is no rule set;
+- **What is signed is the expanded result**: rules are written with selectors such as nodes, devices and tags; a source can also select a node's Edge address (written as that node's `edge`), to allow Edge to reach specified services. The signed artifact contains the expanded member IDs, addresses and ports. If a change of tags (for example adding a tag to a node) makes the expansion larger, it is widening access and requires a signature; nodes execute only the expanded result in the signed artifact and do not expand by tag themselves;
+- Rules are compiled into filter rules local to each member: Linux uses nftables, attached at `prerouting` with priority before Docker's destination NAT, matching traffic entering from `nett0`, so traffic to the local machine, to Docker published ports and traffic that needs forwarding (mobile gateway, smart gateway) all passes through; matching is by source mesh address, destination address and port, with IPv4 and IPv6 treated the same. On userspace platforms the mesh process filters before forwarding;
+- **Deny first, then open**: at startup the filter rules are installed first, and peers are added afterwards; when a rule update fails, deny is kept and an event is reported;
+- WireGuard's `AllowedIPs` guarantees that source addresses cannot be forged.
 
-## 13. 手机与移动网关
+## 13. Phones and the mobile gateway
 
-- 移动网关是承担 `gateway` 角色的 `public` 节点（角色由签名节点策略授予）：在 `nett0` 上接受设备作为对端，并把设备流量经路径层送入组网；
-- 导出给设备的配置包含两个对端，按网段分流：
+- The mobile gateway is a `public` node with the `gateway` role (the role is granted by the signed node policy): it accepts devices as peers on `nett0` and carries device traffic into the mesh through the path layer;
+- The configuration exported to a device contains two peers, splitting traffic by prefix:
 
-| 对端 | `AllowedIPs` |
+| Peer | `AllowedIPs` |
 |---|---|
-| 家里的智能入口（直连） | 家里宣告的局域网网段，以及智能入口的组网地址 |
-| 移动网关 | 组网网段中的其他部分 |
+| The smart gateway at home (direct) | The LAN prefixes advertised at home, and the smart gateway's mesh address |
+| Mobile gateway | The rest of the mesh prefix |
 
-- **设备归属按凭据**：在 WireGuard 中，一个地址只能出现在一个对端的 `AllowedIPs` 里，因此同一时间一份设备凭据只归属一个移动网关，由它代为宣告这份凭据的地址。部署多个移动网关时，每份凭据的配置对应一个网关；网关上报凭据的最近握手，Hub 据此把凭据地址移到当前网关对端的 `AllowedIPs` 中（只能在具有 `gateway` 角色的节点之间移动，第 4.1 节）。直连的智能入口上，这份凭据的地址只配在设备对端上（第 4 节）；
-- 网关能以经它接入的设备的地址发出流量，这是 `gateway` 角色固有的信任（auth.md 第 2 节），因此只授予用户信任的节点；
-- 标准客户端无法在对端之间自动切换：直连不可用时，访问家里的流量不会自动改走网关。因此同时导出一份**"全部经网关"**的备用配置，供用户在直连受阻时手动切换（手机 App 在 M3）。备用配置使用**另一份凭据**（另一对密钥和地址）：主配置的凭据地址在智能入口上只配在直连对端上，经网关到达、源地址是这个地址的包会被丢弃。私钥只在浏览器中，两份凭据和配置在创建时一起生成（auth.md 第 9 节）；
-- **代理客户端配置**（ADR 0018）：创建凭据时可以选择导出格式：标准 WireGuard，或 Surge、mihomo、sing-box。每种格式都使用一主一备两份凭据，规则与上一条相同。代理客户端的配置包含两条 WireGuard 出站："直连家里"使用主凭据、对端为智能入口；"经网关"使用备用凭据、对端为移动网关。访问家里网段的流量放进自动回落的策略组（先直连家里，不通时经网关），其余组网网段经网关；组网后缀的域名交给智能入口和移动网关的 DNS 解析。策略组的测速目标是智能入口组网地址上的健康检查端口：只对设备地址开放，收到连接就返回固定的 HTTP 204 应答并关闭，不解析请求内容。这些配置不占用手机唯一的 VPN 名额，可以和代理应用一起使用；
-- 设备之间的流量经移动网关转发。
+- **Device ownership is per credential**: in WireGuard an address can appear in the `AllowedIPs` of only one peer, so at any one time a device credential belongs to only one mobile gateway, which advertises this credential's address on its behalf. When multiple mobile gateways are deployed, the configuration of each credential corresponds to one gateway; the gateway reports the credential's latest handshake, and the Hub accordingly moves the credential address into the `AllowedIPs` of the current gateway peer (it can move only between nodes with the `gateway` role, section 4.1). On the directly connected smart gateway, this credential's address is configured only on the device peer (section 4);
+- The gateway can send traffic with the addresses of devices connected through it; this is trust inherent to the `gateway` role (auth.md section 2), so it is granted only to nodes the user trusts;
+- Standard clients cannot switch between peers automatically: when direct is unavailable, traffic to home does not automatically go through the gateway. So a **"all through the gateway"** backup configuration is exported as well, for the user to switch to manually when direct is blocked (the phone app is in M3). The backup configuration uses **another credential** (another pair of keys and addresses): on the smart gateway the main configuration's credential address is configured only on the direct peer, and packets arriving through the gateway with this address as source are dropped. The private key exists only in the browser, and the two credentials and configurations are generated together at creation (auth.md section 9);
+- **Proxy client configuration** (ADR 0018): when creating a credential, an export format can be chosen: standard WireGuard, or Surge, mihomo, sing-box. Every format uses one main and one backup credential, with the same rules as the previous item. The proxy client configuration contains two WireGuard outbounds: "direct to home" uses the main credential with the smart gateway as peer; "via gateway" uses the backup credential with the mobile gateway as peer. Traffic to the home prefixes goes into an automatic-fallback policy group (direct to home first, via the gateway when that fails), and the other mesh prefixes go through the gateway; domain names under the mesh suffix are resolved by the DNS of the smart gateway and the mobile gateway. The speed-test target of the policy group is the health check port on the smart gateway's mesh address: open only to device addresses, it returns a fixed HTTP 204 response when a connection arrives and closes, without parsing the request content. These configurations do not occupy the phone's single VPN slot and can be used together with proxy apps;
+- Traffic between devices is forwarded through the mobile gateway.
 
-## 14. 平台
+## 14. Platforms
 
-| 平台 | 会话层 | 过滤 | 备注 |
+| Platform | Session layer | Filtering | Notes |
 |---|---|---|---|
-| Linux（内核 ≥ 5.6） | 内核 WireGuard（netlink） | nftables | 主要目标；TLS 传输由传输适配进程适配 |
-| Linux（旧内核）、Synology DSM | 组网进程：Rust 用户态实现 + TUN | 组网进程 | DSM 需要 root 才能使用 TUN |
-| macOS | 原生成员：组网进程中的 Rust 用户态实现 + utun（ADR 0018） | 组网进程 | 默认方式；笔记本通常为 `dial-only` |
-| macOS 上的容器内成员 | Docker Linux 虚拟机中的内核 WireGuard（ADR 0016） | nftables（虚拟机内） | 只承担其他成员访问 Mac 上需要访客真实 IP 的容器服务 |
-| Home Assistant OS | 加载项内运行，使用 HAOS 内核自带的 WireGuard（ADR 0017） | 宿主网络上的包过滤（以能力探测为准） | 可做智能入口、移动网关、中继 |
-| 手机 | 标准 WireGuard 客户端，或 Surge、mihomo、sing-box | 由移动网关和智能入口执行 | 见第 13 节；App 在 M3 |
-| Windows、iOS、Android（M3） | Windows：wireguard-nt；iOS、Android：App 内的用户态实现 | Windows 防火墙（WFP）；App 内 | 完整成员（ADR 0018） |
+| Linux (kernel >= 5.6) | Kernel WireGuard (netlink) | nftables | Primary target; the TLS transport is adapted by the transport adapter |
+| Linux (old kernel), Synology DSM | Mesh process: Rust userspace implementation + TUN | Mesh process | DSM needs root to use TUN |
+| macOS | Native member: Rust userspace implementation in the mesh process + utun (ADR 0018) | Mesh process | Default way; laptops are usually `dial-only` |
+| Container member on macOS | Kernel WireGuard in the Docker Linux virtual machine (ADR 0016) | nftables (inside the virtual machine) | Only serves other members' access to container services on the Mac that need the visitor's real IP |
+| Home Assistant OS | Runs inside an add-on, using the WireGuard that comes with the HAOS kernel (ADR 0017) | Packet filtering on the host network (subject to capability detection) | Can act as smart gateway, mobile gateway, relay |
+| Phone | Standard WireGuard client, or Surge, mihomo, sing-box | Enforced by the mobile gateway and smart gateway | See section 13; app in M3 |
+| Windows, iOS, Android (M3) | Windows: wireguard-nt; iOS, Android: userspace implementation inside the app | Windows firewall (WFP); inside the app | Full members (ADR 0018) |
 
-用户态 WireGuard 的具体实现在原型关卡之后、铺开到 DSM 和 macOS 之前评估选定，M1 需要覆盖 DSM、旧内核的 Linux 和 macOS。
+The concrete userspace WireGuard implementation is evaluated and selected after the prototype gate and before rolling out to DSM and macOS; M1 must cover DSM, Linux with old kernels and macOS.
 
-**核心与后端分开**（ADR 0018）：准入验证、测量、评分、切换和打洞协调是与平台无关的库；WireGuard 配置、接口、路由、过滤和 DNS 由各平台的后端实现（M1：Linux 内核、用户态；M3：Windows、iOS、Android）。
+**Core and backends are separate** (ADR 0018): admission verification, measurement, scoring, switching and hole-punching coordination are platform-independent libraries; WireGuard configuration, interfaces, routes, filtering and DNS are implemented by the backend of each platform (M1: Linux kernel, userspace; M3: Windows, iOS, Android).
 
-## 15. 故障与降级
+## 15. Failures and degradation
 
-| 情形 | 行为 |
+| Situation | Behavior |
 |---|---|
-| 当前路径中断 | 约 3 秒内判定故障，切换到刚测到的最优候选 |
-| 中继宕机 | 经该中继的连接切换到其他路径；Hub 恢复后重新分配 |
-| 所有 UDP 不可用 | 直接切换到 TLS 传输，不逐个尝试 UDP 中继 |
-| Hub 离线 | 本地自主选路与切换；无法新增候选和分配 |
-| nett-node 停止（升级、崩溃） | 组网照常测量、切换、应答 DNS；node 恢复后同步 Hub 的新配置 |
-| 组网进程停止 | 内核 WireGuard 保持当前路径，但不再切换；用户态平台上全部路径中断。服务管理器自动重启它，重启后先加载信任存储，再加载期望状态（第 4.2 节） |
-| 传输适配进程停止 | 经 TLS 传输的路径中断，由服务管理器重启 |
-| 中继重启 | 从组网进程重新获取分配；索引表丢失，经它的连接重新握手后恢复（第 8.4 节） |
-| 成员被移除 | Hub 下发撤销记录，其他成员删除其公钥并永久拒绝该节点 ID，经它的中继分配作废 |
-| 准入材料验证失败 | 不配置该对端，上报事件 |
-| 时钟偏差 | 不影响 WireGuard；影响测量时间戳，偏差过大时上报事件 |
+| Current path interrupted | Failure is determined within about 3 seconds and the mesh switches to the best candidate just measured |
+| Relay down | Links through that relay switch to other paths; reassigned after the Hub recovers |
+| All UDP unavailable | Switch directly to the TLS transport without trying UDP relays one by one |
+| Hub offline | Local autonomous path selection and switching; new candidates and assignments cannot be added |
+| nett-node stopped (upgrade, crash) | The mesh keeps measuring, switching and answering DNS; after node recovers it syncs the Hub's new configuration |
+| Mesh process stopped | Kernel WireGuard keeps the current path but no longer switches; on userspace platforms all paths are interrupted. The service manager restarts it automatically, and after the restart it loads the trust store first, then the desired state (section 4.2) |
+| Transport adapter stopped | Paths over the TLS transport are interrupted, restarted by the service manager |
+| Relay restart | Obtains the assignment from the mesh process again; the index table is lost, and links through it recover after re-handshaking (section 8.4) |
+| Member removed | The Hub delivers a revocation, other members delete its public key and permanently reject that node ID, and relay assignments through it are voided |
+| Admission material verification fails | The peer is not configured, and an event is reported |
+| Clock skew | Does not affect WireGuard; affects measurement timestamps, and an event is reported when the skew is too large |
 
-## 16. 可观测性
+## 16. Observability
 
-- `links` 资源：每条连接的当前路径、传输、质量、候选得分、最近一次切换及原因；
-- 测量与计数：`link.rtt`、`link.loss`、`link.jitter`、`link.bytes`、`relay.bytes`，经 `LinkReport` 上报，在控制台中显示；
-- 事件：路径切换、传输切换、中继超限、候选全部不可用、准入材料验证失败；
-- `nett status` 显示本机各连接的当前路径与质量（design/status.md）；`nett doctor` 检查端口可达性（按第 5.5 节的清单给出需要放行的端口）、WireGuard 状态、DNS、过滤规则。
+- The `links` resource: the current path, transport, quality, candidate scores and the most recent switch with its reason for each link;
+- Measurements and counters: `link.rtt`, `link.loss`, `link.jitter`, `link.bytes`, `relay.bytes`, reported through `LinkReport` and shown in the console;
+- Events: path switch, transport switch, relay over limit, all candidates unavailable, admission material verification failure;
+- `nett status` shows the current path and quality of each link on this machine (design/status.md); `nett doctor` checks port reachability (giving the ports to open per the list in section 5.5), WireGuard state, DNS and filter rules.
 
-## 17. 资源预算
+## 17. Resource budget
 
-| 项 | 上限 |
+| Item | Limit |
 |---|---|
-| 每对成员的候选路径 | 6 条 |
-| 探测流量 | 每对活跃连接约 1 KiB/s；因故障切走后的 15 秒内约 2.5 KB/s（第 7 节） |
-| 组网进程 | 空闲 RSS ≤ 5 MB；组网状态（含准入材料和撤销记录）在 50 个成员规模下不超过 1 MiB；转发缓冲有上限 |
-| 期望状态文件与信任存储 | 每份 4 MiB；成员 256 个；撤销记录 4096 条；每个成员的候选路径见上 |
-| 传输适配进程 | 空闲 RSS ≤ 5 MB；转发缓冲有上限 |
-| nett-relay 每条经中继的连接 | 约 1 KiB；连接总数、索引表大小、每秒试算 `mac1` 的次数都有上限 |
+| Candidate paths per pair of members | 6 |
+| Probe traffic | About 1 KiB/s per pair of active links; about 2.5 KB/s for 15 seconds after switching away because of a failure (section 7) |
+| Mesh process | Idle RSS <= 5 MB; mesh state (including admission material and revocations) no more than 1 MiB at 50 members; forwarding buffers have limits |
+| Desired state file and trust store | 4 MiB each; 256 members; 4096 revocations; candidate paths per member as above |
+| Transport adapter | Idle RSS <= 5 MB; forwarding buffers have limits |
+| nett-relay per link through the relay | About 1 KiB; the total number of connections, the index table size and the number of `mac1` trials per second all have limits |
 
-## 18. 分阶段实现
+## 18. Phased implementation
 
-| 能力 | M1 | M2 |
+| Capability | M1 | M2 |
 |---|---|---|
-| **原型关卡**（M1 第一步，Linux，用静态配置代替 Hub）：签名准入、UDP 中继与切换到新中继、双方都是 `dial-only` 时的切换与时间片汇合、漫游纠正（含迟到、乱序的包）、中继重启、MTU（大包 TCP、小 MTU 外层路径）、TLS 回退、打洞（锥形 NAT、IPv6）的成功率；断开、波动、回退、恢复与 Tailscale 的对比（ADR 0021）；所选 WireGuard 实现的实际行为（索引冲突后的重试、删除再添加对端后的握手时间、cookie、旧索引老化）；实测切换时间；**性能基准**：同一组机器上与原生 WireGuard、Tailscale 对比吞吐、延迟和 CPU 占用。场景与通过标准见 prototype.md | ✅ | |
-| 地址规划、会话层（内核与用户态） | ✅ | |
-| 准入验证（签名的成员表、网段、规则） | ✅ | |
-| 组网进程、传输适配进程 | ✅ | |
-| 候选路径：局域网直连、公网直连（IPv4、IPv6）、经单个中继；打洞直连（至少一端为锥形 NAT、IPv6）；在 WireGuard 端口上探测 | ✅ | |
-| 候选路径：多跳接力；两端都在对称型 NAT 后时的打洞 | | ✅ |
-| 测量、评分、防抖、快速切换、决定方规则 | ✅ | |
-| 传输：UDP、TLS | ✅ | |
-| 传输：QUIC、混淆 | | ✅ |
-| 中继：单端口转发、绑定规则、流量上限 | ✅ | |
-| CONNECT 代理（入口节点上仅 HTTP/2） | ✅ | |
-| 智能入口、按来源分类的源地址转换 | ✅ | |
-| Edge 专用地址 | ✅ | |
-| 主机名与 DNS | ✅ | |
-| 访问控制（宣告网段默认拒绝） | ✅ | |
-| 移动网关与设备双路径配置 | ✅ | |
-| macOS 原生成员；容器内成员（需要访客真实 IP 的容器服务） | ✅ | |
-| 代理客户端配置（Surge、mihomo、sing-box） | ✅ | |
+| **Prototype gate** (first step of M1, Linux, static configuration instead of the Hub): signed admission, UDP relay and switching to a new relay, switching and time-slot convergence when both sides are `dial-only`, roaming correction (including late and out-of-order packets), relay restart, MTU (large-packet TCP, small-MTU outer path), TLS fallback, success rate of hole punching (cone NAT, IPv6); comparison with Tailscale on disconnect, fluctuation, fallback and recovery (ADR 0021); actual behavior of the chosen WireGuard implementation (retry after index collision, handshake time after removing and re-adding a peer, cookie, aging of old indexes); measured switching time; **performance benchmark**: throughput, latency and CPU usage compared with native WireGuard and Tailscale on the same set of machines. Scenarios and pass criteria are in prototype.md | ✅ | |
+| Address plan, session layer (kernel and userspace) | ✅ | |
+| Admission verification (signed member table, prefixes, rules) | ✅ | |
+| Mesh process, transport adapter | ✅ | |
+| Candidate paths: LAN direct, public direct (IPv4, IPv6), via a single relay; hole-punched direct (at least one end behind cone NAT, IPv6); probing on the WireGuard port | ✅ | |
+| Candidate paths: multi-hop relay; hole punching when both ends are behind symmetric NAT | | ✅ |
+| Measurement, scoring, hysteresis, fast switching, decider rules | ✅ | |
+| Transport: UDP, TLS | ✅ | |
+| Transport: QUIC, obfuscation | | ✅ |
+| Relay: single-port forwarding, binding rules, traffic limits | ✅ | |
+| CONNECT proxy (HTTP/2 only on entry nodes) | ✅ | |
+| Smart gateway, source NAT by source class | ✅ | |
+| Edge address | ✅ | |
+| Hostnames and DNS | ✅ | |
+| Access control (advertised prefixes denied by default) | ✅ | |
+| Mobile gateway and device dual-path configuration | ✅ | |
+| macOS native member; container member (container services that need the visitor's real IP) | ✅ | |
+| Proxy client configuration (Surge, mihomo, sing-box) | ✅ | |
 
-M3：iOS、Android App 与 Windows 成员（ADR 0018）。
+M3: iOS and Android apps and Windows members (ADR 0018).
 
-## 19. 待定问题
+## 19. Open questions
 
-| 问题 | 说明 |
+| Question | Notes |
 |---|---|
-| NAS 系统上的 TUN、IP 转发、NAT 能力 | 原型关卡之后、铺开到 NAS 之前逐项验证 |
-| 在 WireGuard 端口上收发探测 | 各发行版内核上的行为（含 IPv6、主机上已有的连接跟踪和 NAT 规则、nfnetlink_log 是否可用）在原型关卡中验证 |
-| 两端都在对称型 NAT 后时的打洞 | M2 再设计 |
-| 新成员首次连通的时间 | NAT 之后的 `dial-only` 成员，第一次握手若早于对端配置好它，会被对端丢弃，WireGuard 5 秒后才重试：实测 5.2–5.7 秒连通，直连只要 11 毫秒（prototype.md 第 9 节）。之后优化，例如对端配置好新成员后经已有路径通知它立即重新握手；先与 Tailscale 的首次连通时间对比 |
+| TUN, IP forwarding and NAT capabilities on NAS systems | Verified one by one after the prototype gate and before rolling out to NAS |
+| Sending and receiving probes on the WireGuard port | Behavior on each distribution's kernel (including IPv6, existing connection tracking and NAT rules on the host, whether nfnetlink_log is available) is verified at the prototype gate |
+| Hole punching when both ends are behind symmetric NAT | Designed in M2 |
+| Time to first connectivity of a new member | For a `dial-only` member behind NAT, if the first handshake is earlier than the peer having configured it, the peer drops it and WireGuard retries only after 5 seconds: measured 5.2-5.7 seconds to connect, while direct takes only 11 milliseconds (prototype.md section 9). Optimize later, for example by notifying the new member over an existing path to re-handshake immediately once the peer has configured it; first compare with Tailscale's time to first connectivity |

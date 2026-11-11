@@ -1,45 +1,45 @@
-# 0015. 回源身份与局域网段默认拒绝
+# 0015. Origin identity and default deny for LAN prefixes
 
-- 状态：已采纳
-- 日期：2026-11-04
+- Status: accepted
+- Date: 2026-11-04
 
-## 背景
+## Context
 
-一次真实部署中暴露出入口回源的几个问题（见 architecture.md 第 17 节）：
+A real deployment exposed several problems with ingress origin traffic (see architecture.md section 17):
 
-- 需要真实客户端 IP 的服务，只信任某个转发者发来的 `X-Forwarded-For`。而智能入口对组网流量做源地址转换后，所有组网流量在局域网中都是同一个来源，服务分不清哪些请求是 Edge 转来的；
-- macOS 上 Docker 的发布端口会把所有来源都变成容器网络的网关地址；容器经 `host.docker.internal` 访问宿主时，来源变成 `127.0.0.1`；
-- 很多服务对本机或局域网来源免认证。源地址转换让组网流量继承了这种信任；如果访问规则默认允许，宣告网段之后，任何成员（包括被攻破的 VPS）都能以局域网身份访问整个局域网；
-- Edge 和 Hub 所在主机上的其他进程，与 Edge 共用同一个组网地址，访问规则无法区分它们。
+- A service that needs the real client IP trusts the `X-Forwarded-For` sent by only one forwarder. But after the smart gateway applies source NAT to mesh traffic, all mesh traffic looks like the same source on the LAN, and the service cannot tell which requests were forwarded by the Edge;
+- On macOS, Docker's published ports turn every source into the gateway address of the container network; when a container reaches the host via `host.docker.internal`, the source becomes `127.0.0.1`;
+- Many services skip authentication for local or LAN sources. Source NAT lets mesh traffic inherit that trust; if access rules default to allow, then once a prefix is advertised, any member (including a compromised VPS) can reach the whole LAN with LAN identity;
+- Other processes on the host where the Edge and the Hub run share the same mesh address with the Edge, and the access rules cannot tell them apart.
 
-## 决定
+## Decision
 
-**原则：需要真实 IP 的服务，最后一跳必须来自一个只有 Edge 能使用的地址，服务只信任这个地址。**
+**Principle: for a service that needs the real IP, the last hop must come from an address that only the Edge can use, and the service trusts only that address.**
 
-1. **Edge 专用组网地址**：Edge 指用户自己在入口节点上运行的反向代理，任何实现都可以，nett 不管理它的配置。节点策略中的 `edge` 角色声明本机运行 Edge，以及怎样识别 Edge 发出的流量（Edge 所在容器的地址，或原生运行时的系统用户）；具有这个角色的节点额外分配一个组网地址，写进签名节点策略（ADR 0014）。本机按 Edge 的运行用户或 Edge 容器的地址，把 Edge 发出的组网流量的来源换成这个地址。WireGuard 的 `AllowedIPs` 保证这个地址无法被其他成员伪造；**本机的其他进程和容器也不能使用它**：组网进程在本机输出和容器转发两个方向上，丢弃源地址为 Edge 专用地址、但不是来自 Edge 的数据包（无特权的进程也能绑定非本机地址，容器也能伪造源地址，只做地址转换不够）；
-2. **智能入口按来源分类转换**：智能入口在局域网中使用两个地址。来自 Edge 专用地址的流量转换为"入口地址"，其他组网流量转换为"普通地址"。局域网中的服务只信任入口地址；
-3. **macOS 上的容器**：以容器内成员加入组网（ADR 0016）。容器内成员是服务所在容器网络的智能入口，只放行 Edge 专用地址，并把来源换成自己在该网络中的固定地址；
-4. **转换后的地址绝不能是回环地址**；转发到宿主上的服务时使用宿主的局域网地址；
-5. **宣告的局域网段默认拒绝**：只对用户的设备开放，其他成员需要访问规则放行（访问默认拒绝，ADR 0023）。Edge 专用地址默认不能访问任何目标，能访问哪些主机和端口由用户在访问规则中写，放宽需要签名；
-6. Edge 配置中写组网地址，不写主机名（Edge 常运行在容器中，解析不了组网后缀）；
-7. Hub 位于 Hub 主机上的反向代理之后（ADR 0009），只信任这台反向代理发来的 `X-Forwarded-For`，用于限流和 `allowed_sources`。
+1. **Edge address**: the Edge is the reverse proxy the user runs on the entry node; any implementation will do, and nett does not manage its configuration. The `edge` role in the node policy declares that this machine runs an Edge and how to identify the traffic the Edge sends (the address of the container the Edge runs in, or the system user when it runs natively); a node with this role is assigned one extra mesh address, written into the signed node policy (ADR 0014). The machine rewrites the source of the mesh traffic sent by the Edge to this address, based on the Edge's run user or the Edge container's address. WireGuard `AllowedIPs` guarantees that other members cannot forge this address; **other processes and containers on the machine cannot use it either**: in both directions, local output and container forwarding, the mesh process drops packets whose source address is the Edge address but which do not come from the Edge (an unprivileged process can also bind a non-local address, and a container can forge a source address, so address translation alone is not enough);
+2. **The smart gateway translates by source class**: the smart gateway uses two addresses on the LAN. Traffic from the Edge address is translated to the "gateway address" and other mesh traffic to the "ordinary address". Services on the LAN trust only the gateway address;
+3. **Containers on macOS**: they join the mesh as a container member (ADR 0016). A container member is the smart gateway of the container network its services live in; it admits only the Edge address and rewrites the source to its own fixed address in that network;
+4. **The translated address must never be a loopback address**; when forwarding to a service on the host, the host's LAN address is used;
+5. **Advertised LAN prefixes are denied by default**: they are open only to the user's devices, and other members need an access rule to be allowed (access is default deny, ADR 0023). The Edge address cannot reach any target by default; which hosts and ports it can reach is written by the user in the access rules, and widening requires a signature;
+6. Edge configuration uses mesh addresses, not hostnames (the Edge often runs in a container, which cannot resolve the mesh suffix);
+7. The Hub sits behind the reverse proxy on the Hub host (ADR 0009) and trusts only the `X-Forwarded-For` sent by this reverse proxy, for rate limiting and `allowed_sources`.
 
-## 理由
+## Rationale
 
-- WireGuard 已经保证了组网来源地址不可伪造，只需要让"Edge 发出的流量"拥有一个单独的地址，就能用服务普遍支持的"可信代理地址"机制传递真实 IP，不需要服务做任何改造；
-- 同一个地址还能让访问规则把 Edge 与同主机的其他进程分开：Edge 被攻破时，影响范围限于访问规则允许的目标；
-- 局域网中常有按网段信任的设备和服务，宣告网段的默认值应当是拒绝。
+- WireGuard already guarantees that mesh source addresses cannot be forged; giving "traffic sent by the Edge" a separate address is enough to pass the real IP through the "trusted proxy address" mechanism that services widely support, with no change needed in the services;
+- The same address also lets access rules separate the Edge from other processes on the same host: if the Edge is compromised, the impact is limited to the targets the access rules allow;
+- LANs often contain devices and services that trust by prefix, so the default for an advertised prefix should be deny.
 
-## 放弃的方案
+## Alternatives considered
 
-- **不做源地址转换，靠路由把回包引回智能入口**：局域网主机看到的是真实的组网地址；但需要在路由器上配置静态路由，而且局域网主机上的代理类 VPN 应用会截走回包。
-- **Edge 对回源使用 mTLS 或共享密钥头**：不依赖地址，但需要每个服务都支持。保留为补充手段。
-- **每个服务各放一个转发容器**：可行，但要为每个服务单独维护，地址规划也会分散。
+- **No source NAT, route return packets back to the smart gateway**: hosts on the LAN see the real mesh address; but a static route must be configured on the router, and proxy-style VPN apps on LAN hosts will intercept the return packets.
+- **The Edge uses mTLS or a shared-secret header for origin traffic**: does not depend on addresses, but every service would have to support it. Kept as a supplementary measure.
+- **One forwarding container per service**: workable, but each service needs separate maintenance and address planning becomes scattered.
 
-## 影响
+## Consequences
 
-- 组网地址规划增加"Edge 专用地址"一类；智能入口需要在局域网中占用两个地址；
-- 局域网中需要真实 IP 的服务，要把"可信代理"配置成智能入口的入口地址（或容器内成员的地址）。这是部署层面的一次性配置；
-- Edge 的配置由用户自己维护，回源目标写组网地址；Edge 专用地址需要访问的服务，由用户写进访问规则；
-- **边界**：Edge 回源到同一台主机上的服务时（经本机地址或同机的容器网络），流量不经过组网，nett 不约束，由用户自己的 Edge 配置决定。Edge 的配置不经过 Hub，被攻破的 Hub 也改不了它；
-- 访问规则默认拒绝（ADR 0023），宣告网段只对用户的设备开放。
+- Mesh address planning gains an "Edge address" class; the smart gateway needs two addresses on the LAN;
+- A service on the LAN that needs the real IP must configure the smart gateway's gateway address (or the container member's address) as the "trusted proxy". This is a one-time deployment-level configuration;
+- The Edge's configuration is maintained by the user, and origin targets are written as mesh addresses; the services the Edge address needs to reach are written by the user into the access rules;
+- **Boundary**: when the Edge sends origin traffic to a service on the same host (via the local address or a container network on the same machine), the traffic does not pass through the mesh; nett does not constrain it, and it is determined by the user's own Edge configuration. The Edge's configuration does not pass through the Hub, so a compromised Hub cannot change it;
+- Access rules are default deny (ADR 0023), and advertised prefixes are open only to the user's devices.

@@ -1,48 +1,48 @@
-# 站点：用命令维护整张网
+# Site: Maintaining the Whole Network with Commands
 
-- 状态：草案
-- 阶段：M1，与接入 Hub 的 H1 一起（hub.md 第 9 节）；不接 Hub 的站点同样使用
+- Status: draft
+- Phase: M1, together with H1 of joining the Hub (hub.md section 9); sites without a Hub use it the same way
 
-## 1. 目标
+## 1. Goals
 
-用户在自己的电脑上用 `nett site` 的命令维护整张网：加入、移除机器，设置 Edge 和宣告的网段，增删访问规则。命令行是唯一的操作界面（ADR 0024），做法参考 ufw：规则一条一条地加，列出时带编号，按编号删除。
+The user maintains the whole network on their own computer with the `nett site` commands: add and remove machines, set the Edge and advertised routes, add and delete access rules. The command line is the only operating interface (ADR 0024), modeled on ufw: rules are added one at a time, listed with numbers, and deleted by number.
 
-- 每条修改命令当场校验，列出要签名的内容（选择器展开后的地址和端口），确认后签名并送达：接了 Hub 时推送给 Hub（hub.md 第 3.2 节），没接时写成各节点的期望状态文件（local-signing.md 第 5 节）；
-- 接不接 Hub 用同一套命令、同一份站点状态；
-- 哪些机器之间建立连接由访问规则推导，用户不用逐对指定（第 6 节）。
+- Each modifying command validates on the spot, lists what will be signed (the addresses and ports after selector expansion), and after confirmation signs and delivers: with a Hub it pushes to the Hub (hub.md section 3.2), without one it writes the desired state file of each node (local-signing.md section 5);
+- With or without a Hub, the same commands and the same site state are used;
+- Which machines connect to each other is derived from the access rules, and the user does not specify it pair by pair (section 6).
 
-## 2. 分工
+## 2. Division of work
 
-| 内容 | 怎么维护 | 签名 |
+| Content | How maintained | Signing |
 |---|---|---|
-| 机器：名字、可达性、公网地址与端口 | `add`、`set`、`remove` | 不签名；移除生成撤销记录 |
-| 机器的公钥 | 不接 Hub 时 `add --keys`；接了 Hub 时由机器入网时交给 Hub（hub.md 第 6 节） | 写入准入材料 |
-| 权限：Edge、宣告的网段、访问规则 | `edge`、`routes`、`allow`、`rules remove` | 放宽与收窄都以新的版本签名（第 7 节） |
-| 连接与候选路径 | 由访问规则推导（第 6 节） | 不签名 |
+| Machines: name, reachability, public address and port | `add`, `set`, `remove` | Not signed; removal generates a revocation |
+| A machine's public keys | Without a Hub, `add --keys`; with a Hub, given to the Hub by the machine when it enrolls (hub.md section 6) | Written into the admission material |
+| Permissions: Edge, advertised routes, access rules | `edge`, `routes`, `allow`, `rules remove` | Both widening and narrowing are signed with a new version (section 7) |
+| Connections and candidate paths | Derived from the access rules (section 6) | Not signed |
 
-站点的全部内容由工具保存在站点目录中（第 8 节），没有需要手工编辑的文件。规则按机器 ID 记录：移除一台机器时，引用它的规则随之清理，以后用同一个名字加入的机器不会继承它们（第 4 节）。
+All site content is stored by the tool in the site directory (section 8), and there are no files to edit by hand. Rules are recorded by machine ID: when a machine is removed, the rules that reference it are cleaned up with it, and a machine that later joins with the same name does not inherit them (section 4).
 
-## 3. 命令
+## 3. Commands
 
-| 命令 | 作用 |
+| Command | Purpose |
 |---|---|
-| `nett site init` | 建立站点：恢复密钥、信任锚清单、组网网段（第 8 节） |
-| `nett site add <机器>` | 加入一台机器（第 4 节） |
-| `nett site set <机器>` | 改一台机器的可达性、公网地址与端口 |
-| `nett site remove <机器>` | 移除一台机器，连带清理引用它的规则 |
-| `nett site invite <机器>` | 为已加入的机器准备入网所需的东西：接了 Hub 时打印入网命令（hub.md 第 3.3、3.5 节），没接时重签并重写它的期望状态文件 |
-| `nett site edge <机器>` | 设置这台机器的 Edge 来源（第 5.2 节） |
-| `nett site routes <机器>` | 设置这台机器宣告的网段（第 5.2 节） |
-| `nett site allow` | 加一条访问规则（第 5.1 节） |
-| `nett site rules` | 列出访问规则；`nett site rules remove <编号>` 删除一条 |
-| `nett site status` | 列出全部机器；接了 Hub 时加上各台的在线状态和每对机器之间的路径（hub.md 第 3.4 节） |
-| `nett site link` | 与 Hub 关联（hub.md 第 3.1 节） |
+| `nett site init` | Create the site: recovery key, trust anchor list, mesh prefixes (section 8) |
+| `nett site add <machine>` | Add a machine (section 4) |
+| `nett site set <machine>` | Change a machine's reachability, public address and port |
+| `nett site remove <machine>` | Remove a machine, cleaning up the rules that reference it |
+| `nett site invite <machine>` | Prepare what an added machine needs to enroll: with a Hub, prints the enrollment command (hub.md sections 3.3 and 3.5); without one, re-signs and rewrites its desired state file |
+| `nett site edge <machine>` | Set this machine's Edge sources (section 5.2) |
+| `nett site routes <machine>` | Set the routes this machine advertises (section 5.2) |
+| `nett site allow` | Add an access rule (section 5.1) |
+| `nett site rules` | List access rules; `nett site rules remove <number>` deletes one |
+| `nett site status` | List all machines; with a Hub, adds each one's online status and the path between each pair of machines (hub.md section 3.4) |
+| `nett site link` | Link with the Hub (hub.md section 3.1) |
 
-- 只在持有站点的那台电脑上运行，以普通用户身份，不需要 `sudo`；站点目录默认是 `$XDG_CONFIG_HOME/nett`（没有设置时是 `~/.config/nett`），`--dir` 可以放在别处；
-- 修改命令（`add`、`set`、`remove`、`edge`、`routes`、`allow`、`rules remove`）按第 7 节列出变化、确认、签名、送达；不是终端时要加 `--yes`；
-- 查看命令（`rules`、`status`）加 `--json` 输出完整内容。
+- Run only on the computer that holds the site, as an ordinary user, without `sudo`; the site directory defaults to `$XDG_CONFIG_HOME/nett` (`~/.config/nett` when unset), and `--dir` can place it elsewhere;
+- Modifying commands (`add`, `set`, `remove`, `edge`, `routes`, `allow`, `rules remove`) list the changes, confirm, sign and deliver according to section 7; when not on a terminal, `--yes` is required;
+- Viewing commands (`rules`, `status`) output the full content with `--json`.
 
-## 4. 机器
+## 4. Machines
 
 ```
 $ nett site add edge-vps --public --ipv4 203.0.113.10 --keys "…"
@@ -51,12 +51,12 @@ Sign? [y/N] y
 Wrote the desired state for edge-vps in ~/.config/nett/nodes/<machine>/desired.json.
 ```
 
-- **名字**：小写字母、数字和 `-`，最长 63 个字符（status.md 第 5 节），站点内唯一。名字用于显示和在命令中指代机器，不作为身份依据；
-- **可达性**：`--public` 表示能被外部连入，其他成员按它的公网地址连它；不写时为 `dial-only`，只主动连出（mesh.md 第 2 节）。`public` 机器用 `--ipv4`、`--ipv6` 写明公网地址；接了 Hub 时可以不写，由 Hub 得知（hub.md 第 5 节），站点记下得知的地址与来源，写明之后以写明的为准；
-- **端口**：`public` 机器的 WireGuard 端口默认是 `41820`，`--port` 改用别的（例如同一台主机上有两个 `public` 成员）。端口不能是组网进程自己在本机用的端口：组网地址上的探测端口 `41821`（mesh.md 第 7.2 节）和 TLS 中继的回环端口（`41830`–`41845`，mesh.md 第 5.3 节）；WireGuard 的套接字绑定本机全部地址，相同时后绑定的一方失败。`dial-only` 机器的端口由系统分配（mesh.md 第 5.5 节），不写端口和公网地址；
-- **公钥**：不接 Hub 时 `--keys` 必填，是机器上 `nett keys`（macOS 上 `sudo nett install`）打印的一行。接了 Hub 时不写：命令签好节点策略，打印新机器上要运行的一行（hub.md 第 3.3 节），公钥由机器入网时交给 Hub，签名工具之后取回（hub.md 第 4、6 节）。入网之前这台机器处于等待入网的状态：`invite` 换一个新的 token，`remove` 照常移除；
-- **加入**时分配节点 ID 和组网地址，签名它的节点策略；地址不回收（mesh.md 第 3 节）。`set` 改可达性、公网地址与端口，这些不签名，同样先列出、确认，再送达；
-- **移除**（`remove`）是降低权限，从不因为别的原因被挡住：机器被攻破时，移除必须马上生效。工具生成身份撤销记录，所有成员删除这台机器，任何版本的签名产物都不能恢复它（auth.md 第 10.4 节）；规则中引用它的部分随之删除（第 5.1 节），并在输出中列出：
+- **Name**: lowercase letters, digits and `-`, at most 63 characters (status.md section 5), unique within the site. The name is used for display and to refer to the machine in commands, and is not used as the basis of identity;
+- **Reachability**: `--public` means it can be reached from outside, and other members connect to it at its public address; when omitted it is `dial-only`, which only connects outward (mesh.md section 2). A `public` machine states its public addresses with `--ipv4` and `--ipv6`; with a Hub they can be omitted and the Hub learns them (hub.md section 5), the site records the learned address and its source, and once an address is stated the stated one takes precedence;
+- **Port**: the WireGuard port of a `public` machine defaults to `41820`, and `--port` uses another one (for example when the same host has two `public` members). The port cannot be one the mesh process itself uses on the machine: the probe port `41821` on the mesh address (mesh.md section 7.2) and the loopback ports of the TLS relay (`41830`-`41845`, mesh.md section 5.3); the WireGuard socket binds all local addresses, and when they coincide the one that binds later fails. The port of a `dial-only` machine is assigned by the system (mesh.md section 5.5), and no port or public address is given;
+- **Public keys**: without a Hub, `--keys` is required and is the line printed by `nett keys` on the machine (`sudo nett install` on macOS). With a Hub it is omitted: the command signs the node policy and prints the line to run on the new machine (hub.md section 3.3), the public keys are given to the Hub by the machine when it enrolls, and the signing tool fetches them afterwards (hub.md sections 4 and 6). Until it enrolls, the machine is in the waiting to join state: `invite` replaces the token with a new one, and `remove` removes it as usual;
+- **Adding** assigns a node ID and a mesh address and signs its node policy; addresses are not reclaimed (mesh.md section 3). `set` changes reachability, public address and port; these are not signed, and are likewise listed and confirmed first, then delivered;
+- **Removal** (`remove`) lowers privileges and is never blocked for any other reason: when a machine is compromised, removal must take effect immediately. The tool generates an identity revocation, all members delete this machine, and no version of a signed artifact can restore it (auth.md section 10.4); the parts of rules that reference it are deleted with it (section 5.1) and listed in the output:
 
   ```
   $ nett site remove nas
@@ -68,11 +68,11 @@ Wrote the desired state for edge-vps in ~/.config/nett/nodes/<machine>/desired.j
   Sign? [y/N] y
   ```
 
-- 同一个名字以后再 `add` 时是一台新机器：新的节点 ID 和地址，没有原来的规则、Edge 和网段。机器自己退出（`nett leave`，auth.md 第 8.3 节）时按同样的方式处理（hub.md 第 4 节）。
+- Running `add` again later with the same name creates a new machine: a new node ID and address, without the earlier rules, Edge and routes. When a machine leaves by itself (`nett leave`, auth.md section 8.3), it is handled the same way (hub.md section 4).
 
-## 5. 权限
+## 5. Permissions
 
-### 5.1 访问规则
+### 5.1 Access rules
 
 ```
 $ nett site allow edge-vps.edge mac-app.routes 8686/tcp --note "web app"
@@ -88,36 +88,36 @@ r4  edge-vps.edge  mac-app.routes  8686/tcp  web app
 $ nett site rules remove r2
 ```
 
-- **选择器**：`<机器>` 是它的组网地址，`<机器>.edge` 是它的 Edge 专用地址，`<机器>.routes` 是它宣告的网段；一边有多个时用逗号分隔，例如 `mac,nas`。选择器在签名工具中展开，签名产物写展开后的地址和端口（mesh.md 第 12 节）；
-- **端口**：`<端口>[-<端口>]/<tcp|udp>`，多个用逗号分隔；不写时为全部端口，列出变化时写明 `all ports`；
-- **说明**：`--note` 写这条规则做什么，只保存在站点中，不进签名产物；
-- **编号**：`r1`、`r2`……按加入的顺序分配，删除之后不复用，所以一个编号始终指同一条规则；
-- **只有放行，没有顺序**：任何一条规则匹配就放行，规则之间互不影响，加、删一条都不用考虑位置。签名产物的格式支持拒绝规则和按顺序匹配（mesh.md 第 12 节）；签名工具只生成放行规则，按编号排列；
-- **引用的东西没了**：一条规则引用的机器被移除、Edge 或网段被去掉时，规则中引用它的选择器随之删除；一边只剩空时，整条规则删除。这些都属于收窄，列在同一次变化中；
-- 删除规则是收窄，以新的版本签名（第 7 节）；同样先列出、确认：删错一条规则会断掉正在使用的服务。
+- **Selectors**: `<machine>` is its mesh address, `<machine>.edge` is its Edge address, and `<machine>.routes` is the routes it advertises; when one side has several, separate them with commas, for example `mac,nas`. Selectors are expanded in the signing tool, and the signed artifact contains the expanded addresses and ports (mesh.md section 12);
+- **Ports**: `<port>[-<port>]/<tcp|udp>`, several separated by commas; when omitted it means all ports, and the change listing says `all ports`;
+- **Note**: `--note` describes what the rule is for; it is stored only in the site and does not go into the signed artifact;
+- **Number**: `r1`, `r2`, ... assigned in the order of addition and not reused after deletion, so a number always refers to the same rule;
+- **Allow only, no order**: a rule that matches allows the connection, rules do not affect each other, and adding or deleting one does not require considering position. The signed artifact format supports deny rules and ordered matching (mesh.md section 12); the signing tool generates only allow rules, arranged by number;
+- **Referenced things disappear**: when a machine referenced by a rule is removed, or its Edge or routes are removed, the selectors in the rule that reference it are deleted with it; when one side is left empty, the whole rule is deleted. These are all narrowing and are listed in the same change;
+- Deleting a rule is narrowing and is signed with a new version (section 7); it is likewise listed and confirmed first: deleting the wrong rule would cut off a service in use.
 
-### 5.2 Edge 与宣告的网段
+### 5.2 Edge and advertised routes
 
 ```
 $ nett site edge edge-vps 172.17.0.2/32
 $ nett site routes mac-app 172.30.0.10/32
 ```
 
-- **Edge**：写 Edge 所在容器的地址（ADR 0015，local-signing.md 第 6 节）。这台机器的节点策略带上 `edge` 角色，并分配一对 Edge 专用地址；
-- **宣告的网段**：这台机器的节点策略带上 `subnet_router` 角色，网段另签一份带版本号的产物（auth.md 第 10.5 节）。网段不能与组网网段或其他机器宣告的网段重叠；
-- 每次写这台机器的完整列表；`--none` 去掉。节点策略与宣告的网段随之以新的版本签名（第 7 节），去掉时引用它的规则按第 5.1 节清理。
+- **Edge**: give the address of the container where the Edge runs (ADR 0015, local-signing.md section 6). This machine's node policy gets the `edge` role, and a pair of Edge addresses is assigned;
+- **Advertised routes**: this machine's node policy gets the `subnet_router` role, and the routes are signed separately as a versioned artifact (auth.md section 10.5). Routes cannot overlap the mesh prefixes or the routes advertised by other machines;
+- Each time, the machine's complete list is written; `--none` removes it. The node policy and the advertised routes are then signed with a new version (section 7), and when removed, the rules that reference it are cleaned up according to section 5.1.
 
-## 6. 连接
+## 6. Connections
 
-组成期望状态时（接了 Hub 时由 Hub 用同一份逻辑组成，hub.md 第 4 节），按下面的规则决定哪些机器之间建立连接：
+When the desired state is composed (with a Hub, the Hub composes it with the same logic, hub.md section 4), the following rules decide which machines connect to each other:
 
-1. **访问规则涉及的每一对机器**：规则两边的每个选择器对应一台机器（`<机器>`、`<机器>.edge`、`<机器>.routes` 都对应这台机器本身），两边的每一对之间建立一条连接，机器自己与自己除外；
-2. **每个 `dial-only` 成员与全部 `public` 成员**：用于判断 NAT 类型和映射地址（mesh.md 第 6.1 节），也是故障时的冗余（architecture.md 第 12.3 节）；
-3. 每条连接的候选路径按 mesh.md 第 6 节生成：一端是 `public` 时，另一端直连它的公网地址（有 IPv4、IPv6 地址时分别生成）；两端都是 `dial-only` 时打洞直连；经中继的候选在中继实现之后加入。
+1. **Every pair of machines involved in an access rule**: each selector on either side of a rule corresponds to one machine (`<machine>`, `<machine>.edge` and `<machine>.routes` all correspond to the machine itself), a connection is established between each pair across the two sides, except a machine with itself;
+2. **Every `dial-only` member with all `public` members**: used to determine the NAT type and mapped address (mesh.md section 6.1), and also redundancy on failure (architecture.md section 12.3);
+3. The candidate paths of each connection are generated per mesh.md section 6: when one end is `public`, the other end connects directly to its public address (generated separately when there are IPv4 and IPv6 addresses); when both ends are `dial-only`, hole punching is used for a direct connection; relay candidates are added after relays are implemented.
 
-- 连接只是通道：访问仍由规则决定，默认拒绝（ADR 0023）。没有规则涉及的两台机器之间没有连接，`nett status` 中这一对为 `no path`；
-- 两端都是 `dial-only` 的连接只有打洞候选：两端都在对称型 NAT 后时打不通（mesh.md 第 6.1 节），经中继的候选加入之前可能连不上。列出变化时为这样的连接写明 `punch only; may not connect`；
-- 规则变化时，连接随之增减，列在同一次变化中：
+- A connection is only a channel: access is still decided by the rules, denied by default (ADR 0023). There is no connection between two machines that no rule involves, and in `nett status` this pair is `no path`;
+- A connection with both ends `dial-only` has only hole punching candidates: when both ends are behind symmetric NAT it cannot be punched through (mesh.md section 6.1), and before relay candidates are added it may not connect. The change listing says `punch only; may not connect` for such a connection;
+- When rules change, connections are added or removed accordingly and listed in the same change:
 
   ```
   $ nett site allow mac nas 22/tcp
@@ -128,18 +128,18 @@ $ nett site routes mac-app 172.30.0.10/32
   Sign? [y/N] y
   ```
 
-## 7. 修改、签名与送达
+## 7. Changing, signing and delivery
 
-每条修改命令：读取站点状态 → 算出修改之后的状态并校验 → 列出变化 → 确认 → 签名 → 送达 → 保存站点状态。
+Each modifying command: read the site state → compute the state after the change and validate → list the changes → confirm → sign → deliver → save the site state.
 
-- **列出的就是要签名的内容**：选择器展开后的地址和端口、产物的版本变化、增减的连接与成员；放宽的项目以 `+` 标出，收窄的以 `-` 标出，其余的变化以 `~` 标出；
-- **签名**：内容变化的产物版本加一并重新签名，不变的沿用原来的签名，节点视为幂等（auth.md 第 10.2 节）；已签的节点策略离过期不到 7 天的，换一个新版本重签（local-signing.md 第 5 节）；
-- **收窄**：移除机器生成身份撤销记录（auth.md 第 10.4 节）；删除规则、去掉 Edge 或网段以更高的版本重新签名。节点按版本只增不减（mesh.md 第 4.2 节），重发旧的签名产物不能恢复被收窄的权限；
-- **送达**：接了 Hub 时推送给 Hub，等待各台机器应用（hub.md 第 3.2 节）；没接时为期望状态有变化的每台机器重写 `nodes/<机器>/desired.json`，列出这些机器和应用的方法（local-signing.md 第 5 节）；
-- 校验失败时整条命令不做任何改动，说明哪里不对；
-- 站点目录加锁，同一时间只有一个修改命令在运行。
+- **What is listed is what is signed**: the addresses and ports after selector expansion, the artifact version changes, and the connections and members added or removed; widened items are marked with `+`, narrowed ones with `-`, and other changes with `~`;
+- **Signing**: artifacts whose content changed get their version incremented by one and are re-signed; unchanged ones keep their original signature, which nodes treat as idempotent (auth.md section 10.2); a signed node policy less than 7 days from expiry is re-signed with a new version (local-signing.md section 5);
+- **Narrowing**: removing a machine generates an identity revocation (auth.md section 10.4); deleting a rule or removing an Edge or routes re-signs with a higher version. Nodes only increase versions (mesh.md section 4.2), and replaying an old signed artifact cannot restore narrowed permissions;
+- **Delivery**: with a Hub, push to the Hub and wait for the machines to apply it (hub.md section 3.2); without one, rewrite `nodes/<machine>/desired.json` for every machine whose desired state changed, and list these machines and how to apply it (local-signing.md section 5);
+- When validation fails, the whole command makes no change and says what is wrong;
+- The site directory is locked, and only one modifying command runs at a time.
 
-## 8. 站点目录
+## 8. Site directory
 
 ```
 $ nett site init
@@ -156,14 +156,14 @@ Next, for each machine:
   3. Allow what may connect: nett site allow <from> <to> <ports>
 ```
 
-- `init` 建立目录时权限设为 `0700`。组网网段在建立时确定，之后不能改：IPv4 为 `100.88.0.0/16`，IPv6 为随机生成的 ULA `/48`（mesh.md 第 3 节）；
-- 目录中有：恢复密钥 `recovery.pk8`（`0600`，只在签名时读取）；站点状态 `state.json`：信任锚清单、组网网段、各台机器（节点 ID、名字、可达性、地址与端口、公钥、Edge、网段、已签的产物与版本）、访问规则（编号、选择器、端口、说明，以及展开后签名的规则集与版本）、撤销记录、已分配的地址；不接 Hub 时还有生成的期望状态 `nodes/<机器>/desired.json`；
-- 备份这个目录即可，恢复密钥另存一份离线备份（local-signing.md 第 3 节）。接了 Hub 时，Hub 保存最近一次推送的副本，经 Hub 入网的机器的准入证明也取回保存在这里（hub.md 第 4 节），站点状态以这个目录为准。
+- When `init` creates the directory, its mode is set to `0700`. The mesh prefixes are fixed at creation and cannot be changed later: IPv4 is `100.88.0.0/16`, and IPv6 is a randomly generated ULA `/48` (mesh.md section 3);
+- The directory contains: the recovery key `recovery.pk8` (`0600`, read only when signing); the site state `state.json`: the trust anchor list, mesh prefixes, the machines (node ID, name, reachability, address and port, public keys, Edge, routes, signed artifacts and versions), access rules (number, selectors, ports, note, plus the expanded signed rule set and version), revocations, and assigned addresses; without a Hub there are also the generated desired states `nodes/<machine>/desired.json`;
+- Backing up this directory is enough, and the recovery key gets a separate offline backup (local-signing.md section 3). With a Hub, the Hub keeps a copy of the most recent push, and the admission proofs of machines that enrolled through the Hub are also fetched and stored here (hub.md section 4); the site state is whatever this directory holds.
 
-## 9. 验证
+## 9. Verification
 
-| 层级 | 内容 |
+| Level | Content |
 |---|---|
-| 单元测试 | 每条修改命令对站点状态的改变与列出的变化；校验失败时不做改动；编号不复用；移除机器、去掉 Edge 或网段时引用它的规则随之清理，同名的新机器拿到新的节点 ID 和地址、没有旧规则；连接的推导（规则涉及的每一对、`dial-only` 到全部 `public`、候选路径）；放宽与收窄的划分；不变的产物沿用原来的签名；不是终端又没有 `--yes` 时不修改；生成的期望状态能被组网进程接受 |
-| CI | macOS 的安装流程（release.md 第 4 节）用 `nett site add` 加入本机 |
-| 实际机器 | 把已有的站点换成命令维护之后，各成员的期望状态中签名产物的版本、地址与连接不变 |
+| Unit tests | The change each modifying command makes to the site state and the listed changes; no change when validation fails; numbers are not reused; when a machine is removed or an Edge or routes are removed, the rules that reference it are cleaned up, and a new machine with the same name gets a new node ID and address and none of the old rules; derivation of connections (every pair involved in a rule, `dial-only` to all `public`, candidate paths); the split between widening and narrowing; unchanged artifacts keep their original signature; no modification when not on a terminal and without `--yes`; the generated desired state is accepted by the mesh process |
+| CI | The macOS install flow (release.md section 4) adds the local machine with `nett site add` |
+| Real machines | After an existing site is switched to command-based maintenance, the versions of signed artifacts, the addresses and the connections in each member's desired state stay the same |

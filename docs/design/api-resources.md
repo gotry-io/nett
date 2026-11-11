@@ -1,38 +1,38 @@
-# API 资源模型
+# API Resource Model
 
-- 状态：草案
-- 阶段：P0（资源在 M1 实现，见第 8 节）
-- 相关：[architecture.md](../architecture.md)、ADR [0003](../adr/0003-api-and-protocols.md)、[0006](../adr/0006-auth-and-passkey-signing.md)、[0015](../adr/0015-origin-identity-and-lan-default-deny.md)、[0019](../adr/0019-mesh-only.md)
+- Status: draft
+- Phase: P0 (resources are implemented in M1, see section 8)
+- Related: [architecture.md](../architecture.md), ADR [0003](../adr/0003-api-and-protocols.md), [0006](../adr/0006-auth-and-passkey-signing.md), [0015](../adr/0015-origin-identity-and-lan-default-deny.md), [0019](../adr/0019-mesh-only.md)
 
-## 1. 范围
+## 1. Scope
 
-本文定义对外 API 的资源：有哪些资源、字段、关系、生命周期、读写归属，以及通用约定。
+This document defines the resources of the external API: which resources exist, their fields, relationships, lifecycles, who may read and write them, and the general conventions.
 
-不在本文范围：
+Out of scope:
 
-| 内容 | 文档 |
+| Content | Document |
 |---|---|
-| 认证方式、权限范围的完整定义、签名流程 | `auth.md` |
-| 变更集的执行流程、动作目录的完整列表 | `changes.md` |
-| node 与 Hub 之间的通信协议 | `protocol.md` |
-| 组网的路径选择与切换算法 | `mesh.md` |
+| Authentication methods, the full definition of permission scopes, the signing flow | `auth.md` |
+| The execution flow of change sets, the full list of the action catalog | `changes.md` |
+| The communication protocol between node and Hub | `protocol.md` |
+| Mesh path selection and switchover algorithms | `mesh.md` |
 
-## 2. 通用约定
+## 2. General conventions
 
-### 2.1 路径与命名
+### 2.1 Paths and naming
 
-- 基础路径 `/api/v1`；资源名使用复数、短横线连接：`/api/v1/nodes`、`/api/v1/api-tokens`；
-- JSON 字段使用 `snake_case`；枚举值使用小写 `snake_case` 字符串；
-- 时间戳为 UTC，RFC 3339 格式；持续时间以秒为单位的整数表示，字段名以 `_secs` 结尾；
-- 单例资源不带 ID：`/api/v1/owner`、`/api/v1/hub`。
+- Base path `/api/v1`; resource names are plural and hyphen-joined: `/api/v1/nodes`, `/api/v1/api-tokens`;
+- JSON fields use `snake_case`; enum values are lowercase `snake_case` strings;
+- Timestamps are UTC in RFC 3339 format; durations are integers in seconds, with field names ending in `_secs`;
+- Singleton resources carry no ID: `/api/v1/owner`, `/api/v1/hub`.
 
-### 2.2 标识
+### 2.2 Identifiers
 
-- **ID**：`<前缀>_<ULID>`，例如 `node_01J9Z3K8Q2T7V4X6Y8A0B2C4D6`。ID 不可变，按时间有序。
-- **名称**：多数资源还有一个用户可读的 `name`（如节点 `edge-us-1`），在同类资源中唯一，可以修改。
-- 路径中的 `{id}` 也接受名称：`/api/v1/nodes/edge-us-1` 等价于按 ID 访问。资源之间的引用一律存储 ID。
+- **ID**: `<prefix>_<ULID>`, for example `node_01J9Z3K8Q2T7V4X6Y8A0B2C4D6`. IDs are immutable and ordered by time.
+- **Name**: most resources also have a human-readable `name` (such as the node `edge-us-1`), unique within the resource type and changeable.
+- `{id}` in a path also accepts the name: `/api/v1/nodes/edge-us-1` is equivalent to access by ID. References between resources always store the ID.
 
-| 资源 | 前缀 | 资源 | 前缀 |
+| Resource | Prefix | Resource | Prefix |
 |---|---|---|---|
 | nodes | `node` | changes | `chg` |
 | passkeys | `pk` | events | `evt` |
@@ -42,7 +42,7 @@
 | node-policies | `pol` | hostnames | `hst` |
 | links | `lnk` | backups | `bak` |
 
-### 2.3 资源的通用结构
+### 2.3 General structure of a resource
 
 ```json
 {
@@ -57,341 +57,341 @@
 }
 ```
 
-| 字段 | 含义 | 写入方 |
+| Field | Meaning | Written by |
 |---|---|---|
-| `spec` | **期望状态**：希望它是什么样子 | 用户、API token、Hub（按权限） |
-| `status` | **实际状态**：它现在是什么样子 | node 上报，或 Hub 计算；API 调用方不能写入 |
-| `revision` | `spec` 每次修改加一，同时作为 ETag | Hub |
-| `labels` | 键值对，用于筛选和选择器 | 用户 |
+| `spec` | **Desired state**: what it should look like | User, API token, Hub (by permission) |
+| `status` | **Actual state**: what it looks like now | Reported by the node, or computed by the Hub; API callers cannot write it |
+| `revision` | Incremented on every change to `spec`, and also serves as the ETag | Hub |
+| `labels` | Key-value pairs, used for filtering and selectors | User |
 
-`status` 中常见的通用字段：
+Common fields in `status`:
 
-| 字段 | 含义 |
+| Field | Meaning |
 |---|---|
-| `phase` | 当前所处阶段（各资源自行定义的枚举） |
-| `observed_revision` | node 或调和器最近一次处理的 `spec` 版本；与 `revision` 不一致表示"正在生效" |
-| `conditions` | 状态条件列表：`{ type, ok, reason, message, since }`，用于解释"为什么是这个状态" |
+| `phase` | The current phase (an enum defined by each resource) |
+| `observed_revision` | The `spec` revision most recently processed by the node or reconciler; a mismatch with `revision` means "taking effect" |
+| `conditions` | List of status conditions: `{ type, ok, reason, message, since }`, explaining "why it is in this state" |
 
-只读的资源（如 `events`）没有 `spec`。
+Read-only resources (such as `events`) have no `spec`.
 
-### 2.4 列表、筛选与分页
+### 2.4 Lists, filtering and pagination
 
-- 游标分页：`?limit=50&cursor=<不透明字符串>`；`limit` 默认 50，最大 200；响应中带 `next_cursor`；
-- 筛选：按标签 `?label=role:edge`，按引用 `?node=edge-us-1`，按状态 `?phase=online`；
-- 排序：默认按 `created_at` 倒序；支持的排序字段在各资源中说明。
+- Cursor pagination: `?limit=50&cursor=<opaque string>`; `limit` defaults to 50 with a maximum of 200; the response carries `next_cursor`;
+- Filtering: by label `?label=role:edge`, by reference `?node=edge-us-1`, by state `?phase=online`;
+- Sorting: by `created_at` descending by default; supported sort fields are described per resource.
 
-### 2.5 并发与幂等
+### 2.5 Concurrency and idempotency
 
-- 修改 `spec` 时必须带 `If-Match: <revision>`；版本不一致返回 `412`，避免覆盖他人（包括脚本）的修改；
-- 创建类请求支持 `Idempotency-Key`，24 小时内重复的请求返回第一次的结果。
+- Changing `spec` requires `If-Match: <revision>`; a revision mismatch returns `412`, which avoids overwriting someone else's (including a script's) changes;
+- Create requests support `Idempotency-Key`; a repeated request within 24 hours returns the result of the first one.
 
-### 2.6 错误
+### 2.6 Errors
 
-使用 RFC 9457（`application/problem+json`），带稳定的 `code`：
+Uses RFC 9457 (`application/problem+json`) with a stable `code`:
 
 ```json
 {
   "type": "https://nett.example.com/errors/revision-conflict",
-  "title": "资源已被修改",
+  "title": "Resource was modified",
   "status": 412,
   "code": "revision_conflict",
-  "detail": "当前 revision 为 8，请求基于 7",
+  "detail": "Current revision is 8, the request is based on 7",
   "instance": "/api/v1/nodes/edge-us-1"
 }
 ```
 
-`code` 稳定不变，供程序判断；`title` 和 `detail` 按请求的 `Accept-Language`（或用户的 `locale`）返回中文或英文。
+`code` is stable and meant for programs; `title` and `detail` are returned in Chinese or English according to the request's `Accept-Language` (or the user's `locale`).
 
-### 2.7 敏感字段
+### 2.7 Sensitive fields
 
-- 密钥、token、私钥只在创建时返回一次，之后只返回前缀或指纹。
+- Keys, tokens and private keys are returned only once at creation; afterwards only a prefix or fingerprint is returned.
 
-## 3. 写入方式与风险分级
+## 3. Write paths and risk levels
 
-| 风险 | 例子 | 方式 |
+| Risk | Examples | Method |
 |---|---|---|
-| **低** | 修改名称、标签 | 直接修改资源 |
-| **中** | 修改连接的策略覆盖（`link.set_policy`） | 通过变更集：预演 → 执行 |
-| **高** | 开启模块、设置节点角色（如 `edge`）、新增设备或设备凭据、放宽访问规则、宣告网段、吊销节点 | 通过变更集，并需要 passkey 签名批准 |
+| **Low** | Changing names and labels | Modify the resource directly |
+| **Medium** | Changing a link's policy override (`link.set_policy`) | Through a change set: plan → apply |
+| **High** | Enabling a module, setting a node role (such as `edge`), adding a device or device credential, widening access rules, advertising routes, revoking a node | Through a change set, requiring passkey signature approval |
 
-- 中、高风险的写入不直接修改资源，而是创建一个 `change`。直接调用对应资源的写接口时，Hub 返回 `202` 和新建的 `change`；
-- **降低权限**（关闭模块、吊销 token、禁用设备、收窄访问规则）始终视为低风险，可以直接执行；
-- 修改标签本身是低风险，但如果它让某条访问规则的展开结果变大（例如给节点加上被 allow 规则选中的标签），这次修改就是放宽访问，按高风险处理（第 5.5 节）；
-- 每类写入的风险等级由动作目录（`action-types`）定义，`changes.md` 给出完整列表；
-- 变更集随 Web 控制台加入，只用于组网动作，每个变更集只有一个步骤（ADR 0019）。在此之前，中、高风险的修改由签名工具在用户的电脑上签名，以签名产物经 `site` 资源推送（hub.md 第 4 节），Hub 只验证签名与版本，不经变更集（ADR 0024）。
+- Medium- and high-risk writes do not modify the resource directly but create a `change`. When the write endpoint of the corresponding resource is called directly, the Hub returns `202` and the newly created `change`;
+- **Lowering privileges** (disabling a module, revoking a token, disabling a device, narrowing access rules) is always treated as low risk and can be executed directly;
+- Changing labels is itself low risk, but if it makes the expansion of an access rule larger (for example giving a node a label selected by an allow rule), that change is widening access and is handled as high risk (section 5.5);
+- The risk level of each kind of write is defined by the action catalog (`action-types`), and `changes.md` gives the full list;
+- Change sets are added with the web console and are used only for mesh actions, each with a single step (ADR 0019). Until then, medium- and high-risk changes are signed on the user's computer by the signing tool and pushed as signed artifacts through the `site` resource (hub.md section 4); the Hub only verifies the signature and version, without change sets (ADR 0024).
 
-### 3.1 资源上的动作
+### 3.1 Actions on resources
 
-增删改之外的操作，以动作的形式提供：
+Operations beyond create, update and delete are provided as actions:
 
 ```
-POST /api/v1/<资源>/{id}/actions/<动作>
+POST /api/v1/<resource>/{id}/actions/<action>
 ```
 
-例如 `POST /api/v1/nodes/node_…/actions/remove`。动作同样受风险分级约束：低风险直接执行并返回结果；中、高风险返回 `202` 和对应的 `change`。
+For example `POST /api/v1/nodes/node_…/actions/remove`. Actions are also subject to the risk levels: low-risk ones execute directly and return the result; medium- and high-risk ones return `202` and the corresponding `change`.
 
-## 4. 资源总览
+## 4. Resource overview
 
-| 领域 | 资源 | 阶段 | spec 写入方 | status 写入方 |
+| Area | Resource | Phase | spec written by | status written by |
 |---|---|---|---|---|
-| 身份与访问 | `owner` | M1 | 用户 | Hub |
-| | `trust`（信任锚清单） | M1 | 用户（签名） | Hub |
-| | `passkeys` | M1 | 用户 | Hub |
+| Identity and access | `owner` | M1 | User | Hub |
+| | `trust` (trust anchor list) | M1 | User (signed) | Hub |
+| | `passkeys` | M1 | User | Hub |
 | | `sessions` | M1 | — | Hub |
-| | `api-tokens` | M1 | 用户 | Hub |
-| 节点 | `nodes` | M1 | 用户 | node、Hub |
-| | `enrollment-tokens` | M1 | 用户 | Hub |
-| | `node-policies` | M1 | 用户（签名） | node |
-| 活动 | `events` | M1 | — | Hub |
-| 系统 | `hub`、`releases`、`backups` | M1 | 用户 | Hub |
-| 组网 | `links` | M1 | 用户（策略覆盖） | node、Hub |
-| | `devices` | M1 | 用户（签名） | Hub、node（网关） |
-| | `device-credentials` | M1 | 用户（签名） | Hub |
-| | `access-rules` | M1 | 用户（签名） | Hub |
-| | `hostnames` | M1 | 用户、Hub | Hub |
-| 变更 | `changes` | M1 | 用户、API token | Hub |
-| | `action-types` | M1 | — | Hub（内置） |
+| | `api-tokens` | M1 | User | Hub |
+| Nodes | `nodes` | M1 | User | Node, Hub |
+| | `enrollment-tokens` | M1 | User | Hub |
+| | `node-policies` | M1 | User (signed) | Node |
+| Activity | `events` | M1 | — | Hub |
+| System | `hub`, `releases`, `backups` | M1 | User | Hub |
+| Mesh | `links` | M1 | User (policy override) | Node, Hub |
+| | `devices` | M1 | User (signed) | Hub, node (gateway) |
+| | `device-credentials` | M1 | User (signed) | Hub |
+| | `access-rules` | M1 | User (signed) | Hub |
+| | `hostnames` | M1 | User, Hub | Hub |
+| Changes | `changes` | With the web console | User, API token | Hub |
+| | `action-types` | With the web console | — | Hub (built in) |
 
-## 5. 资源详解
+## 5. Resource details
 
-### 5.1 身份与访问
+### 5.1 Identity and access
 
-**`owner`**（单例）：唯一用户。
+**`owner`** (singleton): the only user.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.display_name` | 显示名称 |
-| `spec.locale`、`spec.timezone` | 控制台显示偏好 |
-| `status.initialized_at` | 完成初始化（注册首个 passkey）的时间 |
-| `status.recovery_key` | 恢复密钥的指纹与创建时间 |
-| `status.backup_key` | 备份公钥的指纹与创建时间 |
+| `spec.display_name` | Display name |
+| `spec.locale`, `spec.timezone` | Console display preferences |
+| `status.initialized_at` | Time initialization completed (first passkey registered) |
+| `status.recovery_key` | Fingerprint and creation time of the recovery key |
+| `status.backup_key` | Fingerprint and creation time of the backup public key |
 
-**`trust`**（单例）：当前生效的信任锚清单（格式见 `auth.md` 第 11 节）及其版本。只读；新增、删除 passkey 或更换恢复密钥时由 Hub 生成新版本，经签名后生效。
+**`trust`** (singleton): the trust anchor list currently in effect (format in `auth.md` section 11) and its version. Read-only; when a passkey is added or removed or the recovery key is replaced, the Hub generates a new version, which takes effect once signed.
 
-**`passkeys`**：已注册的 passkey。注册与签名流程见 `auth.md`。
+**`passkeys`**: registered passkeys. See `auth.md` for registration and signing flows.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.name` | 便于识别的名称（如"MacBook Touch ID"） |
-| `status.credential_id_hash`、`status.created_at`、`status.last_used_at` | — |
+| `spec.name` | A recognizable name (such as "MacBook Touch ID") |
+| `status.credential_id_hash`, `status.created_at`, `status.last_used_at` | — |
 
-至少保留一个 passkey；删除最后一个时拒绝。
+At least one passkey is kept; deleting the last one is rejected.
 
-**`sessions`**：浏览器会话，只读。动作：`revoke`。
+**`sessions`**: browser sessions, read-only. Action: `revoke`.
 
 **`api-tokens`**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.name` | 用途说明 |
-| `spec.kind` | `script`（见 `auth.md` 第 6.2 节） |
-| `spec.scopes` | 权限范围列表（定义见 `auth.md`） |
-| `spec.expires_at` | 过期时间，必填，最长 1 年 |
-| `spec.allowed_sources` | 可选，允许的来源地址范围 |
-| `status.prefix` | 明文前缀，用于识别（如 `nett_tok_8Kq3…`） |
-| `status.last_used_at`、`status.last_used_from` | 最近一次使用 |
+| `spec.name` | Description of the purpose |
+| `spec.kind` | `script` (see `auth.md` section 6.2) |
+| `spec.scopes` | List of permission scopes (defined in `auth.md`) |
+| `spec.expires_at` | Expiry time, required, at most 1 year |
+| `spec.allowed_sources` | Optional, allowed source address ranges |
+| `status.prefix` | Plaintext prefix for identification (such as `nett_tok_8Kq3…`) |
+| `status.last_used_at`, `status.last_used_from` | Most recent use |
 | `status.phase` | `active` / `expired` / `revoked` |
 
-明文 token 只在创建响应中返回一次。动作：`revoke`。
+The plaintext token is returned only once, in the creation response. Action: `revoke`.
 
-### 5.2 节点
+### 5.2 Nodes
 
 **`nodes`**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.name`、`labels` | 名称和标签 |
-| `spec.description` | 备注 |
-| `spec.relay_limits` | 作为中继时的流量和带宽上限 |
-| `status.phase` | `pending`（已创建入网 token，尚未连接）/ `online` / `offline` / `removed` |
-| `status.version` | nett 版本 |
-| `status.platform` | `os`、`distro`、`kernel`、`arch` |
-| `status.install_method` | `native` / `container_member`（macOS 的容器内成员）/ `haos_addon`（Home Assistant OS 加载项）；控制台据此只显示可用的模块 |
-| `status.capabilities` | `wireguard_kernel`、`tun`、`docker`、`root` 等探测结果 |
-| `status.hard_deny` | 节点本地硬性禁止的模块（只读，由 node 上报） |
-| `status.modules` | 每个模块的状态：`{ name, enabled, state, message }` |
-| `status.reachability` | `public` / `dial-only`，以及探测到的外部地址、需要放行但不通的端口 |
-| `status.addresses` | 局域网地址、组网地址、Edge 专用地址（节点有 `edge` 角色时） |
-| `status.relay` | 是否提供中继、当前承载的流量 |
-| `status.last_seen_at` | 最近一次与 Hub 通信的时间 |
+| `spec.name`, `labels` | Name and labels |
+| `spec.description` | Note |
+| `spec.relay_limits` | Traffic and bandwidth limits when acting as a relay |
+| `status.phase` | `pending` (enrollment token created, not yet connected) / `online` / `offline` / `removed` |
+| `status.version` | nett version |
+| `status.platform` | `os`, `distro`, `kernel`, `arch` |
+| `status.install_method` | `native` / `container_member` (the container member on macOS) / `haos_addon` (Home Assistant OS add-on); the console uses it to show only the modules that are available |
+| `status.capabilities` | Detection results such as `wireguard_kernel`, `tun`, `docker`, `root` |
+| `status.hard_deny` | Modules forbidden locally on the node (read-only, reported by the node) |
+| `status.modules` | The state of each module: `{ name, enabled, state, message }` |
+| `status.reachability` | `public` / `dial-only`, plus the detected external address and ports that need to be opened but are not reachable |
+| `status.addresses` | LAN address, mesh address, Edge address (when the node has the `edge` role) |
+| `status.relay` | Whether it provides relay and the traffic currently carried |
+| `status.last_seen_at` | Time of the most recent communication with the Hub |
 
-Edge 回源时，服务看到的来源是 Edge 专用地址；经智能入口或容器内成员转发时，是智能入口的入口地址或容器内成员的地址（ADR 0015、0016）。需要访客真实 IP 的服务把这个地址配置为可信代理。
+When Edge sends origin traffic, the source a service sees is the Edge address; when forwarded through a smart gateway or a container member, it is the smart gateway's entry address or the container member's address (ADR 0015, 0016). Services that need the visitor's real IP configure this address as a trusted proxy.
 
-节点的模块权限不在 `spec` 中修改，而是通过 `node-policies`：开启模块经由变更集并需要签名，关闭模块可以直接下发。动作：`remove`（高风险，吊销节点凭据）。升级通过 `release` 分区进行（`auth.md` 第 11.3 节），不是节点上的动作。节点自行退出（`nett leave`）时，Hub 直接把它标记为 `removed`。
+A node's module permissions are not changed in `spec` but through `node-policies`: enabling a module goes through a change set and requires a signature, while disabling a module can be delivered directly. Action: `remove` (high risk, revokes the node's credentials). Upgrades go through the `release` partition (`auth.md` section 11.3) and are not an action on the node. When a node leaves by itself (`nett leave`), the Hub marks it `removed` directly.
 
 **`enrollment-tokens`**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.node_name` | 入网后节点的名称 |
-| `spec.modules` | 初始启用的模块 |
-| `spec.labels` | 初始标签 |
-| `spec.expires_at` | 过期时间（默认 30 分钟，最长 24 小时） |
-| `spec.enrollment_public_key` | 浏览器生成的入网公钥（私钥只在 token 中，见 `auth.md` 第 8.1 节） |
+| `spec.node_name` | The node's name after enrollment |
+| `spec.modules` | Modules enabled initially |
+| `spec.labels` | Initial labels |
+| `spec.expires_at` | Expiry time (30 minutes by default, at most 24 hours) |
+| `spec.enrollment_public_key` | The enrollment public key generated by the signing tool (the private key lives only in the token, see `auth.md` section 8.1) |
 | `status.phase` | `active` / `used` / `expired` / `revoked` |
-| `status.node_id` | 创建时分配的节点 ID；节点同时进入 `pending` |
-| `status.install_command` | 带 token 的安装命令（由浏览器拼装，Hub 不保存） |
+| `status.node_id` | The node ID assigned at creation; the node enters `pending` at the same time |
+| `status.install_command` | The install command with the token (assembled by the signing tool, not stored by the Hub) |
 
-**`node-policies`**：节点权限的签名策略。提升权限的策略由变更集批准后生成，不能直接创建。
+**`node-policies`**: signed policies for node permissions. Policies that raise privileges are generated after a change set is approved and cannot be created directly.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.node_id` | 目标节点 |
-| `spec.modules` | 允许启用的模块 |
-| `spec.roles` | 角色：`relay`、`gateway`（移动网关）、`subnet_router`（智能入口）、`edge`（本机运行 Edge，并声明怎样识别 Edge 发出的流量：Edge 所在容器的地址，或原生运行时的系统用户）；由 `node.set_roles` 签名 |
-| `spec.addresses` | 组网地址；有 `edge` 角色时还有 Edge 专用地址 |
-| `spec.advertised_routes` | 宣告的局域网网段（由 `node.advertise_routes` 签名） |
-| `spec.enrollment_public_key` | 入网公钥，用于验证准入证明 |
-| `spec.policy_version` | 只增不减 |
-| `spec.signature` | passkey 签名（降低权限时可省略） |
+| `spec.node_id` | Target node |
+| `spec.modules` | Modules allowed to be enabled |
+| `spec.roles` | Roles: `relay`, `gateway` (mobile gateway), `subnet_router` (smart gateway), `edge` (runs Edge on this machine and declares how to recognize traffic sent by Edge: the address of the container Edge runs in, or the system user when running natively); signed by `node.set_roles` |
+| `spec.addresses` | Mesh address; with the `edge` role, also the Edge address |
+| `spec.advertised_routes` | Advertised LAN prefixes (signed by `node.advertise_routes`) |
+| `spec.enrollment_public_key` | Enrollment public key, used to verify admission proofs |
+| `spec.policy_version` | Only increases |
+| `spec.signature` | Passkey signature (may be omitted when lowering privileges) |
 | `status.phase` | `pending` / `applied` / `rejected` |
-| `status.reason` | 被拒绝的原因（如签名无效、版本过旧、命中本地硬性禁止） |
+| `status.reason` | Why it was rejected (such as invalid signature, version too old, hit a local hard deny) |
 
-### 5.3 活动：`events`
+### 5.3 Activity: `events`
 
-只读、只追加，同时承担审计和活动时间线。
+Read-only and append-only; serves as both the audit log and the activity timeline.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `at` | 发生时间 |
-| `actor` | `{ kind, id }`；`kind` 为 `owner` / `api_token` / `node` / `system` |
-| `action` | 形如 `<资源>.<动作>`，例如 `device.add`、`node.remove`、`session.login` |
-| `targets` | 涉及的资源引用列表 |
+| `at` | Time of occurrence |
+| `actor` | `{ kind, id }`; `kind` is `owner` / `api_token` / `node` / `system` |
+| `action` | In the form `<resource>.<action>`, for example `device.add`, `node.remove`, `session.login` |
+| `targets` | List of references to the resources involved |
 | `outcome` | `success` / `failure` |
-| `change_id` | 关联的变更集（如有） |
-| `summary` | 一句话描述，供时间线显示 |
-| `details` | 结构化细节；敏感值已脱敏 |
+| `change_id` | The associated change set (if any) |
+| `summary` | A one-sentence description for the timeline |
+| `details` | Structured details; sensitive values are redacted |
 
-- 记录范围：所有写操作和安全事件（登录、token 创建与吊销、签名、入网等）；查询不记录；
-- 默认保留 90 天；API 不提供删除；
-- 支持按时间、操作方、动作、目标资源筛选；实时推送见第 7 节。
+- Recorded: all write operations and security events (login, token creation and revocation, signing, enrollment, and so on); queries are not recorded;
+- Retained for 90 days by default; the API provides no deletion;
+- Can be filtered by time, actor, action and target resource; real-time streaming is in section 7.
 
-### 5.4 系统
+### 5.4 System
 
-| 资源 | 内容 |
+| Resource | Contents |
 |---|---|
-| `hub`（单例） | 版本、对外地址、数据保留策略 |
-| `releases` | 可用的发布版本及签名信息；节点升级时从 Hub 获取 |
-| `backups` | 备份记录：时间、大小、存放位置、结果。动作：`create`、`verify` |
+| `hub` (singleton) | Version, public address, data retention policy |
+| `releases` | Available releases and their signature information; nodes fetch them from the Hub when upgrading |
+| `backups` | Backup records: time, size, location, result. Actions: `create`, `verify` |
 
-### 5.5 组网
+### 5.5 Mesh
 
-**`links`**：一对节点之间的连接。由 Hub 根据组网拓扑生成，不需要手动创建。
+**`links`**: the connection between a pair of nodes. Generated by the Hub from the mesh topology; no need to create manually.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `status.endpoints` | 两端的节点或设备 |
-| `status.path` | 当前路径：`kind`（`lan` / `direct` / `relay` / `multi_hop`）、`via`（经过的中继） |
+| `status.endpoints` | The nodes or devices at both ends |
+| `status.path` | The current path: `kind` (`lan` / `direct` / `relay` / `multi_hop`), `via` (the relays it goes through) |
 | `status.transport` | `udp` / `tls` / `quic` |
-| `status.rtt_ms`、`status.loss`、`status.jitter_ms` | 当前质量 |
-| `status.candidates` | 候选路径及各自的得分 |
-| `status.switched_at`、`status.switch_reason` | 最近一次切换的时间和原因 |
-| `spec.policy` | 可选的策略覆盖：优先直连、强制经某个中继、固定传输方式 |
+| `status.rtt_ms`, `status.loss`, `status.jitter_ms` | Current quality |
+| `status.candidates` | Candidate paths and their scores |
+| `status.switched_at`, `status.switch_reason` | Time and reason of the most recent switch |
+| `spec.policy` | Optional policy override: prefer direct, force via a given relay, fix the transport |
 
 **`devices`**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.name`、`spec.kind` | 名称；`phone` / `laptop` / `other` |
-| `spec.paths` | 启用的路径：直连家里、移动网关 |
-| `spec.disabled` | 禁用后，该设备的所有凭据立即失效（降低权限，直接执行） |
-| `status.last_handshake_at` | 各凭据中最近的一次握手 |
+| `spec.name`, `spec.kind` | Name; `phone` / `laptop` / `other` |
+| `spec.paths` | Enabled paths: direct to home, mobile gateway |
+| `spec.disabled` | When disabled, all of the device's credentials become invalid immediately (lowering privileges, executed directly) |
+| `status.last_handshake_at` | The most recent handshake among all credentials |
 
-新增设备为高风险操作（`device.add`，同时创建第一份凭据）。
+Adding a device is a high-risk operation (`device.add`, which also creates the first credential).
 
-**`device-credentials`**：一台设备的一份接入凭据。
+**`device-credentials`**: one access credential of a device.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.device_id`、`spec.label` | 所属设备；用途说明（如"第三方客户端"） |
-| `spec.kind` | `wireguard` / `connect`（CONNECT 代理凭据，见 `auth.md` 第 9 节） |
-| `status.public_key` | WireGuard 公钥（`wireguard`）；`connect` 类型只返回 token 前缀 |
-| `status.address` | 分配的组网地址（`wireguard`）。每份凭据一个地址：同一台设备的多份凭据会同时作为网关的不同对端，而 WireGuard 不允许两个对端的 `AllowedIPs` 重叠 |
-| `status.gateway_node_id` | 这份凭据当前所属的移动网关（由网关上报的握手决定，见 `mesh.md` 第 13 节） |
-| `status.last_handshake_at` | 最近一次握手 |
+| `spec.device_id`, `spec.label` | The device it belongs to; description of its purpose (such as "third-party client") |
+| `spec.kind` | `wireguard` / `connect` (CONNECT proxy credential, see `auth.md` section 9) |
+| `status.public_key` | WireGuard public key (`wireguard`); for the `connect` type only the token prefix is returned |
+| `status.address` | The assigned mesh address (`wireguard`). One address per credential: multiple credentials of the same device act as different peers of the gateway at the same time, and WireGuard does not allow the `AllowedIPs` of two peers to overlap |
+| `status.gateway_node_id` | The mobile gateway this credential currently belongs to (determined by the handshake reported by the gateway, see `mesh.md` section 13) |
+| `status.last_handshake_at` | The most recent handshake |
 
-- **私钥只在浏览器中生成**，Hub 只保存公钥，从不经手私钥；**配置文件、二维码和代理客户端配置只在创建时由浏览器生成一次**，之后不能再导出，丢失时新建凭据（`auth.md` 第 9 节）；
-- 新增 WireGuard 设备时一次创建两份凭据：主配置（直连家里 + 移动网关）和"全部经网关"的备用配置各用一份（`mesh.md` 第 13 节）；
-- 给已有设备新增凭据是高风险操作（`device_credential.create`），与新增设备一样需要签名；创建记入 `events`；
-- 动作：`revoke`。
+- **Private keys are generated only on the user's computer by the signing tool**; the Hub stores only the public key and never handles the private key; **configuration files, QR codes and proxy client configurations are generated by the signing tool once, at creation**, and cannot be exported again afterwards; if lost, create a new credential (`auth.md` section 9);
+- Adding a WireGuard device creates two credentials at once: one for the primary configuration (direct to home + mobile gateway) and one for the "all via gateway" backup configuration (`mesh.md` section 13);
+- Adding a credential to an existing device is a high-risk operation (`device_credential.create`) and requires a signature just like adding a device; creation is recorded in `events`;
+- Action: `revoke`.
 
 **`access-rules`**
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.from`、`spec.to` | 选择器：节点、设备、标签；`spec.from` 还可以选某个节点的 Edge 专用地址（该节点的 `edge`） |
-| `spec.ports` | 端口和协议 |
+| `spec.from`, `spec.to` | Selectors: nodes, devices, labels; `spec.from` can also select a node's Edge address (that node's `edge`) |
+| `spec.ports` | Ports and protocols |
 | `spec.action` | `allow` / `deny` |
-| `spec.priority` | 优先级 |
+| `spec.priority` | Priority |
 
-默认**拒绝**（`mesh.md` 第 12 节，ADR 0023）：组网成员之间、宣告的局域网段、Edge 专用地址发起的连接，都只有规则放行的才能建立；用户的设备默认可以访问所有成员和宣告的局域网段。规则按 `priority` 匹配。
+The default is **deny** (`mesh.md` section 12, ADR 0023): connections between mesh members, to advertised LAN prefixes, and initiated from an Edge address can be established only if a rule allows them; the user's devices can by default reach all members and advertised LAN prefixes. Rules are matched by `priority`.
 
-整份规则集作为一份带版本号的签名产物下发（`auth.md` 第 10.1 节）。**签名产物中写的是选择器展开后的结果**（成员 ID、地址、端口），节点只执行展开结果；标签变化导致展开结果变大时，Hub 生成新的规则集，作为放宽访问的变更等待签名，在签名之前继续执行旧的展开结果。放宽访问的修改是高风险操作；新增 deny 规则、删除 allow 规则属于收窄，直接执行。
+The whole rule set is delivered as one versioned signed artifact (`auth.md` section 10.1). **The signed artifact holds the result after selector expansion** (member IDs, addresses, ports), and nodes enforce only the expansion result; when a label change makes the expansion larger, the Hub generates a new rule set, which waits for a signature as a change that widens access, and until it is signed the old expansion result stays in force. Changes that widen access are high-risk operations; adding a deny rule or deleting an allow rule is narrowing and is executed directly.
 
-**`whois`**（查询接口）：`GET /api/v1/mesh/whois?address=…`，按组网地址查询它属于哪个节点、设备或 Edge，供控制台显示（roadmap M1 的"身份查询"）。这是 Hub 的声明；服务和 agent 需要确认对方身份时，使用本机的 `nett whois`（组网进程按已验证的准入材料回答，`mesh.md` 第 11 节）。
+**`whois`** (query interface): `GET /api/v1/mesh/whois?address=…` looks up which node, device or Edge a mesh address belongs to, for the console to display (the "identity lookup" in roadmap M1). This is a statement by the Hub; when a service or agent needs to confirm who the other side is, it uses the local `nett whois` (the mesh process answers from verified admission material, `mesh.md` section 11).
 
-**`hostnames`**：组网内的主机名。节点自动获得主机名（节点名）；用户可以添加别名。
+**`hostnames`**: hostnames within the mesh. Nodes automatically get a hostname (the node name); users can add aliases.
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.name` | 主机名 |
-| `spec.target` | 指向的节点 |
+| `spec.name` | Hostname |
+| `spec.target` | The node it points to |
 | `status.origin` | `auto` / `user` |
 
-### 5.6 变更
+### 5.6 Changes
 
-**`changes`**：完整设计见 [changes.md](changes.md)。要点：
+**`changes`**: see [changes.md](changes.md) for the full design. Key points:
 
-| 字段 | 说明 |
+| Field | Description |
 |---|---|
-| `spec.steps` | 步骤 `{ action_type, target, payload, expected_revision }`；每个变更集只有一个步骤 |
-| `spec.reason` | 原因说明 |
+| `spec.steps` | Steps `{ action_type, target, payload, expected_revision }`; each change set has a single step |
+| `spec.reason` | Reason |
 | `spec.apply_mode` | `manual` / `on_approval` |
-| `spec.not_before`、`spec.expires_at` | 最早执行时间；等待批准的截止时间 |
+| `spec.not_before`, `spec.expires_at` | Earliest execution time; deadline for approval |
 | `status.phase` | `planned` / `awaiting_approval` / `approved` / `applying` / `succeeded` / `failed` / `rejected` / `cancelled` / `expired` |
-| `status.risk`、`status.proposed_by` | 风险等级；提议方 |
-| `status.plan` | 预演结果；其中的 `hash` 即批准和签名绑定的 `plan_hash` |
-| `status.approval` | 批准信息；高风险时为绑定 `plan_hash` 的 passkey 签名 |
-| `status.progress`、`status.result` | 执行进度；执行结果 |
+| `status.risk`, `status.proposed_by` | Risk level; proposer |
+| `status.plan` | Plan result; its `hash` is the `plan_hash` that approval and signature bind to |
+| `status.approval` | Approval information; for high risk, a passkey signature bound to `plan_hash` |
+| `status.progress`, `status.result` | Execution progress; execution result |
 
-动作：`approve`、`reject`、`apply`、`cancel`。
+Actions: `approve`, `reject`, `apply`, `cancel`.
 
-**`action-types`**：只读的动作目录。字段：名称、目标资源类型、风险等级、能否撤销、所需权限范围、说明。完整列表见 [changes.md](changes.md) 第 9 节。
+**`action-types`**: the read-only action catalog. Fields: name, target resource type, risk level, whether it can be undone, required permission scope, description. See [changes.md](changes.md) section 8 for the full list.
 
-## 6. 关系
+## 6. Relationships
 
 ```
 owner ── passkeys
       ── api-tokens ──┐
-                      ├─► events（actor）
+                      ├─► events (actor)
 enrollment-tokens ─► nodes ◄── node-policies
                       │
-                      ├── links（两端）
+                      ├── links (two ends)
                       └── hostnames
 devices ── device-credentials
-changes ─► 任意资源（target）；events.change_id ─► changes
+changes ─► any resource (target); events.change_id ─► changes
 ```
 
-## 7. 实时推送
+## 7. Real-time streams
 
-使用 SSE：
+Uses SSE:
 
-| 端点 | 内容 |
+| Endpoint | Contents |
 |---|---|
-| `GET /api/v1/streams/events` | 新增的活动事件 |
-| `GET /api/v1/streams/resources?kind=nodes` | 资源变化（`status` 更新），供控制台刷新 |
+| `GET /api/v1/streams/events` | Newly added activity events |
+| `GET /api/v1/streams/resources?kind=nodes` | Resource changes (`status` updates), for the console to refresh |
 
-连接数有上限；空闲连接定期发送注释行保持连接。
+The number of connections is capped; idle connections periodically send comment lines to stay alive.
 
-## 8. 阶段划分
+## 8. Phases
 
-| 阶段 | 资源 |
+| Phase | Resources |
 |---|---|
-| M1 | `owner`、`trust`、`nodes`、`enrollment-tokens`、`node-policies`、`events`、`hub`、`releases`、`backups`；站点：`site`（推送的站点模型，hub.md 第 4 节）；组网：`links`、`devices`、`device-credentials`、`access-rules`、`hostnames`（节点名与别名）、`whois` |
-| 随 Web 控制台加入（ADR 0024） | `passkeys`、`sessions`、`api-tokens`（`script`）、`changes`、`action-types` |
+| M1 | `owner`, `trust`, `nodes`, `enrollment-tokens`, `node-policies`, `events`, `hub`, `releases`, `backups`; site: `site` (the pushed site model, hub.md section 4); mesh: `links`, `devices`, `device-credentials`, `access-rules`, `hostnames` (node names and aliases), `whois` |
+| Added with the web console (ADR 0024) | `passkeys`, `sessions`, `api-tokens` (`script`), `changes`, `action-types` |
 
-## 9. 待定问题
+## 9. Open questions
 
-| 问题 | 在哪里决定 |
+| Question | Where it is decided |
 |---|---|
-| 权限范围的完整列表与命名 | `auth.md` |
+| The full list and naming of permission scopes | `auth.md` |

@@ -1,32 +1,32 @@
-# 0005. Web 控制台为 React SPA，内嵌进 Hub 二进制
+# 0005. Web console is a React SPA embedded in the Hub binary
 
-- 状态：已采纳；Web 控制台推迟，见 0024
-- 日期：2026-10-12
+- Status: accepted; the Web console is deferred, see 0024
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-Web 是首要的交互入口。控制台是单用户的组网控制台，数据密集（表格、拓扑图、表单、审批流程），只调用对外 API。
+The Web is the primary interaction entry point. The console is a single-user mesh console with dense data (tables, topology graphs, forms, approval flows) and calls only the external API.
 
-## 决定
+## Decision
 
-- React + Vite 构建纯静态 SPA，不使用服务端渲染；
-- TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow（拓扑图）；
-- API 客户端由 OpenAPI 生成（openapi-typescript + openapi-fetch）；
-- 构建产物在构建时预压缩，用 rust-embed 嵌入 Hub 二进制。
+- React + Vite build a purely static SPA, with no server-side rendering;
+- TanStack Router / Query / Table, shadcn/ui + Tailwind, xyflow (topology graph);
+- The API client is generated from OpenAPI (openapi-typescript + openapi-fetch);
+- Build artifacts are pre-compressed at build time and embedded into the Hub binary with rust-embed.
 
-## 理由
+## Rationale
 
-- React 生态最大，数据密集型控制台所需的组件都有成熟实现，生成和维护代码最可靠；
-- 纯 SPA 只调用对外 API，本身就在持续检验 API 是否完备；
-- 前端运行在浏览器中，对 Hub 的影响只是二进制增加约 1 MB；静态资源带内容哈希、永久缓存，运行时几乎不消耗 CPU 和内存；
-- 部署仍然只有一个文件。
+- React has the largest ecosystem, mature implementations exist for every component a data-dense console needs, and generated and maintained code is the most reliable;
+- A pure SPA calls only the external API, which continuously verifies that the API is complete;
+- The frontend runs in the browser, so its only effect on the Hub is about 1 MB of extra binary size; static assets carry content hashes and are cached permanently, so they consume almost no CPU or memory at runtime;
+- Deployment is still a single file.
 
-## 放弃的方案
+## Alternatives considered
 
-- **Svelte / SvelteKit**：体积更小，但组件生态较小。
-- **HTMX + 服务端模板**：页面接口与 JSON API 需要各写一套，与 API 优先冲突；WebAuthn 交互不便。
-- **Rust 编译到 WASM（Leptos、Dioxus）**：全栈一种语言，但生态不成熟，WASM 体积大，迭代慢。
+- **Svelte / SvelteKit**: smaller size, but a smaller component ecosystem.
+- **HTMX + server-side templates**: page endpoints and the JSON API would each have to be written separately, which conflicts with API-first; WebAuthn interaction is awkward.
+- **Rust compiled to WASM (Leptos, Dioxus)**: one language across the stack, but the ecosystem is immature, WASM size is large, and iteration is slow.
 
-## 影响
+## Consequences
 
-- 仓库中包含一个 Node.js 构建环境（仅构建时需要）。
+- The repository contains a Node.js build environment (needed only at build time).

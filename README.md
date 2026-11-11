@@ -1,44 +1,63 @@
 # nett
 
-中文 · [English](README.en.md)
+> Open-source, self-hosted mesh networking that connects your scattered machines into one network. It picks the best path automatically and switches when a path degrades or a node goes offline, without dropping active connections.
 
-> 一个开源、自托管的组网基础设施，把你分散在各处的机器连成一张网：自动选择最优路径，路径变差或节点离线时自动切换，进行中的连接不中断。
+nett is for individuals and small teams with a few scattered machines, for example several VPSes in different regions plus a NAS or a server at home. WireGuard handles encryption, and nett's path layer picks the best path among LAN direct, public direct, hole-punched and relayed paths; when UDP is blocked it falls back to TLS. Other hosts at home join through a LAN smart gateway (subnet router), and your phone can reach them while you are out. Members join only with your signature. The footprint is very small, and the mesh keeps working while the Hub is offline.
 
-面向拥有少量分散机器的个人或小团队：几台不同地域的 VPS，加上家里的 NAS 或主机。WireGuard 负责加密，nett 的路径层在局域网直连、公网直连、打洞和经中继等路径之间选择最优路径；UDP 受阻时改用 TLS；家里的其他主机经局域网智能入口接入，手机在外也能访问它们；成员凭你的签名准入。资源占用极低，Hub 离线时组网照常工作。
+- Homepage: [nett.gotry.io](https://nett.gotry.io) · a GoTry project
+- Command line: `nett`
+- Services:
+  - `nett-hub`: the mesh control plane, operated with the `nett` command line; a web console comes later (ADR 0024)
+  - `nett-node`: the control agent on every machine; handles enrollment, the connection to the Hub and upgrades
+  - `nett-mesh`: the mesh process; handles WireGuard, path selection and switching, DNS and access rules
+  - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
+  - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
+- Status: **M1 in development** ([roadmap](docs/roadmap.md)). A mesh can be deployed with local signing ([design/local-signing.md](docs/design/local-signing.md)) or with a Hub ([design/hub.md](docs/design/hub.md)): Linux uses kernel WireGuard, macOS joins as a native member, and container services on a Mac that need real client IPs use a container member.
+- License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
 
-- GoTry 旗下项目 · 主页 `nett.gotry.io`（建设中）
-- 命令行：`nett`
-- 服务：
-  - `nett-hub`：组网的控制面，用命令行 `nett` 操作；Web 控制台以后加入（ADR 0024）
-  - `nett-node`：每台机器上的控制代理，负责入网、连接 Hub 和升级
-  - `nett-mesh`：组网进程，负责 WireGuard、选路与切换、DNS 和访问规则
-  - `nett-transport`：按需运行的低权限传输适配进程，UDP 不可用时把流量转成 TLS
-  - `nett-relay`：能被外部连入的节点上的中继与公网传输入口
-- 状态：**M1 开发中**。接入 Hub 之前，可以用本地签名部署组网（[design/local-signing.md](docs/design/local-signing.md)）：Linux 使用内核 WireGuard，macOS 以原生成员加入，Mac 上需要访客真实 IP 的容器服务另用容器内成员；Hub 尚未完成（[design/hub.md](docs/design/hub.md)）
-- 许可证：[MIT](LICENSE-MIT) 或 [Apache-2.0](LICENSE-APACHE)（双许可，任选其一）
+## Install
 
-## 安装
+`nett` runs on Linux and macOS:
 
-- **macOS**（原生成员与签名工具 `nett site`）：
-  ```bash
-  brew install gotry-io/tap/nett
-  nett site init                              # 只在持有站点的这台电脑上做一次
-  sudo nett install                           # 生成本机密钥，打印 nett site add 要用的一行
-  nett site add mac --keys "<打印的那一行>"   # 把这台机器加进站点
-  sudo nett install                           # 找到给本机的期望状态，核对、导入并启动组网服务
-  ```
-  站点用命令维护：`nett site add`、`allow`、`rules`、`status` 等，每条修改命令先列出要签名的内容，确认后签名（[design/site.md](docs/design/site.md)）。期望状态更新后执行 `sudo nett install`（只重新加载，不重启）；站点不在这台机器上时加 `--config <这个节点的 desired.json>`。组网服务以 root 运行（创建 utun 需要 root），运行的是复制到 root 专属目录的副本，因此每次 `brew upgrade nett` 之后再运行一次 `sudo nett install`（[design/release.md](docs/design/release.md) 第 4 节）。
-- **Linux**：从 [Releases](https://github.com/gotry-io/nett/releases) 下载对应架构的静态版本，核对签名（[keys/](keys/README.md)）后解压。`sudo ./nett install` 把它装到 `/usr/local/bin`，在 `/etc/nett` 生成本机密钥，打印 `nett site add` 要用的一行；在持有站点的电脑上用 `nett site add <名字> --keys "…"` 加入它（能被连入的机器加 `--public --ipv4 <地址>`），把生成的这台机器的 `desired.json` 拷过来，`sudo nett install --config desired.json` 导入并启动组网服务（systemd 单元 [nett-mesh.service](packaging/systemd/nett-mesh.service) 由它写入）。期望状态更新后同样用 `--config` 再运行一次（只重新加载，不重启）。
-- **接入 Hub**（可选，[design/hub.md](docs/design/hub.md)）：在一台能被连入的主机上运行 Hub（[packaging/hub/](packaging/hub/) 中 Hub 与 Caddy 的 Compose 示例），`nett-hub init --url https://hub.example.com` 打印一次性的关联码；在持有站点的电脑上 `nett site link <关联码>`，再对每台已有的机器运行 `nett site invite <名字>`，在那台机器上执行它打印的 `sudo nett install nett_enr_…`。之后每条修改命令签名后推送到 Hub，各台机器上的 nett-node 接收并交给组网进程，命令报告哪些机器已经应用；`nett site status` 列出每台机器是否在线、是否已应用最新的修改，以及各对机器之间的路径与往返时间。Hub 不在时组网照常，修改在它恢复后补齐。**新机器**经 Hub 入网：电脑上 `nett site add <名字>`（能被连入的机器加 `--public`，公网地址由 Hub 得知），在新机器上运行它打印的一行 `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`（所有平台相同，30 分钟内有效，只能用一次），不用复制公钥和文件；`sudo nett leave` 让一台机器退出，Hub 随即让其他成员删除它。
-- **命令**：`nett help` 列出全部命令，任何命令加 `--help` 显示用法。
-- **查看状态**：`sudo nett status` 列出本机和每个对端的连通情况、路径、往返时间与丢包，以及被拒绝的配置；`sudo nett status <对端>` 看一个对端的候选路径和最近的切换（[design/status.md](docs/design/status.md)）。
+```bash
+curl -fsSL https://nett.gotry.io/install.sh | sh
+```
 
-## 文档
+The script installs only the `nett` program to `/usr/local/bin`, after checking the download against the hash written in the script. Release archives and their signatures are also on the [releases page](https://github.com/gotry-io/nett/releases) ([keys/](keys/README.md) explains how to verify them). On the computer that holds your site, you can install with Homebrew instead: `brew install gotry-io/tap/nett`.
 
-- [愿景](docs/vision.md)：要解决的问题、目标与约束
-- [架构](docs/architecture.md)：总体设计：角色边界、信任链、组网、回源、技术栈
-- [路线图](docs/roadmap.md)：各阶段内容与验收标准
-- [架构决策记录](docs/adr/README.md)
-- [设计文档](docs/design/README.md)
-- [安全问题报告](SECURITY.md)
-- [开发规则](CLAUDE.md)：安全边界、编码规范与提交约定（也供 AI 编码助手使用）
+### With a Hub
+
+1. Run the Hub on a host other machines can reach ([packaging/hub/](packaging/hub/) has a Compose example with Caddy). `nett-hub init --url https://hub.example.com` prints a one-time link code.
+2. On the computer that holds the site: `nett site init` once, then `nett site link <link code>`.
+3. Add a machine: `nett site add <name>` (with `--public` for a machine others connect to; the Hub learns its public address). It prints one line to run on the new machine, the same on every platform, valid for 30 minutes and usable once:
+   ```bash
+   curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…
+   ```
+4. Change the site with commands such as `nett site allow`, `routes` and `edge` ([design/site.md](docs/design/site.md)). Every change lists what will be signed, is signed once you confirm, and is pushed to the Hub; nett-node on each machine hands it to the mesh process, and the command reports which machines applied it.
+
+`nett site status` lists whether each machine is online and has applied the latest change, and the path and round-trip time between each pair. Machines that were already members before the Hub connect with `nett site invite <name>`. `sudo nett leave` takes a machine out of the site, and every member drops it. While the Hub is down the mesh keeps working, and changes catch up when it is back.
+
+### Without a Hub (local signing)
+
+1. On the computer that holds the site: `nett site init`.
+2. On each machine, `sudo nett install` creates its keys and prints the line for `nett site add`.
+3. On the computer: `nett site add <name> --keys "<that line>"` (with `--public --ipv4 <address>` for a machine others connect to).
+4. Give the machine its desired state: on a Mac that holds the site, run `sudo nett install` again, which finds it in the site directory; elsewhere, copy the generated `nodes/<name>/desired.json` over and run `sudo nett install --config desired.json`. Run the same command again after the desired state changes; it reloads without a restart.
+
+The mesh service runs as root from a copy in a root-only directory, so run `sudo nett install` again after upgrading nett ([design/release.md](docs/design/release.md) section 4).
+
+## Use
+
+- `nett help` lists every command; add `--help` to any command for its usage.
+- `sudo nett status` lists this node and every peer: whether it is connected, the path, round-trip time and loss, and any rejected configuration; `sudo nett status <peer>` shows one peer's candidate paths and recent switches ([design/status.md](docs/design/status.md)).
+
+## Documentation
+
+- [Vision](docs/vision.md): problems, goals and constraints
+- [Architecture](docs/architecture.md): role boundaries, chain of trust, mesh, origin identity, technology stack
+- [Roadmap](docs/roadmap.md): milestones and acceptance criteria
+- [Architecture decision records](docs/adr/README.md)
+- [Design documents](docs/design/README.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md) and [security policy](SECURITY.md)
+- [CLAUDE.md](CLAUDE.md): security boundaries, coding conventions and commit format, also used by AI coding assistants

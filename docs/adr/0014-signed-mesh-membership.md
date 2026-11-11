@@ -1,56 +1,56 @@
-# 0014. 组网成员表由签名产物构成
+# 0014. The mesh member table is built from signed artifacts
 
-- 状态：已采纳
-- 日期：2026-11-04
+- Status: accepted
+- Date: 2026-11-04
 
-## 背景
+## Context
 
-ADR 0006 规定：提升权限必须由用户签名，节点独立验证，Hub 只是中间人。但在原设计中，组网成员的公钥、宣告的网段和访问规则都由 Hub 经期望状态直接下发，成员不做验证。Hub 被攻破后，可以把攻击者的公钥作为新成员加入组网，或者把某个局域网段指向攻击者；在默认允许的访问规则下，攻击者能访问所有成员和家里的局域网。这与采用 Headscale 时"控制服务器被攻破即可加节点、改 ACL"的问题相同，也正是 ADR 0006 要避免的。
+ADR 0006 states that raising privileges must be signed by the user, nodes verify independently, and the Hub is only an intermediary. If the public keys of mesh members, advertised routes and access rules were delivered by the Hub through the desired state without members verifying them, a compromised Hub could add an attacker's public key as a new member, or point a LAN prefix at the attacker; under default-allow access rules, the attacker could reach all members and the home LAN. This is the same problem as with Headscale, where "a compromised control server can add nodes and change the ACL", and it is exactly what ADR 0006 sets out to avoid.
 
-另外两处缺陷与此相关：入网握手使用 Noise IK，而入网 token 中只有 Hub 公钥的 128 位指纹，IK 需要完整公钥；入网 token 中的一次性密钥会被 Hub 看到，无法用来证明"这个节点确实是持有用户授权的那台"。
+Two related requirements: the enrollment handshake uses Noise IK, which needs the full Hub public key rather than a fingerprint; and a one-time key that the Hub could see would not prove that "this node is really the one the user authorized".
 
-## 决定
+## Decision
 
-**成员只为能验证签名链条的对端建立 WireGuard 会话；Hub 负责搬运签名产物，不能自己生成。**
+**A member establishes WireGuard sessions only with peers whose signature chain it can verify; the Hub carries signed artifacts and cannot produce them itself.**
 
-入网：
+Enrollment:
 
-1. 控制台创建入网 token 时，Hub 先分配节点 ID 和组网地址；**浏览器**生成一对一次性的入网签名密钥（Ed25519）；
-2. 初始节点策略中写入节点 ID、组网地址、模块和入网公钥，由 passkey 签名；
-3. token 中携带：Hub 地址、**Hub 的完整身份公钥**、信任锚清单指纹、入网私钥。Hub 只看得到入网公钥；
-4. 节点入网时生成身份密钥和组网密钥，用入网私钥签名 `{节点 ID, 身份公钥, 组网公钥}`，形成**准入证明**，随后丢弃入网私钥；
-5. Hub 用策略中的入网公钥验证准入证明，然后把"签名策略 + 准入证明"作为该成员的准入材料，分发给其他成员。
+1. The signing tool on the user's computer allocates a node ID and a mesh address and generates a one-time enrollment signing key pair (Ed25519) (ADR 0024, design/hub.md section 6);
+2. The initial node policy contains the node ID, mesh address, modules and the enrollment public key, signed with the recovery key;
+3. The token carries: the Hub address, the **full Hub identity public key**, the trust anchor list fingerprint, and the enrollment private key. The Hub sees only the enrollment public key;
+4. At enrollment the node generates an identity key and a mesh key, signs `{node ID, identity public key, mesh public key}` with the enrollment private key to form the **admission proof**, and then discards the enrollment private key;
+5. The Hub verifies the admission proof with the enrollment public key in the policy, then distributes "signed policy + admission proof" to the other members as this member's admission material.
 
-成员验证的链条：
+The chain a member verifies:
 
-| 对端属性 | 由什么证明 |
+| Peer attribute | Proven by |
 |---|---|
-| 节点的组网公钥和组网地址 | 信任锚 → 含 mesh 模块的签名节点策略 → 准入证明 |
-| 设备的组网公钥和组网地址 | 信任锚 → `device.add` 或 `device_credential.create` 的签名产物 |
-| `AllowedIPs` 中的局域网网段 | 信任锚 → `node.advertise_routes` 的签名产物 |
-| Edge 专用地址（ADR 0015） | 信任锚 → 签名节点策略中的 `edge` 角色与地址分配 |
-| 访问规则 | 信任锚 → 整份规则集的签名产物（选择器展开后的成员、地址和端口），版本号只增不减 |
+| A node's mesh public key and mesh address | trust anchor → signed node policy containing the mesh module → admission proof |
+| A device's mesh public key and mesh address | trust anchor → signed artifact of `device.add` or `device_credential.create` |
+| LAN prefixes in `AllowedIPs` | trust anchor → signed artifact of `node.advertise_routes` |
+| Edge address (ADR 0015) | trust anchor → the `edge` role and address assignment in the signed node policy |
+| Access rules | trust anchor → signed artifact of the whole rule set (members, addresses and ports after selector expansion), with a version number that only increases |
 
-- 移除成员、撤销网段、收窄规则都是降低权限，Hub 可以直接下发，不需要签名。成员把它们作为**撤销记录**持久保存：移除的节点和吊销的凭据按 ID 永久拒绝；收窄只能被版本更高的签名产物取代；Hub 重发旧的签名产物不能恢复权限。成员只因撤销记录删除对端，完整快照中缺少某个成员不视为撤销（auth.md 第 10.4 节）；
-- 准入材料会在批准很久之后才分发给新加入的成员。成员验证其他成员的准入材料时，不检查批准的过期时间，只检查签名、版本和撤销记录；被取消或过期未执行的批准由撤销记录作废（auth.md 第 10.2 节）；
-- 候选路径、中继分配、主机名不涉及权限，仍由 Hub 直接下发；最坏情况是连接中断或流量绕路，内容始终是加密的。主机名和 Hub 的 `whois` 接口只是 Hub 的声明，不能作为身份依据；需要确认对端是谁时，由本机按已验证的准入材料回答（mesh.md 第 11 节）。
+- Removing a member, revoking a prefix and narrowing rules all lower privileges; the Hub may deliver them directly without a signature. Members persist them as **revocations**: removed nodes and revoked credentials are rejected permanently by ID; a narrowing can only be superseded by a signed artifact with a higher version; a replayed old signed artifact from the Hub cannot restore privileges. Members delete a peer only because of a revocation; a member missing from a full snapshot is not treated as revoked (auth.md section 10.4);
+- Admission material may be distributed to a newly joined member long after approval. When a member verifies another member's admission material, it does not check the approval's expiry time, only the signature, the version and the revocations; approvals that were cancelled or expired without execution are invalidated by revocations (auth.md section 10.2);
+- Candidate paths, relay assignments and hostnames involve no privileges and are still delivered directly by the Hub; the worst case is a broken connection or detoured traffic, and the content is always encrypted. Hostnames and the Hub's `whois` interface are only claims by the Hub and cannot serve as proof of identity; when the peer's identity must be confirmed, the local machine answers from the verified admission material (mesh.md section 11).
 
-## 理由
+## Rationale
 
-- 被攻破的 Hub 在组网上能做的只剩"让连接断开"，不能加入成员、不能放宽访问、不能劫持网段，与 ADR 0006 一致。前提是用户没有在被攻破的控制台上完成签名（auth.md 第 2 节）；
-- 入网私钥只在浏览器和节点上出现，Hub 无法替换节点的公钥；
-- token 携带完整的 Hub 公钥后，入网和日常连接都能使用 IK，只需一个往返。
+- All a compromised Hub can do to the mesh is "disconnect it": it cannot add members, widen access or hijack prefixes, consistent with ADR 0006. This assumes the user's signing device is not compromised (auth.md section 2);
+- The enrollment private key appears only in the token and on the node, so the Hub cannot replace the node's public key;
+- Once the token carries the full Hub public key, both enrollment and routine connections can use IK, needing a single round trip.
 
-## 放弃的方案
+## Alternatives considered
 
-- **入网后再由用户逐个签名节点公钥**（类似 Tailnet Lock）：安全性相同，但每个新节点都要多一次 passkey 操作，而且节点在签名之前无法加入组网。
-- **入网时改用 Noise XX**：可以只带指纹，但只解决握手问题，不解决成员准入问题。
-- **继续信任 Hub 下发的成员表**：实现最简单，但签名授权在组网上形同虚设。
+- **The user signs each node public key one by one after enrollment** (similar to Tailnet Lock): the same security, but every new node needs an extra passkey operation, and a node cannot join the mesh before it is signed.
+- **Switch to Noise XX at enrollment**: a fingerprint alone would suffice, but it only solves the handshake problem and not the member admission problem.
+- **Keep trusting the member table delivered by the Hub**: simplest to implement, but signed authorization would be meaningless on the mesh.
 
-## 影响
+## Consequences
 
-- 入网 token 变长（多出约 52 个字符的公钥）；
-- 每个成员要保存并验证所有对端的准入材料。按 50 个成员计算，约几十 KiB，计入组网状态的内存上限；
-- 从备份重建 Hub 时，准入材料随数据库一起恢复，成员无需重新入网；备份落后于节点时，由节点回传已生效的签名产物和撤销记录（protocol.md 第 6.4 节）；
-- 撤销只在收到撤销记录的成员上生效。被攻破的 Hub 可以对从未收到某条撤销记录的成员（例如之后才加入的成员）隐瞒它；
-- 设备凭据（`device_credential.create`）、宣告网段、访问规则都必须以签名产物的形式下发，changes.md 的动作目录随之调整。
+- The enrollment token gets longer (about 52 more characters for the public key);
+- Each member stores and verifies the admission material of all peers. For 50 members this is about tens of KiB, counted toward the memory limit for mesh state;
+- When the Hub is rebuilt from a backup, admission material is restored with the database and members do not need to re-enroll; when the backup is behind the nodes, nodes send back the signed artifacts and revocations already in effect (protocol.md section 6.4);
+- A revocation takes effect only on members that received it. A compromised Hub can withhold a revocation from members that never received it (for example members that join later);
+- Device credentials (`device_credential.create`), advertised routes and access rules must all be delivered as signed artifacts, and the action catalog in changes.md is adjusted accordingly.

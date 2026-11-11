@@ -1,43 +1,43 @@
-# 0006. 身份模型与 passkey 签名授权
+# 0006. Identity model and passkey signing authorization
 
-- 状态：已采纳；passkey 的部分推迟，签名先由用户电脑上的签名工具完成，见 0024
-- 日期：2026-10-12
+- Status: accepted; the passkey part is deferred, signing is first done by the signing tool on the user's computer, see 0024
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-Hub 管理着所有节点。如果 Hub 能自行决定开启任意节点的高危能力（如组网），那么 Hub 一旦被攻破，所有机器都会失守。同时，系统要支持脚本等外部程序（包括 AI）调用 API。
+The Hub manages all nodes. If the Hub could decide on its own to enable a high-risk capability (such as the mesh) on any node, then once the Hub is compromised, every machine falls. At the same time, the system must let external programs such as scripts (including AI) call the API.
 
-## 决定
+## Decision
 
-**身份类型**
+**Identity types**
 
-| 身份 | 认证方式 |
+| Identity | Authentication |
 |---|---|
-| 用户 | passkey（WebAuthn）+ 恢复密钥；短期会话 Cookie（HttpOnly、SameSite=Strict） |
-| API token | 权限范围 + 过期时间 + 可吊销；固定前缀便于泄露扫描；服务端只存哈希，明文只显示一次 |
-| node | 一次性入网 token → X25519 身份密钥；WebSocket 内层 Noise 双向认证与端到端加密 |
-| 手机设备 | 设备凭据 |
+| User | passkey (WebAuthn) + recovery key; short-lived session cookie (HttpOnly, SameSite=Strict) |
+| API token | permission scope + expiry + revocable; fixed prefix to ease leak scanning; the server stores only the hash, and the plaintext is shown once |
+| node | one-time enrollment token -> X25519 identity key; inner Noise mutual authentication and end-to-end encryption within the WebSocket |
+| Phone device | device credentials |
 
-**授权**：每个请求都归属到一个身份，检查权限范围和策略后执行，并写入审计。
+**Authorization**: every request is attributed to an identity, checked against permission scopes and policy before execution, and written to the audit log.
 
-**签名授权**：提升权限的变更（开启模块、新增设备、高风险操作）必须由用户用 passkey 签名：以变更内容的哈希作为 WebAuthn 挑战。Hub 只负责转发签好名的策略，node 验证签名后才生效。降低权限可以由 Hub 直接下发。策略带递增版本号，防止重放。节点本地还可以设置 Hub 和签名都无法突破的硬性禁止项。组网成员表（成员公钥、宣告网段、访问规则）同样由签名产物构成，见 ADR 0014。
+**Signing authorization**: changes that raise privileges (enabling a module, adding a device, high-risk operations) must be signed by the user with a passkey: the hash of the change content is used as the WebAuthn challenge. The Hub only forwards the signed policy, and the node applies it only after verifying the signature. Lowering privileges can be issued by the Hub directly. Policies carry an increasing version number to prevent replay. A node can also set local hard prohibitions that neither the Hub nor a signature can override. The mesh member table (member public keys, advertised routes, access rules) likewise consists of signed artifacts, see ADR 0014.
 
-**token 只能提议高风险变更，不能批准。**
+**A token can only propose high-risk changes, not approve them.**
 
-## 理由
+## Rationale
 
-- Hub 被攻破时，攻击者伪造不出用户签名，无法越权（前提见"影响"中关于控制台页面的一条）；
-- passkey 在浏览器中即可完成签名，不依赖专门的移动端 App 或命令行工具；
-- 同一套机制同时服务于人和脚本等外部程序（包括 AI）。
+- When the Hub is compromised, the attacker cannot forge the user's signature and cannot exceed their authority (the precondition is in the note on console pages under "Consequences");
+- A passkey can sign in the browser, without depending on a dedicated mobile app or command-line tool;
+- The same mechanism serves both people and external programs such as scripts (including AI).
 
-## 放弃的方案
+## Alternatives considered
 
-- **Hub 直接下发权限**：最方便，但 Hub 成为单点。
-- **节点本地配置文件作为唯一上限**：安全，但每次修改都要登录机器。
-- **移动端 Secure Enclave 专用密钥**：安全性略高，但在移动端 App 完成之前无法使用。
+- **Hub issues privileges directly**: the most convenient, but the Hub becomes a single point of failure.
+- **A node-local configuration file as the sole upper bound**: secure, but every change requires logging in to the machine.
+- **A dedicated mobile Secure Enclave key**: slightly more secure, but unusable until the mobile app is done.
 
-## 影响
+## Consequences
 
-- 同步型 passkey（如 iCloud 钥匙串）的私钥不只存在于一台设备，这是单用户场景下可以接受的取舍；
-- **控制台页面由 Hub 提供**（ADR 0005），passkey 签的是页面算出的载荷哈希，无法向用户显示内容。被攻破的 Hub 可以显示一项操作、实际请求签名另一项。因此"Hub 被攻破不能越权"成立的前提是：用户没有在被攻破的控制台上完成签名。缓解：节点保存接受过的每一份签名产物，`nett trust log` 在本机列出，不经过 Hub；独立于 Hub 的批准工具列为以后的增强（auth.md 第 2 节）；
-- 必须提供恢复手段：初始化时生成一把离线保存的恢复密钥，并建议注册第二把 passkey，防止设备丢失后无法授权。
+- The private key of a synced passkey (such as iCloud Keychain) lives on more than one device, which is an acceptable trade-off for a single-user setting;
+- **Console pages are served by the Hub** (ADR 0005), and what the passkey signs is the payload hash computed by the page, so the content cannot be shown to the user. A compromised Hub can display one operation and actually request a signature for another. So "a compromised Hub cannot exceed authority" holds on the precondition that the user did not complete a signature on a compromised console. Mitigation: nodes keep every signed artifact they have accepted, and `nett trust log` lists them locally without going through the Hub; an approval tool independent of the Hub is listed as a future enhancement (auth.md section 2);
+- A recovery path must be provided: at initialization an offline recovery key is generated, and registering a second passkey is recommended, so that losing a device does not make authorization impossible.

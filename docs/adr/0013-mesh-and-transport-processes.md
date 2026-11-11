@@ -1,53 +1,53 @@
-# 0013. 组网进程与传输适配进程
+# 0013. Mesh process and transport adapter
 
-- 状态：已采纳
-- 日期：2026-11-04
+- Status: accepted
+- Date: 2026-11-04
 
-## 背景
+## Context
 
-组网有两类工作不适合放在 nett-node 里：
+Two kinds of mesh work do not belong in nett-node:
 
-- **在用户态处理数据包**：UDP 不可用时的 TLS 传输适配，以及无内核模块平台（Synology DSM、旧内核）上的用户态 WireGuard。ADR 0001 说 WireGuard 的 UDP 端口"由内核监听"，所以不算 nett-node 监听公网端口；用户态平台上这个前提不成立；
-- **路径层**：测量、打分、切换、DNS 应答、访问规则与地址转换。nett-node 是一个 tokio 单线程的 root 进程。它的 bug、内存泄漏，或者误放进运行时的阻塞操作，以及 node 被 OOM 杀掉、node 升级，都会让组网停止切换、DNS 停止应答。
+- **Packet handling in user space**: the TLS transport adapter used when UDP is unavailable, and userspace WireGuard on platforms without a kernel module (Synology DSM, old kernels). ADR 0001 says the WireGuard UDP port is "listened on by the kernel", so nett-node is not considered to listen on a public port; on userspace platforms this premise does not hold;
+- **The path layer**: measurement, scoring, switching, DNS answering, access rules and address translation. nett-node is a tokio single-threaded root process. A bug in it, a memory leak, a blocking operation mistakenly placed in the runtime, the node being killed by the OOM killer, or a node upgrade would stop the mesh from switching paths and DNS from answering.
 
-architecture.md 第 2 节要求 Hub 和 node 都停止时组网照常工作。只把数据包处理移出 node 还不够：已建立的路径能保住，但 node 不在时路径出了故障没有人切换。
+architecture.md section 2 requires the mesh to keep working when both the Hub and the node are stopped. Moving only packet handling out of the node is not enough: established paths survive, but if a path fails while the node is down, nobody switches.
 
-## 决定
+## Decision
 
-组网拆成两个独立的系统服务，都是 `nett` 可执行文件的子命令（ADR 0012）：
+The mesh is split into two independent system services, both subcommands of the `nett` executable (ADR 0012):
 
-| 进程 | 负责 | 运行身份 | 持有的密钥 |
+| Process | Responsibility | Runs as | Keys held |
 |---|---|---|---|
-| **组网进程** `nett mesh` | WireGuard 配置（内核 netlink，或用户态实现 + TUN）；路径层（测量、打分、切换、与对端协调）；组网地址和局域网地址上的探测应答；DNS 应答器；访问规则、Edge 专用地址的防冒用与地址转换、智能入口地址转换的过滤规则；准入材料验证；本机的身份查询 | Linux：`CAP_NET_ADMIN`、`CAP_NET_RAW`（在 WireGuard 端口上探测，ADR 0021），DNS 需要时加 `CAP_NET_BIND_SERVICE`，不是 root；用户态平台：能创建 TUN 的身份（通常是 root） | 组网私钥 |
-| **传输适配进程** `nett transport` | TLS（WebSocket）传输适配，后期加入 QUIC：在回环地址上收发 WireGuard 密文，转写到 TLS 连接 | 专用低权限用户 | 无，只经手密文 |
+| **Mesh process** `nett mesh` | WireGuard configuration (kernel netlink, or a userspace implementation + TUN); the path layer (measurement, scoring, switching, coordination with peers); probe responses on the mesh address and LAN addresses; the DNS responder; access rules, anti-spoofing and address translation for Edge addresses, and filter rules for smart gateway address translation; admission material verification; local identity lookups | Linux: `CAP_NET_ADMIN`, `CAP_NET_RAW` (probing on the WireGuard port, ADR 0021), plus `CAP_NET_BIND_SERVICE` when DNS needs it; not root. Userspace platforms: an identity that can create a TUN device (usually root) | Mesh private key |
+| **Transport adapter** `nett transport` | TLS (WebSocket) transport adaptation, QUIC later: sends and receives WireGuard ciphertext on the loopback address and relays it to the TLS connection | A dedicated low-privilege user | None; handles ciphertext only |
 
-- **组网进程独立运行**：从 nett-node 经本机接口接收 `trust` 和 `mesh` 分区，自己验证签名，持久化最后一次的配置、信任锚和撤销记录；node 停止时照常测量、切换、应答 DNS。它不连接 Hub、不访问 Docker、不执行外部命令；
-- **配置只有一个所有者**：WireGuard 接口、组网相关的过滤和地址转换规则只由组网进程修改；
-- **传输适配不并入组网进程**：它解析来自外部的 TLS 和 WebSocket 数据。放进有 `CAP_NET_ADMIN` 的进程，一旦被攻破就能改路由、过滤规则和 WireGuard 配置；单独以低权限运行，被攻破也只能丢弃或篡改无法解密的密文；
-- **各自由系统的服务管理器守护**：组网进程先于 node 启动，有单独的内存上限、自动重启和更低的 OOM 优先级；传输适配进程和 nett-relay 同样各自守护，崩溃后由服务管理器重启，不依赖 node 在线。nett-node 只按策略启用或停用它们；
-- **组网进程是组网配置的唯一来源**：传输适配进程和 nett-relay 启动时向组网进程取自己的配置（TLS 目标与证书指纹、本机端口、中继分配、CONNECT 所需的已验证材料），组网进程确认它们就绪；nett-relay 在组网进程报告过滤规则就绪之前不开放 CONNECT。本机套接字按对端进程的系统身份鉴别调用方；
-- **升级**：本机接口和状态文件都带版本号，相邻两个发布版本之间双向兼容。发布包的元数据标明组网进程是否有变化，没有变化时升级不重启组网进程；但组网进程最多落后一个发布版本，再升级时随之重启；
-- 组网私钥由 nett-node 在入网时生成（准入证明需要它），经权限为 `0600` 的本机接口交给组网进程，之后只由组网进程保存，不离开节点；
-- 资源预算单独计算：两个进程空闲 RSS 各 ≤ 5 MB，转发缓冲有上限。
+- **The mesh process runs independently**: it receives the `trust` and `mesh` partitions from nett-node over a local interface, verifies signatures itself, and persists the last configuration, the trust anchors and the revocations; when the node is stopped it keeps measuring, switching and answering DNS. It does not connect to the Hub, access Docker or execute external commands;
+- **Configuration has a single owner**: the WireGuard interface and the mesh-related filter and address translation rules are modified only by the mesh process;
+- **The transport adapter is not merged into the mesh process**: it parses TLS and WebSocket data from outside. In a process with `CAP_NET_ADMIN`, a compromise could change routes, filter rules and the WireGuard configuration; running separately with low privileges, a compromise can only drop or tamper with ciphertext that cannot be decrypted;
+- **Each is supervised by the system's service manager**: the mesh process starts before the node, with its own memory limit, automatic restart and a lower OOM priority; the transport adapter and nett-relay are likewise supervised individually, restarted by the service manager after a crash, and do not depend on the node being online. nett-node only enables or disables them according to policy;
+- **The mesh process is the sole source of mesh configuration**: when the transport adapter and nett-relay start, they fetch their configuration from the mesh process (TLS target and certificate fingerprint, local port, relay assignment, the verified material needed for CONNECT), and the mesh process confirms they are ready; nett-relay does not open CONNECT until the mesh process reports that the filter rules are ready. The local socket authenticates the caller by the peer process's system identity;
+- **Upgrades**: the local interface and the state files carry version numbers and are bidirectionally compatible between two adjacent release versions. The release package metadata states whether the mesh process changed; if it did not, an upgrade does not restart the mesh process; the mesh process lags by at most one release version, and restarts with the next upgrade;
+- The mesh private key is generated by nett-node at enrollment (the admission proof needs it), handed to the mesh process over a local interface with `0600` permissions, and from then on held only by the mesh process and never leaves the node;
+- The resource budget is counted separately: idle RSS of each of the two processes is <= 5 MB, and forwarding buffers have upper bounds.
 
-这是**故障隔离，不是安全边界**：nett-node 仍是 root，被攻破的 node 依然可以改动组网进程。拆分保证的是 node 的故障和升级不影响组网。
+This is **fault isolation, not a security boundary**: nett-node is still root, and a compromised node can still modify the mesh process. The split guarantees that node failures and upgrades do not affect the mesh.
 
-## 理由
+## Rationale
 
-- 恢复"管理和流量分离"：node 升级、崩溃、被 OOM 杀掉时，组网照常切换，DNS 照常应答；
-- 恢复"有权限的不对外"：node 不在任何公网端口上处理数据包；
-- 解析外部输入的代码（传输适配）不持有任何权限和密钥。
+- Restores "management and traffic are separate": when the node is upgraded, crashes or is killed by the OOM killer, the mesh keeps switching and DNS keeps answering;
+- Restores "privileged components are not exposed, exposed components are not privileged": the node does not handle packets on any public port;
+- Code that parses external input (the transport adapter) holds no privileges and no keys.
 
-## 放弃的方案
+## Alternatives considered
 
-- **保留在 nett-node 中**：少一个进程，但 nett-node 的任何故障都会让组网停止切换，而智能入口正是受影响最大的节点。
-- **只把数据包处理移出 node**：保住已建立的路径，但 node 不在时没有人切换路径、应答 DNS。
-- **传输适配并入组网进程**：少一个进程和一个本机接口，但让解析外部输入的代码拿到修改网络配置的权限。
-- **放进 nett-relay**：relay 只在 `public` 节点上运行，而且按设计不持有组网私钥。
+- **Keep it in nett-node**: one process fewer, but any nett-node failure would stop the mesh from switching, and the smart gateway is the node affected most.
+- **Move only packet handling out of the node**: preserves established paths, but when the node is down nobody switches paths or answers DNS.
+- **Merge the transport adapter into the mesh process**: one process and one local interface fewer, but code that parses external input would gain the privilege to modify network configuration.
+- **Put it in nett-relay**: the relay runs only on `public` nodes and, by design, does not hold the mesh private key.
 
-## 影响
+## Consequences
 
-- 开启 mesh 模块的节点上多一个常驻服务（组网进程）；存在 TLS 传输候选时再多一个（传输适配进程）；资源预算表相应增加；
-- nett-node 与组网进程之间需要一个有版本号的本机接口（配置下发、状态与计数上报）；
-- 传输适配进程和 nett-relay 的配置由组网进程提供，它们重启时不依赖 node；
-- 组网进程重启时重新加载已保存的配置：内核 WireGuard 的会话不受影响，用户态平台上经它的路径会短暂中断。
+- A node with the mesh module enabled has one more resident service (the mesh process); when a TLS transport candidate exists, one more again (the transport adapter); the resource budget table grows accordingly;
+- nett-node and the mesh process need a versioned local interface (configuration delivery, status and counter reporting);
+- The configuration of the transport adapter and nett-relay is provided by the mesh process, and they do not depend on the node when they restart;
+- When the mesh process restarts it reloads the saved configuration: kernel WireGuard sessions are unaffected, and paths through it are briefly interrupted on userspace platforms.

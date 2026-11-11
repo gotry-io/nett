@@ -1,53 +1,53 @@
-# 0019. nett 只做组网
+# 0019. nett does only the mesh
 
-- 状态：已采纳
-- 日期：2026-11-05
+- Status: accepted
+- Date: 2026-11-05
 
-## 背景
+## Context
 
-组网、观测（替代轻量监控）、管理（容器部署、入口路由、AI 运维）放在同一个项目里时，三者共用 Hub、nett-node 和变更集，耦合在一起：
+When the mesh, observability (replacing lightweight monitoring) and management (container deployment, ingress routing, AI operations) lived in one project, the three shared the Hub, nett-node and the change set and were coupled together:
 
-- nett-node 要同时负责指标采集、部署、入口配置和组网的转交；
-- 变更集、协议和 API 要为部署和 AI 准备大量结构（多步骤、回滚、自动执行策略、部署档位、机密）；
-- 第一个可用版本要等观测和组网都完成。
+- nett-node had to handle metrics collection, deployment, ingress configuration and the mesh handoff at the same time;
+- The change set, protocol and API had to carry a lot of structure for deployment and AI (multi-step, rollback, auto-execution policy, deployment profiles, secrets);
+- The first usable version had to wait for both observability and the mesh to be finished.
 
-组网是最核心、风险最大的能力。用户决定 nett 只做组网，观测和管理与组网解耦。
+The mesh is the most central and riskiest capability. The user decided that nett does only the mesh, and observability and management are decoupled from it.
 
-## 决定
+## Decision
 
-- **nett 只做组网**。观测和管理以后作为独立项目另做，通过 nett 的 API 和身份查询（`whois`）对接；nett 不为它们预留接口或数据结构。它们的早期设计保存在 git 历史中（提交 cfd5ef1 及之前的版本）。
-- **不在 nett 中的内容**：
-  - 观测：metrics 模块、资产清单与服务发现（`services`）、到组网之外目标的线路测量、告警与通知渠道、心跳检查、外部死信开关、指标的存储、实时数据与图表；
-  - 管理：deploy 模块（Compose、stack、部署档位、部署钩子、机密加密下发与 `stack_spec`、CI 身份）、ingress 模块（路由、证书、Edge 配置生成、DNS 服务商对接）、只读容器日志、从现有工具导入；变更集的多步骤、影响分析、自动执行策略、主动验证与回滚；AI 运维（MCP 适配层、运维 Agent、`ai` 类型的 API token）和 MCP 网关。
-- **nett 的组件**：
-  - **nett-hub**：组网的控制面和 Web 控制台。负责用户与 passkey、恢复密钥与备份密钥、API token（只有 `script` 类型）、信任锚、节点与入网、节点策略、设备与凭据、访问规则、主机名（节点名与用户添加的别名）、连接（`links`）、`whois`、活动事件、发布包分发、Hub 备份，以及组网动作的变更集（单步骤，高风险时 passkey 签名）；
-  - **nett-node**：控制代理。只负责入网、连接 Hub、保存本地状态、升级、把签名材料转交组网进程、上报清单（平台、能力、地址）和链路状态、执行组网动作、拉取 Hub 的加密备份；不访问 Docker；
-  - **组网进程、传输适配进程、nett-relay、命令行 `nett`**。
-- **回源是组网的通用能力**（ADR 0015）：
-  - Edge 指用户自己在入口节点上运行的反向代理，任何实现都可以（Caddy、nginx、Traefik 等）。nett 不生成、也不管理它的配置；
-  - 节点策略中的 `edge` 角色（`node.set_roles`，需要签名）声明本机运行 Edge，并说明怎样识别 Edge 发出的流量：Edge 所在容器的地址，或原生运行时的系统用户。据此分配 Edge 专用地址；
-  - Edge 专用地址默认不能访问任何目标，能访问哪些主机和端口由用户在访问规则中写（属于签名的访问规则集，放宽需要签名）；
-  - 智能入口按来源分类转换；macOS 上需要访客真实 IP 的容器服务使用容器内成员（ADR 0016）。
-- **Hub 自己的 HTTPS**：Hub 安装脚本为 Hub 的控制台域名生成反向代理配置（默认 Caddy，ADR 0009），并在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay。这台反向代理也可以同时是用户的 Edge，但 nett 只生成 Hub 和 nett-relay 这两段配置。
-- **agent 互访待讨论**：工作负载身份可能作为组网的扩展（沿用 Edge 专用地址的机制，给单个程序分配专用地址）；MCP 网关不属于 nett。不排期。
-- **阶段**：P0 立项 → M1 组网 → M2 组网增强（多跳、QUIC 与混淆、CONNECT 的 UDP 支持、两端都在对称型 NAT 后时的打洞）→ M3 客户端（iOS、Android App 与 Windows）。
-- 角色边界和资源预算：nett-node、组网进程、传输适配进程、nett-relay 空闲 RSS 各 ≤ 5 MB，Hub ≤ 30–50 MB。
+- **nett does only the mesh**. Observability and management will be built later as independent projects, integrating through nett's API and identity lookup (`whois`); nett reserves no interfaces or data structures for them. Their early designs are kept in git history (commit cfd5ef1 and earlier).
+- **Not in nett**:
+  - Observability: the metrics module, asset inventory and service discovery (`services`), measurement of lines to targets outside the mesh, alerts and notification channels, heartbeat checks, external dead man's switches, metrics storage, real-time data and charts;
+  - Management: the deploy module (Compose, stack, deployment profiles, deployment hooks, encrypted secret delivery and `stack_spec`, CI identity), the ingress module (routes, certificates, Edge configuration generation, DNS provider integration), read-only container logs, importing from existing tools; multi-step change sets, impact analysis, auto-execution policy, active verification and rollback; AI operations (the MCP adapter layer, the operations agent, `ai`-type API tokens) and the MCP gateway.
+- **Components of nett**:
+  - **nett-hub**: the control plane of the mesh and the Web console. It handles users and passkeys, recovery keys and backup keys, API tokens (only the `script` type), trust anchors, nodes and enrollment, node policy, devices and credentials, access rules, hostnames (node names and user-added aliases), links (`links`), `whois`, activity events, release package distribution, Hub backup, and change sets for mesh actions (single step, passkey signature when high risk);
+  - **nett-node**: the control agent. It only handles enrollment, connecting to the Hub, keeping local state, upgrades, handing signed material to the mesh process, reporting inventory (platform, capabilities, addresses) and link status, executing mesh actions, and pulling the Hub's encrypted backups; it does not access Docker;
+  - **The mesh process, the transport adapter, nett-relay, and the command-line `nett`**.
+- **Origin traffic is a general mesh capability** (ADR 0015):
+  - The Edge is the reverse proxy the user runs on the entry node; any implementation will do (Caddy, nginx, Traefik and so on). nett neither generates nor manages its configuration;
+  - The `edge` role in the node policy (`node.set_roles`, requires a signature) declares that this machine runs an Edge and states how to identify the traffic the Edge sends: the address of the container the Edge runs in, or the system user when it runs natively. The Edge address is assigned accordingly;
+  - The Edge address cannot reach any target by default; which hosts and ports it can reach is written by the user in the access rules (part of the signed access rule set, widening requires a signature);
+  - The smart gateway translates by source class; container services on macOS that need the visitor's real IP use the container member (ADR 0016).
+- **The Hub's own HTTPS**: the Hub install script generates the reverse proxy configuration for the Hub console's domain (Caddy by default, ADR 0009), and on the same port 443 hands the nett-relay domain over to nett-relay by SNI. This reverse proxy can also be the user's Edge, but nett generates only these two sections, for the Hub and nett-relay.
+- **Agent-to-agent access is to be discussed**: workload identity may become an extension of the mesh (reusing the Edge address mechanism, assigning a dedicated address to a single program); the MCP gateway does not belong to nett. Not scheduled.
+- **Phases**: P0 project start → M1 mesh → M2 mesh enhancements (multi-hop, QUIC and obfuscation, UDP support for CONNECT, hole punching when both ends are behind symmetric NAT) → M3 clients (iOS and Android apps and Windows).
+- Role boundaries and resource budget: idle RSS of nett-node, the mesh process, the transport adapter and nett-relay is <= 5 MB each, and the Hub <= 30-50 MB.
 
-## 理由
+## Rationale
 
-- 组网是最核心、风险最大的能力，单独做能最早得到可用的版本；
-- 去掉为部署和 AI 预留的结构后，Hub、nett-node、协议、API 和变更集都明显变简单；
-- 观测和管理以后经 API 和 `whois` 对接，组网的签名身份正好可以作为它们的身份依据；
-- 回源属于组网，是因为"这个请求确实来自我的反向代理"只有网络层能保证，而且现在就有云上反向代理回源到家里服务的用法。
+- The mesh is the most central and riskiest capability; building it on its own yields a usable version earliest;
+- With the structure reserved for deployment and AI removed, the Hub, nett-node, the protocol, the API and the change set all become much simpler;
+- Observability and management will integrate later through the API and `whois`, and the mesh's signed identity can serve as their basis of identity;
+- Origin traffic belongs to the mesh because "this request really comes from my reverse proxy" can only be guaranteed at the network layer, and cloud reverse proxies sending origin traffic to services at home is already a use case.
 
-## 放弃的方案
+## Alternatives considered
 
-- **观测、组网、管理一起做**：第一个可用版本推迟太久，组网的设计被其他功能牵着走。
-- **留在 nett 中作为独立组件**：仍要在 nett 中维护它们的接口和文档，范围不清。
-- **回源能力也放到 nett 之外**：服务看不到访客的真实 IP，也分不清访客和用户自己的设备。
+- **Build observability, mesh and management together**: the first usable version would be delayed too long, and the mesh design would be pulled around by other features.
+- **Keep them in nett as independent components**: nett would still have to maintain their interfaces and documentation, and the scope would be unclear.
+- **Also put the origin traffic capability outside nett**: services cannot see the visitor's real IP and cannot tell visitors apart from the user's own devices.
 
-## 影响
+## Consequences
 
-- Hub、nett-node、协议、API 和变更集只包含组网需要的结构：变更集只有单步骤，API token 只有 `script` 类型，nett-node 不访问 Docker；
-- ADR 0010 只约束"nett 不含 AI 逻辑"；
-- 用户现有的监控、容器管理面板和反向代理继续使用，直到以后的项目替代它们。
+- The Hub, nett-node, the protocol, the API and the change set contain only the structure the mesh needs: change sets have only a single step, API tokens have only the `script` type, and nett-node does not access Docker;
+- ADR 0010 constrains only that "nett contains no AI logic";
+- The user's existing monitoring, container management panels and reverse proxies keep being used until later projects replace them.

@@ -1,86 +1,86 @@
-# 本地签名部署
+# Local Signing
 
-- 状态：草案
-- 阶段：M1，原型关卡之后、接入 Hub 之前（roadmap M1，ADR 0022）
+- Status: draft
+- Phase: M1, after the prototype gate and before joining the Hub (roadmap M1, ADR 0022)
 
-## 1. 目标
+## 1. Goals
 
-用 nett 替换用户手工配置的 WireGuard 隧道，不等 Hub、nett-node 和控制台。典型的例子：VPS 上的 Edge 经隧道回源到家里 Mac 上的容器服务（ADR 0015、0016）。
+Replace the WireGuard tunnels the user configured by hand with nett, without waiting for the Hub, nett-node and the console. A typical example: the Edge on a VPS reaches back through a tunnel to a container service on a Mac at home (ADR 0015, 0016).
 
-签名、验证和组网的行为与接入 Hub 之后相同：用户签名，节点独立验证。Hub 本来只是签名产物的转发者（auth.md 第 2 节）；这里由用户自己的电脑上的签名工具生成产物，用户把文件拷到节点上。
+Signing, verification and mesh behavior are the same as after joining the Hub: the user signs and nodes verify independently. The Hub is only a forwarder of signed artifacts (auth.md section 2); here the signing tool on the user's own computer generates the artifacts, and the user copies the files to the nodes.
 
-## 2. 范围
+## 2. Scope
 
-| 包含 | 不包含 |
+| Included | Not included |
 |---|---|
-| 签名工具 `nett site`，运行在用户自己的电脑上：生成恢复密钥和信任锚清单，分配地址，签名节点策略、宣告网段和访问规则集，为每个节点生成期望状态文件；用命令维护站点（site.md） | Hub、nett-node、控制台、passkey、自动升级 |
-| 正式构建的 `nett mesh --config`：读本地的期望状态文件，`SIGHUP` 时重新加载 | 设备凭据、移动网关、主机名与 DNS、CONNECT |
-| 节点上生成密钥的 `nett keys`（macOS 上由 `sudo nett install` 完成） | 原生 macOS 成员、DSM、Home Assistant OS |
-| 访问控制（mesh.md 第 12 节）、Edge 专用地址（ADR 0015）、容器内成员作为它所在容器网络的智能入口（mesh.md 第 10 节、ADR 0016） | |
-| 运行方式：Linux 上的 systemd 单元（`packaging/systemd/nett-mesh.service`）；容器内成员的容器镜像与 Compose 示例（`packaging/container/`） | |
+| The signing tool `nett site`, running on the user's own computer: generates the recovery key and the trust anchor list, assigns addresses, signs node policy, advertised routes and access rule sets, generates a desired state file for each node; maintains the site with commands (site.md) | Hub, nett-node, console, passkey, automatic upgrade |
+| `nett mesh --config` in the official build: reads the local desired state file and reloads on `SIGHUP` | Device credentials, mobile gateway, hostnames and DNS, CONNECT |
+| `nett keys`, which generates keys on the node (on macOS done by `sudo nett install`) | Native macOS member, DSM, Home Assistant OS |
+| Access control (mesh.md section 12), the Edge address (ADR 0015), a container member acting as the smart gateway of the container network it lives in (mesh.md section 10, ADR 0016) | |
+| Deployment: the systemd unit on Linux (`packaging/systemd/nett-mesh.service`); the container image and Compose example for container members (`packaging/container/`) | |
 
-候选路径、中继和传输与原型相同（mesh.md 第 5–9 节）。
+Candidate paths, relays and transports are the same as in the prototype (mesh.md sections 5-9).
 
-## 3. 信任与密钥
+## 3. Trust and keys
 
-| 密钥 | 在哪里生成 | 保存 |
+| Key | Where generated | Storage |
 |---|---|---|
-| 恢复密钥（ECDSA P-256），唯一的信任锚 | `nett site init`，用户自己的电脑 | 站点目录中的私钥文件，权限 `0600`，只在签名时读取；另存一份离线备份 |
-| 节点的组网私钥（X25519）与身份私钥（X25519） | `nett keys`，节点本机 | 节点本机，权限 `0600`，不离开节点（硬性规则 10）；只把公钥交给签名工具 |
-| 入网密钥（Ed25519，auth.md 第 8 节） | `nett site add`，每个节点一把 | 不保存：签出准入证明后即丢弃 |
+| Recovery key (ECDSA P-256), the only trust anchor | `nett site init`, the user's own computer | Private key file in the site directory, mode `0600`, read only when signing; keep an offline backup |
+| The node's mesh private key (X25519) and identity private key (X25519) | `nett keys`, on the node itself | On the node itself, mode `0600`, never leaving the node (hard rule 10); only the public keys are given to the signing tool |
+| Enrollment key (Ed25519, auth.md section 8) | `nett site add`, one per node | Not stored: discarded after the admission proof is signed |
 
-- 信任锚清单（auth.md 第 11.1 节）只含恢复密钥，没有 passkey。控制台地址（`origin`）可以在 `nett site init --origin` 时写上；还不知道时为 `https://nett.invalid`，接入 Hub 时由恢复密钥签一次信任锚更新改成控制台的地址（auth.md 第 11.2 节）；
-- 恢复密钥等同于控制台的恢复密钥：泄露等于交出全部控制权；丢失后不能再签发新的授权，只能重建信任锚、所有节点重新入网。建议站点目录放在加密卷上，私钥文件另存一份离线备份；
-- 准入证明由入网私钥对节点 ID、身份公钥、组网公钥签名，节点策略写入入网公钥并由恢复密钥签名。产物格式与经 Hub 入网时相同，其他成员按同一条链验证（mesh.md 第 4.1 节）。
+- The trust anchor list (auth.md section 11.1) contains only the recovery key, with no passkey. The console address (`origin`) can be set with `nett site init --origin`; when it is not yet known it is `https://nett.invalid`, and when joining the Hub the recovery key signs one trust anchor update that changes it to the console address (auth.md section 11.2);
+- The recovery key is equivalent to the console's recovery key: leaking it hands over all control; losing it means no new authorizations can be issued, the trust anchor can only be rebuilt, and all nodes must enroll again. Keep the site directory on an encrypted volume and keep an offline backup of the private key file;
+- The admission proof is signed by the enrollment private key over the node ID, identity public key and mesh public key; the node policy is bound to the enrollment public key and signed by the recovery key. The artifact formats are the same as when enrolling through the Hub, and other members verify along the same chain (mesh.md section 4.1).
 
-## 4. 站点
+## 4. Site
 
-站点由签名工具的命令维护（site.md）：机器、Edge、宣告的网段与访问规则，连接由访问规则推导。不接 Hub 时：
+The site is maintained with the signing tool's commands (site.md): machines, Edge, advertised routes and access rules, with connections derived from the access rules. Without the Hub:
 
-- 加入机器时用 `--keys` 写明公钥，也就是机器上 `nett keys`（macOS 上 `sudo nett install`）打印的一行；`public` 机器写明公网地址（site.md 第 4 节）；
-- 每条修改命令为期望状态有变化的机器重写 `nodes/<机器>/desired.json`，由用户拷到机器上（第 5 节）。
+- When adding a machine, give the public keys with `--keys`, that is, the line printed by `nett keys` on the machine (`sudo nett install` on macOS); for a `public` machine, give the public address (site.md section 4);
+- Each modifying command rewrites `nodes/<machine>/desired.json` for the machines whose desired state changed, and the user copies it to the machine (section 5).
 
-## 5. 分发与更新
+## 5. Distribution and updates
 
-- 每条修改命令为期望状态有变化的节点重写它的期望状态文件（site.md 第 7 节），格式与接入 Hub 后 nett-node 交给组网进程的 `mesh` 分区相同（protocol.md 第 6 节）。文件不含私钥。一台机器的第一份期望状态固定它的信任锚（mesh.md 第 4.2 节），要经可信的通道送到；之后的更新带签名，组网进程按已固定的信任锚和已生效的版本验证，可以经不受信任的通道传递；
-- 用户把文件拷到节点上，替换后运行 `nett reload`，看到它是否被接受（status.md 第 4.1 节）；容器内成员用 `docker exec <容器> /nett reload`；macOS 上 `sudo nett install` 导入并重新加载（release.md 第 4 节）；
-- 签名载荷的过期时间是生成后 30 天：节点首次接受自己的节点策略时检查它（auth.md 第 10.2 节），因此生成后 30 天内拷到节点上；超过时，`nett site invite <机器>` 重签它的节点策略并重写它的文件。生成时已签的节点策略离过期不到 7 天的，换一个新版本重签；
-- 组网进程照常验证签名、版本和撤销记录。验证失败的部分不应用，已生效的状态保持不变，并记录事件（硬性规则 3–6）。
+- Each modifying command rewrites the desired state file of the nodes whose desired state changed (site.md section 7); its format is the same as the `mesh` partition that nett-node hands to the mesh process after joining the Hub (protocol.md section 6). The file contains no private keys. A machine's first desired state fixes its trust anchor (mesh.md section 4.2) and must be delivered over a trusted channel; later updates carry signatures, and the mesh process verifies them against the pinned trust anchor and the effective version, so they can travel over untrusted channels;
+- The user copies the file to the node, replaces the old one, runs `nett reload` and sees whether it was accepted (status.md section 4.1); a container member uses `docker exec <container> /nett reload`; on macOS `sudo nett install` imports and reloads (release.md section 4);
+- The expiry of a signed payload is 30 days after generation: the node checks it when it first accepts its own node policy (auth.md section 10.2), so copy it to the node within 30 days of generation; when it has passed, `nett site invite <machine>` re-signs its node policy and rewrites its file. A node policy that was signed at generation and is less than 7 days from expiry is re-signed with a new version;
+- The mesh process verifies signatures, versions and revocations as usual. Parts that fail verification are not applied, the effective state stays unchanged, and an event is recorded (hard rules 3-6).
 
-## 6. 访问控制、Edge 与容器内成员
+## 6. Access control, Edge and container members
 
-按 mesh.md 第 12 节与 ADR 0015、0016 实现。本阶段的做法：
+Implemented according to mesh.md section 12 and ADR 0015, 0016. The approach in this phase:
 
-- **过滤**：Linux 上用 nftables，挂在 `prerouting`，优先级在 Docker 的目的地址转换之前，匹配从 `nett0` 进入的流量。先安装规则，再添加对端；规则更新失败时保持拒绝；
-- **Edge**：`nett site edge` 写明 Edge 所在容器的网段（site.md 第 5.2 节）。从这些来源发往组网的流量，源地址换成 Edge 专用地址，这条转换在 Docker 的源地址伪装之前生效。本机输出和容器转发两个方向上，丢弃源地址为 Edge 专用地址、但不是来自 Edge 的数据包。这个网段里的每个容器都会被当作 Edge，因此只写 Edge 容器自己的地址，或只有 Edge 使用的容器网络；
-- **宣告的网段**：其他成员把它加进这个节点对端的 `AllowedIPs`，并在组网接口上加路由；
-- **容器内成员**：是它所在容器网络的智能入口（ADR 0016）。容器在网络中使用固定地址，在自己的网络命名空间中开启转发（Compose 的 `sysctls`），宣告服务的固定地址。只转发来自 Edge 专用地址、访问规则放行的连接，来源换成自己在出接口上的地址，也就是它在容器网络中的固定地址；需要真实 IP 的服务把这个地址配置为可信代理。其他来源的转发丢弃（智能入口为其他来源准备的"普通地址"，ADR 0015，留到接入局域网时实现）。容器以 `NET_ADMIN`、`NET_RAW` 运行；服务保留自己的网络，容器内成员重启不影响服务。固定地址只属于运行中的那个容器：用 `docker compose run` 为容器内成员或服务跑一次性任务（生成密钥、部署前的检查、迁移）时，临时容器继承同一个地址，与运行中的容器冲突（Docker 报地址已被占用），所以这类任务在不接网络的临时容器中运行（`docker run --network none`，或只为这一次覆盖 `network_mode: none`）。
+- **Filtering**: nftables on Linux, attached to `prerouting` with a priority before Docker's destination NAT, matching traffic entering from `nett0`. Rules are installed first, then peers are added; when a rule update fails, access stays denied;
+- **Edge**: `nett site edge` specifies the subnet of the container where the Edge runs (site.md section 5.2). For traffic from these sources to the mesh, the source address is replaced with the Edge address, and this translation takes effect before Docker's source masquerading. In both directions, local output and container forwarding, packets whose source is the Edge address but which do not come from the Edge are dropped. Every container in this subnet is treated as the Edge, so specify only the Edge container's own address, or a container network used only by the Edge;
+- **Advertised routes**: other members add them to the `AllowedIPs` of this node's peer and add routes on the mesh interface;
+- **Container member**: it is the smart gateway of the container network it lives in (ADR 0016). The container uses a fixed address in the network, enables forwarding in its own network namespace (`sysctls` in Compose), and advertises the fixed addresses of the services. It forwards only connections that come from the Edge address and are allowed by the access rules, replacing the source with its own address on the outgoing interface, that is, its fixed address in the container network; a service that needs the real IP configures this address as a trusted proxy. Forwarding from other sources is dropped (the "ordinary address" that the smart gateway prepares for other sources, ADR 0015, is left to be implemented when the LAN is connected). The container runs with `NET_ADMIN` and `NET_RAW`; the service keeps its own network, and restarting the container member does not affect the service. A fixed address belongs only to the running container: when `docker compose run` is used to run a one-off task for the container member or the service (generating keys, pre-deployment checks, migrations), the temporary container inherits the same address and conflicts with the running container (Docker reports the address is already in use), so such tasks run in a temporary container with no network (`docker run --network none`, or override `network_mode: none` for that run only).
 
-## 7. 替换已有的隧道
+## 7. Replacing an existing tunnel
 
-- **并行准备**：新的组网使用自己的端口和网段（`41820`、`100.88.0.0/16`），与旧隧道互不影响；先确认两端连通、访问规则生效，再切换；
-- **切换**：服务固定在容器网络中的地址，可信代理改为容器内成员的地址，Edge 的上游改为服务的地址；
-- **回滚**：Edge 的上游改回旧地址。旧隧道的配置一直保留到验证通过；
-- 在用户的机器上执行之前，先列出命令和回滚方法，经用户确认（CLAUDE.md "隐私与操作边界"）。
+- **Prepare in parallel**: the new mesh uses its own port and prefix (`41820`, `100.88.0.0/16`), so it does not interfere with the old tunnel; confirm that both ends connect and the access rules take effect before switching;
+- **Switch**: pin the service to its address in the container network, change the trusted proxy to the container member's address, and change the Edge upstream to the service's address;
+- **Roll back**: change the Edge upstream back to the old address. Keep the old tunnel's configuration until verification passes;
+- Before executing anything on the user's machines, list the commands and the rollback method and get the user's confirmation (CLAUDE.md "Privacy and operating boundaries").
 
-## 8. 验证
+## 8. Verification
 
-实验 A 的场景 `nett-lab run access`（`crates/nett-lab/topologies/access.toml`，每次推送都在 CI 中运行）：一个运行 Edge 的成员（背后有一个"容器"，成员像 Docker 一样对它做源地址伪装）、一个在锥形 NAT 之后的容器内成员（背后有一个服务，宣告它的地址）、一个普通成员，访问规则只放行 Edge 访问这个服务的一个端口。通过标准：
+The scenario `nett-lab run access` of experiment A (`crates/nett-lab/topologies/access.toml`, run in CI on every push): a member running the Edge (with a "container" behind it, which the member source-masquerades like Docker), a container member behind a cone NAT (with a service behind it, advertising its address), and an ordinary member; the access rules allow only the Edge to reach one port of this service. Pass criteria:
 
-- Edge 访问服务放行的端口能连上，服务看到的来源是容器内成员的地址；
-- Edge 访问其他端口、Edge 所在成员自己和普通成员访问这个服务，都被拒绝；
-- 一个成员伪造路由和 `AllowedIPs`、把包发往容器内成员背后没有宣告的地址，被容器内成员丢弃（模拟这个成员被攻破）；
-- 没有规则放行的成员之间互相连不上，规则放行的能连上；隧道内探测不受访问规则影响；
-- 在 Edge 所在的成员上以 Edge 专用地址为源发出的包，不出现在其他成员的组网接口上；
-- 各成员的规则集都已生效，没有数据面失败。
+- The Edge can connect to the allowed port of the service, and the source the service sees is the container member's address;
+- The Edge reaching other ports, the member hosting the Edge itself, and the ordinary member reaching this service are all denied;
+- A member that forges routes and `AllowedIPs` and sends packets to an address not advertised behind the container member has them dropped by the container member (simulating a compromised member);
+- Members with no allowing rule cannot reach each other, and those with an allowing rule can; in-tunnel probes are not affected by the access rules;
+- Packets sent from the member hosting the Edge with the Edge address as source do not appear on other members' mesh interfaces;
+- The rule sets of all members are in effect, with no data plane failures.
 
-## 9. 接入 Hub 时
+## 9. When joining the Hub
 
-接入 Hub 时沿用这把恢复密钥、信任锚版本、已分配的地址和产物版本，节点不重新入网（hub.md 第 3.5 节）。
+When joining the Hub, the same recovery key, trust anchor version, assigned addresses and artifact versions are kept, and nodes do not enroll again (hub.md section 3.5).
 
-## 10. 待定问题
+## 10. Open questions
 
-| 问题 | 说明 |
+| Question | Notes |
 |---|---|
-| 恢复密钥的保护 | 文件权限之外，是否加口令加密，或放进硬件密钥（auth.md 第 14 节） |
-| 宣告的网段与本机网络重叠 | 成员在组网接口上加路由之前，是否检查它与本机直连的网络是否重叠（重叠时本机发往那个网络的流量会被引进组网）；目前由签名工具只检查与组网网段、其他节点网段的重叠 |
+| Protection of the recovery key | Beyond file permissions, whether to encrypt it with a passphrase or put it in a hardware key (auth.md section 14) |
+| Advertised routes overlapping the local network | Before a member adds a route on the mesh interface, whether to check that it does not overlap a network directly connected to the machine (when it overlaps, the machine's traffic to that network would be drawn into the mesh); currently the signing tool only checks overlap with the mesh prefixes and with other nodes' routes |

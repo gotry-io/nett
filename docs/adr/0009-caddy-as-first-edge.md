@@ -1,40 +1,40 @@
-# 0009. Hub 前的反向代理默认使用 Caddy
+# 0009. The reverse proxy in front of the Hub defaults to Caddy
 
-- 状态：已采纳
-- 日期：2026-10-12
+- Status: accepted
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-Hub 的控制台、对外 API 和 node 的连接都经 443 上的 HTTPS 提供，Hub 主机上需要一个反向代理负责 TLS 终止；同一个 443 端口还要把 nett-relay 的流量转交给 nett-relay（ADR 0011）。
+The Hub's console, external API, and node connections are all served over HTTPS on 443, so the Hub host needs a reverse proxy for TLS termination; the same 443 port must also hand nett-relay traffic over to nett-relay (ADR 0011).
 
-Edge 指用户自己在入口节点上运行的反向代理，任何实现都可以；nett 不生成、也不管理它的配置（ADR 0019）。本 ADR 只决定 Hub 前的这一台。
+Edge means a reverse proxy the user runs on an entry node, any implementation will do; nett neither generates nor manages its configuration (ADR 0019). This ADR decides only the one in front of the Hub.
 
-候选方案在资源和功能上差异明显。HTTPS 终止 + 反代、限制 1 CPU / 256 MB、50 并发压测 20 秒的实测：
+The candidates differ markedly in resources and features. Measured with HTTPS termination + reverse proxy, limited to 1 CPU / 256 MB, 50 concurrent connections for 20 seconds:
 
 | | Caddy 2.11 | Nginx 1.31 | Traefik 3.7 |
 |---|---|---|---|
-| 空闲内存 | 38–56 MB | 4.4 MB | 13.3 MB |
-| 压测峰值内存 | 67.6 MB | 7.3 MB | 132.4 MB |
-| 请求/秒 | 18,025 | 66,989 | 21,777 |
-| p99 延迟 | 10.3 ms | 2.3 ms | 41.2 ms |
+| Idle memory | 38–56 MB | 4.4 MB | 13.3 MB |
+| Peak memory under load | 67.6 MB | 7.3 MB | 132.4 MB |
+| Requests/second | 18,025 | 66,989 | 21,777 |
+| p99 latency | 10.3 ms | 2.3 ms | 41.2 ms |
 
-## 决定
+## Decision
 
-- Hub 安装脚本为 Hub 自己的控制台域名生成反向代理配置，默认使用 Caddy；
-- 在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay（转交方式见 ADR 0011）；
-- 这台反向代理也可以同时是用户的 Edge，但 nett 只生成 Hub 和 nett-relay 这两段配置。
+- The Hub install script generates the reverse proxy configuration for the Hub's own console domain, using Caddy by default;
+- On the same 443 port, traffic for nett-relay's domain is handed over to nett-relay by SNI (for the handover method see ADR 0011);
+- This reverse proxy can also be the user's Edge at the same time, but nett generates only the two configuration sections for the Hub and nett-relay.
 
-## 理由
+## Rationale
 
-- 目标规模下，三者的吞吐都远超需求，**性能差异没有实际意义**；
-- Caddy 内置证书自动申请和续期，Hub 的控制台域名不需要另配证书组件。
+- At the target scale, the throughput of all three far exceeds the need, so **the performance difference has no practical meaning**;
+- Caddy has built-in automatic certificate issuance and renewal, so the Hub's console domain needs no separate certificate component.
 
-## 放弃的方案
+## Alternatives considered
 
-- **Nginx**：资源最省，但证书管理需要额外组件。
-- **Traefik**：优势在于同机容器的标签发现，Hub 前的反向代理用不上；压测峰值内存最高。
-- **自研**：见 ADR 0001。
+- **Nginx**: the most frugal in resources, but certificate management needs an extra component.
+- **Traefik**: its strength is label-based discovery of containers on the same machine, which the reverse proxy in front of the Hub does not need; it has the highest peak memory under load.
+- **Self-built**: see ADR 0001.
 
-## 影响
+## Consequences
 
-- Hub 主机上 Caddy 的内存可以通过 `GOMEMLIMIT` 约束峰值。
+- On the Hub host, Caddy's peak memory can be constrained with `GOMEMLIMIT`.

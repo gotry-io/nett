@@ -1,30 +1,30 @@
-# 0003. 对外 REST + OpenAPI，内部 WebSocket + Protobuf
+# 0003. REST + OpenAPI externally, WebSocket + Protobuf internally
 
-- 状态：已采纳
-- 日期：2026-10-12
+- Status: accepted
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-Hub 有两类对端：面向用户和工具的客户端（Web、脚本、以后的移动端），以及大量常驻的 node。
+The Hub has two kinds of counterparts: clients for users and tools (Web, scripts, a future mobile app), and a large number of resident nodes.
 
-## 决定
+## Decision
 
-- **对外 API**：REST + JSON，资源化设计；事件和状态的实时推送用 SSE；从 Hub 的 Rust 代码（utoipa）生成 OpenAPI 3.1，作为唯一来源，客户端由它生成。
-- **node ↔ Hub**：node 主动建立 WebSocket over TLS 长连接，消息用 Protobuf（prost）。
+- **External API**: REST + JSON with a resource-oriented design; real-time push of events and status uses SSE; OpenAPI 3.1 is generated from the Hub's Rust code (utoipa) as the single source, and clients are generated from it.
+- **node <-> Hub**: the node actively establishes a long-lived WebSocket over TLS connection, with Protobuf (prost) messages.
 
-## 理由
+## Rationale
 
-- REST + OpenAPI 对所有客户端通用，并能生成 TypeScript、Swift 客户端。
-- 所有客户端共用同一套 API，界面能做的事 API 都能做；以后另做的观测和管理项目也经 API 对接（ADR 0019）。
-- node 主动连接，节点无需开放入站端口；Protobuf 消息紧凑，字段演进安全。
-- 内外协议分开，内部协议可以自由演进而不影响公开 API。
+- REST + OpenAPI is universal across clients and can generate TypeScript and Swift clients.
+- All clients share one API, so whatever the UI can do, the API can do; observability and management projects built separately later also integrate through the API (ADR 0019).
+- The node connects outward, so nodes do not need to open inbound ports; Protobuf messages are compact and safe to evolve.
+- Keeping the internal and external protocols separate lets the internal protocol evolve freely without affecting the public API.
 
-## 放弃的方案
+## Alternatives considered
 
-- **gRPC / Connect 作为对外 API**：一份定义可以生成多端客户端，但 Rust 服务端对 Connect 的支持还不成熟，浏览器端也需要额外适配。
-- **内部协议也用 JSON**：实现简单，但带宽和解析开销更高，缺少显式的模式演进规则。
+- **gRPC / Connect as the external API**: one definition can generate clients for many platforms, but Rust server support for Connect is not yet mature, and browsers need extra adaptation.
+- **JSON for the internal protocol too**: simple to implement, but higher bandwidth and parsing cost, and no explicit schema evolution rules.
 
-## 影响
+## Consequences
 
-- CI 需要检查生成的 OpenAPI 文档和客户端代码是否最新。
-- 需要维护两套协议定义（OpenAPI 与 Protobuf）。
+- CI must check that the generated OpenAPI document and client code are up to date.
+- Two protocol definitions (OpenAPI and Protobuf) have to be maintained.

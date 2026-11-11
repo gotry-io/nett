@@ -1,45 +1,45 @@
-# 0018. 终端设备：macOS 原生成员、代理客户端配置与客户端规划
+# 0018. End devices: macOS native member, proxy client configuration and client planning
 
-- 状态：已采纳
-- 日期：2026-11-05
+- Status: accepted
+- Date: 2026-11-05
 
-## 背景
+## Context
 
-笔记本和手机是个人用户最常用的终端，也是与 Tailscale / Headscale 相比差距最容易出现的地方：
+Laptops and phones are the end devices personal users use most, and the places where gaps compared with Tailscale / Headscale appear most easily:
 
-- 终端要成为**完整成员**才能自己选路、随身漫游、被其他成员直接连入。完整成员指设备上运行组网进程，自己验证准入材料，测量、选路、切换；
-- Mac 只以容器内成员加入时（ADR 0016），只保证其他成员访问 Mac 上的容器服务，Mac 主动访问组网没有保证，不运行 Docker 的笔记本无法加入；
-- 手机使用标准 WireGuard 客户端（ADR 0008）时，直连家里不通要手动切换到备用配置；
-- Windows 也是常见的终端。
+- An end device must be a **full member** to choose paths on its own, roam with the user, and be reached directly by other members. A full member runs the mesh process on the device, verifies admission material itself, and measures, selects paths and switches;
+- When a Mac joins only as a container member (ADR 0016), it is guaranteed only that other members can reach the container services on the Mac; there is no guarantee for the Mac's own outbound access to the mesh, and laptops that do not run Docker cannot join;
+- When a phone uses a standard WireGuard client (ADR 0008), a failed direct connection home requires manually switching to the backup configuration;
+- Windows is also a common end device.
 
-用户决定：macOS 原生成员和代理客户端配置在 M1 完成；手机 App 和 Windows 一定要做，放在 M3。
+The user decided: the macOS native member and the proxy client configuration are completed in M1; the phone app and Windows must be built, scheduled for M3.
 
-## 决定
+## Decision
 
-- **macOS 原生成员（M1，默认方式）**：组网进程以 root 由 launchd 运行在宿主上，使用 Rust 用户态 WireGuard（与 DSM、旧内核的 Linux 共用一个实现）和 utun 接口；过滤由组网进程在转发前完成（与其他用户态平台相同），组网主机名的解析写入 `/etc/resolver/<后缀>`；路径层和准入验证与 Linux 共用。Mac 可以主动访问组网，笔记本可以随身漫游（通常为 `dial-only`）；
-- **容器内成员保留**：Mac 上需要识别访客真实 IP 的容器服务，继续使用容器内成员（ADR 0016）。两者可以同时存在，是两个节点身份；
-- **与代理类 VPN 应用共存**：macOS 原生成员与代理应用的增强模式（接管路由和 DNS）能否共存，在 M1 铺开到 macOS 之前实测。不能直接共存时，写明在代理应用中让组网网段不经代理的配置方法；
-- **代理客户端配置（M1）**：创建设备凭据时，除标准 WireGuard 配置外，同时导出 Surge、mihomo（Clash Meta 内核）、sing-box 的配置：直连家里和经网关两条 WireGuard 出站（分别使用主凭据和备用凭据，mesh.md 第 13 节），访问家里网段的流量放进自动回落的策略组，直连不通时自动改走网关。它和代理应用一起使用，不占用手机唯一的 VPN 名额。设备仍不是完整成员：不能被其他成员主动连入；
-- **M3：客户端**：iOS、Android App 和 Windows 成员，都是完整成员。iOS 在 Network Extension 中、Android 在 VpnService 中运行用户态 WireGuard 和路径层；Windows 使用 wireguard-nt 内核驱动，过滤使用 Windows 防火墙（WFP）。iOS 需要 Apple 开发者账号（付费）并通过 App Store 审核。M3 开工前写设计文档，包括移动端与 Hub 的连接方式和耗电；
-- **从 M1 起为客户端预留**：组网的核心逻辑（准入验证、测量、评分、切换、打洞协调）写成与平台无关的库，不直接调用 netlink、nftables 或某个具体的 WireGuard 实现；数据面（WireGuard 配置、接口、路由、过滤、DNS）由各平台的后端实现。M1 有 Linux 内核后端和用户态后端（DSM、旧内核、macOS），M3 增加 Windows、iOS、Android 后端和 App 外壳，不重写核心。
+- **macOS native member (M1, the default)**: the mesh process runs on the host as root under launchd, using the Rust userspace WireGuard (one implementation shared with DSM and old-kernel Linux) and a utun interface; filtering is done by the mesh process before forwarding (as on other userspace platforms), and resolution of mesh hostnames is written to `/etc/resolver/<suffix>`; the path layer and admission verification are shared with Linux. The Mac can access the mesh actively, and the laptop can roam with the user (usually `dial-only`);
+- **The container member is kept**: container services on a Mac that need to recognize the visitor's real IP keep using the container member (ADR 0016). The two can coexist, as two node identities;
+- **Coexistence with proxy-style VPN apps**: whether the macOS native member can coexist with the enhanced mode of a proxy app (which takes over routes and DNS) is measured before M1 rolls out to macOS. If they cannot coexist directly, the configuration for keeping the mesh prefixes out of the proxy is documented for the proxy app;
+- **Proxy client configuration (M1)**: when a device credential is created, in addition to the standard WireGuard configuration, configurations for Surge, mihomo (Clash Meta core) and sing-box are exported: two WireGuard outbounds, direct home and via the gateway (using the primary credential and the backup credential respectively, mesh.md section 13), with traffic to the home prefixes placed in a policy group with automatic fallback, switching to the gateway when the direct path fails. It is used together with the proxy app and does not take up the phone's only VPN slot. The device is still not a full member: it cannot be reached actively by other members;
+- **M3: clients**: iOS and Android apps and a Windows member, all full members. iOS runs the userspace WireGuard and path layer in a Network Extension, Android in a VpnService; Windows uses the wireguard-nt kernel driver, with filtering through the Windows firewall (WFP). iOS requires an Apple developer account (paid) and App Store review. A design document is written before M3 starts, including how mobile devices connect to the Hub and battery consumption;
+- **Reserved for clients from M1**: the core mesh logic (admission verification, measurement, scoring, switching, hole punching coordination) is written as a platform-independent library that does not call netlink, nftables or any specific WireGuard implementation directly; the data plane (WireGuard configuration, interfaces, routes, filtering, DNS) is implemented by per-platform backends. M1 has a Linux kernel backend and a userspace backend (DSM, old kernels, macOS); M3 adds Windows, iOS and Android backends and the app shells, without rewriting the core.
 
-## 理由
+## Rationale
 
-- 笔记本和手机是个人用户最常用的终端；
-- macOS 原生成员与 DSM 共用用户态 WireGuard，新增的主要是 utun、路由和 DNS，工作量可控；
-- 代理客户端配置只是多导出几种格式，成本很低，却解决了手机的自动回落，而且不和代理应用抢 VPN 名额；
-- App 和 Windows 工作量大，放进 M1 会让第一个可用版本推迟太久；核心库从一开始就与平台无关，以后不用重写。
+- Laptops and phones are the end devices personal users use most;
+- The macOS native member shares userspace WireGuard with DSM, and what is added is mainly utun, routes and DNS, so the work is manageable;
+- The proxy client configuration only exports a few more formats, at very low cost, yet it solves automatic fallback on phones and does not compete with the proxy app for the VPN slot;
+- The apps and Windows are a lot of work, and putting them in M1 would delay the first usable version too long; with a platform-independent core library from the start, nothing needs to be rewritten later.
 
-## 放弃的方案
+## Alternatives considered
 
-- **只保留容器内成员**：笔记本和不运行 Docker 的 Mac 无法加入，Mac 主动访问组网没有保证。
-- **M1 同时做手机 App 和 Windows**：第一个可用版本推迟太久。
-- **手机只用标准 WireGuard 配置**：直连受阻时需要手动切换。
+- **Keep only the container member**: laptops and Macs that do not run Docker cannot join, and there is no guarantee for the Mac's own outbound access to the mesh.
+- **Build the phone app and Windows in M1 as well**: the first usable version would be delayed too long.
+- **Phones use only the standard WireGuard configuration**: when the direct path is blocked, a manual switch is required.
 
-## 影响
+## Consequences
 
-- 用户态 WireGuard 的选型同时覆盖 DSM、旧内核的 Linux 和 macOS（design/userspace.md 第 3 节）；
-- macOS 上新增 utun、路由与 DNS 的后端；笔记本的休眠、唤醒和频繁换网络纳入测试；资源预算同样适用于 macOS 上的组网进程；
-- 代理客户端配置的格式要跟进这些客户端的版本变化，控制台标明测试过的版本；
-- 智能入口的组网进程在组网地址上提供一个健康检查端口，供策略组测速：只对设备地址开放，收到连接就返回固定的 HTTP 204 应答并关闭，不解析请求内容；
-- 手机 App 完成之前，Web 控制台仍承担全部查看、管理、审批和签名。
+- The choice of userspace WireGuard covers DSM, old-kernel Linux and macOS at the same time (design/userspace.md section 3);
+- macOS gains a backend for utun, routes and DNS; laptop sleep, wake and frequent network changes are included in testing; the resource budget applies equally to the mesh process on macOS;
+- The proxy client configuration formats must follow version changes of these clients, and the console states the versions that were tested;
+- The mesh process of a smart gateway provides a health check port on the mesh address for policy group speed tests: open only to device addresses, it returns a fixed HTTP 204 response and closes upon receiving a connection, without parsing the request content;
+- Until the phone app is done, the Web console still handles all viewing, management, approval and signing.

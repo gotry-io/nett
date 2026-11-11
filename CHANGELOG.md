@@ -1,18 +1,10 @@
-# 变更记录 · Changelog
+# Changelog
 
-用户可见的变化，按版本记录；版本号遵循语义化版本（design/release.md 第 2 节）。
-User-visible changes by version; versions follow Semantic Versioning.
+User-visible changes by version. Versions follow [Semantic Versioning](https://semver.org); see design/release.md section 2.
 
-## [未发布 · Unreleased]
+## [Unreleased]
 
-- 新机器经 Hub 入网（design/hub.md 第 9 节 H2）：接了 Hub 时 `nett site add <名字>` 不用 `--keys`，签好节点策略，
-  打印新机器上要运行的一行 `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`，
-  所有平台相同。安装脚本只安装 `nett`，按脚本中写明的哈希核对；token 中有入网私钥，30 分钟内有效、只能用一次，
-  `nett site invite <名字>` 换一个新的。`--public` 的机器可以不写公网地址，由 Hub 得知（本机连接 Hub 时用的
-  全局地址，或 Hub 看到的来源地址），`nett site status <名字>` 显示地址与来源。`sudo nett leave` 让一台机器
-  退出：告诉 Hub（其他成员随即删除它），删除服务、组网接口与本机的密钥和配置；每条 `nett site` 命令先取回
-  Hub 一侧的入网、退出与地址，记进站点目录。
-  New machines join through the Hub (design/hub.md section 9, H2): with a Hub, `nett site add <name>` needs no
+- New machines join through the Hub (design/hub.md section 9, H2): with a Hub, `nett site add <name>` needs no
   `--keys`; it signs the node policy and prints one line to run on the new machine,
   `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`, the same on every
   platform. The install script only installs `nett` and checks it against the hash written in the script; the
@@ -23,16 +15,7 @@ User-visible changes by version; versions follow Semantic Versioning.
   drops it) and removes the services, the mesh interface, and the machine's keys and configuration. Every
   `nett site` command first fetches what happened on the Hub (joins, departures, addresses) and records it in
   the site directory.
-- 接入 Hub（design/hub.md 第 9 节 H1）：新的 `nett-hub`（`serve`、`init`、`reset`；Linux 的静态版本、
-  [packaging/hub/](packaging/hub/) 中 Hub 与 Caddy 的 Compose 示例、原生运行的 systemd 单元）。`nett site link`
-  把站点关联到 Hub；之后每条修改命令签名后推送，Hub 逐份按关联时固定的信任锚验证签名产物（伪造、版本倒退、
-  同版本不同内容、恢复已撤销的机器都整份拒绝），为每台机器组成期望状态（与不接 Hub 时写出的文件相同）；
-  命令最多等 10 秒，报告哪些机器已经应用、哪些拒绝或仍有问题。`nett site invite <名字>` 为已有的机器打印
-  `sudo nett install nett_enr_…`，它在本机核对节点 ID 与信任锚，写入 Hub 的配置并启动新的 `nett node` 服务
-  （控制代理 nett-node：经 WebSocket 上的 Noise IK 连接 Hub，写期望状态文件、请组网进程重新读取、上报状态；
-  Hub 不在时组网照常）。`nett site status` 接了 Hub 时列出每台机器的在线、版本、确认与问题，以及各对机器之间的
-  状态、路径与往返时间；`nett site status <名字>` 显示那台机器的本机状态。
-  Hub (design/hub.md section 9, H1): the new `nett-hub` (`serve`, `init`, `reset`; static Linux builds, a
+- Hub (design/hub.md section 9, H1): the new `nett-hub` (`serve`, `init`, `reset`; static Linux builds, a
   Compose example with Caddy in [packaging/hub/](packaging/hub/), a systemd unit for running it natively).
   `nett site link` links the site to a Hub; from then on every change is signed and pushed, and the Hub checks
   each signed artifact against the trust anchors pinned when linking (forged artifacts, older versions, the same
@@ -45,23 +28,13 @@ User-visible changes by version; versions follow Semantic Versioning.
   reload it, reports its status; the mesh keeps working while the Hub is down). With a Hub, `nett site status`
   lists each machine's connection, version, acknowledgement and problems, and the state, path and round-trip
   time between each pair; `nett site status <name>` shows that machine's own status.
-- Linux 上也用 `sudo nett install` 安装：把 `nett` 装到 `/usr/local/bin`，在 `/etc/nett` 生成或沿用密钥，
-  写入编译时嵌入的 systemd 单元并启动；`--config` 导入期望状态，期望状态变了时只重新加载。`sudo nett uninstall`
-  停止并删除服务，保留密钥与期望状态。
-  On Linux, `sudo nett install` installs too: it puts `nett` in `/usr/local/bin`, creates or keeps the keys in
+- On Linux, `sudo nett install` installs too: it puts `nett` in `/usr/local/bin`, creates or keeps the keys in
   `/etc/nett`, writes the systemd units built into it and starts them; `--config` imports the desired state,
   and a changed desired state is only reloaded. `sudo nett uninstall` stops and removes the services and keeps
   the keys and the desired state.
-- 修复：一台机器的宣告网段全部去掉之后再宣告时，版本号从 1 重新开始，被组网进程拒绝；现在接着增加。
-  Fixed: advertising routes again after removing all of them restarted the version at 1, which the mesh process
+- Fixed: advertising routes again after removing all of them restarted the version at 1, which the mesh process
   rejected; the version now keeps counting.
-- 站点改为用命令维护（design/site.md）：`nett site add`、`set`、`remove`、`invite`、`edge`、`routes`、`allow`、
-  `rules`、`status`。每条修改命令先列出要签名的内容（选择器展开后的地址和端口、增减的连接），确认后签名并重写
-  有变化的机器的期望状态；不是终端时要加 `--yes`。哪些机器之间建立连接由访问规则推导：规则涉及的每一对，加上每个
-  dial-only 机器与全部 public 机器；两端都是 dial-only 时提示可能连不上。移除机器时，引用它的规则一起清理。
-  `site.toml` 与 `nett site apply` 取消，0.1.x 的站点要转换一次；`nett keys` 与 `sudo nett install` 打印的是
-  `nett site add --keys` 要用的一行。
-  The site is kept with commands (design/site.md): `nett site add`, `set`, `remove`, `invite`, `edge`, `routes`,
+- The site is kept with commands (design/site.md): `nett site add`, `set`, `remove`, `invite`, `edge`, `routes`,
   `allow`, `rules`, `status`. Every change first lists what will be signed (addresses and ports after selectors
   expand, connections added or removed), then signs once you confirm and rewrites the desired state of the
   machines it affects; pass `--yes` when not on a terminal. Which machines connect follows from the access rules:
@@ -69,14 +42,7 @@ User-visible changes by version; versions follow Semantic Versioning.
   is flagged as possibly unable to connect. Removing a machine also cleans up the rules that name it.
   `site.toml` and `nett site apply` are gone, and a 0.1.x site needs converting once; `nett keys` and
   `sudo nett install` print the line for `nett site add --keys`.
-- 组网进程在本机保存信任存储（design/mesh.md 第 4.2 节）：第一次接受期望状态时固定这台机器的信任锚，之后
-  信任锚不同的期望状态整份拒绝；撤销记录和各签名产物已生效的版本写入磁盘，重启之后旧版本的产物、被撤销的
-  成员同样不接受；启动时期望状态文件被拒绝，改用最近一次整份接受的那一份。已经在运行的机器升级之后，以当时的
-  期望状态为基准建立它，连接不受影响。位置：Linux 为 `/var/lib/nett`，要换上新的
-  `packaging/systemd/nett-mesh.service`（加了 `StateDirectory=nett`），否则 `nett status` 会列出
-  "trust store" 问题；macOS 为 `/Library/Application Support/nett/state`；容器镜像为挂载目录中的
-  `/etc/nett/state`。
-  The mesh process keeps a trust store on the machine (design/mesh.md section 4.2): the first accepted desired
+- The mesh process keeps a trust store on the machine (design/mesh.md section 4.2): the first accepted desired
   state pins this machine's trust anchors, and a desired state with different trust anchors is rejected as a
   whole; revocations and the applied versions of signed artifacts are written to disk, so after a restart
   older artifacts and revoked members are still refused; when the desired state file is rejected at start,
@@ -85,52 +51,33 @@ User-visible changes by version; versions follow Semantic Versioning.
   on Linux — install the new `packaging/systemd/nett-mesh.service` (it adds `StateDirectory=nett`), otherwise
   `nett status` lists a "trust store" problem; `/Library/Application Support/nett/state` on macOS;
   `/etc/nett/state` in the mounted directory for the container image.
-- 期望状态不是给这台机器的（节点 ID 不同）时，`nett reload` 报告被拒绝，退出码为 1；之前报告为已生效。
-  本机节点策略的新版本过期时不接受。期望状态文件与成员、撤销记录的数量都有上限。
-  `nett reload` reports a desired state for another node (a different node ID) as rejected and exits with 1.
+- `nett reload` reports a desired state for another node (a different node ID) as rejected and exits with 1.
   A new version of this machine's own node policy is refused once it has expired. The desired state file
   and its member and revocation counts are bounded.
-- macOS：`sudo nett install` 在服务配置变化时卸下再载入服务，换上新的配置；读期望状态文件时不跟随符号链接。
-  macOS: when the service configuration changes, `sudo nett install` unloads and reloads the service so the
+- macOS: when the service configuration changes, `sudo nett install` unloads and reloads the service so the
   new configuration takes effect; it does not follow symbolic links when reading the desired state file.
 
 ## [0.1.5] - 2026-11-10
 
-- 命令按作用范围重新整理（`nett help` 按组列出，任何命令加 `--help` 显示用法）：本机的命令都在顶层，
-  `nett mesh` 只是由服务管理器运行的组网进程。改名：`nett mesh install` / `uninstall` → `nett install` /
-  `uninstall`，`nett mesh keys` → `nett keys`，`nett site build` → `nett site apply`。已安装的 macOS 服务、
-  systemd 单元和容器镜像都按 `nett mesh` 启动，不受影响；脚本和自己的笔记里的旧命令要改成新的。
-  Commands are regrouped by scope (`nett help` lists them by group; `--help` after any command shows its
+- Commands are regrouped by scope (`nett help` lists them by group; `--help` after any command shows its
   usage): commands for this machine are top-level, and `nett mesh` is only the mesh process run by the
   service manager. Renamed: `nett mesh install` / `uninstall` -> `nett install` / `uninstall`,
   `nett mesh keys` -> `nett keys`, `nett site build` -> `nett site apply`. Installed macOS services, systemd
   units and container images start `nett mesh` and keep working; update scripts and notes that use the old
   commands.
-- 新命令 `nett reload`：请组网进程重新读取期望状态文件，并显示它是否被接受、应用之后还有哪些问题；被拒绝时
-  退出码为 1。容器内成员用 `docker exec <容器> /nett reload`，Linux 上用 `sudo nett reload`；macOS 上
-  `sudo nett install` 在期望状态有变化时也这样做。0.1.4 中 `nett site build` 提示容器用 `docker kill -s HUP`，
-  这会让 Docker 把容器记为手动停止过，主机重启后 `unless-stopped` 的容器不再自动启动；照着做过的，运行一次
-  `docker restart <容器>` 清掉这个记录。
-  New command `nett reload`: asks the mesh process to re-read its desired state file and shows whether it was
+- New command `nett reload`: asks the mesh process to re-read its desired state file and shows whether it was
   accepted and what problems remain; it exits with 1 when the file is rejected. Container members use
   `docker exec <container> /nett reload`, Linux nodes `sudo nett reload`; on macOS, `sudo nett install` does
   this when the desired state changed. The 0.1.4 hint from `nett site build` said `docker kill -s HUP` for
   containers, which makes Docker treat the container as manually stopped, so an `unless-stopped` container
   no longer starts after the host restarts; if you followed it, run `docker restart <container>` once to
   clear that.
-- macOS：`sudo nett install` 只在本机还没有期望状态时打印写进站点描述的公钥那一行；之后再运行只说明结果。
-  macOS: `sudo nett install` prints the key line for the site description only while this machine has no
+- macOS: `sudo nett install` prints the key line for the site description only while this machine has no
   desired state yet; later runs just report what happened.
 
 ## [0.1.4] - 2026-11-10
 
-- 新命令 `nett status`：本机的地址与运行方式，每个对端是否连通、走哪条路径、往返时间与丢包、最近一次握手，以及
-  被拒绝的期望状态、成员和访问规则；`nett status <对端>` 显示候选路径和最近的切换，`--json` 输出完整的状态。
-  状态经组网进程的本机套接字读取（Linux 与容器内为 `/run/nett/mesh.sock`，macOS 为 `/var/run/nett/mesh.sock`，
-  `nett mesh --socket` 可改），只有 root 能读，所以要 `sudo nett status`。Linux 上自己安装 systemd 单元的，
-  换上新的 `nett-mesh.service`（增加了 `RuntimeDirectory=nett`）后 `systemctl daemon-reload`；不换时组网照常，
-  日志中有一条警告，`nett status` 连不上。
-  New command `nett status`: this node's addresses and setup; for each peer whether it is connected, which
+- New command `nett status`: this node's addresses and setup; for each peer whether it is connected, which
   path it uses, round-trip time and loss, and the last handshake; plus any rejected desired state, members
   or access rules. `nett status <peer>` shows the candidate paths and recent switches; `--json` prints the
   full status. It is read from the mesh process's local socket (`/run/nett/mesh.sock` on Linux and in
@@ -138,74 +85,49 @@ User-visible changes by version; versions follow Semantic Versioning.
   read, so run `sudo nett status`. If you installed the systemd unit yourself, replace `nett-mesh.service`
   (it adds `RuntimeDirectory=nett`) and run `systemctl daemon-reload`; without it the mesh keeps working,
   the log has a warning and `nett status` cannot connect.
-- `nett site build` 把节点名写进期望状态（不签名，只用于显示）。之前的版本不接受这个字段：先升级节点上的 nett，
-  再换上新生成的期望状态；顺序反了时节点继续使用上一份期望状态。节点名最长 63 个字符。
-  `nett site build` puts node names into the desired state (unsigned, for display only). Earlier versions
+- `nett site build` puts node names into the desired state (unsigned, for display only). Earlier versions
   reject the field: upgrade nett on the nodes before giving them the new desired state; in the other order a
   node keeps using its previous desired state. Node names are at most 63 characters.
-- 命令行的提示和错误只用英文，写得更短。
-  Command-line messages and errors are in English only, and shorter.
+- Command-line messages and errors are in English only, and shorter.
 
 ## [0.1.3] - 2026-11-10
 
-- `dial-only` 节点的 WireGuard 端口由系统分配：站点描述中不再为它写 `listen_port`、`ipv4`、`ipv6`，
-  同一台主机上的原生成员与容器内成员不再争用端口；日志中的 `mesh interface ready` 写着实际的端口。
-  之前的版本不接受不带端口的期望状态：先升级 `dial-only` 节点上的 nett，再换上新生成的期望状态。
-  A `dial-only` node's WireGuard port is picked by the system: the site description no longer sets
+- A `dial-only` node's WireGuard port is picked by the system: the site description no longer sets
   `listen_port`, `ipv4` or `ipv6` for it, so a native member and a container member on the same host no
   longer compete for a port; `mesh interface ready` in the log shows the port in use. Earlier versions
   reject a desired state without a port: upgrade nett on `dial-only` nodes before giving them the new one.
-- WireGuard 端口不能用组网进程自己在本机用的端口（组网地址上的探测端口 `41821`、TLS 中继的回环端口
-  `41830`–`41845`）：`nett site build` 生成时即报错。之前这样设置时组网照常连通，但不收发探测，测不到路径、
-  也发现不了故障。
-  The WireGuard port cannot be one the mesh process uses itself (the probe port `41821` on mesh addresses,
+- The WireGuard port cannot be one the mesh process uses itself (the probe port `41821` on mesh addresses,
   the TLS relay loopback ports `41830`–`41845`); `nett site build` reports it. Before, such a node stayed
   connected but sent and answered no probes, so it could not measure paths or notice failures.
 
 ## [0.1.2] - 2026-11-10
 
-- 站点描述的节点可以写 `listen_port`，用自己的 WireGuard 端口：同一台主机上的原生成员与容器内成员各用一个。
-  A node in the site description can set `listen_port` for its own WireGuard port, so a native member and a
+- A node in the site description can set `listen_port` for its own WireGuard port, so a native member and a
   container member on the same host each get one.
-- `nett site` 的站点目录默认是 `~/.config/nett`（按 `$XDG_CONFIG_HOME`），不用再写 `--dir`；`nett site init`
-  把目录权限设为 `0700`。
-  The `nett site` directory defaults to `~/.config/nett` (following `$XDG_CONFIG_HOME`), so `--dir` is
+- The `nett site` directory defaults to `~/.config/nett` (following `$XDG_CONFIG_HOME`), so `--dir` is
   optional; `nett site init` makes the directory `0700`.
-- `nett site build` 把各节点的期望状态写在站点目录的 `nodes/<节点>/desired.json`。
-  `nett site build` writes each node's desired state to `nodes/<node>/desired.json` in the site directory.
-- macOS：`sudo nett mesh install` 自动在运行 sudo 的用户的站点目录中找到给本机的期望状态，不用再写
-  `--config`；站点不在这台机器上时仍可用 `--config` 指定。
-  macOS: `sudo nett mesh install` finds this machine's desired state in the site directory of the user who
+- `nett site build` writes each node's desired state to `nodes/<node>/desired.json` in the site directory.
+- macOS: `sudo nett mesh install` finds this machine's desired state in the site directory of the user who
   ran sudo, so `--config` is only needed when the site is on another machine.
-- macOS：`sudo nett mesh uninstall` 等服务的进程退出之后才报告已停止。
-  macOS: `sudo nett mesh uninstall` reports the service as stopped only after its process has exited.
+- macOS: `sudo nett mesh uninstall` reports the service as stopped only after its process has exited.
 
 ## [0.1.1] - 2026-11-09
 
-- macOS：`sudo nett mesh install` 一个命令完成安装：生成本机密钥并打印写进站点描述的一行；
-  `--config <desired.json>` 核对期望状态是给本机的再导入，然后启动服务；只有期望状态变化时重新加载、不重启。
-  macOS: `sudo nett mesh install` does the whole setup: it creates this machine's keys and prints the line
+- macOS: `sudo nett mesh install` does the whole setup: it creates this machine's keys and prints the line
   for the site description; with `--config <desired.json>` it checks that the desired state belongs to this
   machine, imports it and starts the service, and reloads without a restart when only the desired state changed.
-- `nett mesh keys --dir` 沿用已有的密钥，打印同一行公钥。
-  `nett mesh keys --dir` keeps existing keys and prints the same line again.
-- Homebrew 的安装提示只用英文。The Homebrew caveats are in English only.
+- `nett mesh keys --dir` keeps existing keys and prints the same line again.
+- The Homebrew caveats are in English only.
 
 ## [0.1.0] - 2026-11-09
 
-第一个发布版本：接入 Hub 之前，用本地签名部署组网（design/local-signing.md）。
 First release: deploy a mesh with local signing before the Hub is ready.
 
-- 组网进程 `nett mesh`：成员凭签名准入，直连、打洞与经中继的路径之间自动选路和切换；Linux 使用内核
-  WireGuard，macOS 以原生成员加入（用户态 WireGuard 与 utun），Mac 上的容器服务可用容器内成员。
-  The mesh process: signed membership, automatic path selection and failover across direct, hole-punched
+- The mesh process: signed membership, automatic path selection and failover across direct, hole-punched
   and relayed paths; kernel WireGuard on Linux, a native member on macOS (userspace WireGuard and utun),
   and container members for container services on a Mac.
-- 访问控制默认拒绝，按签名的规则放行；Edge 专用地址让回源的服务认出真实访客（ADR 0015、0023）。
-  Access is denied by default and opened by signed rules; the Edge address lets origin services see real
+- Access is denied by default and opened by signed rules; the Edge address lets origin services see real
   client addresses.
-- 签名工具 `nett site`：在自己的电脑上生成恢复密钥、签名节点与规则，为每个节点生成期望状态文件。
-  The signing tool `nett site`: keeps the recovery key on your own computer, signs nodes and rules, and
+- The signing tool `nett site`: keeps the recovery key on your own computer, signs nodes and rules, and
   writes each node's desired state.
-- macOS：`brew install gotry-io/tap/nett`，`sudo nett mesh install` 安装组网服务。
-  macOS: `brew install gotry-io/tap/nett`, then `sudo nett mesh install` installs the mesh service.
+- macOS: `brew install gotry-io/tap/nett`, then `sudo nett mesh install` installs the mesh service.

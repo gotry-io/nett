@@ -1,40 +1,40 @@
-# 0016. macOS 上的容器内成员
+# 0016. Container member on macOS
 
-- 状态：已采纳
-- 日期：2026-11-04
+- Status: accepted
+- Date: 2026-11-04
 
-## 背景
+## Context
 
-macOS 默认以原生成员加入组网（用户态 WireGuard + utun，ADR 0018）。但实测（architecture.md 第 17 节）发现：
+On macOS a machine joins the mesh as a native member by default (userspace WireGuard + utun, ADR 0018). But measurements (architecture.md section 17) found:
 
-- macOS 上 Docker 的发布端口会丢掉访问来源：经发布端口访问容器的所有客户端，在容器内都显示为容器网络的网关地址。只有让组网端点进入容器网络，容器中的服务才能认出 Edge 和访客来源（ADR 0015）；
-- 在 macOS 的 Docker（OrbStack）容器中运行内核 WireGuard，宿主开着代理类 VPN 应用的增强模式时工作正常，UDP 直接发出。
+- Docker's published ports on macOS drop the origin of the access: every client that reaches a container through a published port appears inside the container as the gateway address of the container network. Only by bringing a mesh endpoint into the container network can the services in the containers recognize the Edge and visitor sources (ADR 0015);
+- Running kernel WireGuard in a macOS Docker (OrbStack) container works correctly when the host has the enhanced mode of a proxy-style VPN app turned on, with UDP going out directly.
 
-## 决定
+## Decision
 
-- Mac 上的**容器服务需要识别访客真实 IP** 时，另外运行一个**容器内成员**：在 Docker 的 Linux 虚拟机中运行一个 Linux 成员，使用内核 WireGuard，由 nett 以容器的形式提供；
-- 它是一个独立的节点身份，只开启 mesh 模块，只承担其他成员访问这些容器服务；宿主上的原生 nett-node 和原生成员照常运行，Mac 主动访问组网由原生成员负责；
-- 容器内成员是它所在**容器网络的智能入口**（mesh.md 第 10 节）：在网络中使用一个固定地址，宣告具体服务的地址（每个服务一个 `/32`，服务在网络中使用固定地址），只把来自 Edge 专用地址、访问规则放行的流量转发给服务，来源换成自己在这个网络中的固定地址（ADR 0015）。需要真实 IP 的服务把这个地址配置为可信代理。本机和宣告的地址入方向默认拒绝。服务保留自己的网络，容器内成员重启、升级都不影响服务；
-- 宿主上的原生服务经原生成员访问，容器内成员不代理它们（也就不会经 `host.docker.internal` 把来源变成 `127.0.0.1`）。
+- When a **container service on a Mac needs to recognize the visitor's real IP**, a separate **container member** is run: a Linux member running in Docker's Linux virtual machine, using kernel WireGuard, provided by nett as a container;
+- It is an independent node identity, with only the mesh module enabled, and only serves other members' access to these container services; the native nett-node and native member on the host keep running, and the native member is responsible for the Mac's own outbound access to the mesh;
+- The container member is the **smart gateway of its container network** (mesh.md section 10): it uses one fixed address in the network and advertises the addresses of specific services (one `/32` per service, with the services using fixed addresses in the network). It forwards to the services only traffic that comes from the Edge address and is allowed by access rules, rewriting the source to its own fixed address in this network (ADR 0015). A service that needs the real IP configures this address as the trusted proxy. Inbound traffic to the machine itself and to the advertised addresses is denied by default. The services keep their own network, and restarting or upgrading the container member does not affect them;
+- Native services on the host are accessed through the native member; the container member does not proxy them (so the source does not become `127.0.0.1` via `host.docker.internal`).
 
-## 理由
+## Rationale
 
-- 原生成员经发布端口访问容器时来源会丢失，只有容器内成员能让容器中的服务认出访客；
-- 与代理类 VPN 应用的共存有实测依据；
-- 服务与组网进程互不依赖：容器内成员重启时，服务的连接（例如到局域网中其他设备的连接）照常；
-- 与局域网的智能入口是同一套机制（宣告网段、转发、按来源转换），不为容器另造一种；
-- 复用 Linux 成员的实现（内核 WireGuard、nftables）。
+- When the native member accesses a container through a published port, the source is lost; only the container member lets services in containers recognize the visitor;
+- Coexistence with proxy-style VPN apps is backed by measurements;
+- The service and the mesh process do not depend on each other: when the container member restarts, the service's connections (for example to other devices on the LAN) are unaffected;
+- It is the same mechanism as the LAN smart gateway (advertised prefixes, forwarding, translation by source), so no separate mechanism is built for containers;
+- It reuses the Linux member implementation (kernel WireGuard, nftables).
 
-## 放弃的方案
+## Alternatives considered
 
-- **只用原生成员**：Mac 上的容器服务拿不到访客真实 IP。
-- **macOS 不加入组网，只经家里的智能入口访问**：服务都在 Mac 上时，所有流量都要多绕一个设备，而且发布端口丢失来源的问题依然存在。
-- **与服务共用网络命名空间的边车**（`network_mode: service:<容器内成员>`，社区教程中常见）：不需要转发和固定地址，但边车容器重启后 Docker 给它新的网络命名空间，共用它的服务随即断网，直到也重启；对交易一类的服务不可接受。
-- **按端口转发**（组网地址的端口映射到服务名）：服务不必固定地址，但要为容器另造一种签名的转发表，组网进程还要定时解析服务名。
+- **Native member only**: container services on a Mac cannot get the visitor's real IP.
+- **macOS does not join the mesh and is accessed only through the smart gateway at home**: when the services are all on the Mac, all traffic takes an extra hop through another device, and the problem of published ports losing the source remains.
+- **A sidecar sharing the network namespace with the service** (`network_mode: service:<container member>`, common in community tutorials): it needs no forwarding and no fixed addresses, but after the sidecar container restarts Docker gives it a new network namespace, and the services sharing it lose network connectivity until they restart too; unacceptable for services such as trading.
+- **Port forwarding** (mesh address ports mapped to service names): services need no fixed addresses, but a separate kind of signed forwarding table must be built for containers, and the mesh process must resolve service names periodically.
 
-## 影响
+## Consequences
 
-- 依赖宿主上的 Docker 运行时（OrbStack 或 Docker Desktop）；Docker 停止时，这个成员也会离线；
-- 同一台 Mac 可能对应多个节点（原生成员和每个容器内成员），控制台需要把它们显示为同一台主机；
-- 服务要在容器网络中使用固定地址（Compose 的 `ipv4_address`）；容器内成员在自己的网络命名空间中开启转发；
-- 容器内成员前面多一层 Docker 虚拟机的 NAT，打洞是否可行由 NAT 类型判断自动决定（mesh.md 第 6.1 节）。
+- Depends on the Docker runtime on the host (OrbStack or Docker Desktop); when Docker stops, this member goes offline too;
+- One Mac may correspond to several nodes (the native member and each container member), and the console must display them as the same host;
+- Services must use fixed addresses in the container network (`ipv4_address` in Compose); the container member enables forwarding in its own network namespace;
+- The container member sits behind an extra layer of NAT from the Docker virtual machine; whether hole punching is feasible is decided automatically by NAT type detection (mesh.md section 6.1).
