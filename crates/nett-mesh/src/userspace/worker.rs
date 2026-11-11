@@ -46,6 +46,7 @@ pub(super) enum Command {
     Filter(FilterSpec, SyncSender<()>),
     GuardTlsPorts(Vec<u16>, SyncSender<()>),
     SetLocal(Vec<IpAddr>, SyncSender<()>),
+    SetNames(crate::dns::NameTable, SyncSender<()>),
     Shutdown,
 }
 
@@ -289,6 +290,10 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                 }
                 Command::SetLocal(local, reply) => {
                     self.plane.set_local(local);
+                    let _ = reply.send(());
+                }
+                Command::SetNames(names, reply) => {
+                    self.plane.set_names(names);
                     let _ = reply.send(());
                 }
                 Command::Shutdown => return false,

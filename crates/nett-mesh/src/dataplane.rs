@@ -202,6 +202,13 @@ pub trait DataPlane: Send {
     /// interface carrying the default route and does not go through the proxy app's TUN (design/userspace.md
     /// section 6.2).
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
+
+    /// The names this machine's own DNS queries are answered from when they reach the data plane
+    /// instead of the responder's socket (design/userspace.md section 4). Only the userspace data
+    /// plane sees them; elsewhere they go to the responder over the loopback path.
+    fn set_names(&mut self, _names: &crate::dns::NameTable) -> Result<(), DataPlaneError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -19,6 +19,7 @@ use super::packet;
 use super::session::{Output, Sessions};
 use crate::access::FilterSpec;
 use crate::dataplane::{PeerSpec, PeerStat};
+use crate::dns::NameTable;
 use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY};
 
 /// The maximum number of handshake messages per source IP per second that enter the session layer
@@ -123,6 +124,8 @@ pub struct Plane<S> {
     /// Idle TLS loopback ports: packets coming in from them are dropped (design/mesh.md section 5.3).
     guarded: BTreeSet<u16>,
     handshakes: HandshakeBudget,
+    /// The names this machine's own DNS queries are answered from (design/userspace.md section 4).
+    names: NameTable,
 }
 
 impl<S: Sessions> Plane<S> {
@@ -134,7 +137,12 @@ impl<S: Sessions> Plane<S> {
             local: Vec::new(),
             guarded: BTreeSet::new(),
             handshakes: HandshakeBudget::new(Instant::now()),
+            names: NameTable::new(),
         }
+    }
+
+    pub fn set_names(&mut self, names: NameTable) {
+        self.names = names;
     }
 
     pub fn set_local(&mut self, local: Vec<IpAddr>) {
@@ -279,9 +287,24 @@ impl<S: Sessions> Plane<S> {
             return;
         };
         // macOS routes this machine's own mesh address into the utun (design/userspace.md section 4):
-        // handed back, the packet is delivered locally
+        // a DNS query is answered here, anything else is handed back with its checksum filled in
         if self.local.contains(&ip.dst) {
-            out.push(Action::Tun(packet[..ip.len].to_vec()));
+            if let packet::Transport::Udp {
+                src_port,
+                dst_port: crate::dns::PORT,
+            } = ip.transport
+            {
+                let reply = packet::udp_payload(packet, &ip)
+                    .and_then(|query| crate::dns::answer(query, &self.names))
+                    .and_then(|reply| {
+                        packet::udp(ip.dst, crate::dns::PORT, ip.src, src_port, &reply)
+                    });
+                out.extend(reply.map(Action::Tun));
+                return;
+            }
+            let mut back = packet[..ip.len].to_vec();
+            packet::fill_checksum(&mut back);
+            out.push(Action::Tun(back));
             return;
         }
         let Some(key) = self.route(ip.dst) else {
@@ -375,6 +398,7 @@ mod tests {
     use crate::key::PrivateKey;
     use crate::userspace::packet::build;
     use crate::userspace::session::Gotatun;
+    use std::net::Ipv4Addr;
 
     const SYN: u8 = 0x02;
 
@@ -468,14 +492,50 @@ mod tests {
     }
 
     #[test]
-    fn a_packet_to_this_machines_own_address_goes_back_to_the_tun() {
+    fn a_packet_to_this_machines_own_address_goes_back_with_its_checksum() {
         let (mut a, _b) = pair(false);
-        let query = build::udp(a.mesh, 50000, a.mesh, 53);
-        let out = send(&mut a, &query);
+        let whole = packet::udp(a.mesh, 50000, a.mesh, 8080, b"self").expect("fits");
+        let mut unfilled = whole.clone();
+        unfilled[26..28].copy_from_slice(&[0, 0]);
+        let out = send(&mut a, &unfilled);
         assert!(
-            matches!(out.as_slice(), [Action::Tun(p)] if *p == query),
+            matches!(out.as_slice(), [Action::Tun(p)] if *p == whole),
             "{out:?}"
         );
+    }
+
+    #[test]
+    fn this_machines_own_dns_query_is_answered_in_the_data_plane() {
+        let (mut a, _b) = pair(false);
+        let at: Ipv4Addr = "100.88.0.2".parse().expect("ip");
+        a.plane
+            .set_names([("b".to_owned(), (at, "fd00:88::2".parse().expect("ip")))].into());
+        let mut query = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
+        for label in ["b", "nett", "internal"] {
+            query.push(u8::try_from(label.len()).expect("short"));
+            query.extend_from_slice(label.as_bytes());
+        }
+        query.extend_from_slice(&[0, 0, 1, 0, 1]);
+        let packet = packet::udp(a.mesh, 50000, a.mesh, 53, &query).expect("fits");
+        let out = send(&mut a, &packet);
+        let [Action::Tun(reply)] = out.as_slice() else {
+            panic!("{out:?}");
+        };
+        let ip = packet::parse(reply).expect("an IP packet");
+        assert_eq!((ip.src, ip.dst), (a.mesh, a.mesh));
+        assert_eq!(
+            ip.transport,
+            packet::Transport::Udp {
+                src_port: 53,
+                dst_port: 50000
+            }
+        );
+        let answer = packet::udp_payload(reply, &ip).expect("payload");
+        assert_eq!(&answer[answer.len() - 4..], &at.octets());
+        // The reply carries a valid checksum: filling it in again changes nothing
+        let mut again = reply.clone();
+        packet::fill_checksum(&mut again);
+        assert_eq!(&again, reply);
     }
 
     #[test]
