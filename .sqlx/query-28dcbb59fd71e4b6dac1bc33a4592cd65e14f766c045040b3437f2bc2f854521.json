@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE nodes SET backup_sha256 = ?2, backup_at = ?3 WHERE node_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "28dcbb59fd71e4b6dac1bc33a4592cd65e14f766c045040b3437f2bc2f854521"
+}

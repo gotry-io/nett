@@ -20,7 +20,7 @@ use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
-    AckResult, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
+    AckResult, BackupFetch, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
     PartitionAck, PartitionKind, PathSwitch, Ping, StateAck,
 };
 use prost::Message as _;
@@ -39,6 +39,10 @@ pub const STATUS_EVERY: Duration = Duration::from_secs(15);
 /// Keepalive (protocol.md section 8): one Ping every 25 seconds; 3 consecutive missed replies count
 /// as a disconnect.
 const PING_EVERY: Duration = Duration::from_secs(25);
+/// How often the node asks for the Hub's latest backup (design/hub.md section 8.2).
+const BACKUP_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// The Hub backup this machine keeps, next to the desired state.
+pub const BACKUP_FILE: &str = "hub-backup.enc";
 const MISSED_PINGS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper limit on waiting for the first desired state at enrollment.
@@ -403,6 +407,8 @@ impl Node {
             next_stream: 0,
         };
         out.send(&mut ws, inventory(local)).await?;
+        let mut backups = tokio::time::interval(BACKUP_EVERY);
+        backups.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut reassembler = Reassembler::default();
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -474,6 +480,12 @@ impl Node {
                             tracing::info!(reason = %g.reason, "the Hub closed the session");
                             return Ok(Exit::Shutdown);
                         }
+                        Some(Body::Backup(backup)) => {
+                            if let Some(have) = self.keep_backup(&backup) {
+                                // Tells the Hub this machine holds it now
+                                out.send(&mut ws, Body::BackupFetch(BackupFetch { have })).await?;
+                            }
+                        }
                         // From another member's mesh process: checked and handed over as data; only the mesh
                         // process can authenticate it (hard rule 13)
                         Some(Body::PathSwitch(p)) => {
@@ -488,6 +500,9 @@ impl Node {
                         }
                         _ => {}
                     }
+                }
+                _ = backups.tick() => {
+                    out.send(&mut ws, Body::BackupFetch(BackupFetch { have: self.backup_held() })).await?;
                 }
                 Some(p) = from_mesh.recv() => {
                     out.send(&mut ws, Body::PathSwitch(PathSwitch {
@@ -527,6 +542,43 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// The SHA-256 of the Hub backup this machine holds; empty when it has none.
+    fn backup_held(&self) -> Vec<u8> {
+        let path = self.backup_path();
+        match nett_mesh::config::read_bounded(&path, nett_trust::MAX_BACKUP_BYTES as u64) {
+            Ok(Some(bytes)) => ring::digest::digest(&ring::digest::SHA256, &bytes)
+                .as_ref()
+                .to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Keeps the Hub's backup next to the desired state (`0600`, design/hub.md section 8.2). It is
+    /// opaque here: only the site's backup key opens it. Returns its hash once written.
+    fn keep_backup(&self, backup: &nett_proto::v1::Backup) -> Option<Vec<u8>> {
+        let digest = ring::digest::digest(&ring::digest::SHA256, &backup.data);
+        if backup.data.len() as u64 > nett_trust::MAX_BACKUP_BYTES as u64
+            || digest.as_ref() != backup.sha256
+        {
+            tracing::warn!("the Hub sent a backup that does not match its hash or is too large");
+            return None;
+        }
+        match write_private(&self.backup_path(), &backup.data) {
+            Ok(()) => {
+                tracing::info!(bytes = backup.data.len(), "Hub backup kept");
+                Some(backup.sha256.clone())
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "keeping the Hub backup");
+                None
+            }
+        }
+    }
+
+    fn backup_path(&self) -> std::path::PathBuf {
+        self.desired.with_file_name(BACKUP_FILE)
     }
 
     async fn read_status(&self) -> Option<Vec<u8>> {
@@ -726,6 +778,22 @@ fn is_pending(ack: &StateAck) -> bool {
     ack.partitions
         .iter()
         .any(|p| p.kind == PartitionKind::Mesh as i32 && p.result == AckResult::Pending as i32)
+}
+
+/// A file only root reads (`0600`): written to a temporary file, synced, then renamed.
+fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let tmp = path.with_extension("new");
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)
 }
 
 /// The desired state file: write a temporary file, sync to disk, then rename. Keeps the existing

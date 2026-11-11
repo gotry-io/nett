@@ -51,6 +51,20 @@ pub struct StatusResponse {
     pub url: String,
     pub generation: u64,
     pub machines: Vec<MachineStatus>,
+    /// The Hub's latest encrypted backup (design/hub.md section 8.2); absent before the site has a
+    /// backup key or before any machine asked for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<BackupStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct BackupStatus {
+    /// When it was made (Unix seconds).
+    pub made_at: i64,
+    pub bytes: u64,
+    /// The machines that hold this backup.
+    pub held_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

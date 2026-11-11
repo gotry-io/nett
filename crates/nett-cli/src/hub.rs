@@ -114,7 +114,16 @@ fn rules_text(state: &State) -> String {
 pub fn link(dir: &Path, code: &str) -> anyhow::Result<()> {
     let code = LinkCode::decode(code)?;
     let site = SiteDir::open(dir)?;
-    let state = site.load()?;
+    let mut state = site.load()?;
+    // The Hub seals its backups to this key; the private half stays in the site directory
+    if site.ensure_backup_key(&mut state)? {
+        site.save(&state)?;
+        println!(
+            "Created {}: the Hub's backups open only with it. Keep a copy offline with {}.",
+            site.path().join(nett_site::dir::BACKUP_FILE).display(),
+            nett_site::dir::RECOVERY_FILE
+        );
+    }
     if let Some(old) = SiteHub::load(dir)?
         && old.url != code.url
     {
@@ -396,6 +405,16 @@ pub fn status(
         println!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
     }
+    let backup = match (&reply.backup, state.backup_key) {
+        (Some(b), _) => format!(
+            "made {}, kept by {} of {} machines",
+            crate::status::ago(Timestamp::from_unix_seconds(b.made_at), Timestamp::now()),
+            b.held_by.len(),
+            reply.machines.len()
+        ),
+        (None, Some(_)) => "none yet: machines ask for it when they connect".to_owned(),
+        (None, None) => "no backup key: the Hub makes backups after `nett site link`".to_owned(),
+    };
     print!(
         "{}",
         key_values(&[
@@ -407,6 +426,7 @@ pub fn status(
                 "site",
                 format!("{} machines, {}", state.machines.len(), rules_text(state))
             ),
+            ("backup", backup),
         ])
     );
     let mut rows =

@@ -108,9 +108,14 @@ pub async fn hub(dir: &Path, url: &str) -> Arc<Hub> {
             .await
             .expect("set link")
     );
-    Hub::load(db, StaticSecret::from([200; 32]), url.to_owned())
-        .await
-        .expect("hub")
+    Hub::load(
+        db,
+        StaticSecret::from([200; 32]),
+        url.to_owned(),
+        Some(dir.to_path_buf()),
+    )
+    .await
+    .expect("hub")
 }
 
 pub async fn call(

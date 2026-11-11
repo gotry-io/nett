@@ -496,6 +496,58 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
         );
     }
 
+    // The Hub host is lost (design/hub.md section 8.2): the Hub is rebuilt in a new data directory
+    // from the backup a member keeps, with the site's backup key; members connect to it on their own
+    // and the next push reaches them
+    let kept = lab_nodes[0].dir.join(nett_node::session::BACKUP_FILE);
+    report.check(
+        "rebuild:backup-kept",
+        kept.exists(),
+        format!("{} keeps {}", lab_nodes[0].name, kept.display()),
+    );
+    h.stop_hub();
+    let lost = out.join("hub-lost");
+    std::fs::remove_dir_all(&lost).ok();
+    std::fs::rename(&h.hub_dir, &lost)?;
+    std::fs::create_dir_all(&h.hub_dir)?;
+    // The reverse proxy's certificate is not part of the Hub; the lab's self-signed one moves along
+    for file in ["tls-cert.pem", "tls-key.pem"] {
+        std::fs::copy(lost.join(file), h.hub_dir.join(file))?;
+    }
+    let key_line = std::fs::read(site.join("backup.key"))?;
+    let restored = crate::cmd::run_with_input(
+        &h.hub_bin.display().to_string(),
+        [
+            "restore".as_ref(),
+            "--data".as_ref(),
+            h.hub_dir.as_os_str(),
+            kept.as_os_str(),
+        ],
+        Some(&key_line),
+        Duration::from_secs(30),
+    );
+    report.check(
+        "rebuild:restored",
+        restored
+            .as_ref()
+            .is_ok_and(|o| o.contains("Restored the Hub")),
+        restored
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    h.start_hub()?;
+    let pushed = h.site_cmd(&["allow", &b.name, &a.name, "82/tcp", "--yes"]);
+    report.record("rebuild:push", pushed.unwrap_or_else(|e| format!("{e:#}")));
+    let current = h.wait_acked("applied", RECONNECT);
+    report.check(
+        "rebuild:members-current",
+        current.is_ok(),
+        current.as_ref().map_or_else(
+            |e| format!("{e:#}"),
+            |s| format!("generation {}", s.generation),
+        ),
+    );
+
     // The compromised Hub delivers a member signed by another site: members reject it, the rest
     // continue as usual
     let other = out.join("other-site");

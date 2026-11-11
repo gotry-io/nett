@@ -17,7 +17,7 @@ workspace = true
 [dependencies]
 nett-core.workspace = true
 nett-mesh.workspace = true
-nett-trust = { workspace = true, features = ["signing"] }
+nett-trust = { workspace = true, features = ["signing", "backup"] }
 ring.workspace = true
 rustix = { workspace = true, features = ["fs"] }
 serde = { workspace = true, features = ["derive"] }
