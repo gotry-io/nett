@@ -182,7 +182,7 @@ fn desired(path: &Path) -> anyhow::Result<DesiredMeshDoc> {
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }
 
-pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
     underlay.down()?;
@@ -783,8 +783,165 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         m.ipv4.is_none() && m.learned.ipv4.map(|l| l.ip) == Some(expected),
         format!("learned {:?}, expected {expected}", m.learned),
     );
+    if let Some(seconds) = soak {
+        soak_phase(
+            &h,
+            &lab,
+            &ns_a,
+            &rejoined.mesh_ipv4.to_string(),
+            seconds,
+            out,
+            &mut report,
+        )?;
+    }
     drop(h);
     Ok(report)
+}
+
+/// Rest after the load before the idle measurement (CLAUDE.md "Resource discipline").
+const SOAK_REST: Duration = Duration::from_secs(600);
+const SOAK_EVERY: Duration = Duration::from_secs(60);
+/// Allowed growth of anonymous memory from the first sample after the warm-up to the idle
+/// measurement. Anonymous memory is what a leak grows; RSS also counts code pages, which the kernel
+/// may reclaim while the lab rests.
+const SOAK_GROWTH_KIB: u64 = 512;
+/// Idle budget of nett-node and the mesh process (hard rule 14); meaningful for release builds.
+const NODE_BUDGET_KIB: u64 = 5 * 1024;
+
+/// One memory sample of each process: RSS, PSS and anonymous memory in KiB.
+type Samples = Vec<(String, super::Memory)>;
+
+/// The soak (CLAUDE.md "Resource discipline", roadmap M1): for `seconds`, every minute a rule is
+/// added or removed again, pushed through the Hub, and one member pings the other; the memory of
+/// every nett process is sampled into `soak.csv`. Then the lab rests for 10 minutes and the idle
+/// memory is measured: anonymous memory must be flat against the first sample after a 10-minute
+/// warm-up, and nett-node and the mesh process must stay within their budget, judged by the
+/// largest RSS sampled.
+fn soak_phase(
+    h: &HubLab<'_>,
+    lab: &Lab,
+    ns_a: &str,
+    b_mesh: &str,
+    seconds: u64,
+    out: &Path,
+    report: &mut Report,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let mut pids: Vec<(String, u32)> = lab
+        .processes
+        .iter()
+        .map(|(name, child)| {
+            let name = if name.starts_with("node:") {
+                name.clone()
+            } else {
+                format!("mesh:{name}")
+            };
+            (name, child.id())
+        })
+        .collect();
+    if let Some(hub) = &h.hub {
+        pids.push(("nett-hub".to_owned(), hub.id()));
+    }
+    let csv_path = out.join("soak.csv");
+    let mut csv = std::fs::File::create(&csv_path)?;
+    writeln!(csv, "seconds,process,rss_kib,pss_kib,anon_kib,threads")?;
+    let mut peak: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut sample = |csv: &mut std::fs::File, at: u64| -> anyhow::Result<Samples> {
+        let mut all = Vec::new();
+        for (name, pid) in &pids {
+            if let Some(m) = super::memory_kib(*pid) {
+                writeln!(
+                    csv,
+                    "{at},{name},{},{},{},{}",
+                    m.rss, m.pss, m.anon, m.threads
+                )?;
+                let top = peak.entry(name.clone()).or_default();
+                *top = (*top).max(m.rss);
+                all.push((name.clone(), m));
+            }
+        }
+        Ok(all)
+    };
+    let started = Instant::now();
+    let warm_up = Duration::from_secs(600).min(Duration::from_secs(seconds / 2));
+    let mut baseline: Option<Samples> = None;
+    let (mut pushes, mut failed_pushes, mut pings, mut failed_pings) = (0u64, 0u64, 0u64, 0u64);
+    let mut round = 0u64;
+    while started.elapsed() < Duration::from_secs(seconds) {
+        let pushed = if round.is_multiple_of(2) {
+            h.site_cmd(&["allow", "a", "b", "9000/tcp", "--note", "soak", "--yes"])
+        } else {
+            let rules = h.site_cmd(&["rules", "--json"])?;
+            let rules: serde_json::Value = serde_json::from_str(&rules)?;
+            let id = rules
+                .as_object()
+                .and_then(|r| {
+                    r.iter()
+                        .find(|(_, rule)| rule["note"] == "soak")
+                        .map(|(id, _)| id.clone())
+                })
+                .context("the soak rule")?;
+            h.site_cmd(&["rules", "remove", &id, "--yes"])
+        };
+        pushes += 1;
+        if pushed.is_err() {
+            failed_pushes += 1;
+        }
+        pings += 1;
+        if ping(ns_a, b_mesh).is_err() {
+            failed_pings += 1;
+        }
+        let now = sample(&mut csv, started.elapsed().as_secs())?;
+        if baseline.is_none() && started.elapsed() >= warm_up {
+            baseline = Some(now);
+        }
+        round += 1;
+        std::thread::sleep(SOAK_EVERY);
+    }
+    std::thread::sleep(SOAK_REST);
+    let idle = sample(&mut csv, started.elapsed().as_secs())?;
+    report.record(
+        "soak:load",
+        format!(
+            "{seconds} s, {pushes} pushes ({failed_pushes} failed), {pings} pings ({failed_pings} failed); samples in {}",
+            csv_path.display()
+        ),
+    );
+    report.check(
+        "soak:changes-and-pings",
+        failed_pushes == 0 && failed_pings == 0,
+        format!("{failed_pushes} failed pushes, {failed_pings} failed pings"),
+    );
+    let baseline = baseline.unwrap_or_default();
+    for (name, m) in &idle {
+        let first = baseline
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(m.anon, |(_, b)| b.anon);
+        report.check(
+            &format!("soak:{name}:flat"),
+            m.anon <= first + SOAK_GROWTH_KIB,
+            format!(
+                "anonymous {first} KiB after the warm-up, {} KiB idle at the end",
+                m.anon
+            ),
+        );
+        let top = peak.get(name).copied().unwrap_or(m.rss);
+        let detail = format!(
+            "idle RSS {} KiB, PSS {} KiB, anonymous {} KiB; largest RSS {top} KiB",
+            m.rss, m.pss, m.anon
+        );
+        if name.starts_with("node:") || name.starts_with("mesh:") {
+            report.check(
+                &format!("soak:{name}:budget"),
+                top <= NODE_BUDGET_KIB,
+                format!("{detail}; budget {NODE_BUDGET_KIB} KiB"),
+            );
+        } else {
+            report.record(&format!("soak:{name}:memory"), detail);
+        }
+    }
+    Ok(())
 }
 
 /// `nett-lab leave`: tells the Hub this machine is leaving, and tears down the mesh interface and
