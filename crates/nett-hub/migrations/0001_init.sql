@@ -35,7 +35,10 @@ CREATE TABLE nodes (
     status_at INTEGER,
     -- Public address learned by the Hub (design/hub.md section 5, JSON of
     -- nett_site::state::Learned)
-    learned TEXT
+    learned TEXT,
+    -- The machine's answer to the release manifest (design/release.md section 7)
+    upgrade_result TEXT,
+    upgrade_reason TEXT
 );
 
 -- Events that happen on the Hub side and are not yet in the pushed site state (design/hub.md

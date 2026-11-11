@@ -45,5 +45,6 @@ tracing.workspace = true
 x25519-dalek.workspace = true
 
 [dev-dependencies]
+blake2.workspace = true
 nett-site.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }

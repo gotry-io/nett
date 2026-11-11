@@ -83,6 +83,9 @@ impl HubLab<'_> {
                 self.hub_dir.join("tls-cert.pem").as_os_str(),
                 "--tls-key".as_ref(),
                 self.hub_dir.join("tls-key.pem").as_os_str(),
+                // The lab has no internet; upgrades are tested in CI on Linux with systemd
+                "--releases".as_ref(),
+                "off".as_ref(),
             ],
             &self.hub_dir.join("hub.log"),
         )?;

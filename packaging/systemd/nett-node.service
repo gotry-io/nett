@@ -1,6 +1,7 @@
 # nett-node, the agent that connects this machine to its Hub. Installed by `sudo nett install <token>`.
 # It writes the desired state from the Hub to /etc/nett/desired.json, asks the mesh service to reload
-# it, and reports status. Hub settings are in /etc/nett/hub.json, the identity key in
+# it, reports status, and installs new releases into /usr/local/lib/nett after verifying their
+# release signature. Hub settings are in /etc/nett/hub.json, the identity key in
 # /etc/nett/identity.key. The mesh keeps running without this service; systemd restarts each one.
 [Unit]
 Description=nett node agent
@@ -8,13 +9,14 @@ After=network-online.target nett-mesh.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/nett node --dir /etc/nett
-# Runs as root to write the desired state; CAP_DAC_OVERRIDE lets it reach the mesh service's
-# socket in /run/nett. It listens on no port and runs no other programs.
+ExecStart=/usr/local/lib/nett/nett node --dir /etc/nett
+# Runs as root to write the desired state and replace the program; CAP_DAC_OVERRIDE lets it reach
+# the mesh service's socket in /run/nett. It listens on no port; the only program it runs is
+# systemctl, to restart the mesh service after an upgrade.
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/nett
+ReadWritePaths=/etc/nett /usr/local/lib/nett
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
@@ -22,8 +24,8 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-# Idle use stays under 5 MB; the limit leaves room for a large desired state
-MemoryMax=32M
+# Idle use stays under 5 MB; the limit leaves room for a large desired state or a download
+MemoryMax=64M
 Restart=always
 RestartSec=5
 

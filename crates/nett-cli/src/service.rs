@@ -18,13 +18,12 @@ use crate::install::{
     InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
 };
 
-const DIR: &str = "/Library/Application Support/nett";
-const BINARY: &str = "/Library/Application Support/nett/nett";
+use nett_node::platform::macos::{DIR, LAUNCHCTL, MESH_LABEL, NODE_LABEL, PROGRAM as BINARY};
+
 const DESIRED: &str = "/Library/Application Support/nett/desired.json";
 const KEY: &str = "/Library/Application Support/nett/mesh.key";
 const LOG_DIR: &str = "/Library/Logs/nett";
 const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
-const LAUNCHCTL: &str = "/bin/launchctl";
 /// Upper bound for waiting for launchctl to unload a service.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -40,7 +39,7 @@ struct Service {
 }
 
 const MESH: Service = Service {
-    label: "io.gotry.nett.mesh",
+    label: MESH_LABEL,
     plist: "/Library/LaunchDaemons/io.gotry.nett.mesh.plist",
     args: &["mesh", "--config", DESIRED, "--key", KEY],
     log: "mesh.log",
@@ -48,7 +47,7 @@ const MESH: Service = Service {
 };
 
 const NODE: Service = Service {
-    label: "io.gotry.nett.node",
+    label: NODE_LABEL,
     plist: "/Library/LaunchDaemons/io.gotry.nett.node.plist",
     args: &["node", "--dir", DIR],
     log: "node.log",

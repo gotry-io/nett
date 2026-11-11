@@ -1318,6 +1318,7 @@ name = "nett-node"
 version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
+ "blake2 0.11.0",
  "bytes",
  "futures-util",
  "http-body-util",
@@ -1423,6 +1424,7 @@ name = "nett-trust"
 version = "0.1.5"
 dependencies = [
  "base64 0.23.1",
+ "blake2 0.11.0",
  "nett-core",
  "ring",
  "serde",

@@ -70,6 +70,12 @@ pub struct MachineStatus {
     pub status: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status_at: Option<i64>,
+    /// The machine's answer to the release manifest (`applied`, `pending`, `rejected`) and its
+    /// reason (design/release.md section 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_result: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_reason: Option<String>,
 }
 
 /// API errors (design/api-resources.md section 2).

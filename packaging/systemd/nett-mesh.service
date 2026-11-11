@@ -8,7 +8,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key
+ExecStart=/usr/local/lib/nett/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key
 ExecReload=/bin/kill -HUP $MAINPID
 LoadCredential=mesh.key:/etc/nett/mesh.key
 # Local status socket /run/nett/mesh.sock: only the service and root can enter the directory

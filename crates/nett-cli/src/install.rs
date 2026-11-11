@@ -7,8 +7,7 @@ use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use lexopt::ValueExt as _;
@@ -139,28 +138,7 @@ pub fn copy_self(target: &str) -> anyhow::Result<bool> {
 /// Runs a service manager command with an argument array (hard rule 9: the program is a fixed
 /// absolute path, no shell), with a timeout; returns whether it succeeded.
 pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("running {program} {}", args.join(" ")))?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .with_context(|| format!("waiting for {program}"))?
-        {
-            return Ok(status.success());
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("{program} {} did not finish in time", args.join(" "));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    nett_node::platform::run(program, args, COMMAND_TIMEOUT).map_err(anyhow::Error::msg)
 }
 
 /// Result when there is a token.
@@ -299,6 +277,8 @@ pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
         "identity.key",
         "desired.json",
         nett_node::config::HUB_FILE,
+        nett_node::upgrade::STATE_FILE,
+        nett_node::upgrade::MARKER_FILE,
     ] {
         let path = Path::new(dir).join(name);
         match fs::remove_file(&path) {

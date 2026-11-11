@@ -72,6 +72,9 @@ pub struct Hub {
     changes: watch::Sender<u64>,
     /// The current connection of each machine: a new connection replaces the old one.
     live: Mutex<HashMap<NodeId, Arc<Notify>>>,
+    /// The latest release manifest (design/release.md section 7), sent to every node as the
+    /// `release` partition.
+    release: watch::Sender<Option<Arc<Vec<u8>>>>,
 }
 
 /// The reason an enrollment is rejected, told to that machine as is (protocol.md section 4.3).
@@ -103,7 +106,30 @@ impl Hub {
             site: RwLock::new(site),
             changes: watch::channel(generation).0,
             live: Mutex::new(HashMap::new()),
+            release: watch::channel(None).0,
         }))
+    }
+
+    /// The latest release manifest, already checked.
+    pub fn release(&self) -> Option<Arc<Vec<u8>>> {
+        self.release.borrow().clone()
+    }
+
+    pub fn subscribe_release(&self) -> watch::Receiver<Option<Arc<Vec<u8>>>> {
+        self.release.subscribe()
+    }
+
+    /// Takes a newly fetched release manifest; connected nodes get it when it changed.
+    pub fn set_release(&self, manifest: Vec<u8>) -> Result<(), String> {
+        nett_trust::release::Manifest::parse(&manifest).map_err(|e| e.to_string())?;
+        self.release.send_if_modified(|current| {
+            if current.as_deref().map(Vec::as_slice) == Some(manifest.as_slice()) {
+                return false;
+            }
+            *current = Some(Arc::new(manifest));
+            true
+        });
+        Ok(())
     }
 
     pub async fn site(&self) -> Option<Arc<Site>> {
