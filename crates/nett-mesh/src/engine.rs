@@ -171,6 +171,64 @@ impl<D: DataPlane> Engine<D> {
         &self.names
     }
 
+    /// Who `address` belongs to, from the verified admission material and the verified advertised routes
+    /// only (design/names-and-diagnostics.md section 4).
+    pub fn whois(&self, address: IpAddr) -> status::Whois {
+        let node_ref = |id: &NodeId| NodeRef {
+            id: id.clone(),
+            name: self.names.get(id).cloned(),
+        };
+        let answer = |kind, m: &Member, prefix| status::Whois {
+            address,
+            kind,
+            node: Some(node_ref(&m.node_id)),
+            mesh: mesh_addrs(m),
+            roles: m.roles.clone(),
+            prefix,
+        };
+        let members = self.members.members();
+        if let Some(m) = members.values().find(|m| mesh_addrs(m).contains(&address)) {
+            return answer(status::WhoisKind::Member, m, None);
+        }
+        if let Some(m) = members.values().find(|m| edge_addrs(m).contains(&address)) {
+            return answer(status::WhoisKind::Edge, m, None);
+        }
+        for m in members.values() {
+            if let Some(prefix) = self
+                .routes
+                .of(&m.node_id)
+                .iter()
+                .find(|p| p.contains(address))
+            {
+                return answer(status::WhoisKind::Route, m, Some(*prefix));
+            }
+        }
+        status::Whois {
+            address,
+            kind: status::WhoisKind::None,
+            node: None,
+            mesh: vec![],
+            roles: vec![],
+            prefix: None,
+        }
+    }
+
+    /// What the DNS responder answers (design/names-and-diagnostics.md section 2): each admitted
+    /// member's name from the desired state, with the addresses from its verified admission material.
+    pub fn name_table(&self) -> crate::dns::NameTable {
+        self.members
+            .members()
+            .values()
+            .filter_map(|m| {
+                let name = self.names.get(&m.node_id)?;
+                Some((
+                    name.as_str().to_ascii_lowercase(),
+                    (m.addresses.ipv4, m.addresses.ipv6),
+                ))
+            })
+            .collect()
+    }
+
     pub fn members(&self) -> &MemberSet {
         &self.members
     }
@@ -1350,6 +1408,51 @@ mod tests {
                     .iter()
                     .any(|m| matches!(m, crate::access::Match::Destination(d) if d.covers(&route)))
         }));
+    }
+
+    /// The responder's names and `whois` come from the verified members: a name in the desired state
+    /// for a node that is not admitted resolves to nothing (design/names-and-diagnostics.md).
+    #[test]
+    fn names_and_whois_follow_the_verified_members() {
+        let mesh = Mesh::new(&[1, 2, 3]);
+        let members = vec![
+            mesh.edge_material(1, 1),
+            mesh.router_material(2, 1),
+            mesh.material(3, 1),
+        ];
+        let mut d = mesh.desired(1, members);
+        d.advertised_routes = vec![mesh.sign(&mesh.routes_doc(2, 1, &["192.0.2.10/32"]))];
+        d.names.insert(node_id(9), "ghost".parse().expect("name"));
+        let mut e = engine(1);
+        e.apply(&validated(d), &mut VecSink::default())
+            .expect("accepted");
+        let names = e.name_table();
+        let member2 = e.members().get(&node_id(2)).expect("member 2").addresses;
+        assert_eq!(names.get("node-2"), Some(&(member2.ipv4, member2.ipv6)));
+        assert!(
+            !names.contains_key("ghost"),
+            "a name for no admitted member"
+        );
+        assert_eq!(names.len(), 3);
+
+        let who = e.whois(IpAddr::V4(member2.ipv4));
+        assert_eq!(who.kind, status::WhoisKind::Member);
+        assert_eq!(who.node.map(|n| n.id), Some(node_id(2)));
+        let edge = e
+            .members()
+            .get(&node_id(1))
+            .and_then(|m| m.edge.as_ref())
+            .expect("edge")
+            .addresses
+            .ipv4;
+        assert_eq!(e.whois(IpAddr::V4(edge)).kind, status::WhoisKind::Edge);
+        let routed = e.whois("192.0.2.10".parse().expect("ip"));
+        assert_eq!(routed.kind, status::WhoisKind::Route);
+        assert_eq!(routed.node.map(|n| n.id), Some(node_id(2)));
+        assert_eq!(
+            e.whois("203.0.113.1".parse().expect("ip")).kind,
+            status::WhoisKind::None
+        );
     }
 
     #[test]

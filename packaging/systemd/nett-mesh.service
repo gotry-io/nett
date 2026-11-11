@@ -20,11 +20,15 @@ RuntimeDirectoryMode=0711
 # Trust store /var/lib/nett: pinned trust anchors, revocations and applied versions survive restarts
 StateDirectory=nett
 StateDirectoryMode=0700
-# A dedicated system user with only the capabilities for WireGuard, nftables and path probes
+# Names under nett.internal go to this machine's DNS responder through systemd-resolved; this step
+# runs as root, changes only the settings of nett0, and does nothing without systemd-resolved
+ExecStartPost=+/usr/local/lib/nett/nett resolver
+# A dedicated system user with only the capabilities for WireGuard, nftables, path probes and the DNS
+# responder on the mesh address (UDP 53)
 User=nett
 Group=nett
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

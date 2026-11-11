@@ -6,6 +6,7 @@ pub mod clock;
 pub mod config;
 pub mod coord;
 pub mod dataplane;
+pub mod dns;
 pub mod engine;
 pub mod event;
 pub mod helper;

@@ -565,7 +565,7 @@ impl Node {
             tracing::warn!("the Hub sent a backup that does not match its hash or is too large");
             return None;
         }
-        match write_private(&self.backup_path(), &backup.data) {
+        match crate::config::write_private(&self.backup_path(), &backup.data) {
             Ok(()) => {
                 tracing::info!(bytes = backup.data.len(), "Hub backup kept");
                 Some(backup.sha256.clone())
@@ -778,22 +778,6 @@ fn is_pending(ack: &StateAck) -> bool {
     ack.partitions
         .iter()
         .any(|p| p.kind == PartitionKind::Mesh as i32 && p.result == AckResult::Pending as i32)
-}
-
-/// A file only root reads (`0600`): written to a temporary file, synced, then renamed.
-fn write_private(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let tmp = path.with_extension("new");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
 }
 
 /// The desired state file: write a temporary file, sync to disk, then rename. Keeps the existing

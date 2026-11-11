@@ -59,6 +59,12 @@ pub enum Event {
         members: usize,
         links: usize,
     },
+    /// The DNS responder answers on the mesh addresses (design/names-and-diagnostics.md section 2).
+    NamesReady,
+    /// The DNS responder could not start: names do not resolve, the mesh works as before.
+    NamesUnavailable {
+        reason: String,
+    },
     /// A data plane operation failed; the current state is kept and the operation is retried on the next
     /// desired state.
     DataPlaneFailed {
@@ -169,6 +175,10 @@ pub fn log_event(event: &Event) {
         ),
         Event::RelayAssignmentChanged { members, links } => {
             tracing::info!(members, links, "relay assignment changed")
+        }
+        Event::NamesReady => tracing::info!("answering names under {}", crate::dns::SUFFIX),
+        Event::NamesUnavailable { reason } => {
+            tracing::warn!(%reason, "names under {} do not resolve", crate::dns::SUFFIX)
         }
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),

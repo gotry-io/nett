@@ -362,6 +362,30 @@ impl Platform for MacTun {
     }
 }
 
+/// The file that sends `nett.internal` to this machine's responder (design/names-and-diagnostics.md
+/// section 3).
+pub const RESOLVER_FILE: &str = "/etc/resolver/nett.internal";
+
+/// Points the system resolver's `nett.internal` at `ipv4`, rewriting the file only when it differs. A
+/// failure leaves names unresolved by the system resolver and is logged.
+pub fn point_resolver(ipv4: std::net::Ipv4Addr) {
+    let content = format!(
+        "# Written by the nett mesh service: names under nett.internal resolve through this machine's\n\
+         # mesh address.\nnameserver {ipv4}\n"
+    );
+    if std::fs::read_to_string(RESOLVER_FILE).ok().as_deref() == Some(content.as_str()) {
+        return;
+    }
+    let written = std::fs::create_dir_all("/etc/resolver").and_then(|()| {
+        let tmp = format!("{RESOLVER_FILE}.new");
+        std::fs::write(&tmp, &content)?;
+        std::fs::rename(&tmp, RESOLVER_FILE)
+    });
+    if let Err(e) = written {
+        tracing::warn!(error = %e, file = RESOLVER_FILE, "pointing the system resolver at the mesh");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

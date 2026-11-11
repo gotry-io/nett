@@ -4,6 +4,17 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Names: every machine answers as `<name>.nett.internal` (design/names-and-diagnostics.md). The mesh
+  process answers `A` and `AAAA` for the site's machines on UDP 53 of its own mesh address and refuses
+  every other name, so it never forwards. On macOS it writes `/etc/resolver/nett.internal`; on Linux the
+  mesh service routes the suffix to `nett0` through systemd-resolved (`nett resolver`, run when the service
+  starts) and does nothing without it. `sudo nett leave` removes the resolver file on macOS.
+- `nett ping <peer>` sends probes through the tunnel and shows each round trip and, with sudo, the path it
+  took; it works whatever the access rules allow. `sudo nett whois <address>` says which member, Edge or
+  advertised prefix an address belongs to, from what this machine verified. `sudo nett doctor` checks the
+  mesh service, the desired state, unreachable peers with their likely cause (closed WireGuard or relay
+  ports), the clock, the relay, the TLS transport, the Hub connection, names, overriding units and failed
+  upgrades, and exits with 1 when it finds a problem.
 ## [0.2.0] - 2026-11-11
 
 - The Hub keeps an encrypted backup on every machine (design/hub.md section 8.2). `nett site link` creates

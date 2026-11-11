@@ -65,6 +65,8 @@ enum Msg {
     Transport(SyncSender<Option<nett_core::transport::TransportConfig>>),
     /// From nett-node over the coordination connection (design/status.md section 4.2).
     Coordination(Inbound),
+    /// Who an address belongs to (design/names-and-diagnostics.md section 4).
+    Whois(IpAddr, SyncSender<crate::status::Whois>),
     Shutdown,
 }
 
@@ -85,10 +87,13 @@ impl Applier for Runtime {
 }
 
 impl Runtime {
+    /// Starts the background thread. `dns_port` is where the DNS responder answers on the mesh addresses
+    /// (`crate::dns::PORT`; 0 turns it off).
     pub fn spawn<D: DataPlane + 'static, E: EventSink + Send + 'static, C: Clock + 'static>(
         engine: Engine<D>,
         events: E,
         clock: C,
+        dns_port: u16,
     ) -> std::io::Result<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         let worker_tx = tx.clone();
@@ -107,6 +112,8 @@ impl Runtime {
                     receivers: Vec::new(),
                     started: false,
                     coordinator: worker_coordinator,
+                    dns: None,
+                    dns_port,
                 };
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
@@ -188,6 +195,9 @@ impl Runtime {
                         }
                         Ok(Msg::Transport(reply)) => {
                             let _ = reply.try_send(worker.engine.transport_config());
+                        }
+                        Ok(Msg::Whois(address, reply)) => {
+                            let _ = reply.try_send(worker.engine.whois(address));
                         }
                         Ok(Msg::Coordination(Inbound::Hub(up))) => worker.engine.set_hub(up),
                         Ok(Msg::Coordination(Inbound::PathSwitch { peer, message })) => {
@@ -278,6 +288,12 @@ impl StatusSource for RuntimeStatus {
         answer.recv_timeout(RELOAD_TIMEOUT).ok()
     }
 
+    fn whois(&self, address: IpAddr) -> Option<crate::status::Whois> {
+        let (reply, answer) = sync_channel(1);
+        self.tx.try_send(Msg::Whois(address, reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
+
     fn coordinate(&self, stream: std::os::unix::net::UnixStream) -> std::io::Result<()> {
         let tx = self.tx.clone();
         // A full queue drops the line: the Hub state is sent again on change, and switch messages are
@@ -317,23 +333,50 @@ struct Worker<D, E> {
     started: bool,
     /// The coordination connection with nett-node: switch messages through the Hub go out here.
     coordinator: Arc<Coordinator>,
+    /// The DNS responder, once the mesh addresses are up, and the port it answers on (0: none).
+    dns: Option<crate::dns::DnsServer>,
+    dns_port: u16,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
     /// Creates the probe sockets and receive threads once the mesh interface is ready (only once).
     fn ensure_sockets(&mut self) {
-        if self.sockets.is_some() {
-            return;
-        }
         let Some(interface) = self.engine.interface() else {
             return;
         };
         let addrs: Vec<IpAddr> = interface.spec.addresses.iter().map(|a| a.addr).collect();
-        match self.open(&addrs, interface.listen_port) {
-            Ok(sockets) => self.sockets = Some(sockets),
-            Err(e) => self.events.emit(Event::DataPlaneFailed {
-                reason: format!("opening probe sockets: {e}"),
-            }),
+        if self.sockets.is_none() {
+            match self.open(&addrs, interface.listen_port) {
+                Ok(sockets) => self.sockets = Some(sockets),
+                Err(e) => self.events.emit(Event::DataPlaneFailed {
+                    reason: format!("opening probe sockets: {e}"),
+                }),
+            }
+        }
+        // The DNS responder on the mesh addresses (design/names-and-diagnostics.md section 2): if the
+        // port cannot be bound, names do not resolve and the mesh works as before
+        if self.dns.is_none() && self.dns_port != 0 {
+            match crate::dns::DnsServer::spawn(&addrs, self.dns_port) {
+                Ok(server) => {
+                    self.dns = Some(server);
+                    self.events.emit(Event::NamesReady);
+                    // macOS sends the suffix to this machine's own responder (the mesh process runs as
+                    // root there); elsewhere the service setup does it
+                    #[cfg(target_os = "macos")]
+                    if let Some(IpAddr::V4(v4)) = addrs.iter().find(|a| a.is_ipv4()) {
+                        crate::macos::point_resolver(*v4);
+                    }
+                }
+                Err(e) => self.events.emit(Event::NamesUnavailable {
+                    reason: format!(
+                        "binding UDP port {} on the mesh addresses: {e}",
+                        self.dns_port
+                    ),
+                }),
+            }
+        }
+        if let Some(dns) = &self.dns {
+            dns.set_names(self.engine.name_table());
         }
     }
 

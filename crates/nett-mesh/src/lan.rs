@@ -106,6 +106,15 @@ pub fn addresses(mesh: &[IpPrefix]) -> Vec<LanAddress> {
     out
 }
 
+/// The addresses on one interface.
+pub fn interface_ips(name: &str) -> Vec<IpAddr> {
+    interfaces()
+        .into_iter()
+        .filter(|(n, _)| n == name)
+        .map(|(_, a)| a.addr)
+        .collect()
+}
+
 /// Interface names and their addresses with prefix lengths.
 fn interfaces() -> Vec<(String, LanAddress)> {
     let mut out = Vec::new();

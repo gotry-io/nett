@@ -354,6 +354,14 @@ pub fn leave() -> anyhow::Result<()> {
     crate::install::tell_hub(DIR)?;
     remove_services()?;
     crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
+    // The names of this site no longer resolve here
+    match std::fs::remove_file(nett_mesh::macos::RESOLVER_FILE) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).with_context(|| format!("removing {}", nett_mesh::macos::RESOLVER_FILE));
+        }
+    }
     println!(
         "Left the site: removed the services, deleted the keys, the desired state, the trust store \
          and the Hub configuration."
