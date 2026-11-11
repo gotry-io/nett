@@ -4,9 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-11
+
 - macOS: names under `nett.internal` resolve. The system resolver's queries to this machine's own mesh
   address are answered by the data plane, and other packets a Mac sends to its own mesh address get the
   checksum macOS leaves out for them, so local programs reach it over IPv6 as well as IPv4.
+- `nett doctor` asks the DNS responder for this machine's own name, and reports a responder that does not
+  answer as a problem rather than as a resolver setting.
+
 ## [0.3.2] - 2026-11-11
 
 - macOS: a Mac reaches its own mesh address, and names under `nett.internal` resolve. The utun's address is
