@@ -240,7 +240,7 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
     assert_eq!(row.upgrade_result.as_deref(), Some("rejected"));
     assert_eq!(
         row.upgrade_reason.as_deref(),
-        Some("this machine does not upgrade itself")
+        Some("9.9.9 is available; this machine does not upgrade itself")
     );
     // The answer appears in the site status
     let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;

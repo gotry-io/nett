@@ -7,6 +7,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - Container members: nett-node in its own container reads the mesh process's status and asks it to reload.
   The mesh process read a peer in another PID namespace as an error and closed the connection, so new
   desired states waited for the next restart and the site showed the machine as pending.
+- A machine whose program nett-node does not install, such as a container member, counts the release it
+  already runs as applied, and reports a newer one as available for its image to be upgraded.
 ## [0.3.0] - 2026-11-11
 
 - Names: every machine answers as `<name>.nett.internal` (design/names-and-diagnostics.md). The mesh
