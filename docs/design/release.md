@@ -27,7 +27,7 @@
 2. **签名**：在 `release` 环境中运行，只接收构建任务产出的压缩包，下载固定版本、校验过哈希的 minisign，用主钥匙签名并生成 `SHA256SUMS`；不检出代码、不安装其他依赖；
 3. **发布**：创建 GitHub Release，上传压缩包、签名和 `SHA256SUMS`；发布说明取 `CHANGELOG.md` 中这个版本的一节；
 4. **更新配方**：按 `packaging/homebrew/nett.rb`（配方模板，唯一的出处）填入版本、地址和哈希，推送到 `gotry-io/homebrew-tap` 的 `Formula/nett.rb`，使用仓库密钥 `TAP_PUSH_TOKEN`（只对 tap 仓库有写权限）；
-5. **更新项目网站**：核对签名任务产出的 `SHA256SUMS`，按 `packaging/install.sh`（安装脚本的模板，唯一的出处）填入版本和各平台压缩包的哈希，与这个版本的压缩包一起部署到 Cloudflare Pages 上的 `nett.gotry.io`（第 6 节），使用仓库密钥 `CLOUDFLARE_API_TOKEN`（只有这个 Pages 项目的编辑权限）与 `CLOUDFLARE_ACCOUNT_ID`。部署工具 `wrangler` 固定版本。
+5. **更新项目网站**：核对签名任务产出的 `SHA256SUMS`，按 `packaging/install.sh`（安装脚本的模板，唯一的出处）填入版本和各平台压缩包的哈希，与这个版本的压缩包一起部署到 `nett.gotry.io`（第 6 节）。部署工具 `wrangler` 固定版本，配置是 `packaging/site/wrangler.jsonc`；密钥 `CLOUDFLARE_API_TOKEN`（只能编辑这个账号的 Worker 与 gotry.io 的 Worker 路由）与 `CLOUDFLARE_ACCOUNT_ID` 放在只有 `v*` 标签能用的 `site` 环境中：新机器首次安装信任这个网站，部署它的密钥与签名钥匙受同样的保护。
 
 ## 4. macOS：Homebrew 与组网服务
 
@@ -53,7 +53,7 @@
 
 新机器上的一行命令（hub.md 第 3.3 节）前半句是 `curl -fsSL https://nett.gotry.io/install.sh | sh`。
 
-- **网站**：`nett.gotry.io` 是项目主页，静态托管在 Cloudflare Pages，内容只由发布工作流部署（第 3 节）：首页、`install.sh` 与最新版本的压缩包（`dl/nett-<版本号>-<目标>.tar.gz`）。网站不在用户自己的机器上，也不在 Hub 上；
+- **网站**：`nett.gotry.io` 是项目主页，托管在 Cloudflare：一个只有静态文件的 Worker 挂在这个自定义域名上，DNS 记录与证书由 Cloudflare 管理。内容只由发布工作流部署（第 3 节）：首页、`install.sh` 与最新版本的压缩包（`dl/nett-<版本号>-<目标>.tar.gz`）。网站不在用户自己的机器上，也不在 Hub 上；
 - **脚本只安装 `nett`**：判断系统（Linux、macOS）与架构（x86_64、aarch64/arm64），下载对应的压缩包，按脚本中写明的 SHA-256 核对（`sha256sum` 或 `shasum -a 256`），解压到临时目录，放到 `/usr/local/bin/nett`（属主 root，`0755`；不是 root 时用 `sudo`）。`/usr/local/bin/nett` 是 Homebrew 的链接时停下，说明用 `brew upgrade`。脚本不读 token、不连接 Hub、不写配置，入网与服务由之后的 `sudo nett install` 完成；
 - **信任**：首次安装信任项目网站（经 HTTPS）与它背后的代码托管和 CI，与 Homebrew 信任配方、其他组网产品的安装脚本相同（ADR 0020）。脚本中的哈希防止压缩包在下载途中或在网站上被单独替换；网站本身被篡改时新装的机器会被接管，已经装好的机器不受影响，升级仍然核对发布签名；
 - 脚本用 POSIX `sh` 编写，只用 `uname`、`curl`、`tar`、`mktemp`、`install` 与哈希命令；出错时说明哪一步、为什么，并以非零退出。
