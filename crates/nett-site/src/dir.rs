@@ -23,6 +23,8 @@ pub const RECOVERY_FILE: &str = "recovery.pk8";
 pub const NODES_DIR: &str = "nodes";
 pub const DESIRED_FILE: &str = "desired.json";
 const LOCK_FILE: &str = ".lock";
+/// How long a command waits for the site directory's lock.
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// IPv4 prefix of the mesh (design/mesh.md section 3).
 const MESH_IPV4: &str = "100.88.0.0/16";
 
@@ -96,14 +98,29 @@ impl SiteDir {
             .mode(0o600)
             .open(path.join(LOCK_FILE))
             .map_err(|e| SiteError::io(format!("opening {}", path.join(LOCK_FILE).display()), e))?;
-        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).map_err(
-            |_| {
-                SiteError::invalid(format!(
-                    "another nett site command is changing {}; try again when it is done",
-                    path.display()
-                ))
-            },
-        )?;
+        // The lock can be held for a moment by something that is not another command (a child
+        // process that inherited it before exec), so wait briefly before reporting a conflict
+        let deadline = std::time::Instant::now() + LOCK_WAIT;
+        loop {
+            match rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => break,
+                Err(rustix::io::Errno::WOULDBLOCK) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(rustix::io::Errno::WOULDBLOCK) => {
+                    return Err(SiteError::invalid(format!(
+                        "another nett site command is changing {}; try again when it is done",
+                        path.display()
+                    )));
+                }
+                Err(e) => {
+                    return Err(SiteError::io(
+                        format!("locking {}", path.join(LOCK_FILE).display()),
+                        e.into(),
+                    ));
+                }
+            }
+        }
         Ok(Self {
             path: path.to_owned(),
             _lock: lock,
