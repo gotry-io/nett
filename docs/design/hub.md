@@ -230,6 +230,5 @@ Later: the web console and passkeys (ADR 0024), after the site state moves to th
 
 | Question | Notes |
 |---|---|
-| Read permission of the desired state file on Linux (H1) | The mesh process runs with systemd's `DynamicUser` and reads `/etc/nett/desired.json` directly, so this file must be world-readable, and the structure of the whole network is visible to ordinary users on the machine (status.md section 3 deliberately lets only root see it). Options: the mesh process uses a fixed system user and only it can read the file; or nett-node hands the desired state to the mesh process through the local interface, without a file |
 | How to confirm a `public` machine can be reached from outside | The learned public address (section 5) is not necessarily reachable from outside (firewall, security group). Option: judge from another member's measurements and show a hint in `nett site status` |
 | Choice of Hub host | Needs a `public`, long-term stable host that can use the Hub domain name (architecture.md section 13.5); this is also where it becomes a single point, see H5 |

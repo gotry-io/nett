@@ -6,6 +6,7 @@
 //! `--config`; with a Hub (a token, or an existing Hub configuration) only nett-node writes it.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
 use anyhow::{Context as _, bail};
@@ -82,9 +83,12 @@ fn ensure_running(unit: &Unit, restart: bool) -> anyhow::Result<Option<String>> 
 
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
-    // The mesh process runs under a dedicated systemd identity and must be able to enter this
-    // directory to read the desired state; the private key file itself is 0600
-    ensure_dir(DIR, 0o755)?;
+    // The mesh service runs as the system user nett and reads the desired state through the
+    // directory's group; other users cannot enter it. setgid hands the group to new files
+    let gid = ensure_user()?;
+    ensure_dir(DIR, 0o2750)?;
+    std::os::unix::fs::chown(DIR, Some(0), Some(gid))
+        .with_context(|| format!("changing the group of {DIR}"))?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
     let token = apply_token(
         DIR,
@@ -99,7 +103,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     let desired_changed = match (token.desired, &args.config, linked) {
         // The first one the Hub sends when a new machine joins (design/hub.md section 6);
         // afterwards only nett-node writes it
-        (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, 0o644)?,
+        (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, 0o640)?,
         (None, Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
         }
@@ -107,10 +111,18 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
             let bytes = crate::site::read_desired(path)?
                 .with_context(|| format!("{} is not a regular file", path.display()))?;
             crate::site::check_desired_for(&bytes, &keys.0)?;
-            replace_if_changed(Path::new(DESIRED), &bytes, 0o644)?
+            replace_if_changed(Path::new(DESIRED), &bytes, 0o640)?
         }
         (None, None, _) => false,
     };
+    // A desired state written before the directory had its group keeps working and stops being
+    // readable by everyone
+    if Path::new(DESIRED).exists() {
+        std::os::unix::fs::chown(DESIRED, Some(0), Some(gid))
+            .with_context(|| format!("changing the group of {DESIRED}"))?;
+        fs::set_permissions(DESIRED, fs::Permissions::from_mode(0o640))
+            .with_context(|| format!("setting permissions of {DESIRED}"))?;
+    }
     ensure_dir(PROGRAM_DIR, 0o755)?;
     let binary_changed = copy_self(BINARY)?;
     if !ensure_link(LINK, BINARY)? {
@@ -223,9 +235,52 @@ pub fn ensure_link(link: &str, target: &str) -> anyhow::Result<bool> {
     Ok(true)
 }
 
+/// The system user the mesh service runs as (`packaging/systemd/nett.sysusers`), created with
+/// systemd-sysusers. Returns the group ID of its group.
+fn ensure_user() -> anyhow::Result<u32> {
+    const SYSUSERS: &str = include_str!("../../../packaging/systemd/nett.sysusers");
+    const CONF: &str = "/etc/sysusers.d/nett.conf";
+    const PROGRAMS: [&str; 2] = ["/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"];
+    ensure_dir("/etc/sysusers.d", 0o755)?;
+    replace_if_changed(Path::new(CONF), SYSUSERS.as_bytes(), 0o644)?;
+    let program = PROGRAMS
+        .into_iter()
+        .find(|p| Path::new(p).exists())
+        .context("systemd-sysusers is not on this machine")?;
+    if !crate::install::run(program, &[CONF])? {
+        bail!("systemd-sysusers could not create the user nett");
+    }
+    group_id("nett")?.context("systemd-sysusers did not create the group nett")
+}
+
+/// A group's ID from /etc/group (the standard library has no getgrnam).
+fn group_id(name: &str) -> anyhow::Result<Option<u32>> {
+    let groups = fs::read_to_string("/etc/group").context("reading /etc/group")?;
+    Ok(group_in(&groups, name))
+}
+
+fn group_in(groups: &str, name: &str) -> Option<u32> {
+    groups.lines().find_map(|line| {
+        let mut fields = line.split(':');
+        (fields.next() == Some(name))
+            .then(|| fields.nth(1).and_then(|gid| gid.parse().ok()))
+            .flatten()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mesh_service_runs_as_the_nett_user_from_the_group_file() {
+        assert!(MESH.content.contains("\nUser=nett\n"));
+        assert!(!MESH.content.contains("DynamicUser"));
+        let groups = "root:x:0:\nnetty:x:998:\nnett:x:997:\n";
+        assert_eq!(group_in(groups, "nett"), Some(997));
+        assert_eq!(group_in(groups, "nobody"), None);
+        assert_eq!(group_in("nett:x:notanumber:\n", "nett"), None);
+    }
 
     #[test]
     fn units_run_the_installed_binary_from_the_config_directory() {

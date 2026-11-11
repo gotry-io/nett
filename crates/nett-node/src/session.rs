@@ -659,10 +659,11 @@ fn is_pending(ack: &StateAck) -> bool {
 }
 
 /// The desired state file: write a temporary file, sync to disk, then rename. Keeps the existing
-/// permissions; `0644` if there are none, and the mesh process reads it under a dedicated identity.
+/// permissions; `0640` if there are none (on Linux the directory hands its `nett` group to new files,
+/// and the mesh service reads it as that group).
 fn write_desired(path: &std::path::Path, json: &[u8]) -> Result<(), String> {
     let io = |e: std::io::Error| format!("writing {}: {e}", path.display());
-    let mode = std::fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o777);
+    let mode = std::fs::metadata(path).map_or(0o640, |m| m.permissions().mode() & 0o777);
     let tmp = path.with_extension("json.new");
     std::fs::remove_file(&tmp).ok();
     let mut file = std::fs::OpenOptions::new()
@@ -772,7 +773,7 @@ mod tests {
                 .permissions()
                 .mode()
                 & 0o777,
-            0o644
+            0o640
         );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
         write_desired(&path, doc).expect("second write");
