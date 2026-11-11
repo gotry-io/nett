@@ -54,6 +54,8 @@ const USAGE: &str = "usage:
   nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir> [--soak SECONDS]
       (nett-hub next to nett; --soak then keeps changing and pinging, samples memory into
       soak.csv, rests 10 minutes and checks that memory stayed flat)
+  nett-lab run throughput --topology <direct.toml|relay-only.toml> --nett <path/to/release/nett> --out <dir> [--duration SECONDS]
+      (iperf3 over the underlying network and the mesh; add --userspace a --userspace b to compare)
   nett-lab run hub-relay --topology hub-relay.toml --nett <path/to/nett> --out <dir>
       (members join through the Hub; a relay, its TLS fingerprint learned, and TLS fallback)
   nett-lab down --topology <file.toml>
@@ -195,6 +197,7 @@ fn run() -> anyhow::Result<bool> {
                 "access" => scenario::access(&topology, &nett()?, &out)?,
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
+                "throughput" => scenario::throughput(&topology, &nett()?, &out, duration_s)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,
