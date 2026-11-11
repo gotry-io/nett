@@ -688,9 +688,12 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         std::fs::write(&desired_a, text).context("rewriting desired state")?;
         lab.stop(&a.name)?;
         let before = count(&events(a), "member_rejected");
+        let applied = count(&events(a), "peers_applied");
         lab.spawn(a, nett)?;
-        let waited = wait_for(a, "a rejection after restart", |ev| {
-            count(ev, "member_rejected") > before
+        // The rejection is reported before the peers are synced: wait for both before reading the
+        // interface, which the restart reuses with b still on it
+        let waited = wait_for(a, "a rejection and the peers synced after restart", |ev| {
+            count(ev, "member_rejected") > before && count(ev, "peers_applied") > applied
         });
         let peers_after = wg_peers(&ns_a)?;
         let b_configured = peers_after.contains(&b.mesh_public_key.to_string());
