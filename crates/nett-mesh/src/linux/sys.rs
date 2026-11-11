@@ -1,11 +1,45 @@
-//! System calls rustix does not provide: socket options that bind to an interface, reading the kernel's
-//! clock error, and creating a TUN interface. `unsafe` is used only here (CLAUDE.md "Code rules"): it
-//! hands the kernel pointers to local data.
+//! System calls rustix does not provide, or does not cover in every case: socket options that bind to an
+//! interface, the peer credentials of a Unix socket, reading the kernel's clock error, and creating a TUN
+//! interface. `unsafe` is used only here (CLAUDE.md "Code rules"): it hands the kernel pointers to local
+//! data.
 #![allow(unsafe_code)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
+
+/// Effective user ID of the peer process of a Unix socket (design/status.md section 3). The kernel reports
+/// the PID of a peer outside this process's PID namespace (another container) as 0, which rustix's
+/// `socket_peercred` cannot represent; reading `ucred` directly keeps the user ID in that case.
+pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let size = std::mem::size_of::<libc::ucred>();
+    let mut len = libc::socklen_t::try_from(size).unwrap_or(libc::socklen_t::MAX);
+    // SAFETY: the pointer and length describe the local `cred`; the kernel writes at most `len` bytes
+    // into it during the call
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if usize::try_from(len).ok() != Some(size) {
+        return Err(io::Error::other(
+            "the kernel returned incomplete peer credentials",
+        ));
+    }
+    Ok(cred.uid)
+}
 
 /// Associates an opened `/dev/net/tun` with the TUN interface named `name` (created if it does not
 /// exist); sent and received packets carry no extra header.

@@ -42,6 +42,11 @@ impl crate::clock::Clock for SystemClock {
     }
 }
 
+/// Effective user ID of the peer process of a Unix socket (design/status.md section 3).
+pub(crate) fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<u32> {
+    sys::peer_uid(fd)
+}
+
 /// Tears down what the mesh process leaves in the system (`nett leave`, design/auth.md section 8.3): the
 /// mesh process normally keeps the interface on exit, so connections are not interrupted during a
 /// restart (design/mesh.md section 4). Delete the interface first, and delete the filter rules once
