@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-11
+
 - The Hub keeps an encrypted backup on every machine (design/hub.md section 8.2). `nett site link` creates
   `backup.key` in the site directory (keep a copy offline with `recovery.pk8`); the Hub seals a copy of its
   database and its identity key to it, and every machine fetches the latest copy into `hub-backup.enc` next
