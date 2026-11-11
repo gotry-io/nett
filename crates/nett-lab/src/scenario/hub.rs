@@ -17,10 +17,9 @@
 //!   as a new machine (no public address written, learned by the Hub), gets a new node ID and
 //!   address, and connects with the other members; the token can only be used once.
 //!
-//! Enrollment and leaving run in the node's namespace through `nett-lab enroll` and
-//! `nett-lab leave`: they call the same library code as `sudo nett install <token>` and
-//! `sudo nett leave`, except that they do not install services and the files live in the lab
-//! directory.
+//! Enrollment runs in the node's namespace with `nett join`, which is `sudo nett install <token>`
+//! without the services; leaving runs `nett-lab leave`, which calls the library code of
+//! `sudo nett leave` and also removes the mesh interface in the lab's namespace.
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -682,16 +681,11 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         &nett.display().to_string(),
         ["keys", "--dir", &new_dir.to_string_lossy()],
     )?;
+    // `nett join`: what `sudo nett install <token>` does, without installing services
     let joined = run_in(
         &ns_b,
-        &lab_bin.display().to_string(),
-        [
-            "enroll",
-            "--out",
-            &new_dir.to_string_lossy(),
-            "--token",
-            &token,
-        ],
+        &nett.display().to_string(),
+        ["join", &token, "--dir", &new_dir.to_string_lossy()],
     );
     report.check(
         "join:enrolled",
@@ -716,14 +710,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         )?;
         run_in(
             &ns_b,
-            &lab_bin.display().to_string(),
-            [
-                "enroll",
-                "--out",
-                &other.to_string_lossy(),
-                "--token",
-                &token,
-            ],
+            &nett.display().to_string(),
+            ["join", &token, "--dir", &other.to_string_lossy()],
         )
     };
     report.check(
@@ -797,21 +785,6 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     );
     drop(h);
     Ok(report)
-}
-
-/// `nett-lab enroll`: enrolls through the Hub in the node's namespace (the same library code as
-/// `sudo nett install <token>`), and writes the desired state and the Hub configuration into the
-/// node directory.
-pub fn enroll_here(dir: &Path, token: &str) -> anyhow::Result<()> {
-    let token = JoinToken::decode(token)?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    let enrolled = runtime.block_on(nett_node::join::enroll(dir, &token, nett_hub::now()))?;
-    std::fs::write(dir.join("desired.json"), &enrolled.desired)?;
-    enrolled.config.save(dir).map_err(anyhow::Error::msg)?;
-    println!("joined as {}", enrolled.config.node_id);
-    Ok(())
 }
 
 /// `nett-lab leave`: tells the Hub this machine is leaving, and tears down the mesh interface and

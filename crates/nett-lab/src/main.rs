@@ -66,7 +66,6 @@ measurement helpers (started by the scenarios inside a node's network namespace)
   nett-lab forge --to <addr:port>
   nett-lab flood --to <addr:port> --key <hex public key> [--duration SECONDS]
 Hub helpers (started by the hub scenario inside a node's network namespace):
-  nett-lab enroll --out <node dir> --token <nett_enr_…>   join through the Hub, write desired.json and hub.json
   nett-lab leave --out <node dir>                         tell the Hub, remove the mesh interface";
 
 #[cfg(not(target_os = "linux"))]
@@ -93,7 +92,6 @@ fn run() -> anyhow::Result<bool> {
     let mut clock_skew_ms = 0i64;
     let mut bytes = None::<u64>;
     let mut key = None::<String>;
-    let mut token = None::<String>;
     let mut userspace = Vec::new();
     while let Some(arg) = parser.next()? {
         match arg {
@@ -112,7 +110,6 @@ fn run() -> anyhow::Result<bool> {
             Long("clock-skew") => clock_skew_ms = parser.value()?.string()?.parse()?,
             Long("bytes") => bytes = Some(parser.value()?.string()?.parse()?),
             Long("key") => key = Some(parser.value()?.string()?),
-            Long("token") => token = Some(parser.value()?.string()?),
             Long("userspace") => userspace.push(parser.value()?.string()?),
             Long("help") => {
                 println!("{USAGE}");
@@ -130,9 +127,6 @@ fn run() -> anyhow::Result<bool> {
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     match words.as_slice() {
         ["probe-send"] => measure::probe_send(to.context(USAGE)?).map(|()| true),
-        ["enroll"] => {
-            scenario::enroll_here(&out.context(USAGE)?, &token.context(USAGE)?).map(|()| true)
-        }
         ["leave"] => scenario::leave_here(&out.context(USAGE)?).map(|()| true),
         ["probe-recv"] => {
             measure::probe_recv(listen.context(USAGE)?, &out.context(USAGE)?).map(|()| true)

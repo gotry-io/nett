@@ -82,9 +82,19 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     })
 }
 
-/// The upgrader for this machine's layout (design/release.md section 7); `None` when this build
-/// has no release target or its release keys do not parse.
+/// The upgrader for this machine's layout (design/release.md section 7); `None` where nett did not
+/// install the services (a container member, a lab), or when this build has no release target or
+/// its release keys do not parse.
 fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader> {
+    let installed = if cfg!(target_os = "macos") {
+        std::path::Path::new(nett_node::platform::macos::PROGRAM).exists()
+    } else {
+        std::path::Path::new(nett_node::platform::linux::PROGRAM).exists()
+            && nett_node::platform::linux::systemctl().is_some()
+    };
+    if !installed {
+        return None;
+    }
     let target = nett_trust::release::current_target()?;
     let keys = match nett_trust::release::ReleaseKeys::built_in() {
         Ok(keys) => keys,
