@@ -426,32 +426,62 @@ fn check_names(doc: &StatusDoc) -> Finding {
         .to_socket_addrs()
         .ok()
         .and_then(|mut a| a.next());
-    match resolved {
-        Some(a) if doc.node.mesh.contains(&a.ip()) => {
-            Finding::ok("names", format!("{full} resolves to {}", a.ip()))
-        }
-        _ if doc
-            .problems
-            .iter()
-            .any(|p| p.kind == status::ProblemKind::Names) =>
-        {
-            Finding::problem(
-                "names",
-                "the DNS responder is not running",
-                "see the names problem above",
-            )
-        }
-        _ if cfg!(target_os = "linux") => Finding::warn(
+    if let Some(a) = resolved
+        && doc.node.mesh.contains(&a.ip())
+    {
+        return Finding::ok("names", format!("{full} resolves to {}", a.ip()));
+    }
+    let responder = doc.node.mesh.iter().find(|a| a.is_ipv4()).map(|a| {
+        let at = SocketAddr::new(*a, nett_mesh::dns::PORT);
+        (
+            at,
+            nett_mesh::dns::lookup_ipv4(at, &full, Duration::from_secs(2)),
+        )
+    });
+    names_finding(doc, &full, responder)
+}
+
+/// The names finding once the system resolver did not resolve this machine's own name; `responder`
+/// is the responder's address and what it answered for that name.
+fn names_finding(
+    doc: &StatusDoc,
+    full: &str,
+    responder: Option<(SocketAddr, Option<std::net::Ipv4Addr>)>,
+) -> Finding {
+    if doc
+        .problems
+        .iter()
+        .any(|p| p.kind == status::ProblemKind::Names)
+    {
+        return Finding::problem(
+            "names",
+            "the DNS responder is not running",
+            "see the names problem above",
+        );
+    }
+    if let Some((at, answer)) = responder
+        && answer.map(IpAddr::V4) != Some(at.ip())
+    {
+        return Finding::problem(
+            "names",
+            format!("the DNS responder on {} does not answer {full}", at.ip()),
+            "no name under nett.internal resolves on this machine; the mesh service's log may \
+             say why",
+        );
+    }
+    if cfg!(target_os = "linux") {
+        Finding::warn(
             "names",
             format!("{full} does not resolve through the system resolver"),
             "with systemd-resolved, restart the mesh service (it routes nett.internal to nett0); \
              without it, use `dig @<mesh address> <name>.nett.internal` or the mesh address",
-        ),
-        _ => Finding::warn(
+        )
+    } else {
+        Finding::warn(
             "names",
             format!("{full} does not resolve through the system resolver"),
             "restart the mesh service: it writes /etc/resolver/nett.internal",
-        ),
+        )
     }
 }
 
@@ -600,6 +630,26 @@ pub fn report(findings: &[Finding]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_responder_that_does_not_answer_its_own_name_is_a_problem() {
+        let doc = doc();
+        let at: SocketAddr = "100.88.0.4:53".parse().expect("addr");
+        let silent = names_finding(&doc, "mac.nett.internal", Some((at, None)));
+        assert_eq!(silent.level, Level::Problem);
+        assert!(silent.found.contains("does not answer"), "{}", silent.found);
+        let answering = names_finding(
+            &doc,
+            "mac.nett.internal",
+            Some((at, Some("100.88.0.4".parse().expect("ip")))),
+        );
+        assert_eq!(answering.level, Level::Warning);
+        assert!(
+            answering.found.contains("system resolver"),
+            "{}",
+            answering.found
+        );
+    }
 
     #[test]
     fn ufw_that_denies_incoming_drops_the_mesh_until_nett0_is_allowed() {
