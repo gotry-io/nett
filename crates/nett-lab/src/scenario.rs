@@ -306,13 +306,20 @@ fn start_with(
     for node in &generated.nodes {
         // Keys and the trust anchor are regenerated for every lab run: the trust store left by the
         // previous run would cause the new desired state to be rejected (design/mesh.md section
-        // 4.2). Restarting a mesh process within the same run does not go through here, and the
-        // trust store is kept
+        // 4.2), and the mesh process appends to its event log, so the previous run's events would
+        // count as this run's. Restarting a mesh process within the same run does not go through
+        // here, and both are kept
         let state = node.dir.join("state");
         match std::fs::remove_dir_all(&state) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e).with_context(|| format!("removing {}", state.display())),
+        }
+        let events = node.dir.join("events.jsonl");
+        match std::fs::remove_file(&events) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", events.display())),
         }
         lab.spawn_with(node, nett, &extra(&node.name))?;
         if topo
