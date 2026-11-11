@@ -70,17 +70,18 @@ Pushed. 1 of 2 machines applied.
 
 ```
 nett site add nas
-Adding nas (dial-only), 100.88.0.6
++ nas (dial-only), 100.88.0.6
 Sign and push? [y/N] y
+Pushed. 3 of 3 machines applied.
 On nas, run within 30 minutes (once):
-  Linux x86_64   curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-0.3.0-x86_64-unknown-linux-musl.tar.gz && echo "9f86d0…  nett.tar.gz" | sha256sum -c && tar -xzf nett.tar.gz && sudo ./nett install nett_enr_…
-  Linux aarch64  curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-0.3.0-aarch64-unknown-linux-musl.tar.gz && echo "2c26b4…  nett.tar.gz" | sha256sum -c && tar -xzf nett.tar.gz && sudo ./nett install nett_enr_…
-  macOS          brew install gotry-io/tap/nett && sudo nett install nett_enr_…
+  curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…
 ```
 
-- 在新机器上运行对应的一行。Linux 的命令先下载发布包，按命令中写明的 SHA-256 核对，再运行其中的 `nett`，不运行任何由 Hub 提供的脚本。哈希由签名工具写入：它用内置的发布公钥核对过这个版本的发布签名（ADR 0020）。所以发布包从 Hub 的缓存下载（网络受限的机器）还是从项目的发布页下载都可以，被攻破的 Hub 换不了它。macOS 上用 Homebrew 安装；
-- `sudo nett install <token>` 在本机生成密钥（私钥不离开本机），连接 Hub 完成入网，安装并启动 nett-node 与组网进程的服务。其他成员随即收到它的准入材料。用户不用复制公钥，也不用再签名：签名在 `add` 时已经完成（第 6 节）；
-- 能被外部连入的机器加 `--public`，公网地址可以不写（第 11 节）；token 过期了用 `nett site invite nas` 重新生成。
+- 所有平台都是这一行。前半句的安装脚本只安装 `nett`：判断系统与架构，从项目网站下载这个版本的压缩包，按脚本中写明的 SHA-256 核对，放到 `/usr/local/bin/nett`（release.md 第 6 节）。脚本不读 token，也不经过 Hub：被攻破的 Hub 换不了装上的程序。首次安装因此信任项目网站，与 Homebrew 信任它的配方相同；之后的升级由节点核对发布签名（ADR 0020，第 9 节 H3）。已经装好 `nett` 的机器只运行后半句；
+- 后半句 `sudo nett install <token>` 在本机生成密钥（私钥不离开本机），经 Hub 完成入网，安装并启动 nett-node 与组网进程的服务（第 6、7 节）。其他成员随即收到它的准入材料。用户不用复制公钥，也不用再签名：节点策略在 `add` 时已经签好；
+- token 中有入网私钥，30 分钟内有效，只能用一次。过期了或者丢了，`nett site invite nas` 换一把入网密钥，打印新的一行，原来的随之作废；
+- 能被外部连入的机器加 `--public`，公网地址可以不写，由 Hub 得知（第 5 节）；
+- 入网之前，`nett site status` 中这台机器的 `HUB` 为 `never`，`PROBLEMS` 写明 token 的过期时间。
 
 ### 3.4 查看
 
@@ -123,11 +124,16 @@ edge-vps is already a member. On edge-vps, run:
 
 - **站点状态以用户的电脑为准**：机器、权限、地址分配、产物版本保存在站点目录中（site.md 第 8 节）。Hub 保存最近一次推送的副本；
 - **站点目录保存整张网的全部签名内容**：经 Hub 入网的机器，签名工具从 Hub 取回它的准入证明（其中有身份公钥和组网公钥），记进站点状态。Hub 损坏时，新的 Hub 一次 `nett site link` 就能拿到全部机器和权限（第 8.1 节）；
-- **在 Hub 一侧发生的降低权限**：节点上运行 `nett leave` 时，Hub 收到 `Leave`，为这个节点生成身份撤销记录并下发给其他成员，不等站点（降低权限不需要签名，auth.md 第 8.3、10.4 节）。`nett site` 的每条命令先从 Hub 取回这类变化，按 `nett site remove` 处理：这台机器从站点中删除，引用它的规则随之清理，并在输出中列出（site.md 第 4 节）。同一个名字再次 `add` 时是新的机器：新的节点 ID 和地址，没有原来的规则；
+- **在 Hub 一侧发生的事**：有三类，Hub 记下来，当场用到自己保存的站点副本上（换代数、下发，不等站点），之后每次推送也先用到推送的站点上，所以还没取回它们的推送不会把它们抹掉：
+  - **入网**：机器交来的准入证明（第 6 节）；
+  - **退出**：节点上运行 `nett leave` 时 Hub 收到 `Leave`，按 `nett site remove` 处理这台机器：生成身份撤销记录，所有成员删除它（降低权限不需要签名，auth.md 第 8.3、10.4 节）；规则中引用它的部分从站点中删除，已签的访问规则集等站点重签（它的地址不再分配，留在规则集中也放行不了任何机器）；
+  - **得知的公网地址**（第 5 节）；
+
+  `nett site` 的每条命令先从 Hub 取回这些（`GET /api/v1/site/updates`），用同一份逻辑（`nett-site`）记进站点状态，准入证明由签名工具自己再验证一次，并在输出中列出。退出的机器从站点中删除，引用它的规则随之清理，访问规则集以新的版本重签（收窄，site.md 第 4 节）；同一个名字再次 `add` 时是新的机器：新的节点 ID 和地址，没有原来的规则。准入材料按机器实际用过的那份记下：取回之后、推送之前它正好入网、站点又给它换了入网密钥时，入网的结果照样保留，新的 token 随之没有用处；
 - **推送的内容**：签名产物（节点策略、访问规则集、宣告网段）、撤销记录、不签名的部分（机器的名字、可达性、公网地址与端口）。连接与候选路径由 Hub 组成期望状态时推导（site.md 第 6 节）。Hub 验证每份签名产物的签名与版本，版本低于已保存的、或与已保存的版本相同而内容不同的整份拒绝；
 - **组成期望状态**：Hub 按站点模型为每台机器组成 `mesh` 分区，格式与本地签名部署的期望状态文件相同（protocol.md 第 6 节）。组成的逻辑只有一份：站点模型与组成从 `nett site` 中移到一个库 crate（`nett-site`），签名工具不接 Hub 时与 Hub 共用；
 - **API**：REST + JSON，经 HTTPS，带 OpenAPI（ADR 0003）。这一步用到的资源是 api-resources.md 中的 `hub`、`trust`、`nodes`、`enrollment-tokens`、`node-policies`、`access-rules`、`links`、`events` 与一个新的 `site`（推送的站点模型）；
-- **H1 的接口**：`POST /api/v1/link`（关联码中的一次性密钥与信任锚清单，换回 owner token）、`PUT /api/v1/site`（推送站点状态，回复 Hub 接受之后的代数）、`GET /api/v1/site/status`（各台机器的连接、版本、确认与本机状态）；节点网关是 `GET /node/v1/connect` 上的 WebSocket（protocol.md）。关联码是 `nett_lnk_` 加上 base64url 编码的 JSON（Hub 地址、Hub 身份公钥、一次性密钥、自签证书的指纹），接入 token 是 `nett_enr_` 加上同样编码的 JSON（第 3.5 节）。Hub 自签证书时（没有反向代理的部署、实验拓扑），`nett-hub serve --tls-cert --tls-key` 自己终止 TLS，签名工具与节点按关联码和 token 中的指纹校验证书（硬性规则 11）；
+- **H1 的接口**：`POST /api/v1/link`（关联码中的一次性密钥与信任锚清单，换回 owner token）、`PUT /api/v1/site`（推送站点状态，回复 Hub 接受之后的代数）、`GET /api/v1/site/status`（各台机器的连接、版本、确认与本机状态）；节点网关是 `GET /node/v1/connect` 上的 WebSocket（protocol.md）。H2 加上 `GET /api/v1/site/updates`（Hub 一侧的入网、退出与得知的地址）。关联码是 `nett_lnk_` 加上 base64url 编码的 JSON（Hub 地址、Hub 身份公钥、一次性密钥、自签证书的指纹），接入 token 是 `nett_enr_` 加上同样编码的 JSON（第 3.5 节）；入网 token 是同一种格式，多了入网私钥（Ed25519 的 32 字节种子）与过期时间（auth.md 第 8.1 节）。Hub 自签证书时（没有反向代理的部署、实验拓扑），`nett-hub serve --tls-cert --tls-key` 自己终止 TLS，签名工具与节点按关联码和 token 中的指纹校验证书（硬性规则 11）；
 - **API token**：关联时发给站点的 token，`kind` 为 `owner`，拥有站点的全部操作。它能推送签名产物，但推送的产物照样要通过签名验证：token 本身批准不了任何提升权限的变更（硬性规则 3）。它能做的不签名的事，与 Hub 能做的相同：撤销（降低权限）、改机器的名字、可达性与公网地址，影响的是可用性，不是权限。
 
 ## 5. 节点与 Hub
@@ -137,6 +143,7 @@ edge-vps is already a member. On edge-vps, run:
 - **交给组网进程**：nett-node 把 `mesh` 分区写成组网进程的期望状态文件（先写临时文件再改名），再经本机接口发出重新读取的请求（`nett reload` 的同一个请求，status.md 第 4.1 节），拿回结果：`applied`（附 `problems`）、`rejected`（附原因）、`busy`，分别作为 `StateAck` 的 `applied`、`rejected`、`pending` 报给 Hub（protocol.md 第 5 节）。`problems` 随状态上报；`busy`、或组网进程没有应答（文件已写好，它启动时会读）时报 `pending`，nett-node 在下一次读状态时再请它重新读取一次，拿到结果后补报。组网进程把接受过的授权和最近一次整份接受的期望状态保存在它自己的信任存储中（mesh.md 第 4.2 节），重启时先应用它们，不等 nett-node 和 Hub（硬性规则 8）；期望状态文件只是输入，被拒绝的文件不会成为验证的基准，也不会让被撤销的权限恢复；
 - **期望状态文件只有一个写入者**：接入 Hub 的机器上只由 nett-node 写，`sudo nett install` 不从站点目录导入（第 7 节）；用户运行 `nett reload` 只是让组网进程重新读同一份文件；
 - **上报状态**：nett-node 每 15 秒、以及期望状态应用之后，经本机状态接口读一次状态，有变化时发 `LinkReport`（各对端的状态、路径、往返时间）和 `Inventory`（版本、平台、地址）。Hub 只保存每台机器最新的一份，事件保留最近的若干条（第 8 节）；
+- **公网地址**：`public` 机器在站点中没有写明地址时，由 Hub 得知。nett-node 在 `Inventory` 中报告它连接 Hub 时本机用的地址；Hub 另外记下它看到的来源地址：在反向代理之后时取 `X-Forwarded-For` 的最后一项（最近的代理加上的那一项），只在 TCP 对端是回环或私有地址（即代理）时采用；自己终止 TLS 时取 TCP 对端的地址。每个地址族：本机报告的是全局单播地址时用它（多数 VPS），否则用 Hub 看到的地址（公网地址不在网卡上的 1:1 NAT 云主机）；回环地址不用。地址变化时 Hub 换代数下发。写明的地址总是优先；Hub 主机自己的成员经本机的代理连接时 Hub 看不到它的公网地址，要写明。公网地址不签名，错了只影响连通，不扩大权限；`nett site status` 列出所用的地址与来源；
 - **离线**：Hub 或 nett-node 不在时，组网照常（architecture.md 第 12.2 节）；nett-node 按 protocol.md 第 8 节重连，连上后按代数补齐；
 - **Hub 端点**：入网 token 中的地址是公网地址，不经组网；以后增加的备用端点也至少保留一个不经组网（硬性规则 8）。
 
@@ -144,12 +151,12 @@ edge-vps is already a member. On edge-vps, run:
 
 按 auth.md 第 8 节，入网 token 由签名工具代替浏览器生成：
 
-1. `nett site add <机器>`（token 过期后用 `nett site invite <机器>` 重新生成）：签名工具分配节点 ID 和组网地址，生成一对一次性的入网签名密钥（Ed25519），用恢复密钥签名这个节点的初始策略（其中有入网公钥；重新生成时换一把入网密钥，策略版本加一），把策略推给 Hub，然后打印 token：Hub 地址、节点 ID、Hub 身份公钥、信任锚清单指纹、入网私钥。入网私钥不经过 Hub；
-2. 节点上 `sudo nett install <token>`：生成身份密钥和组网密钥，用入网私钥签准入证明，以 Noise IK 连接 Hub（用 token 中的 Hub 公钥）；
-3. Hub 用策略中的入网公钥验证准入证明，检查 token 未用过、未过期；把信任锚和策略交给节点，把准入材料（策略 + 准入证明）分发给其他成员；
-4. 节点核对信任锚指纹、验证策略，丢弃入网私钥，安装并启动服务：Linux 上 `nett-node.service` 与 `nett-mesh.service`，macOS 上两个 launchd 服务（第 7 节）。
+1. **签名工具**：`nett site add <机器>`（接了 Hub、不写 `--keys`）分配节点 ID 和组网地址，生成一把入网密钥（Ed25519），用恢复密钥签名这个节点的初始策略（其中有入网公钥），连同 token 的过期时间推给 Hub，然后打印 token：Hub 地址、Hub 身份公钥、节点 ID、信任锚清单指纹、入网私钥、过期时间，Hub 自签证书时加上证书指纹。入网私钥只在 token 中，签名工具和 Hub 都不保存。`nett site invite <机器>` 换一把新的入网密钥，策略版本加一；入网之前改了这台机器的 Edge、网段，节点策略用同一把入网公钥以新的版本重签，token 照样能用；
+2. **节点**：`sudo nett install <token>` 生成身份密钥和组网密钥（已有的沿用，重试时不换），用入网私钥签准入证明，用身份密钥与 token 中的 Hub 公钥做 Noise IK 握手，`Hello` 中带上准入证明（protocol.md 第 3.3 节）；
+3. **Hub**：握手中的身份公钥不认识、`Hello` 带着准入证明时按入网处理。站点中这个节点 ID 的机器要正在等待入网、token 没有过期，准入证明要能用它的节点策略中的入网公钥验证，证明中的身份公钥就是握手用的那一把。通过后 Hub 记下准入证明（第 4 节），从此按身份公钥认出这台机器：同一台机器重试时直接认出，别的机器再用这个 token 被拒绝，所以 token 只能用一次；换代数，把准入材料（策略 + 准入证明）下发给其他成员。不通过时以 `ENROLLMENT_REFUSED` 拒绝并说明原因；
+4. **节点**：收到第一份期望状态后，核对其中信任锚清单的指纹与 token 中的相同、节点 ID 是自己的，写下期望状态与 Hub 的配置，丢弃入网私钥，安装并启动服务（第 7 节）。之后组网进程照常用信任锚验证全部内容。
 
-`nett site add --keys` 因此只用于不接 Hub 的站点；接入之前就已是成员的机器沿用站点中登记的公钥（第 3.5 节）。经 Hub 入网的节点，公钥由节点自己交给 Hub，签名工具用不到它。
+接入之前就已是成员的机器沿用站点中登记的公钥（第 3.5 节）；经 Hub 入网的机器，公钥在准入证明中，由签名工具从 Hub 取回（第 4 节）。
 
 ## 7. 节点上的进程与权限
 
@@ -158,13 +165,14 @@ edge-vps is already a member. On edge-vps, run:
 | nett-node | root | 写组网进程的期望状态文件、请它重新加载；以后还要替换可执行文件（升级）。不监听任何端口，不执行 shell，不访问 Docker（硬性规则 1、2、9）；tokio 单线程；空闲 RSS ≤ 5 MB |
 | 组网进程 | 不变（Linux 上的专用身份，macOS 上的 root） | 只认它自己验证过的期望状态；本机状态接口只接受 root 和它自己（status.md 第 3 节），nett-node 以 root 连接 |
 
-- `sudo nett install <token>` 在两个平台上做同样的事：生成或沿用密钥，把正在运行的 `nett` 复制到固定的位置（已经在那里运行时不复制），写入两个服务的配置，保存 Hub 的配置（地址与 Hub 身份公钥），启动服务。服务配置的内容只有一个出处：macOS 的 launchd 配置在代码中定义（release.md 第 4 节），Linux 的单元是 `packaging/systemd/` 中的文件，编译时嵌入；
+- `sudo nett install <token>` 在两个平台上做同样的事：生成或沿用密钥，带入网私钥的 token 先按第 6 节入网，把正在运行的 `nett` 复制到固定的位置（已经在那里运行时不复制），写入两个服务的配置，保存 Hub 的配置（地址与 Hub 身份公钥），启动服务。本机已是某个站点的成员（有信任存储或期望状态）时不接受入网 token，要先 `nett leave`；同一台机器重试同一个 token 时照常完成。服务配置的内容只有一个出处：macOS 的 launchd 配置在代码中定义（release.md 第 4 节），Linux 的单元是 `packaging/systemd/` 中的文件，编译时嵌入；
 - Linux：程序在 `/usr/local/bin/nett`（单元中的路径）；`nett-node.service` 在 `nett-mesh.service` 之后启动，两者都由 systemd 重启，互不依赖；
 - macOS：`io.gotry.nett.node` 与 `io.gotry.nett.mesh` 两个 launchd 服务，都运行 root 专属目录里的副本（release.md 第 4 节）；
 - **不接 Hub 时**，不带 token 的 `sudo nett install` 在两个平台上都按 release.md 第 4 节：生成密钥并打印 `nett site add --keys` 要用的一行，导入期望状态（Linux 上站点目录通常不在这台机器上，用 `--config`），写入组网进程的服务并启动。Linux 上由此取代手工复制 systemd 单元；
 - **换到另一个 Hub**：已经接入某个 Hub 的机器运行 `sudo nett install <token>` 时，token 中的信任锚指纹必须与本机信任存储中固定的信任锚相同（mesh.md 第 4.2 节）：相同时换成 token 中的 Hub 地址与身份公钥，不同时拒绝，要先 `nett leave`。这一步只能在本机以 root 执行，被攻破的 Hub 做不到（第 8.1 节）；
-- **本机有 Hub 的配置时**，不带 token 的 `sudo nett install` 只更新程序的副本和服务配置，程序变了时重启两个服务；它不从站点目录导入期望状态，也不接受 `--config`（第 5 节）。H3 之前，macOS 上 `brew upgrade nett` 之后运行一次 `sudo nett install` 换上新的副本；
-- `sudo nett uninstall` 停止并删除两个服务，保留密钥、期望状态和 Hub 的配置，再次 `install` 即恢复；`sudo nett leave` 按 auth.md 第 8.3 节退出，连同 Hub 的配置一起删除；
+- **本机有 Hub 的配置时**，不带 token 的 `sudo nett install` 只更新程序的副本和服务配置，程序变了时重启两个服务；它不从站点目录导入期望状态，也不接受 `--config`（第 5 节）。H3 之前的升级：再运行一次安装脚本（第 3.3 节的前半句），然后 `sudo nett install`；用 Homebrew 安装的电脑在 `brew upgrade nett` 之后运行 `sudo nett install`；
+- `sudo nett uninstall` 停止并删除两个服务，保留密钥、期望状态和 Hub 的配置，再次 `install` 即恢复；
+- `sudo nett leave` 按 auth.md 第 8.3 节退出：有 Hub 的配置时向 Hub 发送 `Leave`（10 秒内连不上时照常往下做，并说明要在电脑上 `nett site remove`）；停止并删除两个服务；拆掉组网接口和过滤规则（Linux 上删除 `nett0` 接口与 nett 的 nftables 表；macOS 上的 utun 接口随组网进程退出消失）；删除密钥、信任存储、期望状态和 Hub 的配置。`/usr/local/bin/nett` 保留，这台机器可以再加入任何一张网；
 - 容器内成员：见第 11 节。
 
 ## 8. Hub 的运行
@@ -201,7 +209,7 @@ Hub 主机上的命令（命令行的约定同 architecture.md 第 14.3 节）�
 | 步 | 内容 | 做完之后 |
 |---|---|---|
 | **H1 分发与状态** | 前提：组网进程的信任存储（mesh.md 第 4.2 节），Hub 下发的内容才不会改变验证的基准。`nett-hub` 与节点网关，发布与安装（第 8 节）；站点的命令与 `nett-site` 库（site.md）；`nett site link`、`status`、`invite`（已有的机器）；两个平台上的 `sudo nett install`，带或不带 token（第 7 节）；nett-node 接收期望状态、交给组网进程、上报状态 | 已有的机器接入 Hub；修改之后自动送达；一处看到全部机器 |
-| **H2 入网与退出** | 新机器的 `add` 与入网；入网命令写明发布包的哈希，Hub 缓存发布包（第 3.3 节）；`public` 机器的公网地址由 Hub 得知（第 11 节）；`nett leave`（第 4 节） | 新机器在电脑上一条命令、在机器上一条命令入网，不用复制公钥；退出的机器可以重新入网 |
+| **H2 入网与退出** | 新机器的 `add` 与入网（第 3.3、6 节）；所有平台同一行的入网命令，安装脚本由发布工作流放到项目网站（release.md 第 6 节）；`public` 机器的公网地址由 Hub 得知（第 5 节）；Hub 一侧的入网、退出与地址取回站点（第 4 节）；`nett leave`（第 7 节） | 新机器在电脑上一条命令、在机器上一条命令入网，不用复制公钥；退出的机器可以重新入网 |
 | **H3 升级** | `release` 分区：Hub 缓存签名的发布包，nett-node 核对发布签名、只接受更高的版本、失败回滚（auth.md 第 11.3 节、ADR 0020） | 不用逐台下载、替换 |
 | **H4 运行时协调** | 节点上报的地址用于候选路径（地址变化自动跟随）；中继分配；两端都是 `dial-only` 时经 Hub 转达切换（`PathSwitch`，mesh.md 第 8.4 节） | 家宽 IP 变化、笔记本换网络不需要重新生成配置；更快地绕开失效的中继 |
 | **H5 可用性与多设备** | Hub 的加密备份由节点拉取、重建手册（architecture.md 第 12.3 节，protocol.md 第 6.4 节）；站点状态移到 Hub，多台签名设备各用自己的钥匙（信任锚更新，auth.md 第 11.2 节） | Hub 主机坏了能重建；不只一台电脑能签名 |
@@ -212,7 +220,7 @@ Hub 主机上的命令（命令行的约定同 architecture.md 第 14.3 节）�
 
 | 层级 | 内容 |
 |---|---|
-| 单元测试 | 站点模型的组成（与不接 Hub 时写出的期望状态文件逐字节相同）；Hub 对产物的验证（签名错误、版本倒退、同版本不同内容）；token 只能用一次、过期；重新读取的结果（`applied` 带问题、`rejected`、`busy`）映射到 `StateAck`；有 Hub 配置的机器上 `install` 不改动期望状态文件 |
+| 单元测试 | 站点模型的组成（与不接 Hub 时写出的期望状态文件逐字节相同）；Hub 对产物的验证（签名错误、版本倒退、同版本不同内容）；token 只能用一次、过期；入网：准入证明签错、身份公钥与握手的不同、机器不在等待入网时都拒绝；Hub 一侧的入网、退出与地址用到推送的站点上与用到站点目录中的结果相同；公网地址的取舍（写明的、本机的全局地址、Hub 看到的、回环）；重新读取的结果（`applied` 带问题、`rejected`、`busy`）映射到 `StateAck`；有 Hub 配置的机器上 `install` 不改动期望状态文件 |
 | Hub 集成测试 | 临时 SQLite，经 HTTP 调用真实的路由：关联、推送、权限检查（没有 token、错误的 token） |
 | 实验场景 | 在实验拓扑中运行 Hub：推送之后各成员应用、`nett site status` 列出全部机器与链路；Hub 停止时组网照常、修改恢复后补齐；Hub 下发一个没有准入材料的对端或旧版本的产物，成员都拒绝（roadmap M1 验收）；入网；一个成员 `nett leave` 之后其他成员删除它，站点中删除它并清理引用它的规则，同一个名字再次加入得到新的节点 ID |
 | 资源 | nett-node 空闲 RSS ≤ 5 MB；Hub 在实验拓扑中的稳定内存 |
@@ -224,6 +232,6 @@ Hub 主机上的命令（命令行的约定同 architecture.md 第 14.3 节）�
 |---|---|
 | 容器内成员怎么接 Hub | 镜像里只有一个 `nett`，以组网进程为主进程。可选：容器里也运行 nett-node（需要在容器内同时运行两个进程）；或者宿主上的 nett-node 代管它（经挂载的目录写期望状态、经挂载的本机套接字请它重新加载，不访问 Docker），这时宿主要代它连接 Hub |
 | Linux 上期望状态文件的读权限（H1） | 组网进程以 systemd 的 `DynamicUser` 运行，直接读 `/etc/nett/desired.json`，这个文件因此要所有人可读，整张网的结构对本机的普通用户可见（status.md 第 3 节有意只让 root 看到它）。可选：组网进程改用固定的系统用户、文件只给它读；或由 nett-node 经本机接口把期望状态交给组网进程，不经文件 |
-| 发布包从哪里来（H2 的入网命令、H3 的升级） | Hub 自己从项目的发布页下载并核对签名；或由用户的电脑下载核对后推给 Hub。网络受限的 Hub 主机需要后一种 |
-| `public` 机器的公网地址怎样得知（H2） | 站点中没写明时：本机网卡上的全局地址（多数 VPS），或 Hub 看到的来源地址（由 Hub 前的反向代理转交，适用于公网地址不在网卡上的 1:1 NAT 云主机；Hub 主机自己经本机连接时看不到）。以哪一种为准、能否被连入怎样确认，待定 |
+| 升级的发布包从哪里来（H3） | Hub 自己从项目网站下载、节点核对签名；或由用户的电脑下载核对后推给 Hub。网络受限的 Hub 主机需要后一种 |
+| `public` 机器能否被连入怎样确认 | 得知的公网地址（第 5 节）不一定能从外部连入（防火墙、安全组）。可选：由另一个成员的测量结果判断，在 `nett site status` 中提示 |
 | Hub 主机的选择 | 需要一个 `public`、长期稳定、能用 Hub 域名的主机（architecture.md 第 13.5 节）；这也是它成为单点的地方，见 H5 |

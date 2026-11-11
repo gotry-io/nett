@@ -63,7 +63,7 @@ node                                                     Hub
 | `protocol_versions` | 支持的协议版本范围 |
 | `node_version` | nett 版本 |
 | `node_id` | 节点 ID；入网时使用 token 中预先分配的 ID |
-| `admission_proof` | 仅入网时携带：入网私钥对 `{节点 ID, 身份公钥, 组网公钥}` 的签名（`auth.md` 第 8.2 节） |
+| `admission_proof` | 仅入网时携带：入网私钥对 `{节点 ID, 身份公钥, 组网公钥}` 的签名，即 `auth.md` 第 10.5 节准入证明的 JSON（第 8.2 节）；其中的身份公钥必须是握手用的那一把 |
 | `boot_id` | 本次进程启动的随机 ID，用于识别重启 |
 | `applied_generation` | 本地已应用的期望状态代数（第 6 节） |
 | `capabilities` | 可选功能标志（第 9 节） |
@@ -75,7 +75,8 @@ node                                                     Hub
 | `session_id` | 本次会话 ID |
 | `server_time` | 服务器时间，用于时钟校准 |
 | `keepalive_secs` | 保活间隔 |
-| `enrollment` | 仅入网时返回：信任锚清单、初始节点策略（见 `auth.md` 第 8 节） |
+
+入网时 Welcome 与平时相同：节点从随后的第一份期望状态中拿到信任锚清单和自己的准入材料，核对信任锚清单的指纹与 token 中的相同（`auth.md` 第 8.2 节）。
 
 ## 4. 消息格式
 
@@ -104,13 +105,13 @@ message Envelope {
 
 ```protobuf
 message Error {
-  ErrorCode code = 1;   // 例如 NODE_REVOKED、UPGRADE_REQUIRED、INVALID_MESSAGE、RATE_LIMITED
+  ErrorCode code = 1;   // 例如 NODE_REVOKED、UPGRADE_REQUIRED、INVALID_MESSAGE、RATE_LIMITED、ENROLLMENT_REFUSED
   string message = 2;
   uint64 related_id = 3;
 }
 ```
 
-致命错误（如节点已吊销）发送后关闭连接；非致命错误只针对相关消息。
+致命错误（如节点已吊销、入网被拒绝）发送后关闭连接；非致命错误只针对相关消息。入网被拒绝（`ENROLLMENT_REFUSED`）的原因写在 `message` 中：token 过期、这台机器已经入网、准入证明不对（hub.md 第 6 节）。
 
 ## 5. 消息类型
 
@@ -122,7 +123,7 @@ message Error {
 | | 双向 | `Error` | 见 4.3 |
 | 期望状态 | Hub → node | `DesiredState` | 期望状态快照或增量（第 6 节） |
 | | node → Hub | `StateAck` | 应用结果，按分区报告 |
-| 清单与状态 | node → Hub | `Inventory` | 平台、能力、地址；连接时发送完整版本，之后发送变化 |
+| 清单与状态 | node → Hub | `Inventory` | 平台、能力、地址（连接 Hub 时本机用的地址，Hub 据此得知 `public` 机器的公网地址，hub.md 第 5 节）；连接时发送完整版本，之后发送变化 |
 | | node → Hub | `ModuleStatus` | 各模块状态与条件 |
 | 事件 | node → Hub | `NodeEvent` | 节点侧发生的事件：策略被拒绝、升级结果等 |
 | 任务 | Hub → node | `Task` | 变更集步骤在节点上的执行请求（第 7 节） |
