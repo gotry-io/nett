@@ -745,7 +745,8 @@ fn peer_allowed(stream: &UnixStream) -> std::io::Result<bool> {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
-    Ok(rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw())
+    use std::os::fd::AsFd as _;
+    crate::linux::peer_uid(stream.as_fd())
 }
 
 #[cfg(target_os = "macos")]
@@ -1135,6 +1136,63 @@ mod tests {
         let mut out = Vec::new();
         stream.read_to_end(&mut out).expect("read");
         serde_json::from_slice(&out).expect("json reply")
+    }
+
+    /// Server half of [`a_peer_in_another_pid_namespace_is_identified`]: runs in a new PID namespace
+    /// and answers one connection with the peer's user ID.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "started by a_peer_in_another_pid_namespace_is_identified"]
+    fn report_peer_uid_once() {
+        let path = std::env::var_os("NETT_TEST_SOCKET").expect("NETT_TEST_SOCKET");
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let (mut stream, _) = listener.accept().expect("accept");
+        let reply = match peer_uid(&stream) {
+            Ok(uid) => uid.to_string(),
+            Err(e) => format!("error: {e}"),
+        };
+        stream.write_all(reply.as_bytes()).expect("reply");
+    }
+
+    /// nett-node in one container and the mesh process in another: the kernel reports the peer's PID
+    /// as 0 when the peer is outside the server's PID namespace, and its user ID must still be read.
+    /// Creating a PID namespace needs root, so this runs in the lab containers, not as an ordinary
+    /// user.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_peer_in_another_pid_namespace_is_identified() {
+        if !rustix::process::geteuid().is_root() {
+            return;
+        }
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("peer.sock");
+        let mut server = std::process::Command::new("unshare")
+            .args(["--pid", "--fork"])
+            .arg(std::env::current_exe().expect("test binary"))
+            .args([
+                "--exact",
+                "status::tests::report_peer_uid_once",
+                "--ignored",
+                "--quiet",
+            ])
+            .env("NETT_TEST_SOCKET", &path)
+            .spawn()
+            .expect("unshare");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut stream = loop {
+            match UnixStream::connect(&path) {
+                Ok(s) => break s,
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(e) => panic!("the server in the new PID namespace did not start: {e}"),
+            }
+        };
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).expect("reply");
+        assert!(server.wait().expect("wait").success());
+        assert_eq!(reply, "0");
     }
 
     #[test]
