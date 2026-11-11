@@ -44,6 +44,18 @@ services:
     cap_drop: [ALL]
     restart: unless-stopped
 
+  # The TLS transport adapter, for when UDP is blocked: it runs in the mesh member's network
+  # namespace, where its loopback ports are the endpoints of paths over TLS. It needs no
+  # capabilities, and waits while there is no such path.
+  transport:
+    image: nett
+    command: ["transport"]
+    network_mode: "service:nett"
+    volumes:
+      - nett-run:/run/nett
+    cap_drop: [ALL]
+    restart: unless-stopped
+
   app:
     image: example/app
     networks:
