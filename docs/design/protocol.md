@@ -146,7 +146,7 @@ The desired state is organized in partitions, each versioned independently:
 | `trust` | Trust anchor list (signed) | M1 |
 | `policy` | Node policy (signed when it raises privileges) | M1 |
 | `hub_endpoints` | The Hub's endpoint list: a JSON array of `https://` addresses | M1 |
-| `release` | Target version and release package address; the node verifies the package with the project public keys (primary and backup) embedded in `nett` and automatically accepts only higher versions (`auth.md` section 11.3). This is the only path for upgrades | M1 |
+| `release` | The release manifest (`release.json`, release.md section 7): the latest version and, per target, the URL, SHA-256 and signature of the program; the node verifies the program with the project public keys (primary and backup) built into `nett` and installs only higher versions (`auth.md` section 11.3). This is the only path for upgrades. When only this partition changes, the Hub sends it as an increment (`base_generation` equal to `generation`) | M1 |
 | `mesh` | Mesh topology, admission material, and revocations. Members, advertised routes, and access rule sets are signed artifacts, verified independently by the mesh process (`mesh.md` section 4.1); node names are not signed and are used only for display (`status.md` section 5); nett-node only hands them over. The content is the mesh process's desired state file (JSON), identical to the file the signing tool writes when no Hub is used (`hub.md` section 4) | M1 |
 
 - Each node has a monotonically increasing **generation**; a change in any partition increments it by one;
