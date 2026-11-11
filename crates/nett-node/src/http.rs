@@ -32,6 +32,8 @@ pub enum HttpError {
     Reply(String),
     #[error("{url} answered {status}")]
     Fetch { url: String, status: u16 },
+    #[error("{url}: the answer is larger than {limit} bytes")]
+    TooLarge { url: String, limit: usize },
 }
 
 /// A Hub: its address, and for a self-signed certificate the certificate's fingerprint.
@@ -149,7 +151,16 @@ async fn send(
     let bytes = Limited::new(res.into_body(), limit)
         .collect()
         .await
-        .map_err(|e| HttpError::Reply(e.to_string()))?
+        .map_err(|e| {
+            if e.is::<http_body_util::LengthLimitError>() {
+                HttpError::TooLarge {
+                    url: format!("{}{path}", target.url),
+                    limit,
+                }
+            } else {
+                HttpError::Reply(e.to_string())
+            }
+        })?
         .to_bytes()
         .to_vec();
     Ok((status, bytes))

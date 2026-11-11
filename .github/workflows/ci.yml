@@ -180,9 +180,10 @@ jobs:
           mkdir -p "$next"
           tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C "$next"
           sed -i '0,/^version = ".*"/s//version = "99.0.0"/' "$next/Cargo.toml"
-          (cd "$next" && cargo update --workspace --offline && CARGO_TARGET_DIR="$PWD/../next-target" cargo build -p nett-cli)
+          # A release build, like the programs nodes download (a debug build exceeds the size limit)
+          (cd "$next" && cargo update --workspace --offline && CARGO_TARGET_DIR="$PWD/../next-target" cargo build --release -p nett-cli)
           mkdir -p "$RUNNER_TEMP/site/dl"
-          cp "$RUNNER_TEMP/next-target/debug/nett" "$RUNNER_TEMP/site/dl/nett-99.0.0-x86_64-unknown-linux-musl"
+          cp "$RUNNER_TEMP/next-target/release/nett" "$RUNNER_TEMP/site/dl/nett-99.0.0-x86_64-unknown-linux-musl"
       - name: Serve the newer release over HTTPS
         run: |
           site="$RUNNER_TEMP/site"
@@ -234,6 +235,9 @@ jobs:
           grep -F 'Joining the site through the Hub at https://127.0.0.1:8443' install.log
           test "$(readlink /usr/local/bin/nett)" = /usr/local/lib/nett/nett
           systemctl is-active --quiet nett-mesh.service
+          # The desired state is readable by the mesh service's group only
+          test "$(sudo stat -c '%a %G' /etc/nett/desired.json)" = "640 nett"
+          test "$(sudo stat -c '%a %G' /etc/nett)" = "2750 nett"
           # The Hub offers 99.0.0: nett-node verifies it, installs it, restarts the mesh service and itself
           for _ in $(seq 120); do
             "$nett" site status --json \
