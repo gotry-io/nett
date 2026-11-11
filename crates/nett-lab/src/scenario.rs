@@ -16,8 +16,10 @@ use crate::topology::Topology;
 
 mod hub;
 mod hub_relay;
+mod throughput;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;
+pub use throughput::throughput;
 
 /// Maximum wait for connectivity checks.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
