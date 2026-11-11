@@ -32,6 +32,7 @@ const USAGE: &str = "usage: nett-hub <command> [--data <dir>]
   init --url https://<host> [--tls-cert <cert.pem>]
                        print a one-time link code for `nett site link`, valid for an hour
   reset                forget the linked site and its machines; the Hub identity key stays
+  openapi              print the OpenAPI document of the Hub API
 
 The data directory defaults to /var/lib/nett-hub.";
 
@@ -93,6 +94,10 @@ fn run() -> anyhow::Result<()> {
         ["init"] => {
             let url = url.context("--url https://<host> is needed: machines and the site connect there")?;
             runtime.block_on(init(&data, &url, cert.as_deref()))
+        }
+        ["openapi"] => {
+            print!("{}", nett_hub::openapi::json()?);
+            Ok(())
         }
         ["reset"] => runtime.block_on(async {
             let db = db::Db::open(&data.join(DB_FILE)).await?;

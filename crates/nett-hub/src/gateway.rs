@@ -90,6 +90,16 @@ impl Connected<IncomingStream<'_, TlsListener>> for Peer {
     }
 }
 
+/// The node gateway (design/protocol.md): a WebSocket carrying Noise IK and Protobuf messages.
+/// Nodes authenticate with their identity key inside the Noise handshake, not with a token.
+#[utoipa::path(
+    get, path = "/node/v1/connect", tag = "nodes",
+    responses(
+        (status = 101, description = "Switching to the WebSocket protocol"),
+        (status = 503, description = "Too many node connections"),
+    ),
+    extensions(("x-nett-scope" = json!("node identity (Noise IK)")), ("x-nett-risk" = json!("low"))),
+)]
 pub async fn connect(
     ws: WebSocketUpgrade,
     headers: HeaderMap,

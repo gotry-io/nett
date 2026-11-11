@@ -90,7 +90,22 @@ async fn unauthorized(hub: &Hub, headers: &HeaderMap) -> Option<Response> {
     }
 }
 
-async fn link(AxumState(hub): AxumState<Arc<Hub>>, Json(req): Json<LinkRequest>) -> Response {
+/// Links the site to this Hub with the one-time secret from the link code, and pins the site's
+/// trust anchor list (design/hub.md section 3.1). Returns the site's owner token, once.
+#[utoipa::path(
+    post, path = "/api/v1/link", tag = "site",
+    request_body = LinkRequest,
+    responses(
+        (status = 200, description = "Linked", body = LinkResponse),
+        (status = 400, description = "The trust anchor list is not valid", body = Problem),
+        (status = 403, description = "The link code is wrong, expired or used", body = Problem),
+    ),
+    extensions(("x-nett-scope" = json!("link code")), ("x-nett-risk" = json!("high"))),
+)]
+pub(crate) async fn link(
+    AxumState(hub): AxumState<Arc<Hub>>,
+    Json(req): Json<LinkRequest>,
+) -> Response {
     let anchors: TrustAnchorsDoc = match serde_json::from_value(req.trust_anchors) {
         Ok(a) => a,
         Err(e) => return problem(StatusCode::BAD_REQUEST, "Bad trust anchors", e.to_string()),
@@ -132,7 +147,26 @@ async fn link(AxumState(hub): AxumState<Arc<Hub>>, Json(req): Json<LinkRequest>)
     }
 }
 
-async fn push(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap, body: Bytes) -> Response {
+/// Pushes the whole site state (design/site.md section 8). Every signed artifact in it is verified
+/// against the pinned trust anchors; older versions, changed content under the same version and a
+/// revoked machine coming back are refused (design/hub.md section 4). Returns the generation.
+#[utoipa::path(
+    put, path = "/api/v1/site", tag = "site",
+    request_body(content = Object, description = "The site state, as `state.json` in the site directory"),
+    responses(
+        (status = 200, description = "Accepted", body = PushResponse),
+        (status = 400, description = "Not a site state", body = Problem),
+        (status = 401, description = "No or a wrong owner token", body = Problem),
+        (status = 409, description = "Not accepted, with the reason", body = Problem),
+    ),
+    security(("owner_token" = [])),
+    extensions(("x-nett-scope" = json!("owner")), ("x-nett-risk" = json!("medium"))),
+)]
+pub(crate) async fn push(
+    AxumState(hub): AxumState<Arc<Hub>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
     if let Some(r) = unauthorized(&hub, &headers).await {
         return r;
     }
@@ -160,7 +194,18 @@ async fn push(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap, body: Byt
 
 /// Hub-side enrollment, leave and learned addresses (design/hub.md section 4): the signing tool
 /// fetches them first with every command.
-async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
+/// What happened on the Hub that the site has not taken in yet: admission material of machines
+/// that joined, machines that left, and learned public addresses (design/hub.md section 4).
+#[utoipa::path(
+    get, path = "/api/v1/site/updates", tag = "site",
+    responses(
+        (status = 200, description = "The updates (nett_site::updates::Updates)", body = Object),
+        (status = 401, description = "No or a wrong owner token", body = Problem),
+    ),
+    security(("owner_token" = [])),
+    extensions(("x-nett-scope" = json!("owner")), ("x-nett-risk" = json!("low"))),
+)]
+pub(crate) async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
     if let Some(r) = unauthorized(&hub, &headers).await {
         return r;
     }
@@ -172,7 +217,21 @@ async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Res
 
 /// A machine's recent events (design/hub.md section 8), newest first: `?node=<ID>&limit=<n>`.
 /// Node IDs need no URL decoding.
-async fn events(
+#[utoipa::path(
+    get, path = "/api/v1/site/events", tag = "machines",
+    params(
+        ("node" = String, Query, description = "The machine's node ID"),
+        ("limit" = Option<i64>, Query, description = "How many, 1 to 100 (default 20)"),
+    ),
+    responses(
+        (status = 200, description = "Newest first", body = Vec<Event>),
+        (status = 400, description = "`node` is not a node ID", body = Problem),
+        (status = 401, description = "No or a wrong owner token", body = Problem),
+    ),
+    security(("owner_token" = [])),
+    extensions(("x-nett-scope" = json!("owner")), ("x-nett-risk" = json!("low"))),
+)]
+pub(crate) async fn events(
     AxumState(hub): AxumState<Arc<Hub>>,
     headers: HeaderMap,
     axum::extract::RawQuery(query): axum::extract::RawQuery,
@@ -213,7 +272,18 @@ async fn events(
     }
 }
 
-async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
+/// Every machine's connection, version, last acknowledgement, upgrade answer and local status
+/// (design/hub.md section 3.4).
+#[utoipa::path(
+    get, path = "/api/v1/site/status", tag = "machines",
+    responses(
+        (status = 200, description = "The status of every machine", body = StatusResponse),
+        (status = 401, description = "No or a wrong owner token", body = Problem),
+    ),
+    security(("owner_token" = [])),
+    extensions(("x-nett-scope" = json!("owner")), ("x-nett-risk" = json!("low"))),
+)]
+pub(crate) async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
     if let Some(r) = unauthorized(&hub, &headers).await {
         return r;
     }

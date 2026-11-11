@@ -24,7 +24,7 @@ nett-core.workspace = true
 nett-mesh.workspace = true
 # The HTTPS client for fetching the release manifest (design/release.md section 7)
 nett-node.workspace = true
-nett-proto.workspace = true
+nett-proto = { workspace = true, features = ["openapi"] }
 nett-site.workspace = true
 nett-trust.workspace = true
 prost.workspace = true
@@ -38,6 +38,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-rustls.workspace = true
 tracing.workspace = true
+utoipa.workspace = true
 tracing-subscriber.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true

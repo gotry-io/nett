@@ -13,6 +13,8 @@ publish = false
 # Dependency versions are centralized here and each crate references them with `workspace = true`;
 # default features are always disabled and enabled as needed
 [workspace.dependencies]
+# OpenAPI document of the Hub API, generated from the code (architecture.md section 10)
+utoipa = { version = "6.0.0", default-features = false, features = ["macros"] }
 nett-core = { path = "crates/nett-core" }
 nett-trust = { path = "crates/nett-trust" }
 nett-mesh = { path = "crates/nett-mesh" }
