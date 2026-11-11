@@ -70,7 +70,7 @@ When M1 is done: hand-written tunnels, home broadband port forwarding and existi
 | **High availability** | Automatic switching when a path jitters, breaks or a node goes offline, with connections kept alive; no single point; the mesh is unaffected when the Hub is offline |
 | **Multi-platform** | Linux, Synology DSM, macOS (native mesh membership; container services that need the visitor's real IP use a container member instead), Home Assistant OS (runs as an add-on); phones join through a standard WireGuard client or proxy client; iOS, Android apps and Windows in M3. See architecture.md section 14 for the support matrix |
 | **General purpose** | Open-source project: does not depend on a specific cloud vendor, region or network environment; differences between environments are handled by capability detection and measurement, not hard-coded |
-| **Bilingual** | The web interface, API error messages and user-facing documentation are provided in Chinese and English; the command line is English only |
+| **One language** | The command line, API error messages, the web console and the documentation are in plain English, in one version without translations |
 | **Single user** | Each deployment serves a single user; no multi-tenancy |
 | **Secure by default** | Control and traffic are separated and the Hub is not on the data path; high-privilege components are not exposed externally; raising privileges requires a signature, and mesh members are admitted by signature too; a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the signed content is computed and displayed locally, not through the Hub (design/auth.md section 2) |
 
