@@ -191,8 +191,18 @@ jobs:
           jq -n --arg sha "$(sha256sum "$site/dl/$program" | cut -d' ' -f1)" --rawfile sig "$site/dl/$program.minisig" \
             '{version: "99.0.0", programs: {"x86_64-unknown-linux-musl": {url: "https://127.0.0.1:8444/dl/nett-99.0.0-x86_64-unknown-linux-musl", sha256: $sha, minisig: $sig}}}' \
             > "$site/release.json"
-          # The test certificate (for 127.0.0.1) is trusted system-wide for this run only
-          sudo cp crates/nett-hub/tests/data/test-cert.pem /usr/local/share/ca-certificates/nett-test.crt
+          # A throwaway CA, trusted system-wide for this run only, and a certificate for 127.0.0.1
+          tls="$RUNNER_TEMP/tls"
+          mkdir -p "$tls"
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+            -subj /CN=nett-test-ca -keyout "$tls/ca.key" -out "$tls/ca.pem"
+          openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj /CN=127.0.0.1 \
+            -keyout "$tls/site.key" -out "$tls/site.csr"
+          printf 'subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n' \
+            > "$tls/site.ext"
+          openssl x509 -req -in "$tls/site.csr" -CA "$tls/ca.pem" -CAkey "$tls/ca.key" -CAcreateserial \
+            -days 1 -extfile "$tls/site.ext" -out "$tls/site.pem"
+          sudo cp "$tls/ca.pem" /usr/local/share/ca-certificates/nett-test.crt
           sudo update-ca-certificates
           cat > "$RUNNER_TEMP/serve.py" <<'PY'
           import functools, http.server, ssl, sys
@@ -203,8 +213,7 @@ jobs:
           server.socket = context.wrap_socket(server.socket, server_side=True)
           server.serve_forever()
           PY
-          certs=crates/nett-hub/tests/data
-          python3 "$RUNNER_TEMP/serve.py" "$site" "$certs/test-cert.pem" "$certs/test-key.pem" 2> site.log &
+          python3 "$RUNNER_TEMP/serve.py" "$site" "$tls/site.pem" "$tls/site.key" 2> site.log &
           for _ in $(seq 20); do curl -fsS https://127.0.0.1:8444/release.json > /dev/null && break; sleep 0.5; done
       - name: Join through the Hub, upgrade, leave (needs root)
         run: |
