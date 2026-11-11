@@ -21,6 +21,8 @@ use nett_node::platform::linux::{
 };
 
 const DESIRED: &str = "/etc/nett/desired.json";
+/// Where units of the same name override the ones nett installs.
+const OVERRIDE_DIR: &str = "/etc/systemd/system";
 
 fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
     let Some(program) = nett_node::platform::linux::systemctl() else {
@@ -60,6 +62,21 @@ fn ensure_running(unit: &Unit, restart: bool) -> anyhow::Result<Option<String>> 
 
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
+    // A unit of the same name in /etc/systemd/system overrides the one nett installs, and would run an
+    // older program with older settings: the administrator removes it (from an earlier manual setup)
+    let overrides: Vec<String> = [&MESH, &NODE, &RELAY, &TRANSPORT]
+        .iter()
+        .map(|u| format!("{OVERRIDE_DIR}/{}", u.name))
+        .filter(|p| Path::new(p).exists())
+        .collect();
+    if !overrides.is_empty() {
+        bail!(
+            "{} overrides the unit nett installs in {}; move it away (for example to /root) and run \
+             `systemctl daemon-reload`, then run this again",
+            overrides.join(" and "),
+            nett_node::platform::linux::UNIT_DIR
+        );
+    }
     // The mesh service runs as the system user nett and reads the desired state through the
     // directory's group; other users cannot enter it. setgid hands the group to new files
     let gid = ensure_user()?;

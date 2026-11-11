@@ -25,7 +25,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - Machines behind the same NAT connect over their LAN (design/mesh.md section 6): with a Hub, each machine's
   status lists its LAN addresses, and two connected machines on the same network get a LAN direct path.
 - On Linux, nett's systemd units now live in `/usr/local/lib/systemd/system` and nett-node rewrites them
-  when an upgrade changes them; files of the same name in `/etc/systemd/system` still override them. The
+  when an upgrade changes them. A unit copied by hand to `/etc/systemd/system` would override them:
+  `sudo nett install` stops and names it; move it away and run it again. The
   mesh service runs as the system user `nett` (created with systemd-sysusers), and `/etc/nett` belongs to its
   group, so the desired state is no longer readable by every user.
 - `nett join <token> [--dir <directory>]` joins a machine that runs nett without nett's services, such as a
