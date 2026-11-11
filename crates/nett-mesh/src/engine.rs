@@ -12,7 +12,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
-use nett_core::transport::TransportConfig;
+use nett_core::transport::{CertFingerprint, TransportConfig};
 use nett_trust::admission::Member;
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
@@ -23,6 +23,7 @@ use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
 };
 use crate::event::{Event, EventSink};
+use crate::helper::{AssignedMember, RelayAssignment};
 use crate::key::PrivateKey;
 use crate::members::{MemberSet, OwnPolicy};
 use crate::path::{CandidateState, PathKind, Role, Route};
@@ -31,7 +32,7 @@ use crate::prober::{ACTIVE_WINDOW, Incoming, Outgoing, Prober};
 use crate::routes::Routes;
 use crate::status::{
     self, CandidateStateDoc, CandidateStatus, ConfigStatus, NatKind, NatStatus, NodeRef,
-    NodeStatus, PathKindDoc, PathStatus, PeerRole, PeerState, PeerStatus, StatusDoc,
+    NodeStatus, PathKindDoc, PathStatus, PeerRole, PeerState, PeerStatus, RelayStatus, StatusDoc,
 };
 use crate::store::{Saved, TrustStore};
 use nett_core::prefix::IpPrefix;
@@ -61,6 +62,10 @@ pub struct Engine<D> {
     interface: Option<Interface>,
     /// The configuration most recently handed to the transport adapter.
     transport: Option<TransportConfig>,
+    /// The assignment of the relay on this machine (design/mesh.md section 5.2), and the fingerprint and
+    /// time nett-relay reported when it last fetched it.
+    relay: Option<RelayAssignment>,
+    relay_fetched: Option<(Option<CertFingerprint>, Instant)>,
     reachability: Reachability,
     prober: Option<Prober>,
     /// Peers already configured on the data plane: the side that follows through roaming sets the endpoint
@@ -118,6 +123,8 @@ impl<D: DataPlane> Engine<D> {
             members: MemberSet::default(),
             interface: None,
             transport: None,
+            relay: None,
+            relay_fetched: None,
             reachability: Reachability::Public,
             prober: None,
             configured: HashSet::new(),
@@ -327,6 +334,7 @@ impl<D: DataPlane> Engine<D> {
         let own_key = me.mesh_public_key;
         let edge = EdgeSpec::of(me);
         self.update_transport(desired, events);
+        self.update_relay(desired, events);
         if !self.apply_access(desired, edge, events) {
             // Access control cannot be installed: no communication with any peer
             self.sync_peers(Vec::new(), events);
@@ -486,6 +494,62 @@ impl<D: DataPlane> Engine<D> {
             });
             self.transport = Some(config);
         }
+    }
+
+    /// The relay assignment for nett-relay (design/mesh.md section 5.2): members resolved to their mesh
+    /// public keys from the verified admission material; members that are not admitted are left out with
+    /// their links, so the relay forwards only between admitted members (hard rule 4).
+    fn update_relay(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        let assignment = desired.relay.as_ref().map(|doc| {
+            let key = |id: &NodeId| self.members.get(id).map(|m| m.mesh_public_key);
+            RelayAssignment {
+                port: doc.port,
+                tls_port: doc.tls_port,
+                members: doc
+                    .members
+                    .iter()
+                    .filter_map(|m| {
+                        Some(AssignedMember {
+                            public_key: key(&m.node)?,
+                            address: m.address,
+                            token: m.token.clone(),
+                        })
+                    })
+                    .collect(),
+                links: doc
+                    .links
+                    .iter()
+                    .filter_map(|[a, b]| Some([key(a)?, key(b)?]))
+                    .collect(),
+            }
+        });
+        if assignment != self.relay {
+            events.emit(Event::RelayAssignmentChanged {
+                members: assignment.as_ref().map_or(0, |a| a.members.len()),
+                links: assignment.as_ref().map_or(0, |a| a.links.len()),
+            });
+            if assignment.is_none() {
+                self.relay_fetched = None;
+            }
+            self.relay = assignment;
+        }
+    }
+
+    /// nett-relay fetches its assignment, reporting the fingerprint of its TLS certificate.
+    pub fn relay_assignment(
+        &mut self,
+        fingerprint: Option<CertFingerprint>,
+        now: Instant,
+    ) -> Option<RelayAssignment> {
+        if self.relay.is_some() {
+            self.relay_fetched = Some((fingerprint, now));
+        }
+        self.relay.clone()
+    }
+
+    /// The transport adapter fetches its configuration.
+    pub fn transport_config(&self) -> Option<TransportConfig> {
+        self.transport.clone()
     }
 
     /// TLS loopback ports that no peer is using: drops packets entering the WireGuard port from them
@@ -843,10 +907,21 @@ impl<D: DataPlane> Engine<D> {
                 }
             })
             .collect();
+        let relay = self.relay.as_ref().map(|a| RelayStatus {
+            port: a.port,
+            tls_port: a.tls_port,
+            members: a.members.len(),
+            links: a.links.len(),
+            fingerprint: self.relay_fetched.and_then(|(f, _)| f),
+            fetched_at: self
+                .relay_fetched
+                .map(|(_, at)| status::wall_time(now, wall, at)),
+        });
         StatusDoc {
             v: status::VERSION,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             node,
+            relay,
             config: ConfigStatus {
                 applied_at: self.applied_at.map(|t| status::wall_time(now, wall, t)),
                 access_rules_version: self.access.version(),

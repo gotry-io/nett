@@ -14,7 +14,8 @@ use nett_trust::payload::{MeshAddresses, PortRange};
 
 use crate::SiteError;
 use crate::state::{
-    Edge, Enrollment, Learned, Machine, NodeKeys, Part, Revoked, Rule, RuleId, Selector, State,
+    Edge, Enrollment, Learned, Machine, NodeKeys, Part, RelayKey, RelayRole, Revoked, Rule, RuleId,
+    Selector, State,
 };
 
 /// Options when adding a machine.
@@ -92,6 +93,23 @@ impl State {
         Ok(())
     }
 
+    /// Runs a relay on a machine, or stops it with `None` (design/site.md section 4.1). `key` becomes
+    /// the site's relay key when it has none yet.
+    pub fn set_relay(
+        &mut self,
+        name: &NodeName,
+        role: Option<RelayRole>,
+        key: RelayKey,
+    ) -> Result<(), SiteError> {
+        self.attempt(|s| {
+            if role.is_some() && s.relay_key.is_none() {
+                s.relay_key = Some(key);
+            }
+            s.machine_mut(name)?.relay = role;
+            s.check()
+        })
+    }
+
     pub fn set_edge(
         &mut self,
         name: &NodeName,
@@ -151,6 +169,7 @@ impl State {
                 enrollment: None,
                 learned: Learned::default(),
                 mesh,
+                relay: None,
                 edge: None,
                 routes: Vec::new(),
                 policy: None,

@@ -9,7 +9,7 @@ use nett_core::id::NodeId;
 use nett_mesh::config::Reachability;
 use nett_trust::payload::{PortRange, Protocol};
 
-use crate::compose::{Pair, connections};
+use crate::compose::{Pair, connections, relay_paths};
 use crate::state::{Machine, Part, Rule, Selector, State};
 
 /// The changes between two site states, one line per item; empty when nothing changed.
@@ -28,6 +28,17 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
             Some(o) => {
                 if reach(old, o) != reach(new, m) {
                     lines.push(format!("~ {name}: {}", reach(new, m)));
+                }
+                if o.relay != m.relay {
+                    lines.push(match m.relay {
+                        Some(r) => format!(
+                            "~ {name} runs a relay: UDP {}, {}",
+                            r.port,
+                            r.tls_port
+                                .map_or_else(|| "no TLS".to_owned(), |p| format!("TLS {p}"))
+                        ),
+                        None => format!("~ {name} stops its relay"),
+                    });
                 }
                 match (&o.edge, &m.edge) {
                     (None, Some(e)) => lines.push(format!(
@@ -109,11 +120,22 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
     let (before, after) = (connections(old), connections(new));
     let added: Vec<&Pair> = after.difference(&before).collect();
     let removed: Vec<&Pair> = before.difference(&after).collect();
-    if !added.is_empty() || !removed.is_empty() {
+    let changed: Vec<&Pair> = after
+        .intersection(&before)
+        .filter(|(a, b)| path_kind(old, a, b) != path_kind(new, a, b))
+        .collect();
+    if !added.is_empty() || !removed.is_empty() || !changed.is_empty() {
         lines.push("Connections:".to_owned());
         for (a, b) in added {
             lines.push(format!(
                 "  + {}  {}",
+                pair_text(new, a, b),
+                path_kind(new, a, b)
+            ));
+        }
+        for (a, b) in changed {
+            lines.push(format!(
+                "  ~ {}  {}",
                 pair_text(new, a, b),
                 path_kind(new, a, b)
             ));
@@ -226,19 +248,41 @@ fn pair_text(state: &State, a: &NodeId, b: &NodeId) -> String {
     format!("{} - {}", names[0], names[1])
 }
 
-/// The kind of path between a pair of machines: direct when either end is `public`, only hole
-/// punching when both ends are `dial-only` (design/site.md section 6).
-pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> &'static str {
-    let public = |id: &NodeId| {
-        state
-            .by_id(id)
-            .is_some_and(|m| m.reachability == Reachability::Public)
+/// The kinds of path between a pair of machines (design/site.md section 6): direct when either end
+/// is `public`, hole punching when both ends are `dial-only`, and the relays it goes through, for
+/// example `punch, relay edge-vps (udp, tls)`. Only hole punching may not connect.
+pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
+    let (Some(ma), Some(mb)) = (state.by_id(a), state.by_id(b)) else {
+        return "-".to_owned();
     };
-    if public(a) || public(b) {
-        "direct"
+    let public = |m: &Machine| m.reachability == Reachability::Public;
+    let mut parts = vec![if public(ma) || public(mb) {
+        "direct".to_owned()
     } else {
-        "punch only; may not connect"
+        "punch".to_owned()
+    }];
+    let paths = relay_paths(state, ma, mb);
+    let mut relays: Vec<&NodeId> = Vec::new();
+    for p in &paths {
+        if !relays.contains(&&p.relay.node_id) {
+            relays.push(&p.relay.node_id);
+        }
     }
+    for relay in relays {
+        let ways: Vec<&str> = paths
+            .iter()
+            .filter(|p| &p.relay.node_id == relay)
+            .map(|p| if p.tls.is_some() { "tls" } else { "udp" })
+            .collect();
+        let name = state
+            .name_of(relay)
+            .map_or_else(|| relay.to_string(), ToString::to_string);
+        parts.push(format!("relay {name} ({})", ways.join(", ")));
+    }
+    if parts.len() == 1 && !public(ma) && !public(mb) {
+        return "punch only; may not connect".to_owned();
+    }
+    parts.join(", ")
 }
 
 /// Machines whose desired state changed (by name): used to tell the user which files to copy over.

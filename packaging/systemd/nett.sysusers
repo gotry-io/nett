@@ -1,4 +1,7 @@
-# The system user the nett mesh service runs as. `sudo nett install` writes this file to
-# /etc/sysusers.d/nett.conf and runs systemd-sysusers. /etc/nett belongs to its group, so the mesh
-# service can read the desired state while other users cannot.
+# The system users nett's services run as. `sudo nett install` writes this file to
+# /etc/sysusers.d/nett.conf and runs systemd-sysusers. /etc/nett belongs to the group nett, so the
+# mesh service can read the desired state while other users cannot. The relay and the transport
+# adapter run as their own users and get their configuration from the mesh service.
 u nett - "nett mesh service" /var/lib/nett
+u nett-relay - "nett relay" /var/lib/nett-relay
+u nett-transport - "nett transport adapter" -

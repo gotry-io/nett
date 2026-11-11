@@ -7,6 +7,7 @@ pub mod config;
 pub mod dataplane;
 pub mod engine;
 pub mod event;
+pub mod helper;
 pub mod key;
 #[cfg(feature = "lab")]
 pub mod lab;

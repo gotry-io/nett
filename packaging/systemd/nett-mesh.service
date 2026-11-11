@@ -12,9 +12,11 @@ Wants=network-online.target
 ExecStart=/usr/local/lib/nett/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key
 ExecReload=/bin/kill -HUP $MAINPID
 LoadCredential=mesh.key:/etc/nett/mesh.key
-# Local status socket /run/nett/mesh.sock: only the service and root can enter the directory
+# Local sockets in /run/nett: mesh.sock (0600) for root and nett-node, helpers.sock for the relay
+# and the transport adapter, which the service answers only for their own users. Others can reach a
+# known name in the directory but not list it
 RuntimeDirectory=nett
-RuntimeDirectoryMode=0700
+RuntimeDirectoryMode=0711
 # Trust store /var/lib/nett: pinned trust anchors, revocations and applied versions survive restarts
 StateDirectory=nett
 StateDirectoryMode=0700

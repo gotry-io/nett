@@ -371,7 +371,7 @@ async fn learned_public_addresses_reach_the_other_members() {
             ip: "198.51.100.7".parse().expect("ip"),
             from: AddressSource::Hub,
         }),
-        ipv6: None,
+        ..Learned::default()
     };
     // The address is learned when the machine connects
     hub.db

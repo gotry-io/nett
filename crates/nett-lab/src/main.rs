@@ -54,6 +54,8 @@ const USAGE: &str = "usage:
   nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir> [--soak SECONDS]
       (nett-hub next to nett; --soak then keeps changing and pinging, samples memory into
       soak.csv, rests 10 minutes and checks that memory stayed flat)
+  nett-lab run hub-relay --topology hub-relay.toml --nett <path/to/nett> --out <dir>
+      (members join through the Hub; a relay, its TLS fingerprint learned, and TLS fallback)
   nett-lab down --topology <file.toml>
   nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -192,6 +194,7 @@ fn run() -> anyhow::Result<bool> {
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
                 "access" => scenario::access(&topology, &nett()?, &out)?,
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
+                "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,

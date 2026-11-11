@@ -63,6 +63,7 @@ async fn a_connected_machine_has_events_through_the_api() {
         desired: dir.join("desired.json"),
         socket: dir.join("mesh.sock"),
         upgrader: None,
+        services: None,
     };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
     let task = tokio::spawn(nett_node::session::run(node, async move {

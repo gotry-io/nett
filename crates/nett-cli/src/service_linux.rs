@@ -17,29 +17,10 @@ use crate::install::{
 };
 
 use nett_node::platform::linux::{
-    CONFIG_DIR as DIR, LINK, MESH_UNIT, NODE_UNIT, PROGRAM as BINARY, PROGRAM_DIR,
+    CONFIG_DIR as DIR, LINK, MESH, NODE, PROGRAM as BINARY, PROGRAM_DIR, RELAY, TRANSPORT, Unit,
 };
 
 const DESIRED: &str = "/etc/nett/desired.json";
-const UNIT_DIR: &str = "/etc/systemd/system";
-
-struct Unit {
-    name: &'static str,
-    content: &'static str,
-    what: &'static str,
-}
-
-const MESH: Unit = Unit {
-    name: MESH_UNIT,
-    content: include_str!("../../../packaging/systemd/nett-mesh.service"),
-    what: "the mesh service",
-};
-
-const NODE: Unit = Unit {
-    name: NODE_UNIT,
-    content: include_str!("../../../packaging/systemd/nett-node.service"),
-    what: "nett-node",
-};
 
 fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
     let Some(program) = nett_node::platform::linux::systemctl() else {
@@ -49,10 +30,6 @@ fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
         );
     };
     crate::install::run(program, args)
-}
-
-fn unit_path(unit: &Unit) -> String {
-    format!("{UNIT_DIR}/{}", unit.name)
 }
 
 /// Makes the service run with the new units and program: enables and starts it when not running,
@@ -128,11 +105,16 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     if !ensure_link(LINK, BINARY)? {
         println!("{LINK} belongs to another installer; the services run {BINARY}.");
     }
-    let mesh_unit_changed =
-        replace_if_changed(Path::new(&unit_path(&MESH)), MESH.content.as_bytes(), 0o644)?;
-    let node_unit_changed =
-        linked && replace_if_changed(Path::new(&unit_path(&NODE)), NODE.content.as_bytes(), 0o644)?;
-    if (mesh_unit_changed || node_unit_changed) && !systemctl(&["daemon-reload"])? {
+    ensure_dir(nett_node::platform::linux::UNIT_DIR, 0o755)?;
+    let write =
+        |unit: &Unit| replace_if_changed(Path::new(&unit.path()), unit.content.as_bytes(), 0o644);
+    let mesh_unit_changed = write(&MESH)?;
+    let node_unit_changed = linked && write(&NODE)?;
+    // Enabled only while the desired state needs them (design/hub.md section 5)
+    let optional_changed = write(&RELAY)? | write(&TRANSPORT)?;
+    if (mesh_unit_changed || node_unit_changed || optional_changed)
+        && !systemctl(&["daemon-reload"])?
+    {
         bail!("systemctl daemon-reload failed");
     }
 
@@ -161,6 +143,20 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         && let Some(m) = ensure_running(&NODE, node_unit_changed || binary_changed || hub_changed)?
     {
         messages.push(m);
+    }
+    // Without a Hub the relay and the transport adapter follow the imported desired state; with one,
+    // nett-node starts and stops them
+    if !linked && let Some(doc) = read_doc() {
+        let wants = nett_node::services::Wants::of(&doc);
+        for problem in nett_node::services::reconcile(wants) {
+            messages.push(problem);
+        }
+        if wants.relay {
+            messages.push(format!(
+                "{} runs; `sudo nett status` shows its TLS fingerprint for `nett site relay --fingerprint`.",
+                RELAY.what
+            ));
+        }
     }
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
@@ -199,9 +195,15 @@ pub fn leave() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The desired state in effect, when it can be read.
+fn read_doc() -> Option<nett_mesh::config::DesiredMeshDoc> {
+    let bytes = std::fs::read(DESIRED).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 fn remove_services() -> anyhow::Result<()> {
-    for unit in [&NODE, &MESH] {
-        let path = unit_path(unit);
+    for unit in [&TRANSPORT, &RELAY, &NODE, &MESH] {
+        let path = unit.path();
         if !Path::new(&path).exists() {
             continue;
         }

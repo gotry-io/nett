@@ -552,6 +552,47 @@ impl Relay {
     pub fn table_sizes(&self) -> (usize, usize) {
         (self.pending.len(), self.sessions.len())
     }
+
+    /// Applies a changed assignment in place (design/mesh.md section 5.2): members that remain keep
+    /// their binding and their sessions, members that are gone lose theirs, and handshakes still
+    /// pending are dropped (WireGuard retries them). An invalid assignment leaves the relay as it was.
+    pub fn reassign(
+        &mut self,
+        members: &[AssignedMember],
+        connections: &[(X25519PublicKey, X25519PublicKey)],
+    ) -> Result<(), AssignmentError> {
+        let mut next = Self::new(members, connections)?;
+        let old: HashMap<X25519PublicKey, usize> = self
+            .members
+            .iter()
+            .enumerate()
+            .map(|(i, m)| (m.public_key, i))
+            .collect();
+        let mut moved = HashMap::new();
+        for (i, m) in next.members.iter_mut().enumerate() {
+            let Some(&o) = old.get(&m.public_key) else {
+                continue;
+            };
+            moved.insert(o, i);
+            let before = &self.members[o];
+            // A binding learned from handshakes is newer than an address in the assignment
+            if before.bound.is_some() {
+                m.bound = before.bound;
+                m.unconfirmed = before.unconfirmed;
+                m.last_change = before.last_change;
+            }
+        }
+        next.sessions = self
+            .sessions
+            .drain()
+            .filter_map(|(index, s)| {
+                let owner = *moved.get(&s.owner)?;
+                Some((index, Session { owner, at: s.at }))
+            })
+            .collect();
+        *self = next;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -630,6 +671,51 @@ mod tests {
             r.handle(addr("203.0.113.5:50000"), &data(33), now, 0),
             Outcome::Drop(Drop::UnknownIndex)
         );
+    }
+
+    #[test]
+    fn a_new_assignment_keeps_the_links_that_remain() {
+        let mut r = relay();
+        let now = Instant::now();
+        handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
+        let key = X25519PublicKey::from_bytes;
+        let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
+            public_key: key(k),
+            address: a.map(sock),
+            token: [k[0]; 32],
+        };
+        // C joins with a link to A; B and A keep their link, binding and sessions
+        r.reassign(
+            &[
+                member(C, None),
+                member(B, None),
+                member(A, Some("198.51.100.1:41820")),
+            ],
+            &[(key(A), key(B)), (key(A), key(C))],
+        )
+        .expect("reassigned");
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Forward(addr("203.0.113.5:50000")),
+            "the session to B survives"
+        );
+        assert_eq!(
+            r.handle(addr("203.0.113.5:50000"), &data(22), now, 0),
+            Outcome::Forward(addr("198.51.100.1:41820"))
+        );
+        // B's link is removed: its sessions go with it
+        r.reassign(
+            &[member(A, Some("198.51.100.1:41820")), member(C, None)],
+            &[(key(A), key(C))],
+        )
+        .expect("reassigned");
+        assert_eq!(
+            r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
+            Outcome::Drop(Drop::UnknownIndex)
+        );
+        // An invalid assignment changes nothing
+        assert!(r.reassign(&[member(A, None)], &[(key(A), key(D))]).is_err());
+        assert_eq!(r.members.len(), 2);
     }
 
     #[test]

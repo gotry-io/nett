@@ -182,6 +182,19 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
     if !node.clock_trusted {
         head.push(("clock", "not synchronized".into()));
     }
+    if let Some(relay) = &doc.relay {
+        let mut parts = vec![format!("UDP {}", relay.port)];
+        if let Some(tls) = relay.tls_port {
+            parts.push(format!("TLS {tls}"));
+        }
+        parts.push(format!("{} members, {} links", relay.members, relay.links));
+        parts.push(match (relay.fetched_at, relay.fingerprint) {
+            (Some(at), Some(f)) => format!("fetched {}, certificate {f}", ago(at, now)),
+            (Some(at), None) => format!("fetched {}", ago(at, now)),
+            (None, _) => "nett-relay has not fetched its assignment".to_owned(),
+        });
+        head.push(("relay", parts.join(", ")));
+    }
     let mut config = vec![match doc.config.applied_at {
         Some(t) => format!("applied {}", ago(t, now)),
         None => "not applied yet".to_owned(),

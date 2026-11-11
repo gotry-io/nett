@@ -17,7 +17,7 @@ mod layout;
 mod mesh;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node;
-#[cfg(all(feature = "lab", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod relay;
 #[cfg(target_os = "macos")]
 mod service;
@@ -26,7 +26,7 @@ mod service_linux;
 mod site;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod status;
-#[cfg(all(feature = "lab", target_os = "linux"))]
+#[cfg(target_os = "linux")]
 mod transport;
 
 /// One command: name, group in the help, one-line description and usage. The usage text lives in
@@ -115,18 +115,18 @@ const COMMANDS: &[Command] = &[
         summary: "The control agent that connects this machine to its Hub",
         usage: node::USAGE,
     },
-    #[cfg(all(feature = "lab", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     Command {
         name: "relay",
         group: Group::Service,
-        summary: "The relay process (lab build)",
+        summary: "The relay that forwards ciphertext between members",
         usage: relay::USAGE,
     },
-    #[cfg(all(feature = "lab", target_os = "linux"))]
+    #[cfg(target_os = "linux")]
     Command {
         name: "transport",
         group: Group::Service,
-        summary: "The transport adapter process (lab build)",
+        summary: "The transport adapter that carries WireGuard over TLS",
         usage: transport::USAGE,
     },
 ];
@@ -193,9 +193,9 @@ fn run() -> anyhow::Result<()> {
         "mesh" => mesh::run(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "node" => node::run(parser),
-        #[cfg(all(feature = "lab", target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         "relay" => relay::run(parser),
-        #[cfg(all(feature = "lab", target_os = "linux"))]
+        #[cfg(target_os = "linux")]
         "transport" => transport::run(parser),
         _ => unreachable!("every listed command is dispatched"),
     }

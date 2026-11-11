@@ -420,8 +420,25 @@ impl Hub {
         }
     }
 
-    /// Records the public address learned by the Hub (design/hub.md section 5); when it changes, a
-    /// new generation is distributed.
+    /// Changes what the Hub learned about a machine, starting from what it knows now.
+    pub async fn learn(
+        &self,
+        node: &NodeId,
+        change: impl FnOnce(&mut Learned),
+        now: i64,
+    ) -> Result<(), PushError> {
+        let mut learned = self
+            .site()
+            .await
+            .and_then(|s| s.state.by_id(node).map(|m| m.learned))
+            .unwrap_or_default();
+        change(&mut learned);
+        self.learned(node, learned, now).await
+    }
+
+    /// Records what the Hub learned about a machine: its public address, and the fingerprint of its
+    /// relay's certificate (design/hub.md section 5); when it changes, a new generation is
+    /// distributed.
     pub async fn learned(
         &self,
         node: &NodeId,

@@ -38,28 +38,28 @@ use crate::cmd::{run, run_in, spawn_in};
 use crate::net::Underlay;
 use crate::topology::Topology;
 
-const HUB_PORT: u16 = 8443;
+pub(super) const HUB_PORT: u16 = 8443;
 /// Upper bound for members to reconnect after the Hub recovers: nett-node's backoff is at most 60
 /// seconds.
 const RECONNECT: Duration = Duration::from_secs(90);
 
-struct HubLab<'a> {
-    nett: &'a Path,
-    hub_bin: PathBuf,
-    site: PathBuf,
-    hub_dir: PathBuf,
+pub(super) struct HubLab<'a> {
+    pub(super) nett: &'a Path,
+    pub(super) hub_bin: PathBuf,
+    pub(super) site: PathBuf,
+    pub(super) hub_dir: PathBuf,
     /// The namespace running the Hub and its address.
-    hub_ns: String,
-    hub_ip: std::net::Ipv4Addr,
+    pub(super) hub_ns: String,
+    pub(super) hub_ip: std::net::Ipv4Addr,
     /// The namespace running `nett site` (the user's computer).
-    site_ns: String,
+    pub(super) site_ns: String,
     /// The members in the site (not including machines added during the simulated attack).
-    members: Vec<String>,
-    hub: Option<Child>,
+    pub(super) members: Vec<String>,
+    pub(super) hub: Option<Child>,
 }
 
 impl HubLab<'_> {
-    fn site_cmd(&self, args: &[&str]) -> anyhow::Result<String> {
+    pub(super) fn site_cmd(&self, args: &[&str]) -> anyhow::Result<String> {
         let mut full: Vec<std::ffi::OsString> = vec!["site".into()];
         full.extend(args.iter().map(Into::into));
         full.push("--dir".into());
@@ -67,7 +67,7 @@ impl HubLab<'_> {
         run_in(&self.site_ns, &self.nett.display().to_string(), full)
     }
 
-    fn start_hub(&mut self) -> anyhow::Result<()> {
+    pub(super) fn start_hub(&mut self) -> anyhow::Result<()> {
         let listen = format!("{}:{HUB_PORT}", self.hub_ip);
         let child = spawn_in(
             &self.hub_ns,
@@ -101,20 +101,24 @@ impl HubLab<'_> {
         Ok(())
     }
 
-    fn stop_hub(&mut self) {
+    pub(super) fn stop_hub(&mut self) {
         if let Some(mut child) = self.hub.take() {
             run("kill", ["-TERM", &child.id().to_string()]).ok();
             child.wait().ok();
         }
     }
 
-    fn status(&self) -> anyhow::Result<StatusResponse> {
+    pub(super) fn status(&self) -> anyhow::Result<StatusResponse> {
         let out = self.site_cmd(&["status", "--json"])?;
         serde_json::from_str(&out).context("parsing nett site status --json")
     }
 
     /// Waits until every machine has given `result` for the current generation.
-    fn wait_acked(&self, result: &str, within: Duration) -> anyhow::Result<StatusResponse> {
+    pub(super) fn wait_acked(
+        &self,
+        result: &str,
+        within: Duration,
+    ) -> anyhow::Result<StatusResponse> {
         let deadline = Instant::now() + within;
         loop {
             let status = self.status();
@@ -177,7 +181,7 @@ fn keys_line(out: &str) -> anyhow::Result<String> {
     Ok(out[start..start + end].to_owned())
 }
 
-fn desired(path: &Path) -> anyhow::Result<DesiredMeshDoc> {
+pub(super) fn desired(path: &Path) -> anyhow::Result<DesiredMeshDoc> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
 }

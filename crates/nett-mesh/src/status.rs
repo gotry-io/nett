@@ -39,13 +39,13 @@ pub const DEFAULT_SOCKET: &str = "/var/run/nett/mesh.sock";
 pub const DEFAULT_SOCKET: &str = "/run/nett/mesh.sock";
 
 /// Upper limit on the length of a request.
-const MAX_REQUEST: u64 = 1024;
+pub(crate) const MAX_REQUEST: u64 = 1024;
 /// After the reply, at most this much of the peer's unread input is discarded.
-const MAX_DRAIN: u64 = 64 * 1024;
+pub(crate) const MAX_DRAIN: u64 = 64 * 1024;
 /// Upper limit on the length of a reply: several times the estimate based on the member limit.
 pub const MAX_REPLY: u64 = 4 << 20;
 /// Timeout for socket reads and writes.
-const IO_TIMEOUT: Duration = Duration::from_secs(1);
+pub(crate) const IO_TIMEOUT: Duration = Duration::from_secs(1);
 /// Upper limit on waiting for the background thread to hand over a snapshot: while a desired state is
 /// being applied it may be busy with data plane operations.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
@@ -76,8 +76,23 @@ pub struct StatusDoc {
     pub node: NodeStatus,
     pub config: ConfigStatus,
     pub peers: Vec<PeerStatus>,
+    /// The relay on this machine (design/status.md section 6); absent when it is not a relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayStatus>,
     pub problems: Vec<Problem>,
     pub events: Vec<EventRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RelayStatus {
+    pub port: u16,
+    pub tls_port: Option<u16>,
+    pub members: usize,
+    pub links: usize,
+    /// The fingerprint of the TLS certificate nett-relay reported when it last fetched its assignment.
+    pub fingerprint: Option<nett_core::transport::CertFingerprint>,
+    /// When nett-relay last fetched its assignment; empty when it has not since the mesh process started.
+    pub fetched_at: Option<Timestamp>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -525,7 +540,7 @@ struct ErrorReply {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct ErrorBody {
+pub(crate) struct ErrorBody {
     code: String,
     message: String,
 }
@@ -542,21 +557,43 @@ pub trait StatusSource: Send + 'static {
 
 /// The thread that accepts status queries. Dropping it stops the thread and deletes the socket.
 pub struct StatusServer {
-    path: PathBuf,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    _server: LocalServer,
 }
 
 impl StatusServer {
     /// Creates the socket at `path` and starts accepting connections. If the directory does not exist it is
     /// created with `0700`; the socket is `0600`.
     pub fn spawn(path: &Path, source: impl StatusSource) -> std::io::Result<Self> {
-        let listener = bind(path)?;
+        LocalServer::spawn(path, 0o600, "nett-status", move |stream| {
+            handle(stream, &source)
+        })
+        .map(|server| Self { _server: server })
+    }
+}
+
+/// A thread that accepts connections on a local socket one at a time and hands each to `handle`.
+/// Dropping it stops the thread and deletes the socket.
+pub(crate) struct LocalServer {
+    path: PathBuf,
+    stop: Arc<AtomicBool>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl LocalServer {
+    /// Creates the socket at `path` with permissions `mode` and starts accepting connections. If the
+    /// directory does not exist it is created with `0700`.
+    pub(crate) fn spawn(
+        path: &Path,
+        mode: u32,
+        name: &str,
+        handle: impl Fn(UnixStream) -> std::io::Result<()> + Send + 'static,
+    ) -> std::io::Result<Self> {
+        let listener = bind(path, mode)?;
         listener.set_nonblocking(true)?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread = std::thread::Builder::new()
-            .name("nett-status".into())
+            .name(name.into())
             .stack_size(SERVER_STACK)
             .spawn(move || {
                 let timeout = Timespec::try_from(ACCEPT_POLL).unwrap_or(Timespec {
@@ -569,7 +606,7 @@ impl StatusServer {
                         Ok(0) | Err(rustix::io::Errno::INTR) => continue,
                         Ok(_) => {}
                         Err(e) => {
-                            tracing::debug!(error = %e, "waiting for a status connection");
+                            tracing::debug!(error = %e, "waiting for a local connection");
                             std::thread::sleep(ACCEPT_POLL);
                             continue;
                         }
@@ -578,15 +615,14 @@ impl StatusServer {
                         // On macOS an accepted connection inherits the listening socket's non-blocking flag; queries use
                         // blocking reads and writes with a timeout
                         Ok((stream, _)) => {
-                            let result = stream
-                                .set_nonblocking(false)
-                                .and_then(|()| handle(stream, &source));
+                            let result =
+                                stream.set_nonblocking(false).and_then(|()| handle(stream));
                             if let Err(e) = result {
-                                tracing::debug!(error = %e, "status query failed");
+                                tracing::debug!(error = %e, "local query failed");
                             }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-                        Err(e) => tracing::debug!(error = %e, "accepting a status connection"),
+                        Err(e) => tracing::debug!(error = %e, "accepting a local connection"),
                     }
                 }
             })?;
@@ -598,7 +634,7 @@ impl StatusServer {
     }
 }
 
-impl Drop for StatusServer {
+impl Drop for LocalServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
@@ -608,7 +644,7 @@ impl Drop for StatusServer {
     }
 }
 
-fn bind(path: &Path) -> std::io::Result<UnixListener> {
+fn bind(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
     use std::io::{Error, ErrorKind};
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty())
         && !dir.exists()
@@ -639,11 +675,11 @@ fn bind(path: &Path) -> std::io::Result<UnixListener> {
         Err(e) => return Err(e),
     }
     // Create it under a temporary name and set its permissions first, then rename: the moment the socket
-    // appears at the agreed path it is already 0600
+    // appears at the agreed path it already has its permissions
     let tmp = path.with_extension(format!("sock.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let listener = UnixListener::bind(&tmp)?;
-    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
     std::fs::rename(&tmp, path)?;
     Ok(listener)
 }
@@ -656,12 +692,12 @@ fn peer_allowed(stream: &UnixStream) -> std::io::Result<bool> {
 }
 
 #[cfg(target_os = "linux")]
-fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     Ok(rustix::net::sockopt::socket_peercred(stream)?.uid.as_raw())
 }
 
 #[cfg(target_os = "macos")]
-fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
+pub(crate) fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     use std::os::fd::AsFd as _;
     crate::macos::peer_uid(stream.as_fd())
 }
@@ -683,13 +719,13 @@ fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()>
 /// Total time limit for reading [`IO_TIMEOUT`]: before each read the read timeout is set to the time
 /// remaining. If computed per read, a peer sending bit by bit could hold this thread indefinitely
 /// (design/status.md section 4).
-struct Deadline<'a> {
+pub(crate) struct Deadline<'a> {
     stream: &'a UnixStream,
     until: Instant,
 }
 
 impl<'a> Deadline<'a> {
-    fn new(stream: &'a UnixStream) -> Self {
+    pub(crate) fn new(stream: &'a UnixStream) -> Self {
         Self {
             stream,
             until: Instant::now() + IO_TIMEOUT,
@@ -772,7 +808,7 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()
     out.write_all(&bytes)
 }
 
-fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std::io::Result<()> {
+pub(crate) fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std::io::Result<()> {
     let reply = ErrorReply {
         v: VERSION,
         error: ErrorBody {
@@ -831,6 +867,19 @@ pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
 
 /// Sends a request and reads back the reply; the mesh process side handles it for at most `wait`.
 fn request(path: &Path, query: &str, wait: Duration) -> Result<serde_json::Value, QueryError> {
+    send(
+        path,
+        &serde_json::json!({"v": VERSION, "query": query}),
+        wait,
+    )
+}
+
+/// Sends one request document and reads back the reply.
+pub(crate) fn send(
+    path: &Path,
+    request: &serde_json::Value,
+    wait: Duration,
+) -> Result<serde_json::Value, QueryError> {
     let io = |source| QueryError::Io {
         path: path.to_owned(),
         source,
@@ -843,9 +892,9 @@ fn request(path: &Path, query: &str, wait: Duration) -> Result<serde_json::Value
         .set_read_timeout(Some(wait + IO_TIMEOUT))
         .map_err(io)?;
     stream.set_write_timeout(Some(IO_TIMEOUT)).map_err(io)?;
-    (&stream)
-        .write_all(format!("{{\"v\":{VERSION},\"query\":\"{query}\"}}\n").as_bytes())
-        .map_err(io)?;
+    let mut line = request.to_string();
+    line.push('\n');
+    (&stream).write_all(line.as_bytes()).map_err(io)?;
     let mut bytes = Vec::new();
     (&stream)
         .take(MAX_REPLY + 1)
@@ -922,6 +971,7 @@ mod tests {
                 tx_bytes: 0,
                 candidates: vec![],
             }],
+            relay: None,
             problems: vec![],
             events: vec![],
         }

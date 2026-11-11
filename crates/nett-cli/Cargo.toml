@@ -29,8 +29,6 @@ base64.workspace = true
 nett-trust = { workspace = true, features = ["signing"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-nett-relay = { workspace = true, optional = true }
-nett-transport = { workspace = true, optional = true }
 
 # Mesh process: Linux, and the macOS native member (design/userspace.md)
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
@@ -44,6 +42,9 @@ x25519-dalek.workspace = true
 # the service; on macOS, looks up the home directory of the user who ran sudo by SUDO_UID
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
+# The relay and the transport adapter run on Linux (design/mesh.md sections 5.2 and 5.3)
+nett-relay.workspace = true
+nett-transport.workspace = true
 rustix = { workspace = true, features = ["thread", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -52,11 +53,6 @@ rustix = { workspace = true, features = ["process"] }
 
 [features]
 # Lab build: lab options of the mesh process (event file, simulated clock skew, transport adapter
-# configuration), plus the relay and the transport adapter (design/prototype.md sections 3 and 7);
-# not enabled in official builds
-lab = [
-    "nett-mesh/lab",
-    "dep:nett-relay",
-    "nett-relay/lab",
-    "dep:nett-transport",
-]
+# configuration file), and the relay reading its assignment from a file (design/prototype.md
+# sections 3 and 7); not enabled in official builds
+lab = ["nett-mesh/lab", "nett-relay/lab"]

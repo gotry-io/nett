@@ -48,6 +48,35 @@ pub struct DesiredMeshDoc {
     /// Node name, not signed, used only for display (design/status.md section 5).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<NodeId, NodeName>,
+    /// The relay this machine runs, with the links assigned to it (design/mesh.md section 5.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayDoc>,
+}
+
+/// Relay assignment in the desired state (design/mesh.md section 5.2). Members are named by node ID;
+/// the mesh process resolves them to mesh public keys from the verified admission material.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayDoc {
+    /// UDP relay port.
+    pub port: u16,
+    /// TCP port of the TLS transport; absent when the relay serves UDP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_port: Option<u16>,
+    pub members: Vec<RelayMemberDoc>,
+    /// Pairs of members the relay forwards between.
+    pub links: Vec<[NodeId; 2]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayMemberDoc {
+    pub node: NodeId,
+    /// WireGuard address of a `public` member, bound before its first handshake.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub address: Option<SocketAddr>,
+    /// Probe token between this member and the relay.
+    pub token: ProbeToken,
 }
 
 /// Network reachability of a node (design/architecture.md section 6.5).
@@ -116,6 +145,8 @@ pub const MAX_MEMBERS: usize = 256;
 /// Upper limit on the number of revocations: revocations are kept permanently, and each re-enrolled node
 /// leaves one.
 pub const MAX_REVOCATIONS: usize = 4096;
+/// Upper limit on the links assigned to one relay.
+pub const MAX_RELAY_LINKS: usize = 8192;
 
 /// Reads a regular file of at most `max` bytes; `Ok(None)` when it does not exist.
 pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
@@ -192,6 +223,8 @@ pub enum ConfigError {
     TooManyTlsRelays,
     #[error("desired state lists more than {max} {what}")]
     TooMany { what: &'static str, max: usize },
+    #[error("relay: {0}")]
+    Relay(String),
 }
 
 /// Validated desired state.
@@ -211,6 +244,7 @@ pub struct DesiredMesh {
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
     pub names: BTreeMap<NodeId, NodeName>,
+    pub relay: Option<RelayDoc>,
     /// TLS targets of the transport adapter, coming from the same place as [`DesiredMesh::tls_endpoints`].
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
@@ -310,6 +344,9 @@ impl DesiredMesh {
                 fingerprint,
             });
         }
+        if let Some(relay) = &doc.relay {
+            check_relay(relay)?;
+        }
         let mut paths = BTreeMap::new();
         for path in doc.paths {
             let config = PeerPathConfig {
@@ -333,11 +370,51 @@ impl DesiredMesh {
             access_rules: doc.access_rules,
             advertised_routes: doc.advertised_routes,
             names: doc.names,
+            relay: doc.relay,
             tls_targets: targets,
             tls_endpoints,
             doc: source,
         })
     }
+}
+
+/// The relay section is consistent: ports in range, members listed once, links between listed members.
+fn check_relay(relay: &RelayDoc) -> Result<(), ConfigError> {
+    if relay.port == 0 || relay.tls_port == Some(0) {
+        return Err(ConfigError::Relay("ports must not be 0".into()));
+    }
+    if relay.members.len() > MAX_MEMBERS {
+        return Err(ConfigError::TooMany {
+            what: "relay members",
+            max: MAX_MEMBERS,
+        });
+    }
+    if relay.links.len() > MAX_RELAY_LINKS {
+        return Err(ConfigError::TooMany {
+            what: "relay links",
+            max: MAX_RELAY_LINKS,
+        });
+    }
+    let mut members = std::collections::BTreeSet::new();
+    for m in &relay.members {
+        if !members.insert(&m.node) {
+            return Err(ConfigError::Relay(format!(
+                "member {} is listed twice",
+                m.node
+            )));
+        }
+    }
+    for [a, b] in &relay.links {
+        if a == b {
+            return Err(ConfigError::Relay(format!("link of {a} with itself")));
+        }
+        if let Some(missing) = [a, b].into_iter().find(|n| !members.contains(n)) {
+            return Err(ConfigError::Relay(format!(
+                "a link names {missing}, which is not among the relay's members"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Mesh prefixes may only come from private address ranges and must be of reasonable size: all traffic to

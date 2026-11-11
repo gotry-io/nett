@@ -53,6 +53,12 @@ pub enum Event {
     TransportConfigChanged {
         config: nett_core::transport::TransportConfig,
     },
+    /// The assignment of the relay on this machine changed (design/mesh.md section 5.2): the number of
+    /// admitted members and links it forwards for.
+    RelayAssignmentChanged {
+        members: usize,
+        links: usize,
+    },
     /// A data plane operation failed; the current state is kept and the operation is retried on the next
     /// desired state.
     DataPlaneFailed {
@@ -161,6 +167,9 @@ pub fn log_event(event: &Event) {
             targets = config.targets.len(),
             "transport config changed"
         ),
+        Event::RelayAssignmentChanged { members, links } => {
+            tracing::info!(members, links, "relay assignment changed")
+        }
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),
         Event::AccessRulesRejected { reason } => {

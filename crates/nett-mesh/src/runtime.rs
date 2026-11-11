@@ -55,6 +55,13 @@ enum Msg {
     /// Local status query (design/status.md section 8): the background thread builds a snapshot and returns
     /// it through this channel.
     Status(SyncSender<StatusDoc>),
+    /// nett-relay fetches its assignment (design/status.md section 3.1).
+    Relay(
+        Option<nett_core::transport::CertFingerprint>,
+        SyncSender<Option<crate::helper::RelayAssignment>>,
+    ),
+    /// The transport adapter fetches its configuration.
+    Transport(SyncSender<Option<nett_core::transport::TransportConfig>>),
     Shutdown,
 }
 
@@ -167,6 +174,14 @@ impl Runtime {
                             // Drop when the querying party has already timed out and left
                             let _ = reply.try_send(doc);
                         }
+                        Ok(Msg::Relay(fingerprint, reply)) => {
+                            let _ = reply.try_send(
+                                worker.engine.relay_assignment(fingerprint, Instant::now()),
+                            );
+                        }
+                        Ok(Msg::Transport(reply)) => {
+                            let _ = reply.try_send(worker.engine.transport_config());
+                        }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
@@ -240,6 +255,23 @@ impl StatusSource for RuntimeStatus {
         let (reply, answer) = sync_channel(1);
         self.reloads.try_send(reply).ok()?;
         answer.recv_timeout(RELOAD_TIMEOUT).ok()
+    }
+}
+
+impl crate::helper::HelperSource for RuntimeStatus {
+    fn relay(
+        &self,
+        fingerprint: Option<nett_core::transport::CertFingerprint>,
+    ) -> Option<Option<crate::helper::RelayAssignment>> {
+        let (reply, answer) = sync_channel(1);
+        self.tx.try_send(Msg::Relay(fingerprint, reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
+
+    fn transport(&self) -> Option<Option<nett_core::transport::TransportConfig>> {
+        let (reply, answer) = sync_channel(1);
+        self.tx.try_send(Msg::Transport(reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
     }
 }
 
