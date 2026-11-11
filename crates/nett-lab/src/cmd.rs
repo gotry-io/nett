@@ -1,4 +1,5 @@
-//! 调用外部命令（`ip`、`nft`、`tc`、`wg`、`ping` 等）：参数数组传参，不经过 shell，都有超时。
+//! Runs external commands (`ip`, `nft`, `tc`, `wg`, `ping`, etc.): arguments are passed as an
+//! array, not through a shell, and all have timeouts.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -8,10 +9,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 
-/// 单条命令的默认超时。
+/// Default timeout of a single command.
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// 运行命令并返回标准输出；退出码非 0 时返回带标准错误的错误。
+/// Runs a command and returns its standard output; returns an error carrying standard error when
+/// the exit code is not 0.
 pub fn run<I, S>(program: &str, args: I) -> anyhow::Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -20,7 +22,7 @@ where
     run_with_input(program, args, None, COMMAND_TIMEOUT)
 }
 
-/// 在网络命名空间中运行。
+/// Runs in a network namespace.
 pub fn run_in<I, S>(netns: &str, program: &str, args: I) -> anyhow::Result<String>
 where
     I: IntoIterator<Item = S>,
@@ -67,7 +69,8 @@ where
             .write_all(input)
             .with_context(|| format!("writing to `{shown}`"))?;
     }
-    // 边运行边读取输出：输出超过管道缓冲时，子进程才不会卡在写入上
+    // Read the output while it runs: only then does the child process not get stuck writing when
+    // the output exceeds the pipe buffer
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
     let status =
@@ -107,13 +110,13 @@ fn wait_timeout(
     }
 }
 
-/// 在网络命名空间中启动一个长期运行的进程，输出写入日志文件。
+/// Starts a long-running process in a network namespace, with its output written to a log file.
 pub fn spawn_in<I, S>(netns: &str, program: &Path, args: I, log: &Path) -> anyhow::Result<Child>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    // 追加：同一个节点的进程重启后，日志接在后面
+    // Append: after the process of the same node restarts, its log continues after the old one
     let log_file = File::options()
         .create(true)
         .append(true)

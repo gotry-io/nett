@@ -1,5 +1,6 @@
-# 场景 12：a 在锥形 NAT、b 在对称型 NAT 之后，开始经 r1、r2 中继，尝试打洞；
-# a、b 各与 r1、r2 直连，由它们的应答得知自己的映射地址与 NAT 类型
+# Scenario 12: a is behind a cone NAT and b behind a symmetric NAT, start via the relays r1 and r2,
+# and try hole punching; a and b each connect directly to r1 and r2 and learn their own mapped
+# address and NAT type from their replies
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -53,7 +54,7 @@ candidates = ["direct"]
 peers = ["b", "r2"]
 candidates = ["direct"]
 
-# 场景在这些成员之间收发（访问默认拒绝，ADR 0023）
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
 from = ["a", "b", "r1", "r2"]
 to = ["a", "b", "r1", "r2"]

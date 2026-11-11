@@ -1,6 +1,8 @@
-//! netlink 的最小实现：只编码组网进程用到的几种消息（rtnetlink 的接口与地址，WireGuard 的通用 netlink）。
+//! Minimal netlink implementation: encodes only the few kinds of messages the mesh process uses
+//! (rtnetlink interfaces and addresses, WireGuard's generic netlink).
 //!
-//! 消息格式见 Linux 的 `include/uapi/linux/netlink.h`。所有字段为本机字节序；属性按 4 字节对齐。
+//! For the message format see Linux's `include/uapi/linux/netlink.h`. All fields are in host byte order;
+//! attributes are aligned to 4 bytes.
 
 use std::io;
 use std::os::fd::OwnedFd;
@@ -14,10 +16,12 @@ use rustix::net::{
 };
 use zeroize::Zeroizing;
 
-/// 等待内核应答的上限。netlink 操作都在本机完成，正常情况下是微秒级。
+/// Upper limit on waiting for the kernel's reply. Netlink operations all complete locally and normally
+/// take microseconds.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// 接收缓冲区。内核的单个 netlink 数据报不超过一个 skb（dump 时约为一页到 32 KiB）。
+/// Receive buffer. A single netlink datagram from the kernel does not exceed one skb (about a page to 32
+/// KiB for a dump).
 const RECV_BUFFER: usize = 64 * 1024;
 
 pub(crate) const NLMSG_HDR_LEN: usize = 16;
@@ -71,7 +75,7 @@ pub(crate) struct Socket {
 }
 
 impl Socket {
-    /// `protocol` 为 `None` 时是 `NETLINK_ROUTE`（它的值为 0）。
+    /// When `protocol` is `None` it is `NETLINK_ROUTE` (its value is 0).
     pub(crate) fn open(protocol: Option<Protocol>) -> Result<Self, NlError> {
         let fd = socket_with(
             AddressFamily::NETLINK,
@@ -89,8 +93,9 @@ impl Socket {
         })
     }
 
-    /// 发送请求并收集应答，直到内核确认（普通请求）或 dump 结束。返回每条应答消息去掉消息头后的内容。
-    /// 携带私钥的请求在发送后清零（[`Message`] 内部使用 `Zeroizing`）。
+    /// Sends a request and collects the replies until the kernel acknowledges (ordinary requests) or the dump
+    /// ends. Returns the content of each reply message with the message header removed. Requests that
+    /// carry a private key are zeroed after sending ([`Message`] uses `Zeroizing` internally).
     pub(crate) fn request(&mut self, msg: Message) -> Result<Vec<Vec<u8>>, NlError> {
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
@@ -118,7 +123,7 @@ impl Socket {
                 let (header, payload, next) = split_message(rest)?;
                 rest = next;
                 if header.seq != seq {
-                    // 不是这次请求的应答（例如上一次超时后迟到的应答）
+                    // Not a reply to this request (for example a reply that arrived late after the previous timeout)
                     continue;
                 }
                 interrupted |= header.flags & NLM_F_DUMP_INTR != 0;
@@ -132,7 +137,7 @@ impl Socket {
                         if code < 0 {
                             return Err(NlError::Kernel(io::Error::from_raw_os_error(-code)));
                         }
-                        // 普通请求以确认（错误码 0）结束，dump 以 DONE 结束
+                        // An ordinary request ends with an acknowledgement (error code 0), a dump ends with DONE
                         if header.ty == NLMSG_DONE || !dump {
                             return if interrupted {
                                 Err(NlError::Interrupted)
@@ -141,7 +146,7 @@ impl Socket {
                             };
                         }
                     }
-                    // 普通请求的应答之后还有一条确认，继续读到确认为止
+                    // After an ordinary request's reply there is still an acknowledgement; keep reading until it arrives
                     _ => replies.push(payload.to_vec()),
                 }
             }
@@ -150,7 +155,8 @@ impl Socket {
 }
 
 impl Socket {
-    /// 发送一批消息（nftables 的事务），等每一条带确认标志的消息都得到确认；任何一条出错即返回错误。
+    /// Sends a batch of messages (an nftables transaction) and waits until every message with the
+    /// acknowledgement flag is acknowledged; returns an error if any one fails.
     pub(crate) fn request_batch(&mut self, msgs: Vec<Message>) -> Result<(), NlError> {
         let mut bytes = Vec::new();
         let mut pending = std::collections::BTreeSet::new();
@@ -191,7 +197,8 @@ impl Socket {
         Ok(())
     }
 
-    /// 接收一个数据报（用于订阅类的套接字，例如 nfnetlink_log）；超时返回 `None`。
+    /// Receives one datagram (for subscription-type sockets, for example nfnetlink_log); returns `None` on
+    /// timeout.
     pub(crate) fn recv_datagram(&mut self) -> Result<Option<&[u8]>, NlError> {
         match recv(&self.fd, &mut self.buf[..], RecvFlags::empty()) {
             Ok((len, _)) => Ok(Some(&self.buf[..len])),
@@ -237,7 +244,8 @@ pub(crate) const fn align(len: usize) -> usize {
     (len + 3) & !3
 }
 
-/// 一条待发送的 netlink 消息。内容使用 `Zeroizing`：设置 WireGuard 私钥的消息在发送后清零。
+/// A netlink message to send. The content uses `Zeroizing`: a message that sets the WireGuard private key
+/// is zeroed after sending.
 pub(crate) struct Message {
     ty: u16,
     flags: u16,
@@ -251,7 +259,8 @@ impl Message {
         Self { ty, flags, buf }
     }
 
-    /// 消息头之后的定长结构（`ifinfomsg`、`ifaddrmsg`、`genlmsghdr`），长度都是 4 的倍数。
+    /// The fixed-size structure after the message header (`ifinfomsg`, `ifaddrmsg`, `genlmsghdr`), whose
+    /// length is always a multiple of 4.
     pub(crate) fn fixed(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
         self.pad();
@@ -277,7 +286,7 @@ impl Message {
         self.attr(ty, &v.to_ne_bytes());
     }
 
-    /// 以 NUL 结尾的字符串属性。
+    /// A NUL-terminated string attribute.
     pub(crate) fn attr_str(&mut self, ty: u16, s: &str) {
         let mut bytes = Vec::with_capacity(s.len() + 1);
         bytes.extend_from_slice(s.as_bytes());
@@ -285,7 +294,7 @@ impl Message {
         self.attr(ty, &bytes);
     }
 
-    /// 开始一个嵌套属性，返回它的位置，交给 [`Self::end_nested`]。
+    /// Starts a nested attribute and returns its position, to hand to [`Self::end_nested`].
     pub(crate) fn begin_nested(&mut self, ty: u16) -> usize {
         let start = self.buf.len();
         self.buf.extend_from_slice(&0u16.to_ne_bytes());
@@ -299,7 +308,7 @@ impl Message {
         self.buf[start..start + 2].copy_from_slice(&len.to_ne_bytes());
     }
 
-    /// 撤销到某个位置，用于放不下时把最后一项移到下一条消息。
+    /// Undoes back to a position, used to move the last item to the next message when it does not fit.
     pub(crate) fn truncate(&mut self, len: usize) {
         self.buf.truncate(len);
     }
@@ -319,13 +328,13 @@ impl Message {
         self.buf[4..6].copy_from_slice(&self.ty.to_ne_bytes());
         self.buf[6..8].copy_from_slice(&(self.flags | NLM_F_REQUEST).to_ne_bytes());
         self.buf[8..12].copy_from_slice(&seq.to_ne_bytes());
-        // 端口号 0：由内核填写
+        // Port number 0: filled in by the kernel
         self.buf[12..16].copy_from_slice(&0u32.to_ne_bytes());
         self.buf
     }
 }
 
-/// 遍历一段属性。属性类型去掉了嵌套与字节序标志。
+/// Iterates over a run of attributes. The attribute type has the nesting and byte order flags removed.
 pub(crate) fn attrs(buf: &[u8]) -> impl Iterator<Item = Result<(u16, &[u8]), NlError>> {
     let mut rest = buf;
     std::iter::from_fn(move || {

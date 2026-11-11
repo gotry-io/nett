@@ -1,4 +1,4 @@
-//! 共享的领域模型。
+//! Shared domain model.
 
 pub mod id;
 pub mod name;

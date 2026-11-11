@@ -1,7 +1,9 @@
-//! 签名工具与 Hub（design/hub.md 第 3、4 节）：`nett site link` 关联站点；每条命令先取回 Hub 一侧发生的事；
-//! 每条修改命令签名之后把站点推给 Hub，等各台机器确认；`nett site status` 显示 Hub 汇总的状态；`nett site
-//! add`、`invite` 生成新机器入网和已有的机器接入用的 token。站点目录中的 `hub.json`（`0600`）记着 Hub 的
-//! 地址、身份公钥和站点的 token。
+//! The signing tool and the Hub (design/hub.md sections 3 and 4): `nett site link` links the
+//! site; every command first fetches what happened on the Hub side; every modifying command pushes
+//! the site to the Hub after signing and waits for the machines to confirm; `nett site status`
+//! shows the status the Hub aggregates; `nett site add` and `invite` generate the tokens for a new
+//! machine to join and for an existing machine to attach. `hub.json` (`0600`) in the site directory
+//! records the Hub's address, identity public key and the site's token.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -28,15 +30,16 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{key_values, table};
 
 pub const SITE_HUB_FILE: &str = "hub.json";
-/// 新机器上安装 `nett` 的脚本（design/release.md 第 6 节）：只安装程序，不读 token。
+/// Script that installs `nett` on a new machine (design/release.md section 6): installs the program
+/// only, does not read the token.
 pub const INSTALL_SCRIPT: &str = "curl -fsSL https://nett.gotry.io/install.sh | sh";
-/// 入网 token 的有效期（design/auth.md 第 8.1 节）。
+/// Validity period of an enrollment token (design/auth.md section 8.1).
 pub const ENROLL_VALIDITY_SECS: i64 = 30 * 60;
-/// 推送之后等各台机器确认的上限（design/hub.md 第 3.2 节）。
+/// Upper bound for waiting for the machines to confirm after a push (design/hub.md section 3.2).
 const WAIT_APPLIED: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(300);
 
-/// 站点关联的 Hub。
+/// The Hub a site is linked to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SiteHub {
@@ -44,7 +47,8 @@ pub struct SiteHub {
     pub hub_key: Bytes32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_fingerprint: Option<Bytes32>,
-    /// 站点的 owner token：能推送签名产物，批准不了任何提升权限的变更（硬性规则 3）。
+    /// The site's owner token: can push signed artifacts, cannot approve any change that raises
+    /// privileges (hard rule 3).
     pub token: String,
 }
 
@@ -75,7 +79,8 @@ impl SiteHub {
     }
 }
 
-/// 命令行的一次 Hub 请求：单线程运行时，请求本身带超时。
+/// One Hub request from the command line: single-threaded runtime, the request itself has a
+/// timeout.
 fn block_on<F: std::future::Future>(f: F) -> anyhow::Result<F::Output> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -103,7 +108,7 @@ fn rules_text(state: &State) -> String {
     )
 }
 
-/// `nett site link <关联码>`（design/hub.md 第 3.1 节）。
+/// `nett site link <link code>` (design/hub.md section 3.1).
 pub fn link(dir: &Path, code: &str) -> anyhow::Result<()> {
     let code = LinkCode::decode(code)?;
     let site = SiteDir::open(dir)?;
@@ -150,7 +155,7 @@ pub fn push(hub: &SiteHub, state: &State) -> anyhow::Result<u64> {
     Ok(reply.generation)
 }
 
-/// Hub 一侧发生、站点还没有取回的事（design/hub.md 第 4 节）。
+/// What happened on the Hub side that the site has not fetched yet (design/hub.md section 4).
 pub fn fetch_updates(hub: &SiteHub) -> anyhow::Result<Updates> {
     request(&hub.target(), "GET", UPDATES_PATH, Some(&hub.token), None)
 }
@@ -159,14 +164,14 @@ fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
     request(&hub.target(), "GET", STATUS_PATH, Some(&hub.token), None)
 }
 
-/// 一台机器对 `generation` 的确认。
+/// One machine's confirmation of `generation`.
 #[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Applied,
     Problems(String),
     Rejected(String),
     Pending(String),
-    /// 在线，还没有确认。
+    /// Online, not confirmed yet.
     Waiting,
     NeverConnected,
     Offline(i64),
@@ -189,8 +194,9 @@ fn outcome(m: &MachineStatus, generation: u64) -> Outcome {
     }
 }
 
-/// 推送之后等各台机器确认，最多 10 秒（design/hub.md 第 3.2 节）。返回 Hub 的状态，以及有没有机器拒绝或
-/// 应用之后仍有问题。
+/// After a push, waits for the machines to confirm, at most 10 seconds (design/hub.md section 3.2).
+/// Returns the Hub's status, and whether any machine rejected it or still has a problem after
+/// applying it.
 pub fn push_and_wait(hub: &SiteHub, state: &State) -> anyhow::Result<(StatusResponse, bool)> {
     let generation = push(hub, state)?;
     let deadline = Instant::now() + WAIT_APPLIED;
@@ -266,7 +272,8 @@ fn has_desired(state: &State, name: &str) -> bool {
         .is_some_and(|m| m.policy.is_some())
 }
 
-/// 已是成员的机器接入 Hub 的 token（design/hub.md 第 3.5 节）：没有秘密，机器用自己的身份密钥连接。
+/// Token for an existing member machine to attach to the Hub (design/hub.md section 3.5): no
+/// secret, the machine connects with its own identity key.
 pub fn join_token(hub: &SiteHub, state: &State, name: &NodeName) -> anyhow::Result<String> {
     let m = state.machine(name)?;
     if m.keys.is_none() {
@@ -286,7 +293,8 @@ pub fn join_token(hub: &SiteHub, state: &State, name: &NodeName) -> anyhow::Resu
     .encode())
 }
 
-/// 新机器的入网 token（design/hub.md 第 6 节）：多了入网私钥与过期时间，30 分钟内有效，只能用一次。
+/// Enrollment token for a new machine (design/hub.md section 6): adds the enrollment private key
+/// and an expiry time, valid for 30 minutes, usable once.
 pub fn enrollment_token(
     hub: &SiteHub,
     state: &State,
@@ -315,14 +323,14 @@ pub fn enrollment_token(
     .encode())
 }
 
-/// 新机器上要运行的一行（design/hub.md 第 3.3 节）：所有平台相同。
+/// The one line to run on the new machine (design/hub.md section 3.3): the same on all platforms.
 pub fn print_enrollment(name: &NodeName, token: &str) {
     println!(
         "On {name}, run within 30 minutes (once):\n  {INSTALL_SCRIPT} && sudo nett install {token}"
     );
 }
 
-/// `nett site status` 接了 Hub 时（design/hub.md 第 3.4 节）。
+/// `nett site status` when linked to a Hub (design/hub.md section 3.4).
 pub fn status(
     hub: &SiteHub,
     state: &State,
@@ -424,7 +432,8 @@ pub fn status(
             names.swap(0, 1);
             ids.swap(0, 1);
         }
-        // 两端都报告了时取有测量的一端（mesh.md 第 8.3 节：路径由决定方测量）
+        // When both ends report, takes the end that has measurements (mesh.md section 8.3: the
+        // decider measures the path)
         let view = |from: &str, to: &str| {
             docs.get(from)
                 .and_then(|d| d.peers.iter().find(|p| p.id.as_str() == to))
@@ -479,7 +488,7 @@ fn config_text(m: &MachineStatus, generation: u64) -> String {
     }
 }
 
-/// 等待入网的机器：token 还有多久过期（design/hub.md 第 3.3 节）。
+/// A machine waiting to join: how long until its token expires (design/hub.md section 3.3).
 fn pending_text(state: &State, name: &NodeName, now: Timestamp) -> Option<String> {
     let pending = state.machines.get(name)?.enrollment.as_ref()?;
     let left = pending.expires_at - now.unix_seconds();
@@ -493,7 +502,7 @@ fn pending_text(state: &State, name: &NodeName, now: Timestamp) -> Option<String
     })
 }
 
-/// `public` 机器的公网地址与来源（design/hub.md 第 5 节）。
+/// Public address of a `public` machine and its source (design/hub.md section 5).
 fn public_text(state: &State, name: &NodeName) -> Option<String> {
     let m = state.machines.get(name)?;
     let port = m.listen_port(state.listen_port)?;

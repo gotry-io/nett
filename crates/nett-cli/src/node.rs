@@ -1,5 +1,7 @@
-//! `nett node`：控制代理 nett-node（design/hub.md 第 5、7 节），由 systemd 或 launchd 以 root 运行。读本机的
-//! Hub 配置和身份密钥，连接 Hub，把期望状态交给组网进程，上报状态。tokio 单线程运行时。
+//! `nett node`: the control agent nett-node (design/hub.md sections 5 and 7), run as root by
+//! systemd or launchd. Reads this machine's Hub configuration and identity key, connects to the
+//! Hub, hands the desired state to the mesh process and reports status. Tokio single-threaded
+//! runtime.
 
 use std::path::PathBuf;
 
@@ -9,7 +11,7 @@ use nett_node::config::{HUB_FILE, HubConfig};
 use nett_node::session::Node;
 use tokio::signal::unix::{SignalKind, signal};
 
-/// 本机的配置目录：Hub 配置、身份密钥与期望状态。
+/// This machine's configuration directory: Hub configuration, identity key and desired state.
 #[cfg(target_os = "linux")]
 pub const DEFAULT_DIR: &str = "/etc/nett";
 #[cfg(target_os = "macos")]

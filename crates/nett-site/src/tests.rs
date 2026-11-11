@@ -41,7 +41,7 @@ fn tcp(port: u16) -> PortRange {
     }
 }
 
-/// 一个站点：public 的 edge-vps，dial-only 的 mac 与 nas。
+/// A site: public edge-vps, dial-only mac and nas.
 fn site(dir: &Path) -> (SiteDir, State) {
     SiteDir::init(dir, "https://nett.invalid").expect("init");
     let site = SiteDir::open(dir).expect("open");
@@ -83,7 +83,7 @@ fn signed(site: &SiteDir, state: &mut State) {
     .expect("signed");
 }
 
-/// 一台机器的期望状态能被组网进程接受，它的成员都能验证。
+/// A machine's desired state is accepted by the mesh process, and all its members can be verified.
 fn admitted(state: &State, n: &str) -> MemberSet {
     let doc = desired(state, &name(n)).expect("composed").expect("signed");
     let desired = DesiredMesh::from_doc(doc).expect("valid");
@@ -138,7 +138,7 @@ fn machines_get_admissible_desired_states() {
         .expect("ok")
         .expect("signed");
     assert_eq!(edge.listen_port, Some(41820));
-    // public 一端没有候选，由 dial-only 的机器连过来
+    // The public end has no candidate; the dial-only machine connects in
     assert!(edge.paths.iter().all(|p| p.candidates.is_empty()));
     let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
     assert_eq!(mac.listen_port, None);
@@ -153,7 +153,7 @@ fn machines_get_admissible_desired_states() {
             endpoint: "203.0.113.10:41820".parse().expect("endpoint")
         }]
     );
-    // 没有规则涉及 mac 与 nas：两台 dial-only 之间没有连接
+    // No rule involves mac and nas: there is no connection between two dial-only machines
     assert_eq!(mac.paths.len(), 1);
     std::fs::remove_dir_all(&dir).ok();
 }
@@ -235,7 +235,7 @@ fn rules_expand_to_addresses_and_bring_connections() {
             .iter()
             .any(|l| l.contains("mac - nas  punch only; may not connect"))
     );
-    // 同样的规则不加第二遍；编号不复用
+    // The same rule is not added a second time; numbers are not reused
     assert!(
         state
             .allow(
@@ -276,7 +276,7 @@ fn removing_a_machine_revokes_it_and_cleans_up_its_rules() {
     signed(&site, &mut state);
     assert_eq!(state.revoked.len(), 1);
     assert_eq!(state.revoked[0].node_id, nas);
-    // r1 只剩 mac -> edge-vps；r2 整条删除
+    // r1 is left with only mac -> edge-vps; r2 is deleted entirely
     assert_eq!(state.rules.len(), 1);
     assert_eq!(state.rules[&RuleId(1)].to.len(), 1);
     let lines = describe(&before, &state);
@@ -286,7 +286,7 @@ fn removing_a_machine_revokes_it_and_cleans_up_its_rules() {
     let doc = desired(&state, &name("mac")).expect("ok").expect("signed");
     assert_eq!(doc.revocations.len(), 1);
 
-    // 同一个名字再加入：新的节点 ID 和地址，没有原来的规则
+    // Adding the same name again: a new node ID and address, without the old rules
     state
         .add(
             name("nas"),
@@ -349,7 +349,7 @@ fn edge_and_routes_selectors_need_their_part_and_go_with_it() {
     assert_eq!(doc.advertised_routes.len(), 1);
     let rules = expand_rules(&state).expect("expanded");
     assert_eq!(rules[0].to[0].to_string(), "172.30.0.10/32");
-    // 宣告的网段不能与组网网段或其他机器的网段重叠
+    // Advertised routes cannot overlap the mesh prefixes or other machines' routes
     assert!(
         state
             .set_routes(&name("nas"), vec!["172.30.0.0/24".parse().expect("prefix")])
@@ -360,11 +360,11 @@ fn edge_and_routes_selectors_need_their_part_and_go_with_it() {
             .set_routes(&name("nas"), vec!["100.88.1.0/24".parse().expect("prefix")])
             .is_err()
     );
-    // 去掉 Edge：引用它的规则随之删除
+    // Remove Edge: the rules referencing it are deleted with it
     let mut s = state.clone();
     s.set_edge(&name("edge-vps"), None).expect("removed");
     assert!(s.rules.is_empty());
-    // 去掉网段：同样
+    // Remove routes: the same
     let mut s = state.clone();
     s.set_routes(&name("mac"), vec![]).expect("removed");
     assert!(s.rules.is_empty());
@@ -393,7 +393,7 @@ fn policies_close_to_expiry_are_signed_again() {
             .values()
             .all(|m| m.policy.as_ref().map(|p| p.version) == Some(2))
     );
-    // invite：没到时间也重签这一台
+    // invite: this machine is re-signed even if the time has not come
     let mac = state.machines[&name("mac")].node_id.clone();
     sign(&mut state, &recovery, later, &[mac]).expect("signed");
     assert_eq!(
@@ -424,7 +424,8 @@ fn inconsistent_machines_are_refused() {
         add(&mut state, "mac", MachineOptions::default()).is_err(),
         "duplicate name"
     );
-    // `public` 机器可以还不知道地址：接了 Hub 时由 Hub 得知，不接 Hub 时命令要求写明
+    // A `public` machine may not know its address yet: with a Hub, the Hub learns it; without a
+    // Hub, the command requires it to be given
     add(
         &mut state,
         "pub",
@@ -446,7 +447,7 @@ fn inconsistent_machines_are_refused() {
         )
         .is_err()
     );
-    // 端口 41821 是组网地址上的探测端口
+    // Port 41821 is the probe port on the mesh address
     assert!(
         add(
             &mut state,
@@ -460,7 +461,7 @@ fn inconsistent_machines_are_refused() {
         )
         .is_err()
     );
-    // 同一个地址和端口上的两台 public 机器
+    // Two public machines on the same address and port
     assert!(
         add(
             &mut state,
@@ -486,7 +487,7 @@ fn inconsistent_machines_are_refused() {
         )
         .is_ok()
     );
-    // 改成 dial-only：公网地址与端口一起去掉
+    // Changed to dial-only: the public address and port are removed together
     state
         .set(
             &name("twin"),
@@ -503,8 +504,9 @@ fn inconsistent_machines_are_refused() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// 宣告网段全部去掉之后再宣告：版本接着增加。组网进程记着见过的最高版本，只接受更高的
-/// （design/mesh.md 第 4.2 节）。
+/// Advertising again after all advertised routes were removed: the version keeps increasing. The
+/// mesh process remembers the highest version it has seen and only accepts higher ones
+/// (design/mesh.md section 4.2).
 #[test]
 fn advertised_routes_keep_counting_after_they_are_removed() {
     let dir = temp_dir("routes-version");
@@ -532,7 +534,7 @@ fn advertised_routes_keep_counting_after_they_are_removed() {
     assert_eq!(version(&state), Some(2));
 }
 
-/// 让 `name` 等待入网，返回入网密钥。
+/// Makes `name` wait to join and returns the enrollment key.
 fn awaiting(state: &mut State, n: &str) -> nett_trust::signing::EnrollmentKeyPair {
     let key = nett_trust::signing::EnrollmentKeyPair::generate().expect("enrollment key");
     state
@@ -541,7 +543,8 @@ fn awaiting(state: &mut State, n: &str) -> nett_trust::signing::EnrollmentKeyPai
     key
 }
 
-/// 新机器用 token 中的入网私钥签的准入材料（design/hub.md 第 6 节）。
+/// Admission material signed by a new machine with the enrollment private key from the token
+/// (design/hub.md section 6).
 fn joined(
     state: &State,
     n: &str,
@@ -591,13 +594,15 @@ fn a_machine_waiting_to_join_gets_a_policy_with_its_enrollment_key() {
             .map(|p| p.version)
     };
     assert_eq!(version(&state), Some(1));
-    // 入网之前它不是成员：没有自己的期望状态，别的成员也不配置它
+    // Before joining it is not a member: it has no desired state of its own, and other members do
+    // not configure it either
     assert!(desired(&state, &name("box")).expect("compose").is_none());
     let mac = desired(&state, &name("mac"))
         .expect("compose")
         .expect("mac");
     assert_eq!(mac.members.len(), 3);
-    // 没有变化时沿用；Edge 变了用同一把入网公钥重签；换 token 时换一把
+    // Reused when nothing changed; when Edge changed, re-signed with the same enrollment public
+    // key; when the token is replaced, a new key is used
     let unchanged = state.clone();
     sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
     assert_eq!(state, unchanged);
@@ -618,7 +623,8 @@ fn a_machine_waiting_to_join_gets_a_policy_with_its_enrollment_key() {
             .iter()
             .any(|l| l.contains("a new token to join"))
     );
-    // 换过之后原来的入网密钥签的证明不被接受，新的可以
+    // After the replacement, a proof signed by the old enrollment key is not accepted, and the new
+    // one is
     assert!(
         crate::updates::record_enrollment(
             &mut state.clone(),
@@ -657,7 +663,7 @@ fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
         enrolled: vec![material.clone()],
         ..Default::default()
     };
-    // Hub 与站点用同一份逻辑：结果相同，第二次什么都不变
+    // The Hub and the site use the same logic: same result, and nothing changes the second time
     let (mut on_hub, mut on_site) = (state.clone(), state.clone());
     assert_eq!(
         updates.apply(&mut on_hub).expect("hub").joined,
@@ -672,11 +678,11 @@ fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
     let m = on_site.machine(&name("box")).expect("box").clone();
     assert_eq!(m.keys, Some(keys(7)));
     assert!(m.enrollment.is_none());
-    // 签名工具不用重签：准入材料就是 token 那一份
+    // The signing tool does not need to re-sign: the admission material is the one in the token
     let before = on_site.clone();
     sign(&mut on_site, &recovery, Timestamp::now(), &[]).expect("sign");
     assert_eq!(on_site, before);
-    // 成员都接受它
+    // Members accept it
     let mac = desired(&on_site, &name("mac"))
         .expect("compose")
         .expect("mac");
@@ -689,7 +695,7 @@ fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
     members.apply(&mac, &own, &mut VecSink::default());
     assert!(members.get(&m.node_id).is_some());
 
-    // 别的站点签的材料、给别的节点的材料都不接受
+    // Material signed by another site, or meant for another node, is not accepted
     let other_dir = temp_dir("enrolled-other");
     let (other_site, mut other) = site(&other_dir);
     other

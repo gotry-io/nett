@@ -1,5 +1,6 @@
-//! 访问控制（design/mesh.md 第 12 节）与 Edge 专用地址（ADR 0015）：验证签名的访问规则集，算出本机要执行
-//! 的过滤规则和 Edge 的源地址转换。规则的形式与平台无关，由各平台的后端安装（ADR 0018）。
+//! Access control (design/mesh.md section 12) and the Edge address (ADR 0015): verifies the signed access
+//! rule set and computes the filter rules this machine enforces and the Edge's source NAT. The form of
+//! the rules is platform-independent; each platform's backend installs them (ADR 0018).
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
@@ -17,49 +18,54 @@ use crate::event::{Event, EventSink};
 use crate::probe::TUNNEL_PROBE_PORT;
 use crate::store::{FloorError, VersionRecord};
 
-/// 展开后的过滤规则最多的条数（硬性规则 14）：规则集中每条规则的来源 × 目标 × 端口范围，加上成员之间的
-/// 控制流量。超过时整体按拒绝处理。
+/// Maximum number of filter rules after expansion (hard rule 14): source x destination x port range of
+/// each rule in the rule set, plus control traffic between members. When exceeded, the whole set is
+/// treated as deny.
 pub const MAX_FILTER_RULES: usize = 4096;
 
-/// 一个匹配条件。来源和目标网段同时决定了地址族。
+/// A match condition. The source and destination prefixes together determine the address family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Match {
     Source(IpPrefix),
     Destination(IpPrefix),
-    /// 协议与目的端口范围。
+    /// Protocol and destination port range.
     Port(PortRange),
 }
 
-/// 一条过滤规则：全部条件都满足时放行或拒绝；没有条件时匹配所有包。
+/// A filter rule: allows or rejects when all conditions are met; with no conditions it matches all packets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilterRule {
     pub matches: Vec<Match>,
     pub accept: bool,
 }
 
-/// 本机从组网接口进入、新建连接的过滤规则（已建立的连接和与它相关的包直接放行）：按顺序匹配，第一条
-/// 匹配的规则决定放行或拒绝；都不匹配时拒绝（ADR 0023），由数据面的后端执行。
+/// Filter rules for new connections entering this machine from the mesh interface (established
+/// connections and related packets are allowed directly): matched in order, the first matching rule
+/// decides allow or reject; when none match, reject (ADR 0023). Enforced by the data plane backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FilterSpec {
     pub rules: Vec<FilterRule>,
 }
 
 impl FilterSpec {
-    /// 拒绝所有新建的入方向连接（没有规则时即是拒绝）：规则无法展开或安装失败时使用（硬性规则 6）。
+    /// Rejects all new inbound connections (with no rules this is the same as reject): used when the rules
+    /// cannot be expanded or fail to install (hard rule 6).
     pub fn deny_all() -> Self {
         Self::default()
     }
 }
 
-/// 本机作为智能入口转发的流量（design/mesh.md 第 10 节，ADR 0016）：从组网接口进来、转发出去的连接，只放行
-/// 来源是 Edge 专用地址的，来源换成本机在出接口上的地址；其他来源的转发丢弃。
+/// Traffic this machine forwards as a smart gateway (design/mesh.md section 10, ADR 0016): for
+/// connections coming in from the mesh interface and forwarded out, only those whose source is an Edge
+/// address are allowed, and the source is replaced with this machine's address on the outgoing
+/// interface; forwarding from other sources is dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressSpec {
     pub edge_sources: Vec<IpAddr>,
 }
 
 impl IngressSpec {
-    /// 本机宣告了网段时才转发。
+    /// Forwards only when this machine advertises prefixes.
     pub fn of(own_routes: &[IpPrefix], members: &BTreeMap<NodeId, Member>) -> Option<Self> {
         (!own_routes.is_empty()).then(|| Self {
             edge_sources: members
@@ -71,8 +77,9 @@ impl IngressSpec {
     }
 }
 
-/// 本机的 Edge：发往组网接口、来源在 `containers` 中的流量，源地址换成 Edge 专用地址；其他来源使用
-/// Edge 专用地址的包丢弃（ADR 0015）。
+/// This machine's Edge: for traffic sent to the mesh interface whose source is in `containers`, the
+/// source address is replaced with the Edge address; packets from other sources that use the Edge
+/// address are dropped (ADR 0015).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdgeSpec {
     pub containers: Vec<IpPrefix>,
@@ -109,12 +116,13 @@ struct Applied {
     rules: AccessRuleSet,
 }
 
-/// 已生效的访问规则集。版本号只增不减，重启之后以信任存储中的版本为基准（design/mesh.md 第 4.2 节）；
-/// 期望状态中没有规则集时保持已生效的那一份。
+/// The access rule set in effect. Versions only increase; after a restart the version in the trust store
+/// is the baseline (design/mesh.md section 4.2); when the desired state has no rule set, the one in
+/// effect is kept.
 #[derive(Debug, Default)]
 pub struct AccessRules {
     applied: Option<Applied>,
-    /// 本机此前接受过的版本。
+    /// Versions previously accepted by this machine.
     floor: Option<VersionRecord>,
 }
 
@@ -127,7 +135,7 @@ impl AccessRules {
         self.floor = floor;
     }
 
-    /// 保存进信任存储的版本。
+    /// Versions saved into the trust store.
     pub fn saved_version(&self) -> Option<VersionRecord> {
         self.applied
             .as_ref()
@@ -138,7 +146,8 @@ impl AccessRules {
             .or(self.floor)
     }
 
-    /// 应用期望状态中的规则集。验证失败时保持已生效的规则集，并上报事件。
+    /// Applies the rule set in the desired state. On verification failure the rule set in effect is kept and
+    /// an event is reported.
     pub fn apply(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
         let Some(signed) = &desired.access_rules else {
             return;
@@ -157,7 +166,7 @@ impl AccessRules {
         }
     }
 
-    /// 验证签名与版本；与已生效的完全相同时返回 `None`（幂等）。
+    /// Verifies the signature and version; returns `None` when identical to what is in effect (idempotent).
     fn check(
         &self,
         signed: &SignedPayload,
@@ -193,11 +202,13 @@ impl AccessRules {
         }))
     }
 
-    /// 本机的过滤规则（design/mesh.md 第 12 节）：
-    /// 1. 成员发往本机隧道内探测端口的包放行：组网自己的测量不受访问规则影响；
-    /// 2. 规则集中的规则，按顺序展开。
+    /// This machine's filter rules (design/mesh.md section 12):
+    /// 1. Packets from members to the in-tunnel probe port of this machine are allowed: the mesh's own
+    ///    measurement is not affected by access rules;
+    /// 2. The rules in the rule set, expanded in order.
     ///
-    /// 其他新建连接都拒绝（ADR 0023），包括来自 Edge 专用地址的、发往本机宣告的网段的。
+    /// All other new connections are rejected (ADR 0023), including those from the Edge address to prefixes
+    /// advertised by this machine.
     pub fn filter(
         &self,
         own: &NodeId,
@@ -288,7 +299,7 @@ mod tests {
         }
     }
 
-    /// 成员 1、2、3，其中 1 有 Edge；返回 2 看到的成员表。
+    /// Members 1, 2, 3, where 1 has an Edge; returns the member table as seen by 2.
     fn members(mesh: &Mesh) -> BTreeMap<NodeId, Member> {
         let desired = validated(mesh.desired(
             2,
@@ -315,7 +326,8 @@ mod tests {
         };
         access.apply(&with(rule_set(2, vec![])), &mut events);
         assert_eq!(access.version(), Some(2));
-        // 相同的规则集幂等；版本相同而内容不同、版本更低都被拒绝，已生效的保持不变
+        // Identical rule sets are idempotent; the same version with different content, or a lower version, is
+        // rejected and the one in effect stays unchanged
         access.apply(&with(rule_set(2, vec![])), &mut events);
         access.apply(
             &with(rule_set(
@@ -325,7 +337,7 @@ mod tests {
             &mut events,
         );
         access.apply(&with(rule_set(1, vec![])), &mut events);
-        // 不是信任锚签的
+        // not signed by a trust anchor
         let mut forged = mesh.desired(2, vec![mesh.material(1, 1), mesh.material(2, 1)]);
         forged.access_rules = Some(Mesh::new(&[1]).sign(&rule_set(9, vec![])));
         access.apply(&validated(forged), &mut events);
@@ -374,7 +386,8 @@ mod tests {
         access.apply(&validated(d), &mut VecSink::default());
         let spec = access.filter(&node_id(2), &members).expect("filter");
         let r = &spec.rules;
-        // 成员 1、3 的隧道内探测（IPv4、IPv6 各一条）在最前；其后只有规则集，没有规则匹配的都拒绝
+        // In-tunnel probes of members 1 and 3 (one each for IPv4 and IPv6) come first; after them only the rule
+        // set, and anything no rule matches is rejected
         assert_eq!(r.len(), 4 + 1 + 1, "{r:?}");
         assert!(r[..4].iter().all(|x| x.accept
             && x.matches.contains(&Match::Port(PortRange {
@@ -397,7 +410,7 @@ mod tests {
                 accept: true,
             }
         );
-        // IPv6 的来源与 IPv4 的目标不组合
+        // An IPv6 source does not combine with an IPv4 destination
         assert_eq!(
             r[5],
             FilterRule {
@@ -447,7 +460,7 @@ mod tests {
         d.access_rules = Some(mesh.sign(&rule_set(2, vec![])));
         first.apply(&validated(d), &mut VecSink::default());
         assert_eq!(first.version(), Some(2));
-        // 重启之后：信任存储中的版本是基准
+        // After a restart: the version in the trust store is the baseline
         let mut restarted = AccessRules::default();
         restarted.restore(first.saved_version());
         let mut d = mesh.desired(2, vec![]);
@@ -456,7 +469,7 @@ mod tests {
         restarted.apply(&validated(d.clone()), &mut events);
         assert!(matches!(events.0[..], [Event::AccessRulesRejected { .. }]));
         assert_eq!(restarted.version(), None);
-        // 同一个版本、同样的内容照常生效
+        // The same version with the same content takes effect as usual
         d.access_rules = Some(mesh.sign(&rule_set(2, vec![])));
         restarted.apply(&validated(d), &mut VecSink::default());
         assert_eq!(restarted.version(), Some(2));

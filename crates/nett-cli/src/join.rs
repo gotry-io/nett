@@ -1,9 +1,13 @@
-//! `sudo nett install <token>` 中两个平台共用的一步（design/hub.md 第 3.5、7 节）：核对接入 token 与本机，写入
-//! Hub 的配置。H1 只接入已是成员的机器：它沿用自己的密钥、地址和产物版本，用身份密钥连接 Hub。
+//! The step of `sudo nett install <token>` shared by both platforms (design/hub.md sections 3.5
+//! and 7): checks the join token against this machine and writes the Hub configuration. H1 only
+//! joins machines that are already members: the machine keeps its own keys, address and artifact
+//! versions, and connects to the Hub with its identity key.
 //!
-//! token 中的节点 ID 必须是本机的；信任锚清单的指纹必须与本机固定的信任锚相同（先看组网进程的信任存储，
-//! 还没有时看期望状态文件）。所以一个被攻破的 Hub 发出的 token 换不了这台机器认的站点；换到另一个 Hub 也只能
-//! 在本机以 root 执行（第 8.1 节）。
+//! The node ID in the token must be this machine's; the fingerprint of the trust anchor list must
+//! equal the trust anchor pinned on this machine (the mesh process's trust store first, then the
+//! desired state file if there is none yet). So a token issued by a compromised Hub cannot switch
+//! this machine to a site it does not recognize; switching to another Hub is likewise only possible
+//! with root on this machine (section 8.1).
 
 use std::path::Path;
 
@@ -17,7 +21,7 @@ use nett_node::config::HubConfig;
 use nett_proto::token::JoinToken;
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
 
-/// 写入 Hub 配置的结果。
+/// Result of writing the Hub configuration.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Joined {
     New(String),
@@ -25,7 +29,7 @@ pub enum Joined {
     Unchanged,
 }
 
-/// 本机的节点 ID 与固定的信任锚。
+/// This machine's node ID and pinned trust anchor.
 fn membership(dir: &Path, state_dir: &Path) -> anyhow::Result<Option<(NodeId, TrustAnchorsDoc)>> {
     let trust = state_dir.join(TRUST_FILE);
     if let Some(bytes) = read_bounded(&trust, MAX_DESIRED_BYTES)
@@ -44,7 +48,7 @@ fn membership(dir: &Path, state_dir: &Path) -> anyhow::Result<Option<(NodeId, Tr
     Ok(Some((doc.node_id, doc.trust_anchors)))
 }
 
-/// 核对 `token` 并写入 `dir` 中的 Hub 配置。
+/// Checks `token` and writes the Hub configuration into `dir`.
 pub fn join(dir: &Path, state_dir: &Path, token: &str) -> anyhow::Result<Joined> {
     let token = JoinToken::decode(token)?;
     if !dir.join("identity.key").exists() {
@@ -116,7 +120,7 @@ mod tests {
         dir
     }
 
-    /// 一个站点中的一台机器：返回它的期望状态与站点的信任锚。
+    /// A machine in a site: returns its desired state and the site's trust anchor.
     fn member(site_dir: &Path) -> (DesiredMeshDoc, TrustAnchorsDoc) {
         SiteDir::init(site_dir, "https://nett.invalid").expect("init");
         let site = SiteDir::open(site_dir).expect("open");
@@ -173,7 +177,7 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("dir");
         let id = doc.node_id.to_string();
 
-        // 还没有身份密钥、还不是成员
+        // No identity key yet, not yet a member
         assert!(
             join(
                 &dir,
@@ -236,7 +240,8 @@ mod tests {
             }
         );
 
-        // 信任存储优先于期望状态文件：文件被换成另一个站点的，token 仍按固定的信任锚核对
+        // The trust store takes precedence over the desired state file: if the file is replaced by
+        // another site's, the token is still checked against the pinned trust anchor
         std::fs::create_dir_all(&state_dir).expect("state dir");
         let saved = Saved::new(doc.node_id.clone(), other_anchors.clone());
         std::fs::write(

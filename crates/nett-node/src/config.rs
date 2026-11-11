@@ -1,5 +1,6 @@
-//! 本机的 Hub 配置（design/hub.md 第 7 节）：`sudo nett install <token>` 写入，nett-node 读取。没有秘密，但
-//! 决定这台机器连哪个 Hub，只给 root（`0600`）。
+//! This machine's Hub configuration (design/hub.md section 7): written by `sudo nett install
+//! <token>` and read by nett-node. It holds no secrets, but decides which Hub this machine connects
+//! to, so it is root-only (`0600`).
 
 use std::io::Write as _;
 use std::os::unix::fs::OpenOptionsExt as _;
@@ -38,7 +39,8 @@ impl HubConfig {
     }
 }
 
-/// 写一个只给所有者读写（`0600`）的文件：先写同一目录中的临时文件、落盘，再改名；不跟随符号链接。
+/// Writes a file readable and writable only by its owner (`0600`): write a temporary file in the
+/// same directory, sync to disk, then rename; does not follow symbolic links.
 pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let io = |e: std::io::Error| format!("writing {}: {e}", path.display());
     let name = path

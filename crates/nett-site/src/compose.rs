@@ -1,5 +1,6 @@
-//! 按站点组成各台机器的期望状态（design/site.md 第 6 节、design/hub.md 第 4 节）：签名工具不接 Hub 时写成
-//! 文件，接了 Hub 时由 Hub 用同一份逻辑组成。
+//! Composes each machine's desired state from the site (design/site.md section 6, design/hub.md
+//! section 4): written as files when the signing tool is not linked to a Hub; when linked, the Hub
+//! composes it with the same logic.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, SocketAddr};
@@ -12,11 +13,12 @@ use nett_trust::revocation::Revocation;
 use crate::SiteError;
 use crate::state::{Machine, State};
 
-/// 一对需要连接的机器，按节点 ID 排序。
+/// A pair of machines that need a connection, sorted by node ID.
 pub type Pair = (NodeId, NodeId);
 
-/// 哪些机器之间建立连接：访问规则涉及的每一对，加上每个 `dial-only` 成员与全部 `public` 成员（判断 NAT
-/// 类型与映射地址，也是故障时的冗余，design/mesh.md 第 6.1 节、architecture.md 第 12.3 节）。
+/// Which machines get connections: every pair involved in an access rule, plus every `dial-only`
+/// member with all `public` members (to determine NAT type and mapped address, and as redundancy on
+/// failure, design/mesh.md section 6.1, architecture.md section 12.3).
 pub fn connections(state: &State) -> BTreeSet<Pair> {
     let mut pairs = BTreeSet::new();
     let mut add = |a: &NodeId, b: &NodeId| {
@@ -52,9 +54,11 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
     pairs
 }
 
-/// 本机到一个对端的候选路径（design/mesh.md 第 6 节）：对端是 `public` 时直连它的公网地址（写明的或 Hub
-/// 得知的，有 IPv4、IPv6 时分别一条）；两端都是 `dial-only` 时打洞；本机是 `public`、对端是 `dial-only` 时没有候选，由对端连过来
-/// （WireGuard 的漫游）。
+/// Candidate paths from this machine to a peer (design/mesh.md section 6): when the peer is
+/// `public`, connect directly to its public address (the one given, or the one the Hub learned; one
+/// each for IPv4 and IPv6 when both exist); when both ends are `dial-only`, hole punching; when
+/// this machine is `public` and the peer is `dial-only`, there is no candidate and the peer
+/// connects in (WireGuard roaming).
 pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     match (me.reachability, peer.reachability) {
         (_, Reachability::Public) => {
@@ -77,7 +81,8 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
     }
 }
 
-/// 一台机器的期望状态。机器还没有签过的节点策略时（经 Hub 入网之前）返回 `None`。
+/// A machine's desired state. Returns `None` when the machine has no signed node policy yet (before
+/// it joins through the Hub).
 pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>, SiteError> {
     let me = state.machine(name)?;
     if me.policy.is_none() {
@@ -133,7 +138,7 @@ pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>,
             .collect(),
         names,
     };
-    // 生成的期望状态必须能被组网进程接受
+    // The generated desired state must be accepted by the mesh process
     DesiredMesh::from_doc(doc.clone()).map_err(|e| {
         SiteError::invalid(format!("machine `{name}`: generated desired state: {e}"))
     })?;

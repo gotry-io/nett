@@ -1,5 +1,6 @@
-//! `nett-hub`：组网的控制面，没有界面（ADR 0024，design/hub.md）。命令见 hub.md 第 8 节：`serve` 运行服务，
-//! `init` 打印一次性的关联码，`reset` 作废与站点的关联。
+//! `nett-hub`: the mesh control plane, with no UI (ADR 0024, design/hub.md). Commands are in hub.md
+//! section 8: `serve` runs the service, `init` prints a one-time link code, and `reset` invalidates
+//! the link with the site.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use nett_hub::{api, db, hub, now, random, sha256, tls};
 use nett_mesh::key::PrivateKey;
 use nett_proto::token::{Bytes32, LinkCode};
 
-/// 关联码的有效期（auth.md 第 4.1 节）。
+/// Validity period of the link code (auth.md section 4.1).
 const LINK_VALIDITY_SECS: i64 = 3600;
 const DEFAULT_DATA: &str = "/var/lib/nett-hub";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8480";
@@ -94,7 +95,7 @@ fn run() -> anyhow::Result<()> {
     }
 }
 
-/// 数据目录（`0700`）与 Hub 身份密钥（`0600`，没有时生成）。
+/// Data directory (`0700`) and the Hub identity key (`0600`, generated if absent).
 fn prepare(data: &Path) -> anyhow::Result<PrivateKey> {
     use std::os::unix::fs::DirBuilderExt as _;
     std::fs::DirBuilder::new()
@@ -151,7 +152,8 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
         code.encode()
     );
     if cert.is_none() {
-        // 在反向代理之后（design/hub.md 第 8 节）：只转发这两段路径，不改用户自己的其他配置
+        // Behind a reverse proxy (design/hub.md section 8): only these two path prefixes are
+        // forwarded, and the user's other configuration is left untouched
         let host = url.trim_start_matches("https://").trim_end_matches('/');
         println!(
             "\nThe reverse proxy in front of the Hub forwards two paths to it, for example in Caddy:\n  \
@@ -190,7 +192,8 @@ async fn serve(
         }
     };
     match tls {
-        // 对端地址：Hub 据此得知 `public` 机器的公网地址（design/hub.md 第 5 节）
+        // Peer address: the Hub learns the public address of a `public` machine from it
+        // (design/hub.md section 5)
         None => {
             axum::serve(
                 listener,

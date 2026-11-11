@@ -1,5 +1,6 @@
-//! 内层 IP 包的解析：过滤和选择对端只需要地址、协议、端口和少数标志。包来自隧道或 TUN，一律当作不可信
-//! 数据校验（硬性规则 13），格式不对的返回 `None`，由调用方丢弃。
+//! Parsing of inner IP packets: filtering and peer selection need only the address, protocol, port and a
+//! few flags. Packets come from the tunnel or the TUN and are always validated as untrusted data (hard
+//! rule 13); those with a bad format return `None` and are dropped by the caller.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -10,10 +11,10 @@ pub const PROTO_ICMPV6: u8 = 58;
 
 const IPV4_MIN_HEADER: usize = 20;
 const IPV6_HEADER: usize = 40;
-/// IPv6 扩展头最多跟几层，防止构造的长链。
+/// The maximum number of IPv6 extension headers followed, preventing a crafted long chain.
 const MAX_EXTENSION_HEADERS: usize = 8;
 
-/// 传输层的内容。
+/// Content of the transport layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Transport {
     Tcp {
@@ -26,24 +27,25 @@ pub enum Transport {
         src_port: u16,
         dst_port: u16,
     },
-    /// 回显请求或应答（ICMP 与 ICMPv6）。
+    /// Echo request or reply (ICMP and ICMPv6).
     Echo {
         request: bool,
         id: u16,
     },
-    /// 差错报文（不可达、超时、包过大、参数错误）：`inner` 是触发它的那个包的头部。
+    /// Error message (unreachable, time exceeded, packet too big, parameter problem): `inner` is the header of
+    /// the packet that triggered it.
     IcmpError {
         inner: Inner,
     },
-    /// 其他 ICMP 类型。
+    /// Other ICMP types.
     IcmpOther,
-    /// 后续分片：不带传输层头。
+    /// A subsequent fragment: carries no transport layer header.
     Fragment,
-    /// 其他协议，或传输层头不完整。
+    /// Other protocols, or an incomplete transport layer header.
     Other,
 }
 
-/// ICMP 差错报文中内嵌的原始包头部。
+/// The original packet header embedded in an ICMP error message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inner {
     pub src: IpAddr,
@@ -54,10 +56,10 @@ pub struct Inner {
 pub struct Ip {
     pub src: IpAddr,
     pub dst: IpAddr,
-    /// 上层协议号（IPv6 跳过扩展头之后的）。
+    /// Upper layer protocol number (for IPv6, after skipping extension headers).
     pub protocol: u8,
     pub transport: Transport,
-    /// IP 头中声明的总长度；包末尾超出的部分是填充。
+    /// Total length declared in the IP header; the part past it at the end of the packet is padding.
     pub len: usize,
 }
 
@@ -65,7 +67,8 @@ fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(at)?, *b.get(at + 1)?]))
 }
 
-/// 解析一个 IPv4 或 IPv6 包。总长度超出缓冲区、头部不完整的包返回 `None`。
+/// Parses an IPv4 or IPv6 packet. Packets whose total length exceeds the buffer or whose header is
+/// incomplete return `None`.
 pub fn parse(packet: &[u8]) -> Option<Ip> {
     match packet.first()? >> 4 {
         4 => parse_v4(packet),
@@ -116,7 +119,8 @@ fn parse_v6(p: &[u8]) -> Option<Ip> {
     let mut fragment = false;
     for _ in 0..MAX_EXTENSION_HEADERS {
         match next {
-            // 逐跳选项、路由、目的选项：长度以 8 字节为单位，不含前 8 字节
+            // Hop-by-hop options, routing, destination options: the length is in units of 8 bytes, excluding the
+            // first 8 bytes
             0 | 43 | 60 => {
                 next = *p.get(at)?;
                 at += (usize::from(*p.get(at + 1)?) + 1) * 8;
@@ -182,7 +186,8 @@ fn icmp(l4: &[u8], echo_request: u8, echo_reply: u8, errors: &[u8]) -> Transport
         };
     }
     if errors.contains(&kind) {
-        // 内嵌的原始包从 ICMP 头之后（8 字节）开始，只需要它的地址；它往往被截断，不校验长度
+        // The embedded original packet starts after the ICMP header (8 bytes) and only its addresses are needed;
+        // it is often truncated, and its length is not validated
         let inner = l4.get(8..).and_then(|b| match b.first()? >> 4 {
             4 if b.len() >= IPV4_MIN_HEADER => Some(Inner {
                 src: IpAddr::V4(Ipv4Addr::new(b[12], b[13], b[14], b[15])),
@@ -204,7 +209,7 @@ fn icmp(l4: &[u8], echo_request: u8, echo_reply: u8, errors: &[u8]) -> Transport
 
 #[cfg(test)]
 pub(crate) mod build {
-    //! 测试中构造内层包。
+    //! Builds inner packets in tests.
 
     use std::net::IpAddr;
 
@@ -217,7 +222,7 @@ pub(crate) mod build {
                 p.extend_from_slice(&[0, 0, 0, 0, 64, protocol, 0, 0]);
                 p.extend_from_slice(&s.octets());
                 p.extend_from_slice(&d.octets());
-                // 头部校验和：本机协议栈收到时会校验
+                // Header checksum: this machine's protocol stack verifies it on receipt
                 let mut sum: u32 = p
                     .chunks(2)
                     .map(|c| u32::from(u16::from_be_bytes([c[0], c[1]])))
@@ -280,7 +285,7 @@ pub(crate) mod build {
         header(src, dst, protocol, &l4)
     }
 
-    /// `src` 发出的、关于 `original` 的 ICMP 差错报文（IPv4 不可达 / IPv6 包过大）。
+    /// An ICMP error message sent by `src` about `original` (IPv4 unreachable / IPv6 packet too big).
     pub fn icmp_error(src: IpAddr, dst: IpAddr, original: &[u8]) -> Vec<u8> {
         let v6 = src.is_ipv6();
         let mut l4 = vec![if v6 { 2 } else { 3 }, 0, 0, 0, 0, 0, 0, 0];
@@ -377,7 +382,7 @@ mod tests {
         assert!(parse(&v5).is_none());
         let v6 = build::udp(ip("fd00:88::1"), 1, ip("fd00:88::2"), 2);
         assert!(parse(&v6[..39]).is_none());
-        // 截断的传输层头：仍是合法的 IP 包，但没有端口
+        // Truncated transport layer header: still a valid IP packet, but with no ports
         let mut short = build::tcp(ip("100.88.0.1"), 1, ip("100.88.0.2"), 2, 0x02);
         short.truncate(30);
         short[2..4].copy_from_slice(&30u16.to_be_bytes());
@@ -389,7 +394,7 @@ mod tests {
         let mut p = build::udp(ip("100.88.0.1"), 1, ip("100.88.0.2"), 2);
         p[6..8].copy_from_slice(&0x0010u16.to_be_bytes());
         assert_eq!(parse(&p).expect("fragment").transport, Transport::Fragment);
-        // IPv6：分片扩展头，偏移不为 0
+        // IPv6: a fragment extension header with a non-zero offset
         let udp = build::udp(ip("fd00:88::1"), 1, ip("fd00:88::2"), 2);
         let mut v6 = udp[..40].to_vec();
         v6[6] = 44;
@@ -398,7 +403,7 @@ mod tests {
         let plen = u16::try_from(v6.len() - 40).expect("len");
         v6[4..6].copy_from_slice(&plen.to_be_bytes());
         assert_eq!(parse(&v6).expect("fragment").transport, Transport::Fragment);
-        // 偏移为 0 的分片照常解析传输层
+        // A fragment with offset 0 parses the transport layer as usual
         v6[42..44].copy_from_slice(&[0, 0x01]);
         assert!(matches!(
             parse(&v6).expect("first fragment").transport,

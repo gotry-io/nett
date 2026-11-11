@@ -1,4 +1,5 @@
-# 场景 19（IPv6）：a 是 dial-only，在 IPv6 有状态防火墙之后，与"公网"上的 b 经 IPv6 直连；MTU 的设置同
+# Scenario 19 (IPv6): a is dial-only behind an IPv6 stateful firewall and connects directly to b on
+# the "public network" over IPv6; MTU settings as in
 # mtu4.toml
 
 [mesh]
@@ -22,7 +23,7 @@ nat = "ipv6-firewall"
 peers = ["a", "b"]
 candidates = ["direct6"]
 
-# 场景在这些成员之间收发（访问默认拒绝，ADR 0023）
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
 from = ["a", "b"]
 to = ["a", "b"]

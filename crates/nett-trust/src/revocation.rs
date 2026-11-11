@@ -1,4 +1,5 @@
-//! 撤销记录（design/auth.md 第 10.4 节）。撤销只会让权限更小，不需要签名；节点永久保存。
+//! Revocations (design/auth.md section 10.4). A revocation can only make privileges smaller and
+//! needs no signature; nodes keep them permanently.
 
 use std::collections::BTreeSet;
 
@@ -8,7 +9,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Revocation {
-    /// 身份撤销：移除节点。按节点 ID 永久生效，任何版本的签名产物都不能恢复。
+    /// Identity revocation: removes a node. It takes effect permanently by node ID, and no version
+    /// of a signed artifact can restore it.
     Node { node_id: NodeId },
 }
 
@@ -30,7 +32,7 @@ impl Revocations {
         self.nodes.contains(node_id)
     }
 
-    /// 被撤销的节点，保存在本机的信任存储中（design/mesh.md 第 4.2 节）。
+    /// Revoked nodes, kept in the local trust store (design/mesh.md section 4.2).
     pub fn nodes(&self) -> &BTreeSet<NodeId> {
         &self.nodes
     }

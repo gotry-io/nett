@@ -1,4 +1,5 @@
-//! 组网进程上报的事件。每个事件同时写入日志；实验构建另写一份 JSON 行供 `nett-lab` 采集。
+//! Events reported by the mesh process. Every event is also written to the log; lab builds additionally
+//! write a JSON-lines copy for `nett-lab` to collect.
 
 use nett_core::id::NodeId;
 use serde::Serialize;
@@ -6,19 +7,21 @@ use serde::Serialize;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
-    /// 期望状态整份被拒绝，继续使用上一份。
+    /// The whole desired state was rejected; the previous one stays in use.
     ConfigRejected {
         reason: String,
     },
-    /// 启动时期望状态文件整份被拒绝，改用信任存储中最近一次整份接受的期望状态（design/mesh.md 第 4.2 节）。
+    /// The whole desired state file was rejected at startup; the last whole desired state accepted in the
+    /// trust store is used instead (design/mesh.md section 4.2).
     AcceptedStateRestored,
-    /// 信任存储读写失败：照常运行，以内存中的状态验证，这期间重启可能接受旧版本的产物。
+    /// Reading or writing the trust store failed: runs as usual and verifies against the in-memory state;
+    /// a restart during this time may accept an artifact of an older version.
     TrustStoreFailed {
         reason: String,
     },
-    /// 信任存储写入成功。
+    /// Writing the trust store succeeded.
     TrustStoreSaved,
-    /// 本机不在已准入的成员中，组网接口不启用。
+    /// This machine is not among the admitted members; the mesh interface is not enabled.
     SelfNotAdmitted {
         node_id: NodeId,
     },
@@ -26,66 +29,72 @@ pub enum Event {
         node_id: NodeId,
         policy_version: u64,
     },
-    /// 成员的准入材料验证失败，不配置这个对端（design/mesh.md 第 4.1 节）。格式错误到读不出节点 ID 时为空。
+    /// A member's admission material failed verification; the peer is not configured (design/mesh.md
+    /// section 4.1). Empty when the format is so malformed that the node ID cannot be read.
     MemberRejected {
         node_id: Option<NodeId>,
         reason: String,
     },
-    /// 因撤销记录删除成员。
+    /// A member was removed because of a revocation.
     MemberRemoved {
         node_id: NodeId,
     },
-    /// WireGuard 对端已与已准入的成员一致。
+    /// WireGuard peers now match the admitted members.
     PeersApplied {
         peers: usize,
     },
-    /// 组网接口就绪，或 WireGuard 端口变了：期望状态不带端口时由系统分配（design/mesh.md 第 5.5 节）。
+    /// The mesh interface is ready, or the WireGuard port changed: when the desired state carries no port,
+    /// the system assigns one (design/mesh.md section 5.5).
     InterfaceReady {
         listen_port: u16,
     },
-    /// 交给传输适配进程的配置变了（design/mesh.md 第 5.3 节；实验构建写到本机文件）。
+    /// The configuration handed to the transport adapter changed (design/mesh.md section 5.3; lab builds
+    /// write it to a local file).
     TransportConfigChanged {
         config: nett_core::transport::TransportConfig,
     },
-    /// 数据面操作失败，保持现状并在下一份期望状态时重试。
+    /// A data plane operation failed; the current state is kept and the operation is retried on the next
+    /// desired state.
     DataPlaneFailed {
         reason: String,
     },
-    /// 新版本的访问规则集已通过验证（design/mesh.md 第 12 节）。
+    /// A new version of the access rule set passed verification (design/mesh.md section 12).
     AccessRulesApplied {
         version: u64,
     },
-    /// 访问规则集验证失败或无法展开，继续执行已生效的规则；无法展开时入方向全部拒绝。
+    /// The access rule set failed verification or cannot be expanded; the rules already in effect keep being
+    /// enforced; when it cannot be expanded, all inbound traffic is rejected.
     AccessRulesRejected {
         reason: String,
     },
-    /// 一个智能入口宣告的网段已通过验证（design/mesh.md 第 10 节）。
+    /// The routes advertised by a smart gateway passed verification (design/mesh.md section 10).
     RoutesApplied {
         node_id: NodeId,
         version: u64,
     },
-    /// 宣告的网段验证失败，继续使用已生效的那一份。读不出节点 ID 时为空。
+    /// Advertised routes failed verification; the ones already in effect keep being used. Empty when the
+    /// node ID cannot be read.
     RoutesRejected {
         node_id: Option<NodeId>,
         reason: String,
     },
-    /// 决定方切换了到某个对端的路径（design/mesh.md 第 8.2 节）。
+    /// The decider switched the path to a peer (design/mesh.md section 8.2).
     PathSwitched {
         node_id: NodeId,
         to: String,
         reason: crate::path::SwitchReason,
         rehandshake: bool,
     },
-    /// 开始一次打洞（design/mesh.md 第 6.1 节）：双方的 NAT 类型。
+    /// Starts a hole punching attempt (design/mesh.md section 6.1): the NAT types of both sides.
     PunchStarted {
         node_id: NodeId,
         round: u32,
         nat: crate::probe::NatType,
         peer_nat: crate::probe::NatType,
-        /// 要发探测的对方地址。
+        /// Address of the other side to send probes to.
         targets: Vec<std::net::SocketAddr>,
     },
-    /// 打洞打通：对方的地址。
+    /// Hole punching succeeded: the other side's address.
     PunchSucceeded {
         node_id: NodeId,
         address: std::net::SocketAddr,
@@ -94,7 +103,8 @@ pub enum Event {
         node_id: NodeId,
         reason: String,
     },
-    /// endpoint 被 WireGuard 的漫游改回了旧路径，决定方把它改回期望的路径（第 8.3 节）。
+    /// The endpoint was changed back to the old path by WireGuard roaming, and the decider sets it back to
+    /// the intended path (section 8.3).
     EndpointCorrected {
         node_id: NodeId,
         from: Option<std::net::SocketAddr>,
@@ -112,7 +122,7 @@ impl<T: EventSink + ?Sized> EventSink for Box<T> {
     }
 }
 
-/// 只写日志。
+/// Writes the log only.
 #[derive(Debug, Default)]
 pub struct LogSink;
 
@@ -188,7 +198,7 @@ pub fn log_event(event: &Event) {
     }
 }
 
-/// 测试与实验中收集事件。
+/// Collects events in tests and lab scenarios.
 #[derive(Debug, Default)]
 pub struct VecSink(pub Vec<Event>);
 

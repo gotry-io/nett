@@ -1,11 +1,13 @@
-//! Hub 的存储（design/hub.md 第 8 节）：SQLite，显式设置缓存与 mmap 上限；查询用 `sqlx::query!` 在编译期检查，
-//! 离线数据在仓库根目录的 `.sqlx/`。
+//! Hub storage (design/hub.md section 8): SQLite with explicitly set cache and mmap limits; queries
+//! are checked at compile time with `sqlx::query!`, and the offline data is in `.sqlx/` at the
+//! repository root.
 
 use std::path::Path;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
-/// SQLite 的页缓存上限（KiB，负数表示按大小）与 mmap 上限：Hub 稳定运行 ≤ 30–50 MB（硬性规则 14）。
+/// SQLite's page cache limit (KiB, a negative number means by size) and mmap limit: the Hub's
+/// steady-state use is ≤ 30-50 MB (hard rule 14).
 const CACHE_KIB: i64 = 2048;
 const MMAP_BYTES: i64 = 0;
 const MAX_CONNECTIONS: u32 = 4;
@@ -30,7 +32,7 @@ pub struct HubRow {
     pub owner_token_hash: Option<Vec<u8>>,
 }
 
-/// 在 Hub 一侧发生、站点还没有取回的事。
+/// Events that happen on the Hub side and that the site has not yet fetched.
 #[derive(Debug, Clone)]
 pub struct UpdateRow {
     pub node_id: String,
@@ -54,14 +56,15 @@ pub struct NodeRow {
 
 impl Db {
     pub async fn open(path: &Path) -> Result<Self, DbError> {
-        // 按文件名打开：路径中的空格和 `?` 不会被当成 URL 的一部分
+        // Open by file name: spaces and `?` in the path are not treated as part of a URL
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .pragma("cache_size", (-CACHE_KIB).to_string())
             .pragma("mmap_size", MMAP_BYTES.to_string())
-            // 临时数据放在内存中：容器的根文件系统只读，没有可写的临时目录
+            // Temporary data is kept in memory: the container's root file system is read-only and
+            // has no writable temporary directory
             .pragma("temp_store", "memory")
             .foreign_keys(true);
         let pool = SqlitePoolOptions::new()
@@ -72,7 +75,8 @@ impl Db {
         Ok(Self { pool })
     }
 
-    /// 初始化或重新生成关联码：只在还没有关联站点时（`nett-hub reset` 之后）。
+    /// Initializes or regenerates the link code: only when no site is linked yet (after `nett-hub
+    /// reset`).
     pub async fn set_link(
         &self,
         url: &str,
@@ -108,8 +112,9 @@ impl Db {
         .await?)
     }
 
-    /// 关联：关联码中的随机密钥对得上、没有过期、没用过时，固定信任锚并保存 owner token 的哈希。关联码
-    /// 只能用一次：同一条语句中清空它。
+    /// Link: when the random secret in the link code matches, has not expired and has not been
+    /// used, pins the trust anchor and saves the hash of the owner token. The link code
+    /// can be used only once: it is cleared in the same statement.
     pub async fn link(
         &self,
         secret_hash: &[u8],
@@ -232,7 +237,7 @@ impl Db {
         Ok(())
     }
 
-    /// 一台机器入网时交来的准入材料。
+    /// The admission material submitted when a machine enrolls.
     pub async fn put_enrolled(&self, node_id: &str, material: &str) -> Result<(), DbError> {
         sqlx::query!(
             "INSERT INTO node_updates (node_id, enrolled) VALUES (?1, ?2)
@@ -245,7 +250,7 @@ impl Db {
         Ok(())
     }
 
-    /// 一台机器自行退出。
+    /// A machine leaves on its own.
     pub async fn put_left(&self, node_id: &str, now: i64) -> Result<(), DbError> {
         sqlx::query!(
             "INSERT INTO node_updates (node_id, left_at) VALUES (?1, ?2)
@@ -267,7 +272,8 @@ impl Db {
         .await?)
     }
 
-    /// 站点已经有了的事：入网的准入材料（`enrolled`）、退出（`left`）。两者都没有了时删除这一行。
+    /// Events the site already contains: the admission material of enrollment (`enrolled`), and
+    /// leave (`left`). The row is deleted when both are gone.
     pub async fn acknowledge(
         &self,
         node_id: &str,
@@ -299,7 +305,7 @@ impl Db {
         Ok(())
     }
 
-    /// 不在站点中的机器不再保留（保留策略：一台机器一行）。
+    /// Machines not in the site are no longer kept (retention policy: one row per machine).
     pub async fn prune(&self, keep: &[String]) -> Result<(), DbError> {
         for row in self.nodes().await? {
             if !keep.contains(&row.node_id) {
@@ -311,7 +317,8 @@ impl Db {
         Ok(())
     }
 
-    /// `nett-hub reset`：作废与站点的关联，删除站点与各台机器的数据。
+    /// `nett-hub reset`: invalidates the link with the site and deletes the site and the data of
+    /// each machine.
     pub async fn reset(&self) -> Result<(), DbError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query!("DELETE FROM site").execute(&mut *tx).await?;

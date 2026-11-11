@@ -1,6 +1,7 @@
-//! 站点目录（design/site.md 第 8 节）：恢复密钥 `recovery.pk8`、站点状态 `state.json`，不接 Hub 时还有各台
-//! 机器的期望状态 `nodes/<机器>/desired.json`。目录 `0700`，文件 `0600`，先写临时文件再改名；同一时间
-//! 只有一个修改命令在运行。
+//! Site directory (design/site.md section 8): the recovery key `recovery.pk8`, the site state
+//! `state.json`, and, without a Hub, each machine's desired state `nodes/<machine>/desired.json`.
+//! The directory is `0700` and files are `0600`, written to a temporary file first and then
+//! renamed; only one modifying command runs at a time.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -22,24 +23,25 @@ pub const RECOVERY_FILE: &str = "recovery.pk8";
 pub const NODES_DIR: &str = "nodes";
 pub const DESIRED_FILE: &str = "desired.json";
 const LOCK_FILE: &str = ".lock";
-/// 组网的 IPv4 网段（design/mesh.md 第 3 节）。
+/// IPv4 prefix of the mesh (design/mesh.md section 3).
 const MESH_IPV4: &str = "100.88.0.0/16";
 
-/// 一个打开的站点目录：持有它的锁。
+/// An open site directory: holds its lock.
 pub struct SiteDir {
     path: PathBuf,
     _lock: File,
 }
 
 impl SiteDir {
-    /// 建立站点：恢复密钥、只含它的信任锚清单、组网网段（IPv6 为随机的 ULA `/48`）。
+    /// Creates a site: the recovery key, a trust anchor list containing only it, and the mesh
+    /// prefixes (the IPv6 one is a random ULA `/48`).
     pub fn init(path: &Path, origin: &str) -> Result<(), SiteError> {
         std::fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(path)
             .map_err(|e| SiteError::io(format!("creating {}", path.display()), e))?;
-        // 目录已经存在时也收紧：其中有恢复密钥
+        // Tightened even if the directory already exists: it holds the recovery key
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .map_err(|e| SiteError::io(format!("setting permissions of {}", path.display()), e))?;
         for name in [STATE_FILE, RECOVERY_FILE] {
@@ -79,7 +81,7 @@ impl SiteDir {
         Ok(())
     }
 
-    /// 打开站点目录并加锁：另一个修改命令正在运行时报错。
+    /// Opens the site directory and locks it: an error when another modifying command is running.
     pub fn open(path: &Path) -> Result<Self, SiteError> {
         if !path.join(STATE_FILE).exists() {
             return Err(SiteError::invalid(format!(
@@ -124,7 +126,7 @@ impl SiteDir {
         write_file(&self.path, STATE_FILE, &to_json(state)?, false)
     }
 
-    /// 恢复密钥：只在签名时读取，用完即从内存中清除。
+    /// Recovery key: read only when signing, cleared from memory right after use.
     pub fn recovery(&self) -> Result<RecoveryKeyPair, SiteError> {
         let path = self.path.join(RECOVERY_FILE);
         let pkcs8 = zeroize::Zeroizing::new(
@@ -142,7 +144,8 @@ impl SiteDir {
             .join(DESIRED_FILE)
     }
 
-    /// 写一台机器的期望状态；内容与已有的相同时不写，返回 `false`。
+    /// Writes a machine's desired state; does not write when the content equals the existing one
+    /// and returns `false`.
     pub fn write_desired(&self, name: &NodeName, doc: &DesiredMeshDoc) -> Result<bool, SiteError> {
         let bytes =
             serde_json::to_vec_pretty(doc).map_err(|e| SiteError::invalid(e.to_string()))?;
@@ -165,7 +168,7 @@ impl SiteDir {
         Ok(true)
     }
 
-    /// 移除的机器不再有期望状态文件。
+    /// Removed machines no longer have a desired state file.
     pub fn remove_desired(&self, name: &NodeName) -> Result<(), SiteError> {
         let dir = self.path.join(NODES_DIR).join(name.to_string());
         match std::fs::remove_dir_all(&dir) {
@@ -183,7 +186,8 @@ fn to_json(state: &State) -> Result<Vec<u8>, SiteError> {
     Ok(bytes)
 }
 
-/// 先写临时文件、落盘，再改名；`new` 时目标已存在就报错。文件 `0600`。
+/// Writes a temporary file and syncs it to disk, then renames; with `new`, an error if the target
+/// already exists. File `0600`.
 fn write_file(dir: &Path, name: &str, bytes: &[u8], new: bool) -> Result<(), SiteError> {
     let target = dir.join(name);
     if new && target.exists() {
@@ -231,7 +235,7 @@ fn random_ula() -> Result<IpPrefix, SiteError> {
     IpPrefix::new(addr.into(), 48).ok_or_else(|| SiteError::invalid("ULA prefix"))
 }
 
-/// 新机器的节点 ID：毫秒时间加 80 位随机数（ULID 的形式）。
+/// Node ID of a new machine: millisecond time plus 80 random bits (ULID form).
 pub fn new_node_id() -> Result<nett_core::id::NodeId, SiteError> {
     use ring::rand::{SecureRandom as _, SystemRandom};
     let mut r = [0u8; 10];

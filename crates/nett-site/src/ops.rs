@@ -1,5 +1,7 @@
-//! 修改站点的操作（design/site.md 第 4、5 节）。每个操作只改站点状态，不签名、不写文件；调用方随后签名、
-//! 列出变化、确认、送达。操作在副本上进行，校验通过才替换：失败时站点状态不变。
+//! Operations that modify the site (design/site.md sections 4 and 5). Each operation only changes
+//! the site state; it does not sign or write files; the caller then signs, lists the changes,
+//! confirms and delivers. Operations run on a copy and replace the state only if validation passes:
+//! on failure the site state is unchanged.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -15,7 +17,7 @@ use crate::state::{
     Edge, Enrollment, Learned, Machine, NodeKeys, Part, Revoked, Rule, RuleId, Selector, State,
 };
 
-/// 加入一台机器时的选项。
+/// Options when adding a machine.
 #[derive(Debug, Clone, Default)]
 pub struct MachineOptions {
     pub public: bool,
@@ -25,7 +27,7 @@ pub struct MachineOptions {
     pub keys: Option<NodeKeys>,
 }
 
-/// 修改一台机器时的选项：没写的项保持不变。
+/// Options when modifying a machine: items not given stay unchanged.
 #[derive(Debug, Clone, Default)]
 pub struct MachineChange {
     pub reachability: Option<Reachability>,
@@ -35,7 +37,8 @@ pub struct MachineChange {
 }
 
 impl State {
-    /// 在副本上做一次修改，成功之后才替换：失败时站点状态不变。
+    /// Makes a modification on a copy and replaces the state only after success: on failure the
+    /// site state is unchanged.
     fn attempt<T>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<T, SiteError>,
@@ -63,8 +66,10 @@ impl State {
         self.attempt(|s| s.remove_in(name))
     }
 
-    /// 让一台还没有公钥的机器等待经 Hub 入网（design/hub.md 第 6 节）：记下新的入网公钥与 token 的过期
-    /// 时间。之后签名时节点策略换成写着这把公钥的新版本，原来的 token 随之作废。
+    /// Makes a machine that has no public key yet wait to join through the Hub (design/hub.md
+    /// section 6): records the new enrollment public key and the token's expiry time. When signing
+    /// afterwards, the node policy is replaced by a new version carrying this public key, and the
+    /// old token is invalidated.
     pub fn await_enrollment(
         &mut self,
         name: &NodeName,
@@ -113,8 +118,8 @@ impl State {
         self.attempt(|s| s.remove_rule_in(id))
     }
 
-    /// 加入一台机器：分配节点 ID 与组网地址。同一个名字以前被移除过时，这是一台新机器（design/site.md
-    /// 第 4 节）。
+    /// Adds a machine: allocates a node ID and a mesh address. When the same name was removed
+    /// before, this is a new machine (design/site.md section 4).
     fn add_in(
         &mut self,
         name: NodeName,
@@ -178,7 +183,8 @@ impl State {
         self.check()
     }
 
-    /// 移除一台机器：生成身份撤销记录，规则中引用它的部分随之删除（design/site.md 第 4 节）。
+    /// Removes a machine: generates an identity revocation, and the parts of rules that reference
+    /// it are deleted with it (design/site.md section 4).
     fn remove_in(&mut self, name: &NodeName) -> Result<(), SiteError> {
         let m = self
             .machines
@@ -192,7 +198,8 @@ impl State {
         self.check()
     }
 
-    /// 设置一台机器的 Edge 来源；`None` 去掉 Edge，引用它的规则随之清理。
+    /// Sets a machine's Edge source; `None` removes Edge, and rules referencing it are cleaned up
+    /// with it.
     fn set_edge_in(
         &mut self,
         name: &NodeName,
@@ -219,7 +226,8 @@ impl State {
         self.check()
     }
 
-    /// 设置一台机器宣告的网段；空的列表去掉宣告，引用它的规则随之清理。
+    /// Sets the routes a machine advertises; an empty list removes the advertisement, and rules
+    /// referencing it are cleaned up with it.
     fn set_routes_in(&mut self, name: &NodeName, routes: Vec<IpPrefix>) -> Result<(), SiteError> {
         let node = self.machine(name)?.node_id.clone();
         let empty = routes.is_empty();
@@ -230,7 +238,7 @@ impl State {
         self.check()
     }
 
-    /// 加一条访问规则，返回它的编号。
+    /// Adds an access rule and returns its number.
     fn allow_in(
         &mut self,
         from: &[String],
@@ -274,7 +282,7 @@ impl State {
             .ok_or_else(|| SiteError::invalid(format!("there is no rule {id}")))
     }
 
-    /// `mac`、`edge-vps.edge`、`mac-app.routes`。
+    /// `mac`, `edge-vps.edge`, `mac-app.routes`.
     pub fn parse_selector(&self, text: &str) -> Result<Selector, SiteError> {
         let (name, part) = if let Some(name) = text.strip_suffix(".edge") {
             (name, Part::Edge)
@@ -301,7 +309,8 @@ impl State {
         }
     }
 
-    /// 删除规则中匹配的选择器；一边只剩空时整条删除（design/site.md 第 5.1 节）。
+    /// Deletes the matching selectors in a rule; when one side is left empty, the whole rule is
+    /// deleted (design/site.md section 5.1).
     fn strip(&mut self, gone: impl Fn(&Selector) -> bool) {
         for rule in self.rules.values_mut() {
             rule.from.retain(|s| !gone(s));
@@ -311,7 +320,8 @@ impl State {
             .retain(|_, r| !r.from.is_empty() && !r.to.is_empty());
     }
 
-    /// 分配下一对地址：组网网段中的第 `next_host` 个（不回收，design/mesh.md 第 3 节）。
+    /// Allocates the next pair of addresses: the `next_host`-th in the mesh prefixes (not
+    /// reclaimed, design/mesh.md section 3).
     fn allocate(&mut self) -> Result<MeshAddresses, SiteError> {
         let (IpAddr::V4(v4), IpAddr::V6(v6)) =
             (self.prefixes.ipv4.addr(), self.prefixes.ipv6.addr())

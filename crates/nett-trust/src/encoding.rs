@@ -1,4 +1,5 @@
-//! 签名载荷中的字段格式：base64url、`sha256:` 哈希、UTC 时间（design/auth.md 第 10.5 节）。
+//! Field formats in signed payloads: base64url, `sha256:` hashes, UTC time (design/auth.md section
+//! 10.5).
 
 use std::fmt;
 use std::str::FromStr;
@@ -19,7 +20,8 @@ pub enum EncodingError {
     Time,
 }
 
-/// 解码不带填充的 base64url。只接受规范编码（末尾多余的位必须为 0），同一份字节只有一种写法。
+/// Decodes unpadded base64url. Only the canonical encoding is accepted (the extra trailing bits
+/// must be 0), so the same bytes have only one spelling.
 pub fn decode_b64(s: &str) -> Result<Vec<u8>, EncodingError> {
     URL_SAFE_NO_PAD.decode(s).map_err(|_| EncodingError::Base64)
 }
@@ -37,7 +39,7 @@ pub fn encode_b64(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// serde 辅助：`Vec<u8>` 字段以 base64url 字符串表示。
+/// serde helper: a `Vec<u8>` field is represented as a base64url string.
 pub mod b64 {
     use super::*;
 
@@ -51,7 +53,7 @@ pub mod b64 {
     }
 }
 
-/// serde 辅助：定长字节数组以 base64url 字符串表示。
+/// serde helper: a fixed-length byte array is represented as a base64url string.
 pub mod b64_fixed {
     use super::*;
 
@@ -70,7 +72,7 @@ pub mod b64_fixed {
     }
 }
 
-/// SHA-256 摘要，文本形式为 `sha256:` 加 64 位小写十六进制。
+/// A SHA-256 digest, whose text form is `sha256:` followed by 64 lowercase hexadecimal digits.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Sha256Digest(pub [u8; 32]);
 
@@ -136,7 +138,8 @@ impl<'de> Deserialize<'de> for Sha256Digest {
     }
 }
 
-/// UTC 时间，精确到秒，文本形式为 `YYYY-MM-DDTHH:MM:SSZ`。内部是 Unix 时间（秒）。
+/// UTC time, accurate to the second, whose text form is `YYYY-MM-DDTHH:MM:SSZ`. Internally it is
+/// Unix time (seconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Timestamp(i64);
 
@@ -149,12 +152,13 @@ impl Timestamp {
         self.0
     }
 
-    /// 当前时间。只用于和签名载荷中的时间比较；持续时间用单调时钟。
+    /// The current time. Used only to compare with times in signed payloads; durations use a
+    /// monotonic clock.
     pub fn now() -> Self {
         let seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
-            // 时钟早于 1970 年时，任何载荷都不会被当作未过期
+            // When the clock is earlier than 1970, no payload is treated as unexpired
             .unwrap_or(i64::MAX);
         Self(seconds)
     }
@@ -240,7 +244,8 @@ fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-// 公历日期与 1970-01-01 起的天数互相换算（Howard Hinnant 的 days_from_civil 算法）
+// Conversion between a Gregorian date and the number of days since 1970-01-01 (Howard Hinnant's
+// days_from_civil algorithm)
 fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = y.div_euclid(400);

@@ -1,6 +1,7 @@
-//! `nett` 可执行文件：命令行（包括签名工具 `nett site`），以及 `nett mesh`、`nett node`、`nett transport`、
-//! `nett relay` 各进程的入口（ADR 0012）。命令按作用范围分三组：整张网、这台机器、服务进程
-//! （architecture.md 第 13.4 节）。
+//! `nett` executable: the command line (including the signing tool `nett site`) and the entry
+//! points of the `nett mesh`, `nett node`, `nett transport` and `nett relay` processes (ADR 0012).
+//! Commands fall into three groups by scope: the whole mesh, this machine, service processes
+//! (architecture.md section 13.4).
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -28,7 +29,8 @@ mod status;
 #[cfg(all(feature = "lab", target_os = "linux"))]
 mod transport;
 
-/// 一个命令：名字、在帮助中的分组、一句话说明和用法。用法写在实现它的模块里。
+/// One command: name, group in the help, one-line description and usage. The usage text lives in
+/// the module that implements it.
 struct Command {
     name: &'static str,
     group: Group,
@@ -123,9 +125,10 @@ const COMMANDS: &[Command] = &[
 ];
 
 fn main() -> ExitCode {
-    // 各进程的内存都很小，用不上透明大页。系统设为 always 时（例如 Linux 6.1），一个线程栈会被整块换成
-    // 2 MB 的大页，RSS 随之多出 2 MB（architecture.md 第 13.1 节）。在启动任何线程之前关闭；不支持时
-    // 只是内存多一些
+    // Each process uses very little memory, so transparent huge pages are not needed. When the
+    // system is set to always (for example Linux 6.1), a thread stack is replaced as a whole by a 2
+    // MB huge page and RSS grows by 2 MB (architecture.md section 13.1). Disabled before any thread
+    // starts; where unsupported, memory is only a bit higher
     #[cfg(target_os = "linux")]
     rustix::thread::disable_transparent_huge_pages(true).ok();
     match run() {

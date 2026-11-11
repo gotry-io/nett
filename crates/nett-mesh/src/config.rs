@@ -1,7 +1,10 @@
-//! 组网进程的期望状态：期望状态 `trust` 与 `mesh` 分区中组网进程用到的部分（design/protocol.md 第 6 节）。
+//! Desired state of the mesh process: the parts of the desired state's `trust` and `mesh` partitions that
+//! the mesh process uses (design/protocol.md section 6).
 //!
-//! 来源只负责交付文档（[`crate::source`]）；这里在边界处校验一次，之后只传递已校验的类型。
-//! 签名产物在这里只解析格式，签名和准入由 [`crate::members`] 逐项验证，不因来源而跳过。
+//! Sources only deliver documents ([`crate::source`]); validation happens once here at the boundary, and
+//! only validated types are passed on afterwards.
+//! Signed artifacts are only parsed for format here; signatures and admission are verified item by item by
+//! [`crate::members`] and are never skipped because of the source.
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -21,13 +24,14 @@ use nett_core::prefix::IpPrefix;
 
 use crate::probe::TUNNEL_PROBE_PORT;
 
-/// 期望状态的文档形式。
+/// Document form of the desired state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DesiredMeshDoc {
     pub node_id: NodeId,
     pub reachability: Reachability,
-    /// WireGuard 端口。`public` 节点必须有；`dial-only` 节点不带时由系统分配（design/mesh.md 第 5.5 节）。
+    /// WireGuard port. Required for `public` nodes; for `dial-only` nodes the system assigns one when it is
+    /// absent (design/mesh.md section 5.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub listen_port: Option<u16>,
     pub prefixes: MeshPrefixes,
@@ -35,18 +39,18 @@ pub struct DesiredMeshDoc {
     pub members: Vec<AdmissionMaterial>,
     pub revocations: Vec<Revocation>,
     pub paths: Vec<PathDoc>,
-    /// 签名的访问规则集（design/mesh.md 第 12 节）；没有时按默认值匹配。
+    /// Signed access rule set (design/mesh.md section 12); when absent, matching uses the default values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_rules: Option<SignedPayload>,
-    /// 智能入口宣告的网段，每份是一个签名载荷（design/mesh.md 第 10 节）。
+    /// Prefixes advertised by smart gateways, each a signed payload (design/mesh.md section 10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertised_routes: Vec<SignedPayload>,
-    /// 节点名，不签名，只用于显示（design/status.md 第 5 节）。
+    /// Node name, not signed, used only for display (design/status.md section 5).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<NodeId, NodeName>,
 }
 
-/// 节点的网络可达性（design/architecture.md 第 6.5 节）。
+/// Network reachability of a node (design/architecture.md section 6.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Reachability {
@@ -54,7 +58,7 @@ pub enum Reachability {
     DialOnly,
 }
 
-/// 组网网段（design/mesh.md 第 3 节）。
+/// Mesh prefixes (design/mesh.md section 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MeshPrefixes {
@@ -62,52 +66,58 @@ pub struct MeshPrefixes {
     pub ipv6: IpPrefix,
 }
 
-/// 到一个对端的候选路径，相当于 Hub 的计算结果。
+/// Candidate paths to one peer, equivalent to the result of the Hub's computation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathDoc {
     pub peer: NodeId,
-    /// 对端的可达性：据此确定这一对由谁决定路径（design/mesh.md 第 8.3 节）。
+    /// Reachability of the peer: determines which side decides the path for this pair (design/mesh.md
+    /// section 8.3).
     pub peer_reachability: Reachability,
-    /// 按 Hub 给出的顺序排列，初始路径取第一条。
+    /// Ordered as given by the Hub; the initial path is the first one.
     pub candidates: Vec<Candidate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Candidate {
-    /// 公网直连：对端 WireGuard 端口的地址。
+    /// Direct public path: the address of the peer's WireGuard port.
     Direct { endpoint: SocketAddr },
-    /// 经中继：中继的节点 ID、中继端口的地址，以及本机与这个中继之间的探测令牌（design/mesh.md 第 5.2 节）。
+    /// Via a relay: the relay's node ID, the address of the relay port, and the probe token between this
+    /// machine and this relay (design/mesh.md section 5.2).
     Relay {
         relay: NodeId,
         endpoint: SocketAddr,
         token: ProbeToken,
     },
-    /// 经中继的 TLS 传输（design/mesh.md 第 5.3 节）：中继的 TLS 地址与证书指纹；令牌与 UDP 中继相同，
-    /// 用来认证 WebSocket 连接上的第一条探测。WireGuard 中的 endpoint 是传输适配进程的回环端口。
+    /// TLS transport via a relay (design/mesh.md section 5.3): the relay's TLS address and certificate
+    /// fingerprint; the token is the same as for the UDP relay and authenticates the first probe on the
+    /// WebSocket connection. The endpoint in WireGuard is the transport adapter's loopback port.
     RelayTls {
         relay: NodeId,
         address: SocketAddr,
         fingerprint: CertFingerprint,
         token: ProbeToken,
     },
-    /// 尝试打洞直连（design/mesh.md 第 6.1 节）：双方都是 `dial-only`。地址在打洞时交换，不在这里。
+    /// Try hole punching for a direct path (design/mesh.md section 6.1): both sides are `dial-only`. The
+    /// addresses are exchanged during hole punching, not here.
     Punch,
 }
 
-/// 传输适配进程的回环端口从这里起，按中继的节点 ID 排序依次分配（ADR 0013：由组网进程分配）。
+/// The transport adapter's loopback ports start here and are allocated in order of the relays' node IDs
+/// (ADR 0013: allocated by the mesh process).
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
-/// 期望状态文件与信任存储中每个文件的大小上限（design/mesh.md 第 17 节）。
+/// Size limit of each file in the desired state file and the trust store (design/mesh.md section 17).
 pub const MAX_DESIRED_BYTES: u64 = 4 << 20;
-/// 一份期望状态中成员（以及路径、节点名、宣告网段）的数量上限。
+/// Upper limit on the number of members (and paths, node names, advertised prefixes) in one desired state.
 pub const MAX_MEMBERS: usize = 256;
-/// 撤销记录的数量上限：撤销永久保存，重新入网的节点每次留下一条。
+/// Upper limit on the number of revocations: revocations are kept permanently, and each re-enrolled node
+/// leaves one.
 pub const MAX_REVOCATIONS: usize = 4096;
 
-/// 读一个不超过 `max` 字节的普通文件；不存在时为 `Ok(None)`。
+/// Reads a regular file of at most `max` bytes; `Ok(None)` when it does not exist.
 pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
@@ -131,13 +141,14 @@ pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// 组网进程和传输适配进程自己在本机用的端口：组网地址上的探测端口与 TLS 中继的回环端口。WireGuard 的
-/// 套接字绑定本机全部地址，用了其中一个时后绑定的一方失败（design/site.md 第 4 节）。
+/// Ports the mesh process and the transport adapter use locally: the probe port on the mesh address and
+/// the loopback ports of TLS relays. The WireGuard socket binds all local addresses; when it uses one of
+/// them, the party that binds later fails (design/site.md section 4).
 pub fn is_reserved_port(port: u16) -> bool {
     port == TUNNEL_PROBE_PORT || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
 }
 
-/// 成员与中继之间的探测令牌。`Debug` 不输出内容（硬性规则 10）。
+/// Probe token between a member and a relay. `Debug` does not print the contents (hard rule 10).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ProbeToken(#[serde(with = "nett_trust::encoding::b64_fixed")] pub [u8; 32]);
@@ -148,7 +159,7 @@ impl std::fmt::Debug for ProbeToken {
     }
 }
 
-/// 一个对端的路径配置。
+/// Path configuration of one peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerPathConfig {
     pub reachability: Reachability,
@@ -183,7 +194,7 @@ pub enum ConfigError {
     TooMany { what: &'static str, max: usize },
 }
 
-/// 已校验的期望状态。
+/// Validated desired state.
 #[derive(Debug, Clone)]
 pub struct DesiredMesh {
     pub node_id: NodeId,
@@ -191,7 +202,8 @@ pub struct DesiredMesh {
     pub listen_port: Option<u16>,
     pub prefixes: MeshPrefixes,
     pub anchors: TrustAnchors,
-    /// 信任锚清单的文档形式：与本机固定的信任锚比较（design/mesh.md 第 4.2 节）。
+    /// Document form of the trust anchor list: compared with the trust anchors pinned on this machine
+    /// (design/mesh.md section 4.2).
     pub trust_anchors: TrustAnchorsDoc,
     pub members: Vec<AdmissionMaterial>,
     pub revocations: Vec<Revocation>,
@@ -199,10 +211,11 @@ pub struct DesiredMesh {
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
     pub names: BTreeMap<NodeId, NodeName>,
-    /// 传输适配进程的 TLS 目标，与 [`DesiredMesh::tls_endpoints`] 同出一处。
+    /// TLS targets of the transport adapter, coming from the same place as [`DesiredMesh::tls_endpoints`].
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
-    /// 校验之前的文档：整份接受之后保存进信任存储，启动时期望状态文件被拒绝时改用它。
+    /// The document before validation: saved into the trust store after the whole is accepted, and used when
+    /// the desired state file is rejected at startup.
     doc: DesiredMeshDoc,
 }
 
@@ -211,17 +224,18 @@ impl DesiredMesh {
         &self.doc
     }
 
-    /// 各 TLS 中继在 WireGuard 中的 endpoint：传输适配进程为它开的回环端口。
+    /// The endpoint in WireGuard of each TLS relay: the loopback port the transport adapter opens for it.
     pub fn tls_endpoints(&self) -> &BTreeMap<NodeId, SocketAddr> {
         &self.tls_endpoints
     }
 
-    /// 传输适配进程的 TLS 目标：回环端口与中继的 TLS 地址。
+    /// TLS targets of the transport adapter: loopback port and the relay's TLS address.
     pub fn tls_targets(&self) -> &[TlsTarget] {
         &self.tls_targets
     }
 
-    /// 交给传输适配进程的配置：WireGuard 端口取接口实际监听的端口（可能由系统分配）。
+    /// Configuration handed to the transport adapter: the WireGuard port is the port the interface actually
+    /// listens on (possibly assigned by the system).
     pub fn transport(&self, wireguard_port: u16) -> TransportConfig {
         TransportConfig {
             wireguard_port,
@@ -326,8 +340,9 @@ impl DesiredMesh {
     }
 }
 
-/// 组网网段只能取私有地址范围，大小合理：发往组网网段的流量都进入 `nett0`，
-/// 一个过大的网段（例如 `0.0.0.0/0`）会把本机的其他流量（包括连接 Hub 的流量）一起吞掉。
+/// Mesh prefixes may only come from private address ranges and must be of reasonable size: all traffic to
+/// the mesh prefixes enters `nett0`, and an oversized prefix (for example `0.0.0.0/0`) would swallow the
+/// machine's other traffic (including traffic to the Hub).
 fn is_sensible_mesh_prefix(prefix: &IpPrefix) -> bool {
     let private: &[(&str, u8)] = if prefix.is_ipv4() {
         &[
@@ -337,7 +352,7 @@ fn is_sensible_mesh_prefix(prefix: &IpPrefix) -> bool {
             ("100.64.0.0/10", 30),
         ]
     } else {
-        // ULA；Hub 初始化时生成一个 /48
+        // ULA; Hub generates a /48 at initialization
         &[("fc00::/7", 120)]
     };
     private.iter().any(|(range, max_len)| {
@@ -437,7 +452,7 @@ mod tests {
                 assert_eq!(with_port(reachability, Some(port)), Ok(Some(port)));
             }
         }
-        // 没有端口：dial-only 由系统分配，public 不行（别人按端口连它）
+        // No port: dial-only gets one from the system, public does not (others connect to it by port)
         assert_eq!(with_port(Reachability::DialOnly, None), Ok(None));
         assert_eq!(
             with_port(Reachability::Public, None).err(),
@@ -478,7 +493,7 @@ mod tests {
         assert_eq!(transport.targets.len(), 2);
         assert_eq!(transport.wireguard_port, 51000);
         assert_eq!(transport.validate(), Ok(()));
-        // 同一个中继给了两个不同的指纹
+        // The same relay was given two different fingerprints
         doc.paths[1].candidates = vec![tls(9, 7)];
         assert!(matches!(
             DesiredMesh::from_doc(doc),

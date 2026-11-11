@@ -1,11 +1,16 @@
-//! 成员集合：只为能验证签名链条的对端配置 WireGuard（design/mesh.md 第 4.1 节，ADR 0014）。
+//! Member set: configures WireGuard only for peers whose signature chain can be verified
+//! (design/mesh.md section 4.1, ADR 0014).
 //!
-//! - 先应用撤销记录，再应用新的准入材料；撤销永久生效（design/auth.md 第 10.4 节）；
-//! - 成员只因撤销记录删除，期望状态中缺少某个成员不视为撤销；
-//! - 版本号只增不减，与已生效材料相同的视为幂等；重启之后以信任存储中的版本为基准（design/mesh.md
-//!   第 4.2 节）；
-//! - 本机节点策略的新版本检查过期时间（design/auth.md 第 10.2 节检查 6）；
-//! - 验证失败的成员不配置，已生效的旧版本保持不变，并上报事件。
+//! - Revocations are applied first, then new admission material; revocation is permanent
+//!   (design/auth.md section 10.4);
+//! - Members are removed only by revocation; a member missing from the desired state is not treated as
+//!   revoked;
+//! - Versions only increase; material identical to what is in effect is idempotent; after a restart,
+//!   the version in the trust store is the baseline (design/mesh.md section 4.2);
+//! - The new version of this machine's node policy has its expiry checked (design/auth.md section 10.2,
+//!   check 6);
+//! - A member that fails verification is not configured, the older version in effect stays unchanged,
+//!   and an event is reported.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -22,13 +27,15 @@ use crate::event::{Event, EventSink};
 pub struct MemberSet {
     revocations: Revocations,
     applied: AppliedMembers,
-    /// 本机此前接受过的版本（信任存储）：低于它的、同版本不同内容的材料都不接受。
+    /// Versions previously accepted by this machine (trust store): material lower than it, or with the same
+    /// version but different content, is not accepted.
     floor: BTreeMap<NodeId, AppliedRecord>,
     members: BTreeMap<NodeId, Member>,
 }
 
-/// 本机节点策略的检查：本机的节点 ID，以及检查过期时间用的当前时间。信任存储刚建立时（第一份期望状态）
-/// 不检查过期时间，`now` 为 `None`。
+/// Check for this machine's node policy: this machine's node ID, and the current time used for the expiry
+/// check. Right after the trust store is created (the first desired state) the expiry is not checked and
+/// `now` is `None`.
 pub struct OwnPolicy<'a> {
     pub node_id: &'a NodeId,
     pub now: Option<Timestamp>,
@@ -43,7 +50,7 @@ impl MemberSet {
         self.members.get(node_id)
     }
 
-    /// 从信任存储恢复撤销记录和各成员此前接受过的版本。
+    /// Restores revocations and the previously accepted versions of each member from the trust store.
     pub fn restore(&mut self, revoked: &BTreeSet<NodeId>, floor: &BTreeMap<NodeId, AppliedRecord>) {
         for node_id in revoked {
             self.revocations.apply(&Revocation::Node {
@@ -57,7 +64,8 @@ impl MemberSet {
         self.revocations.nodes()
     }
 
-    /// 保存进信任存储的版本：此前接受过的，加上这次生效的（只会更高）。
+    /// Versions saved into the trust store: those previously accepted, plus those that took effect this
+    /// time (only ever higher).
     pub fn saved_versions(&self) -> BTreeMap<NodeId, AppliedRecord> {
         let mut out = self.floor.clone();
         out.extend(
@@ -69,7 +77,7 @@ impl MemberSet {
         out
     }
 
-    /// 应用一份期望状态中的撤销记录和准入材料。
+    /// Applies the revocations and admission material in a desired state.
     pub fn apply(
         &mut self,
         desired: &DesiredMesh,
@@ -88,7 +96,8 @@ impl MemberSet {
             }
         }
 
-        // 同一份期望状态中同一个节点有多份材料时，版本高的先处理，低的随后按"低于已生效版本"拒绝
+        // When one desired state has several pieces of material for the same node, the higher version is
+        // handled first and the lower is then rejected as "lower than the version in effect"
         let mut admitted = Vec::new();
         for material in &desired.members {
             match admit(material, &desired.anchors, &self.revocations) {
@@ -144,7 +153,8 @@ impl MemberSet {
                 )));
                 continue;
             }
-            // 地址或组网公钥与另一个成员冲突时，已有的成员优先：WireGuard 不允许对端的 AllowedIPs 重叠
+            // When the address or mesh public key conflicts with another member, the existing member takes
+            // precedence: WireGuard does not allow peers' AllowedIPs to overlap
             if let Some(other) = self.conflict(&member) {
                 events.emit(reject(format!(
                     "mesh or edge address, or public key, already belongs to {other}"
@@ -173,7 +183,7 @@ impl MemberSet {
     }
 }
 
-/// 成员占用的全部地址：组网地址，以及有 `edge` 角色时的 Edge 专用地址。
+/// All addresses a member occupies: the mesh address, plus the Edge address when it has the `edge` role.
 fn addresses(member: &Member) -> Vec<IpAddr> {
     std::iter::once(member.addresses)
         .chain(member.edge.iter().map(|e| e.addresses))

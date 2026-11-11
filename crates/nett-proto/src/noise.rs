@@ -1,8 +1,11 @@
-//! Noise_IK_25519_ChaChaPoly_BLAKE2s（design/protocol.md 第 3 节），按 Noise 协议规范第 5、7.5 节实现：
-//! nett-node 是发起方，事先知道 Hub 的静态公钥（入网时固定）；Hub 是响应方，从第一条消息中解出节点的静态
-//! 公钥。一个往返之后双方得到两个方向各自的传输密钥。
+//! Noise_IK_25519_ChaChaPoly_BLAKE2s (design/protocol.md section 3), implemented per sections 5 and
+//! 7.5 of the Noise protocol specification: nett-node is the initiator and knows the Hub's static
+//! public key in advance (pinned at enrollment); the Hub is the responder and extracts the node's
+//! static public key from the first message. After one round trip both sides have a transport key
+//! for each direction.
 //!
-//! 只用依赖树中已有的 ring（ChaCha20-Poly1305）、x25519-dalek 与 blake2；测试中与独立的实现（snow）互通。
+//! Uses only ring (ChaCha20-Poly1305), x25519-dalek and blake2, which are already in the dependency
+//! tree; tests interoperate with an independent implementation (snow).
 
 use blake2::Blake2s256;
 use blake2::digest::Digest as _;
@@ -10,16 +13,17 @@ use ring::aead::{Aad, CHACHA20_POLY1305, LessSafeKey, Nonce, UnboundKey};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::{Zeroize as _, Zeroizing};
 
-/// 防止与其他协议混用（protocol.md 第 3.2 节）。
+/// Prevents mixing with other protocols (protocol.md section 3.2).
 pub const PROLOGUE: &[u8] = b"nett-control/1";
 const PROTOCOL_NAME: &[u8] = b"Noise_IK_25519_ChaChaPoly_BLAKE2s";
-/// Noise 消息的上限（规范第 3 节）。
+/// Upper limit on a Noise message (specification section 3).
 pub const MAX_MESSAGE: usize = 65535;
 const TAG: usize = 16;
 const DH: usize = 32;
 const HASH: usize = 32;
 const BLOCK: usize = 64;
-/// 每个方向每传输这么多条消息换一次密钥（规范第 11.3 节的 Rekey）：两端各自按条数换，不需要额外的消息。
+/// Rekey after this many messages in each direction (Rekey in specification section 11.3): each end
+/// rekeys by message count and no extra messages are needed.
 pub const REKEY_EVERY: u64 = 1 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -38,7 +42,7 @@ pub enum NoiseError {
     Random,
 }
 
-/// 生成一把新的 X25519 私钥。
+/// Generates a new X25519 private key.
 pub fn generate_key() -> Result<StaticSecret, NoiseError> {
     use ring::rand::{SecureRandom as _, SystemRandom};
     let mut bytes = Zeroizing::new([0u8; 32]);
@@ -56,7 +60,7 @@ fn hash(parts: &[&[u8]]) -> [u8; HASH] {
     h.finalize().into()
 }
 
-/// HMAC-BLAKE2s（RFC 2104，块长 64 字节）。
+/// HMAC-BLAKE2s (RFC 2104, 64-byte block length).
 fn hmac(key: &[u8; HASH], parts: &[&[u8]]) -> [u8; HASH] {
     let mut padded = Zeroizing::new([0u8; BLOCK]);
     padded[..HASH].copy_from_slice(key);
@@ -75,7 +79,7 @@ fn hmac(key: &[u8; HASH], parts: &[&[u8]]) -> [u8; HASH] {
     hash(&[opad.as_ref(), &inner])
 }
 
-/// 规范第 4.3 节的 HKDF，输出两个 32 字节的值。
+/// HKDF from specification section 4.3, outputting two 32-byte values.
 fn hkdf(ck: &[u8; HASH], ikm: &[u8]) -> (Zeroizing<[u8; HASH]>, Zeroizing<[u8; HASH]>) {
     let temp = Zeroizing::new(hmac(ck, &[ikm]));
     let one = Zeroizing::new(hmac(&temp, &[&[1]]));
@@ -85,14 +89,14 @@ fn hkdf(ck: &[u8; HASH], ikm: &[u8]) -> (Zeroizing<[u8; HASH]>, Zeroizing<[u8; H
 
 fn dh(secret: &StaticSecret, public: &[u8; DH]) -> Result<Zeroizing<[u8; DH]>, NoiseError> {
     let shared = secret.diffie_hellman(&PublicKey::from(*public));
-    // 低阶点得到全零：拒绝，对方必须贡献随机性
+    // A low-order point gives all zeros: reject it, the peer must contribute randomness
     if !shared.was_contributory() {
         return Err(NoiseError::LowOrder);
     }
     Ok(Zeroizing::new(shared.to_bytes()))
 }
 
-/// 规范第 5.1 节的 CipherState。
+/// CipherState from specification section 5.1.
 struct CipherState {
     key: Option<LessSafeKey>,
     n: u64,
@@ -149,7 +153,8 @@ impl CipherState {
         Ok(buf)
     }
 
-    /// 规范第 11.3 节：k = ENCRYPT(k, maxnonce, zerolen, zeros)，取前 32 字节；n 不变。
+    /// Specification section 11.3: k = ENCRYPT(k, maxnonce, zerolen, zeros), taking the first 32
+    /// bytes; n is unchanged.
     fn rekey(&mut self) {
         let Some(key) = &self.key else {
             return;
@@ -167,7 +172,7 @@ impl CipherState {
     }
 }
 
-/// 规范第 5.2 节的 SymmetricState。
+/// SymmetricState from specification section 5.2.
 struct Symmetric {
     ck: Zeroizing<[u8; HASH]>,
     h: [u8; HASH],
@@ -176,7 +181,7 @@ struct Symmetric {
 
 impl Symmetric {
     fn new() -> Self {
-        // 协议名长于 32 字节：h = HASH(协议名)
+        // Protocol name longer than 32 bytes: h = HASH(protocol name)
         let h = hash(&[PROTOCOL_NAME]);
         let mut s = Self {
             ck: Zeroizing::new(h),
@@ -209,14 +214,15 @@ impl Symmetric {
         Ok(pt)
     }
 
-    /// 两个方向的传输密钥：发起方用第一个发送，响应方用第一个接收。
+    /// Transport keys for the two directions: the initiator sends with the first and the responder
+    /// receives with the first.
     fn split(&self) -> (CipherState, CipherState) {
         let (one, two) = hkdf(&self.ck, &[]);
         (CipherState::with_key(&one), CipherState::with_key(&two))
     }
 }
 
-/// 发起方（nett-node）。
+/// The initiator (nett-node).
 pub struct Initiator {
     sym: Symmetric,
     s: StaticSecret,
@@ -225,10 +231,10 @@ pub struct Initiator {
 }
 
 impl Initiator {
-    /// `remote` 是 Hub 的静态公钥。
+    /// `remote` is the Hub's static public key.
     pub fn new(local: &StaticSecret, remote: [u8; DH]) -> Result<Self, NoiseError> {
         let mut sym = Symmetric::new();
-        // 预先消息 <- s
+        // Pre-message <- s
         sym.mix_hash(&remote);
         Ok(Self {
             sym,
@@ -238,7 +244,7 @@ impl Initiator {
         })
     }
 
-    /// 第一条消息：-> e, es, s, ss，加上加密的载荷。
+    /// First message: -> e, es, s, ss, plus the encrypted payload.
     pub fn write_message(&mut self, payload: &[u8]) -> Result<Vec<u8>, NoiseError> {
         let e_pub = PublicKey::from(&self.e).to_bytes();
         let mut out = e_pub.to_vec();
@@ -254,7 +260,7 @@ impl Initiator {
         Ok(out)
     }
 
-    /// 第二条消息：<- e, ee, se，返回载荷与传输状态。
+    /// Second message: <- e, ee, se, returns the payload and the transport state.
     pub fn read_message(mut self, message: &[u8]) -> Result<(Vec<u8>, Transport), NoiseError> {
         if message.len() < DH + TAG || message.len() > MAX_MESSAGE {
             return Err(NoiseError::Malformed);
@@ -270,7 +276,7 @@ impl Initiator {
     }
 }
 
-/// 响应方（Hub）。
+/// The responder (Hub).
 pub struct Responder {
     sym: Symmetric,
     s: StaticSecret,
@@ -290,7 +296,7 @@ impl Responder {
         }
     }
 
-    /// 读第一条消息，返回载荷与发起方的静态公钥。
+    /// Reads the first message and returns the payload and the initiator's static public key.
     pub fn read_message(&mut self, message: &[u8]) -> Result<(Vec<u8>, [u8; DH]), NoiseError> {
         if message.len() < DH + DH + TAG + TAG || message.len() > MAX_MESSAGE {
             return Err(NoiseError::Malformed);
@@ -305,7 +311,7 @@ impl Responder {
         Ok((payload, self.rs))
     }
 
-    /// 第二条消息：<- e, ee, se，返回消息与传输状态。
+    /// Second message: <- e, ee, se, returns the message and the transport state.
     pub fn write_message(mut self, payload: &[u8]) -> Result<(Vec<u8>, Transport), NoiseError> {
         let e = generate_key()?;
         let e_pub = PublicKey::from(&e).to_bytes();
@@ -322,7 +328,7 @@ impl Responder {
     }
 }
 
-/// 握手之后的传输状态：每个方向一个密钥，按条数换密钥。
+/// Transport state after the handshake: one key per direction, rekeyed by message count.
 pub struct Transport {
     send: CipherState,
     recv: CipherState,
@@ -338,7 +344,8 @@ impl Transport {
         }
     }
 
-    /// 握手的哈希：双方相同，唯一标识这次会话（规范第 11.2 节）。
+    /// Handshake hash: identical on both sides and uniquely identifies this session (specification
+    /// section 11.2).
     pub fn handshake_hash(&self) -> [u8; HASH] {
         self.handshake_hash
     }
@@ -445,11 +452,12 @@ mod tests {
     fn a_wrong_hub_key_or_tampering_fails_the_handshake() {
         let (node, hub) = pair();
         let other = generate_key().expect("key");
-        // 节点以为的 Hub 公钥不对：Hub 解不开第一条消息
+        // The Hub public key the node believes in is wrong: the Hub cannot decrypt the first
+        // message
         let mut i = Initiator::new(&node, PublicKey::from(&other).to_bytes()).expect("initiator");
         let m1 = i.write_message(b"hello").expect("m1");
         assert!(Responder::new(&hub).read_message(&m1).is_err());
-        // 篡改第一条消息
+        // Tamper with the first message
         let mut i = Initiator::new(&node, PublicKey::from(&hub).to_bytes()).expect("initiator");
         let mut m1 = i.write_message(b"hello").expect("m1");
         let last = m1.len() - 1;
@@ -458,7 +466,7 @@ mod tests {
             Responder::new(&hub).read_message(&m1),
             Err(NoiseError::Decrypt)
         );
-        // 低阶点作为临时公钥
+        // A low-order point as the ephemeral public key
         let mut zero = vec![0u8; 32 + 48 + 16];
         zero[0] = 0;
         assert_eq!(
@@ -487,9 +495,9 @@ mod tests {
         let (mut it, mut rt) = session(&node, &hub);
         let _first = it.encrypt(b"one").expect("one");
         let second = it.encrypt(b"two").expect("two");
-        // 重放或乱序：计数器对不上，解不开
+        // Replay or out of order: the counter does not match and it cannot be decrypted
         assert_eq!(rt.decrypt(&second), Err(NoiseError::Decrypt));
-        // 跨过换密钥的边界：两端各自按条数换，照常解开
+        // Across the rekey boundary: each end rekeys by message count and decrypts as usual
         let (mut it, mut rt) = session(&node, &hub);
         it.send.n = REKEY_EVERY - 1;
         rt.recv.n = REKEY_EVERY - 1;

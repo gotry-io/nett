@@ -1,6 +1,9 @@
-//! `nett mesh`：组网进程，由服务管理器运行。期望状态来自本地文件，收到 `SIGHUP` 或本机接口的 `reload`
-//! 时重新读取（design/local-signing.md 第 5 节、status.md 第 4.1 节）。`nett keys` 在本机生成组网私钥和
-//! 身份私钥（local-signing.md 第 3 节）。事件文件、模拟时钟误差和传输适配进程的配置只在实验构建中（`lab` 特性）。
+//! `nett mesh`: the mesh process, run by the service manager. The desired state comes from a
+//! local file and is re-read on `SIGHUP` or a `reload` on the local interface
+//! (design/local-signing.md section 5, status.md section 4.1). `nett keys` generates the mesh
+//! private key and the identity private key on this machine (local-signing.md section 3). The event
+//! file, simulated clock skew and transport adapter configuration exist only in the lab build (the
+//! `lab` feature).
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -29,25 +32,25 @@ use tokio::signal::unix::{SignalKind, signal};
 struct Args {
     config: PathBuf,
     key: PathBuf,
-    /// 本机状态的套接字（design/status.md 第 3 节）。
+    /// Local status socket (design/status.md section 3).
     socket: PathBuf,
-    /// 信任存储的目录（design/mesh.md 第 4.2 节）。
+    /// Directory of the trust store (design/mesh.md section 4.2).
     state: PathBuf,
     #[cfg(feature = "lab")]
     lab: LabArgs,
 }
 
-/// 实验构建的选项。
+/// Options of the lab build.
 #[cfg(feature = "lab")]
 #[derive(Default)]
 struct LabArgs {
     events: Option<PathBuf>,
-    /// 模拟时钟误差（design/prototype.md 场景 17）。
+    /// Simulated clock skew (design/prototype.md scenario 17).
     clock_offset_ms: i64,
     clock_trusted: Option<bool>,
-    /// 传输适配进程的配置写到这里（design/mesh.md 第 5.3 节）。
+    /// The transport adapter configuration is written here (design/mesh.md section 5.3).
     transport_config: Option<PathBuf>,
-    /// 用用户态数据面代替内核 WireGuard（design/userspace.md 第 8 节）。
+    /// Uses the userspace data plane instead of kernel WireGuard (design/userspace.md section 8).
     userspace: bool,
 }
 
@@ -97,7 +100,7 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
     }
 }
 
-/// 实验构建的一个选项；不认识时返回 `false`。
+/// One option of the lab build; returns `false` if it is not recognized.
 #[cfg(feature = "lab")]
 fn parse_lab(lab: &mut LabArgs, name: &str, parser: &mut lexopt::Parser) -> anyhow::Result<bool> {
     use lexopt::ValueExt as _;
@@ -118,8 +121,9 @@ fn parse_lab(lab: &mut LabArgs, name: &str, parser: &mut lexopt::Parser) -> anyh
     Ok(true)
 }
 
-/// `nett keys --dir <目录>`：生成组网私钥和身份私钥（各一个新文件，已存在时不覆盖），输出写进站点描述的
-/// 一行公钥。
+/// `nett keys --dir <directory>`: generates the mesh private key and the identity private key (one
+/// new file each, not overwritten if they exist) and prints the one line of public keys to write
+/// into the site description.
 pub fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut dir = None;
     while let Some(arg) = parser.next()? {
@@ -134,8 +138,9 @@ pub fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 本机的组网公钥与身份公钥。两把私钥都还没有时生成（`0600`，不离开本机）；已有时沿用；只有一把时报错，
-/// 不覆盖任何一把。
+/// This machine's mesh public key and identity public key. Generated when neither private key
+/// exists yet (`0600`, never leaves the machine); reused when both exist; an error when only one
+/// exists, and neither is overwritten.
 pub(crate) fn node_keys(
     dir: &std::path::Path,
 ) -> anyhow::Result<(X25519PublicKey, X25519PublicKey)> {
@@ -158,7 +163,7 @@ pub(crate) fn node_keys(
     }
 }
 
-/// 打印写进站点描述的一行公钥。
+/// Prints the one line of public keys to write into the site description.
 pub(crate) fn print_keys(
     dir: &std::path::Path,
     (mesh, identity): (X25519PublicKey, X25519PublicKey),
@@ -172,8 +177,10 @@ pub(crate) fn print_keys(
     println!("(with --public --ipv4 <address> when other machines connect to it)");
 }
 
-/// 日志写到标准错误（Linux 上由 systemd 收进日志）。macOS 上以 launchd 服务运行时（标准错误不是终端）
-/// 写进系统日志：标准错误的文件只记录启动失败，launchd 每次启动进程时重新打开它，轮转才有效。
+/// Logs go to standard error (collected into the journal by systemd on Linux). When running as a
+/// launchd service on macOS (standard error is not a terminal), they go to the system log: the
+/// standard error file only records startup failures, and launchd reopens it each time it starts
+/// the process, so rotation works.
 pub(crate) fn init_logging() {
     let builder = tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
@@ -199,7 +206,7 @@ mod syslog {
     use nett_mesh::macos::SystemLog;
     use tracing_subscriber::fmt::MakeWriter;
 
-    /// 每条日志一个写入器，丢弃时作为一条系统日志写出。
+    /// One writer per log record; when dropped, it is written out as one system log entry.
     pub struct Syslog(pub Arc<SystemLog>);
 
     pub struct Line {
@@ -249,7 +256,8 @@ mod syslog {
     }
 }
 
-/// 还没有信任存储时，本机的节点 ID 取自期望状态文件：引擎据此确认每份期望状态都是给本机的。
+/// When there is no trust store yet, this machine's node ID is taken from the desired state file:
+/// the engine uses it to confirm that every desired state is meant for this machine.
 fn node_id(config: &Path) -> anyhow::Result<NodeId> {
     let bytes = nett_mesh::config::read_bounded(config, nett_mesh::config::MAX_DESIRED_BYTES)
         .with_context(|| format!("reading {}", config.display()))?
@@ -271,14 +279,15 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let args = parse(parser)?;
     init_logging();
 
-    // 先读信任存储，再读期望状态（design/mesh.md 第 4.2 节）
+    // Read the trust store first, then the desired state (design/mesh.md section 4.2)
     let trust = TrustStore::open(Box::new(DirBackend::new(args.state.clone())));
     let node_id = match trust.node_id() {
         Some(id) => id.clone(),
         None => node_id(&args.config)?,
     };
     let key = PrivateKey::load(&args.key)?;
-    // 先装好信号处理：之后的任何时刻收到 SIGHUP（例如 `systemctl reload`）都只是重新读取，不会结束进程
+    // Install the signal handlers first: a SIGHUP (for example `systemctl reload`) at any later
+    // moment only triggers a re-read and does not end the process
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -315,7 +324,8 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "lab"))]
     let clock = SystemClock;
-    // Linux 默认用内核 WireGuard；macOS 是原生成员，用用户态数据面（design/userspace.md）
+    // Linux uses kernel WireGuard by default; macOS is a native member and uses the userspace data
+    // plane (design/userspace.md)
     #[cfg(all(target_os = "linux", feature = "lab"))]
     let userspace = args.lab.userspace;
     #[cfg(all(target_os = "linux", not(feature = "lab")))]
@@ -343,7 +353,8 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         clock,
     );
     let worker = worker.context("starting the mesh worker thread")?;
-    // 本机接口只是给人和 nett-node 用的：套接字建不起来时记录下来，组网照常（硬性规则 8）
+    // The local interface is only for people and nett-node: if the socket cannot be created, record
+    // it and continue meshing as usual (hard rule 8)
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {

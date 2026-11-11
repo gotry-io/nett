@@ -1,9 +1,12 @@
-//! 以内核 WireGuard 的端口为源端口发送直连探测（design/mesh.md 第 7.1 节），走的就是 WireGuard 自己的
-//! NAT 映射。接收由 nftables 规则只拷贝探测包（[`super::nft`]）。
+//! Sends direct probes with the in-kernel WireGuard port as the source port (design/mesh.md section 7.1),
+//! going through WireGuard's own NAT mapping. Reception is by nftables rules that copy only probe
+//! packets ([`super::nft`]).
 //!
-//! 发送用 `IPPROTO_RAW` 原始套接字，IP 头自己构造：这种套接字只能发送，内核不会把收到的包复制给它；
-//! `IPPROTO_UDP` 的原始套接字则会收到每个进来的 UDP 包的副本，即使从不读取，也拖慢 WireGuard 的收包。
-//! 发出的包照常经过连接跟踪与 NAT。需要 `CAP_NET_RAW`。
+//! Sending uses an `IPPROTO_RAW` raw socket with the IP header constructed by hand: this kind of socket
+//! can only send, and the kernel does not copy received packets to it; a raw socket for `IPPROTO_UDP`
+//! would receive a copy of every incoming UDP packet, and even if never read it would slow down
+//! WireGuard's receive path.
+//! Sent packets pass through connection tracking and NAT as usual. Requires `CAP_NET_RAW`.
 
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
@@ -41,7 +44,7 @@ impl WgPort {
         })
     }
 
-    /// 以 WireGuard 端口为源端口发出一个 UDP 包。
+    /// Sends a UDP packet with the WireGuard port as the source port.
     pub fn send(&self, to: SocketAddr, payload: &[u8]) -> io::Result<()> {
         let src = source_for(to)?;
         let udp = udp_packet(src, to, self.port, payload);
@@ -74,13 +77,14 @@ impl WgPort {
     }
 }
 
-/// IPv4 头（20 字节）加 UDP 包。标识与头校验和留 0，由内核填写。
+/// IPv4 header (20 bytes) plus the UDP packet. The identification and header checksum are left at 0, to be
+/// filled in by the kernel.
 fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, udp: &[u8]) -> Vec<u8> {
     let total = u16::try_from(20 + udp.len()).unwrap_or(u16::MAX);
     let mut p = Vec::with_capacity(20 + udp.len());
     p.extend_from_slice(&[0x45, 0]);
     p.extend_from_slice(&total.to_be_bytes());
-    // 标识 0（内核填写）；不分片标志
+    // Identification 0 (filled in by the kernel); don't-fragment flag
     p.extend_from_slice(&[0, 0, 0x40, 0]);
     p.extend_from_slice(&[TTL, IPPROTO_UDP, 0, 0]);
     p.extend_from_slice(&src.octets());
@@ -89,7 +93,7 @@ fn ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, udp: &[u8]) -> Vec<u8> {
     p
 }
 
-/// IPv6 头（40 字节）加 UDP 包。
+/// IPv6 header (40 bytes) plus the UDP packet.
 fn ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, udp: &[u8]) -> Vec<u8> {
     let len = u16::try_from(udp.len()).unwrap_or(u16::MAX);
     let mut p = Vec::with_capacity(40 + udp.len());
@@ -102,7 +106,8 @@ fn ipv6_packet(src: Ipv6Addr, dst: Ipv6Addr, udp: &[u8]) -> Vec<u8> {
     p
 }
 
-/// 内核发往 `to` 时会选用的源地址：与 WireGuard 自己的包一样按路由选择。
+/// The source address the kernel will pick when sending to `to`: chosen by routing, the same as
+/// WireGuard's own packets.
 fn source_for(to: SocketAddr) -> io::Result<IpAddr> {
     let bind: SocketAddr = match to {
         SocketAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
@@ -113,7 +118,7 @@ fn source_for(to: SocketAddr) -> io::Result<IpAddr> {
     Ok(probe.local_addr()?.ip())
 }
 
-/// UDP 头加负载，校验和按伪首部计算（IPv6 必须有校验和）。
+/// UDP header plus payload, with the checksum computed over the pseudo-header (IPv6 requires a checksum).
 fn udp_packet(src: IpAddr, dst: SocketAddr, sport: u16, payload: &[u8]) -> Vec<u8> {
     let len = UDP_HEADER_LEN + payload.len();
     let len16 = u16::try_from(len).unwrap_or(u16::MAX);
@@ -144,7 +149,7 @@ fn udp_packet(src: IpAddr, dst: SocketAddr, sport: u16, payload: &[u8]) -> Vec<u
         }
     }
     let sum = checksum(&[&pseudo, &packet]);
-    // 校验和为 0 表示"没有校验和"，算出 0 时写作 0xffff
+    // A checksum of 0 means "no checksum"; when the computed value is 0 it is written as 0xffff
     let sum = if sum == 0 { 0xffff } else { sum };
     packet[6..8].copy_from_slice(&sum.to_be_bytes());
     packet
@@ -179,7 +184,7 @@ mod tests {
         let mut pseudo = Vec::new();
         pseudo.extend_from_slice(&[198, 51, 100, 1, 198, 51, 100, 2, 0, 17]);
         pseudo.extend_from_slice(&u16::try_from(packet.len()).expect("len").to_be_bytes());
-        // 带上校验和重新计算，结果为 0 说明校验和正确
+        // Recompute with the checksum included: a result of 0 means the checksum is correct
         assert_eq!(checksum(&[&pseudo, &packet]), 0);
     }
 

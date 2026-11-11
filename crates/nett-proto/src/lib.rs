@@ -1,15 +1,18 @@
-//! nett-node 与 Hub 之间的控制协议（design/protocol.md）：Protobuf 消息、Noise 通道与分片。
+//! The control protocol between nett-node and the Hub (design/protocol.md): Protobuf messages, the
+//! Noise channel and fragmentation.
 
 pub mod api;
 pub mod frame;
 pub mod noise;
 pub mod token;
 
-/// `nett.v1` 的消息，由 `cargo run -p nett-proto-gen` 从 `proto/nett/v1/control.proto` 生成。
+/// Messages of `nett.v1`, generated from `proto/nett/v1/control.proto` by `cargo run -p
+/// nett-proto-gen`.
 #[allow(clippy::all, clippy::pedantic)]
 pub mod v1 {
     include!("gen/nett.v1.rs");
 }
 
-/// 协议版本：主版本不同则不兼容，次版本只做增量修改（protocol.md 第 9 节）。
+/// Protocol version: a different major version is incompatible; minor versions only make
+/// incremental changes (protocol.md section 9).
 pub const PROTOCOL_VERSION: &str = "1.0";

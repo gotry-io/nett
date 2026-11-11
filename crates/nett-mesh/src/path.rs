@@ -1,7 +1,9 @@
-//! 每个对端的选路状态机（design/mesh.md 第 7、8 节，ADR 0021）。在决定方运行（第 8.3 节）；双方都是
-//! `dial-only` 时跟随方也运行，只检测中断（第 8.4 节）。
+//! Per-peer path selection state machine (design/mesh.md sections 7 and 8, ADR 0021). Runs on the decider
+//! (section 8.3); when both sides are `dial-only` the follower runs it too, only detecting outages
+//! (section 8.4).
 //!
-//! 纯逻辑：时间由调用方传入，发送探测和切换 endpoint 以 [`Action`] 交给调用方执行，测试中可以精确模拟时间。
+//! Pure logic: the caller passes in the time, and sending probes and switching the endpoint are handed to
+//! the caller as [`Action`]s, so tests can simulate time precisely.
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -9,84 +11,97 @@ use std::time::{Duration, Instant};
 
 use crate::probe::KeyId;
 
-/// 有流量时隧道内探测的间隔。
+/// Interval of in-tunnel probes when there is traffic.
 pub const TUNNEL_INTERVAL: Duration = Duration::from_secs(1);
-/// 隧道内连续这么多次没有应答，进入疑似故障。
+/// After this many consecutive in-tunnel probes without a reply, enter suspected failure.
 const SUSPECT_AFTER_LOSSES: u32 = 2;
-/// 疑似故障时在当前路径上加探的次数与间隔。
+/// Number and interval of extra probes on the current path during suspected failure.
 const BURST_COUNT: u32 = 3;
 const BURST_SPACING: Duration = Duration::from_millis(200);
-/// 丢包率超过这个比例并持续 [`LOSS_FAILURE_HOLD`]，也判为故障。
+/// A loss rate above this ratio that lasts [`LOSS_FAILURE_HOLD`] is also judged a failure.
 const LOSS_FAILURE_RATE: f64 = 0.30;
 const LOSS_FAILURE_HOLD: Duration = Duration::from_secs(3);
-/// 更优类型的候选连续这么多次有应答，切过去。
+/// A candidate of a better type that replies this many consecutive times is switched to.
 const BETTER_TYPE_SUCCESSES: u32 = 2;
-/// 故障过的路径恢复时的等待时间：10 分钟内第二次故障起，10 秒起按故障次数加倍，最长 5 分钟；
-/// 第一次故障后的恢复不等待（ADR 0021）。
+/// Wait time when a path that has failed recovers: from the second failure within 10 minutes, starts at
+/// 10 seconds and doubles with the number of failures, up to 5 minutes; recovery after the first
+/// failure does not wait (ADR 0021).
 const BACKOFF_BASE: Duration = Duration::from_secs(10);
 const BACKOFF_MAX: Duration = Duration::from_secs(300);
 const FAILURE_MEMORY: Duration = Duration::from_secs(600);
-/// 同类型的更优路径：得分优于当前至少 15% 且至少 10 毫秒，并持续 30 秒。
+/// A better path of the same type: score better than the current one by at least 15% and at least 10 ms,
+/// sustained for 30 seconds.
 const SAME_TYPE_RATIO: f64 = 0.85;
 const SAME_TYPE_MIN_MS: f64 = 10.0;
 const SAME_TYPE_HOLD: Duration = Duration::from_secs(30);
-/// 当前路径丢包明显（最近 [`LOSS_WINDOW`] 次隧道内探测丢失这么多次以上）、候选连续有应答时，
-/// 同类型的更优路径只需持续 [`LOSSY_HOLD`]（ADR 0021）。
+/// When the current path has noticeable loss (at least this many of the last [`LOSS_WINDOW`] in-tunnel
+/// probes were lost) and the candidate replies consecutively, a better path of the same type only needs
+/// to be sustained for [`LOSSY_HOLD`] (ADR 0021).
 const LOSSY_LOSSES: usize = 2;
 const LOSSY_HOLD: Duration = Duration::from_secs(5);
-/// 候选的探测间隔：有流量时每 15 秒；当前路径不是最优类型时，更优类型每 1 秒；当前路径明显变差时，
-/// 同类候选每 3 秒；空闲时每 5 分钟。
+/// Probe interval of candidates: every 15 seconds when there is traffic; when the current path is not of
+/// the best type, every 1 second for better types; when the current path has clearly degraded, every 3
+/// seconds for candidates of the same type; every 5 minutes when idle.
 const CANDIDATE_INTERVAL: Duration = Duration::from_secs(15);
 const BETTER_TYPE_INTERVAL: Duration = Duration::from_secs(1);
 const DEGRADED_INTERVAL: Duration = Duration::from_secs(3);
-/// 从未应答过的候选，第一次探测后的这段时间内与更优类型一样每 1 秒探测：启动时对端可能还没起来，
-/// 不必等 15 秒才得知它能不能通、本机的映射地址是什么（design/mesh.md 第 6.1、7 节）。
+/// A candidate that has never replied is probed every 1 second, like a better type, for this long after
+/// its first probe: at startup the peer may not be up yet, and there is no need to wait 15 seconds to
+/// learn whether it can connect and what this machine's mapped address is (design/mesh.md sections 6.1
+/// and 7).
 const DISCOVERY_WINDOW: Duration = Duration::from_secs(60);
-/// 刚因第一次故障从一条更优类型的路径切走时，这么久之内每 [`FAST_RECOVERY_INTERVAL`] 探测它一次，
-/// 恢复后很快切回（ADR 0021）。
+/// Right after switching away from a better-type path because of a first failure, probe it once every
+/// [`FAST_RECOVERY_INTERVAL`] for this long, so that it switches back quickly after recovery (ADR 0021).
 const FAST_RECOVERY_WINDOW: Duration = Duration::from_secs(15);
 pub const FAST_RECOVERY_INTERVAL: Duration = Duration::from_millis(50);
-/// 重新握手之后等它完成：旧路径的往返时间与新路径往返时间的两倍中较大的一个，加上这个余量，最长
-/// 1 秒（第 8.4 节）；新路径还没有测量时按这个往返时间估计。
+/// Waiting for a re-handshake to complete: the larger of the old path's round-trip time and twice the
+/// new path's round-trip time, plus this margin, at most 1 second (section 8.4); when the new path has
+/// not been measured yet, this round-trip time is used as the estimate.
 const HANDSHAKE_MARGIN: Duration = Duration::from_millis(20);
 const HANDSHAKE_WAIT_MAX: Duration = Duration::from_secs(1);
 const HANDSHAKE_UNKNOWN_RTT_MS: f64 = 150.0;
-/// WireGuard 收到 cookie 应答后带着它重试的时间：`REKEY_TIMEOUT` 5 秒，加最多 1/3 秒的抖动。期间
-/// 不再重新握手、不按疑似故障切走；每换到一条路径最多等这么多轮（第 8.4 节）。
+/// How long WireGuard takes to retry with the cookie after receiving a cookie reply: `REKEY_TIMEOUT` of 5
+/// seconds, plus up to 1/3 second of jitter. During this time no re-handshake is made and no switch
+/// away for suspected failure; after switching to a path, wait at most this many rounds (section 8.4).
 const COOKIE_RETRY: Duration = Duration::from_millis(5_400);
 const COOKIE_ROUNDS: u32 = 2;
-/// 一个候选最多同时等待应答的探测数：高频探测时，上一个探测还没超时就发下一个。
+/// The maximum number of probes of one candidate awaiting replies at the same time: during high-frequency
+/// probing the next probe is sent before the previous one times out.
 const MAX_CANDIDATE_OUTSTANDING: usize = 32;
 const IDLE_CANDIDATE_INTERVAL: Duration = Duration::from_secs(300);
-/// 判断当前路径"明显变慢"的往返时间最小增量（毫秒）。
+/// Minimum increase in round-trip time (milliseconds) for judging the current path "clearly slower".
 const DEGRADED_MIN_MS: f64 = 10.0;
-/// 更优类型的候选第一次有应答之后，确认探测的间隔。
+/// Interval of confirmation probes after a better-type candidate replies for the first time.
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
-/// 候选探测等待应答的上限。
+/// Upper limit on how long a candidate probe waits for a reply.
 const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(1);
-/// 超时的隧道内探测再等这么久：迟到的应答说明路径通、只是在排队，照常计入往返时间；对端的包仍在到达、
-/// 这么久却没有任何应答（只有一个方向通），照常判为故障（design/mesh.md 第 7、8.2 节）。
+/// An in-tunnel probe that timed out waits this long again: a late reply means the path works and is only
+/// queueing, and is counted in the round-trip time as usual; if the peer's packets are still arriving
+/// but there has been no reply at all for this long (only one direction works), it is judged a failure
+/// as usual (design/mesh.md sections 7 and 8.2).
 pub const LATE_HORIZON: Duration = Duration::from_secs(10);
-/// 同时等待迟到应答的隧道内探测数上限：每秒一个加上加探，10 秒内不到 20 个。
+/// Upper limit on in-tunnel probes waiting for late replies at the same time: one per second plus extra
+/// probes, fewer than 20 within 10 seconds.
 const MAX_LATE: usize = 32;
-/// 丢包率的滑动窗口（探测次数）。
+/// Sliding window of the loss rate (number of probes).
 const LOSS_WINDOW: usize = 10;
-/// 往返时间指数滑动平均的权重。
+/// Weight of the exponential moving average of the round-trip time.
 const RTT_ALPHA: f64 = 0.25;
-/// 得分中的丢包惩罚：每 1% 丢包相当于 5 毫秒。
+/// Loss penalty in the score: every 1% of loss is equivalent to 5 ms.
 const LOSS_PENALTY_MS: f64 = 500.0;
-/// 路径类型偏好与传输惩罚（毫秒），越小越优（第 8.1 节）：TLS 在经中继的偏好之上再加 20 毫秒。
+/// Path type preference and transport penalty (milliseconds), smaller is better (section 8.1): TLS adds
+/// another 20 ms on top of the relay preference.
 const RELAY_PENALTY_MS: f64 = 10.0;
 const TLS_PENALTY_MS: f64 = 20.0;
 
-/// 路径类型，从优到劣（第 8.2 节）：同一路径上 UDP 优于 TLS。
+/// Path types, from best to worst (section 8.2): on the same path UDP is better than TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Lan,
     Direct,
     Relay,
-    /// 经中继的 TLS 传输（design/mesh.md 第 5.3 节）。
+    /// TLS transport via a relay (design/mesh.md section 5.3).
     RelayTls,
 }
 
@@ -96,7 +111,7 @@ impl PathKind {
     }
 }
 
-/// 一条路径在 WireGuard 中对应的 endpoint。
+/// The endpoint in WireGuard that corresponds to a path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Route {
     Direct(SocketAddr),
@@ -111,7 +126,7 @@ impl Route {
     }
 }
 
-/// 往返时间、丢包率与抖动。
+/// Round-trip time, loss rate and jitter.
 #[derive(Debug, Clone, Default)]
 pub struct PathStats {
     rtt_ms: Option<f64>,
@@ -122,7 +137,7 @@ pub struct PathStats {
 }
 
 impl PathStats {
-    /// 只带往返时间估计的新统计。
+    /// New statistics that carry only a round-trip time estimate.
     fn seeded(rtt_ms: Option<f64>) -> Self {
         Self {
             rtt_ms,
@@ -133,7 +148,8 @@ impl PathStats {
     pub fn record_reply(&mut self, rtt: Duration) {
         let ms = rtt.as_secs_f64() * 1000.0;
         self.rtt_ms = Some(match self.rtt_ms {
-            // 与平均值相差一倍以上：路径变了，直接采用新值，不等平均值慢慢跟上
+            // Differs from the average by more than a factor of two: the path has changed, so adopt the new value
+            // directly instead of waiting for the average to catch up slowly
             Some(prev) if ms >= 2.0 * prev || ms <= prev / 2.0 => ms,
             Some(prev) => {
                 self.jitter_ms += RTT_ALPHA * ((ms - prev).abs() - self.jitter_ms);
@@ -151,7 +167,8 @@ impl PathStats {
         self.record_miss();
     }
 
-    /// 超时未应答：计入连续丢失（用来进入疑似故障），丢包率等确定丢失后再计（design/mesh.md 第 7 节）。
+    /// Timed out without a reply: counted into consecutive losses (used to enter suspected failure); the
+    /// loss rate counts it only once the loss is certain (design/mesh.md section 7).
     fn record_miss(&mut self) {
         self.consecutive_losses += 1;
         self.consecutive_successes = 0;
@@ -180,12 +197,13 @@ impl PathStats {
         self.jitter_ms
     }
 
-    /// 还没有任何一次探测有结果时为 `None`。
+    /// `None` when no probe has produced a result yet.
     pub fn measured_loss(&self) -> Option<f64> {
         (!self.window.is_empty()).then(|| self.loss_rate())
     }
 
-    /// 得分（毫秒，越小越好）：往返时间 + 丢包惩罚 + 抖动 + 路径类型偏好（第 8.1 节）。
+    /// Score (milliseconds, smaller is better): round-trip time + loss penalty + jitter + path type
+    /// preference (section 8.1).
     pub fn score(&self, kind: PathKind) -> Option<f64> {
         let type_penalty = match kind {
             PathKind::Lan | PathKind::Direct => 0.0,
@@ -196,7 +214,8 @@ impl PathStats {
             .map(|rtt| rtt + self.loss_rate() * LOSS_PENALTY_MS + self.jitter_ms + type_penalty)
     }
 
-    /// 等待应答的上限：往返时间的两倍加 100 毫秒，限制在 300 毫秒到 1 秒之间。
+    /// Upper limit of waiting for a reply: twice the round-trip time plus 100 ms, limited to between 300 ms
+    /// and 1 second.
     fn timeout(&self) -> Duration {
         let ms = self
             .rtt_ms
@@ -211,19 +230,21 @@ struct Candidate {
     route: Route,
     kind: PathKind,
     stats: PathStats,
-    /// 等待应答的探测，按发出的先后排列。
+    /// Probes awaiting replies, in the order they were sent.
     outstanding: VecDeque<(u32, Instant)>,
     last_probe: Option<Instant>,
     last_reply: Option<Instant>,
-    /// 作为当前路径时故障的时刻，用于恢复时的退避。
+    /// The moment of failure while this was the current path, used for recovery backoff.
     failures: VecDeque<Instant>,
-    /// 最近一次作为当前路径故障而被切走的时刻（不论是否计入退避）。
+    /// The moment this was most recently switched away from after failing as the current path (whether or
+    /// not it counted toward backoff).
     left_at: Option<Instant>,
-    /// 第一次探测的时刻。
+    /// The moment of the first probe.
     first_probe: Option<Instant>,
-    /// 最近一次连续有应答的开始时刻。
+    /// The moment the most recent run of consecutive replies began.
     healthy_since: Option<Instant>,
-    /// 已经用过一次"从未连通过就失败不算故障"。
+    /// The "failure without ever having connected does not count as a failure" allowance has already been
+    /// used once.
     grace_used: bool,
 }
 
@@ -245,30 +266,34 @@ impl Candidate {
     }
 }
 
-/// 切换的原因，写入路径切换事件。
+/// Reason for a switch, written into the path switch event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SwitchReason {
-    /// 疑似故障后加探全部丢失。
+    /// All extra probes were lost after suspected failure.
     Unreachable,
-    /// 丢包率持续过高。
+    /// The loss rate stayed too high.
     HighLoss,
-    /// 更优类型的路径恢复。
+    /// A path of a better type recovered.
     BetterType,
-    /// 同类型的更优路径。
+    /// A better path of the same type.
     BetterScore,
-    /// 当前中继仍能应答探测而隧道不通：它丢了这条连接的索引，在同一中继上重新握手（第 8.4 节）。
+    /// The current relay still replies to probes but the tunnel is down: it lost the index of this connection,
+    /// so re-handshake on the same relay (section 8.4).
     RelayLostSession,
-    /// 重新握手之后到期仍没有完成（例如对端的应答被旧路径上迟到的包带去了旧中继）：在同一中继上
-    /// 再重新握手一次（第 8.4 节）。
+    /// The handshake still has not completed when due after a re-handshake (for example the peer's reply was
+    /// carried to the old relay by a late packet on the old path): re-handshake once more on the same
+    /// relay (section 8.4).
     HandshakeIncomplete,
-    /// 双方都是 `dial-only`：跟随方按决定方经隧道发来的提议切换（第 8.4 节）。
+    /// Both sides are `dial-only`: the follower switches according to the proposal the decider sent through
+    /// the tunnel (section 8.4).
     Proposed,
-    /// 双方都是 `dial-only`、当前路径中断：按时间片（时钟不可信时按随机间隔）轮换中继（第 8.4 节）。
+    /// Both sides are `dial-only` and the current path is broken: relays are rotated by time slice (by random
+    /// interval when the clock is not trusted) (section 8.4).
     Rotation,
 }
 
-/// 一条候选路径在本机状态中的样子（design/status.md 第 6 节）。
+/// How a candidate path appears in local status (design/status.md section 6).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CandidateView {
     pub route: Route,
@@ -276,30 +301,32 @@ pub struct CandidateView {
     pub rtt_ms: Option<f64>,
     pub loss: Option<f64>,
     pub state: CandidateState,
-    /// 打洞打通的直连（design/mesh.md 第 6.1 节）。
+    /// A direct path established by hole punching (design/mesh.md section 6.1).
     pub punched: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateState {
     Current,
-    /// 最近的探测有应答。
+    /// The most recent probe was answered.
     Ok,
-    /// 最近的探测丢失，或故障之后还在退避。
+    /// The most recent probe was lost, or it is still in backoff after a failure.
     Failing,
-    /// 还没有探测结果。
+    /// No probe result yet.
     Untested,
 }
 
-/// 这一端在这一对成员中的角色（第 8.3、8.4 节）。
+/// The role of this side in this pair of members (sections 8.3 and 8.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    /// 决定方，对端经漫游跟随。
+    /// The decider; the peer follows through roaming.
     Decide,
-    /// 双方都是 `dial-only` 时的决定方：择优的切换先经隧道提议（[`Action::Propose`]），中断时报告
-    /// [`Action::Lost`]。
+    /// The decider when both sides are `dial-only`: a switch chosen for being better is first proposed
+    /// through the tunnel ([`Action::Propose`]); on an outage it reports
+    /// [`Action::Lost`].
     DecideTogether,
-    /// 双方都是 `dial-only` 时的跟随方：只检测中断，不择优、不探测候选。
+    /// The follower when both sides are `dial-only`: only detects outages, does not choose a better path or
+    /// probe candidates.
     FollowTogether,
 }
 
@@ -311,41 +338,45 @@ impl Role {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// 经当前隧道发一个隧道内探测。
+    /// Sends an in-tunnel probe through the current tunnel.
     TunnelProbe { seq: u32 },
-    /// 探测一个候选（直连：从 WireGuard 端口；中继：发往中继）。
+    /// Probes a candidate (direct: from the WireGuard port; relay: sent to the relay).
     CandidateProbe {
         index: usize,
         route: Route,
         seq: u32,
     },
-    /// 把对端的 endpoint 改为 `to`；切换到中继时先删除对端再加回，触发经新中继的握手（第 8.4 节）。
+    /// Changes the peer's endpoint to `to`; when switching to a relay, the peer is deleted and added back,
+    /// triggering a handshake through the new relay (section 8.4).
     Switch {
         to: Route,
         rehandshake: bool,
         reason: SwitchReason,
     },
-    /// 双方都是 `dial-only` 时的决定方：要切到第 `index` 个候选，先经隧道提议，对端确认后由调用方
-    /// [`PeerPaths::adopt`]（第 8.4 节）。在此之前不再另行择优。
+    /// The decider when both sides are `dial-only`: switch to candidate `index`; first proposed through the
+    /// tunnel, and after the peer confirms the caller calls
+    /// [`PeerPaths::adopt`] (section 8.4). No other better-path selection happens before that.
     Propose { index: usize, reason: SwitchReason },
-    /// 双方都是 `dial-only`：当前路径中断，要两端一起恢复（第 8.4 节），由调用方决定去哪里。
+    /// Both sides are `dial-only`: the current path is broken and both ends must recover together (section
+    /// 8.4); the caller decides where to go.
     Lost,
 }
 
-/// 重新握手之后等待它完成（第 8.4 节）。
+/// Waiting for a re-handshake to complete (section 8.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct HandshakeCheck {
     deadline: Instant,
-    /// 已经因为没完成而再握手过一次。
+    /// Has already re-handshaked once because it did not complete.
     retried: bool,
-    /// 对端回了 cookie 应答，在等 WireGuard 带着它重试。
+    /// The peer replied with a cookie reply; waiting for WireGuard to retry with it.
     cookie: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Phase {
     Normal,
-    /// 疑似故障：已经发出的加探次数，下一次加探的时刻，开始时刻。
+    /// Suspected failure: the number of extra probes already sent, the time of the next extra probe, and the
+    /// start time.
     Suspect {
         sent: u32,
         next: Instant,
@@ -353,7 +384,7 @@ enum Phase {
     },
 }
 
-/// 一个对端的选路状态。
+/// Path selection state of one peer.
 #[derive(Debug, Clone)]
 pub struct PeerPaths {
     role: Role,
@@ -361,37 +392,41 @@ pub struct PeerPaths {
     current: usize,
     tunnel: PathStats,
     tunnel_outstanding: VecDeque<(u32, Instant)>,
-    /// 已经超时、还在等迟到应答的隧道内探测（[`LATE_HORIZON`]）。
+    /// In-tunnel probes that have timed out and are still waiting for late replies ([`LATE_HORIZON`]).
     tunnel_late: VecDeque<(u32, Instant)>,
-    /// 当前路径上最近一次收到隧道内应答（包括迟到的）。
+    /// The most recent in-tunnel reply received on the current path (including late ones).
     last_tunnel_reply: Option<Instant>,
-    /// 当前路径上最近一次收到迟到的隧道内应答：在排队。
+    /// The most recent late in-tunnel reply received on the current path: it is queueing.
     last_late_reply: Option<Instant>,
-    /// 最近一次看到对端的包到达（WireGuard 对它的接收字节数有变化）。
+    /// The most recent time a packet from the peer was seen arriving (WireGuard's received byte count for it
+    /// changed).
     last_rx: Option<Instant>,
     last_tunnel_probe: Option<Instant>,
     phase: Phase,
-    /// 当前路径切换以来收到过隧道内应答。
+    /// An in-tunnel reply has been received since switching to the current path.
     tunnel_established: bool,
-    /// 切到当前路径以来隧道内往返时间的最好值（毫秒），用来判断它是否明显变慢。
+    /// The best in-tunnel round-trip time (milliseconds) since switching to the current path, used to judge
+    /// whether it has become clearly slower.
     best_rtt_ms: Option<f64>,
-    /// 这次故障中已经在同一中继上重新握手过一次。
+    /// A re-handshake on the same relay has already been made during this failure.
     rehandshake_tried: bool,
-    /// 重新握手之后，等待确认它完成。
+    /// After a re-handshake, waiting to confirm that it completes.
     handshake: Option<HandshakeCheck>,
-    /// 换到当前路径以来，因 cookie 应答等过几轮。
+    /// The number of rounds waited because of a cookie reply since switching to the current path.
     cookie_rounds: u32,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
-    /// 两端一起切换的过程中（等待确认、轮换中）：只检测中断，不另行择优。
+    /// During a two-ended switchover (waiting for confirmation, rotating): only detects outages, does not
+    /// choose a better path separately.
     hold: bool,
-    /// 打洞打通的直连候选（design/mesh.md 第 6.1 节），排在配置的候选之后。
+    /// The direct candidate established by hole punching (design/mesh.md section 6.1), ordered after the
+    /// configured candidates.
     punched: Option<usize>,
     seq: u32,
 }
 
 impl PeerPaths {
-    /// `routes` 按 Hub 给出的顺序排列；初始路径取第一条。
+    /// `routes` is ordered as given by the Hub; the initial path is the first one.
     pub fn new(routes: Vec<(Route, PathKind)>, role: Role) -> Option<Self> {
         if routes.is_empty() {
             return None;
@@ -423,7 +458,7 @@ impl PeerPaths {
             seq: 0,
         })
         .map(|mut paths| {
-            // 两端一起切换时，两端从同一个中继开始
+            // During a two-ended switchover, both ends start from the same relay
             if role.together()
                 && let Some(first) = paths.relays_in_order().first()
             {
@@ -445,12 +480,14 @@ impl PeerPaths {
         self.role
     }
 
-    /// 切到当前路径以来收到过隧道内应答：本端发出的探测得到了对端的应答，双向都通。
+    /// An in-tunnel reply has been received since switching to the current path: a probe sent by this end got
+    /// a reply from the peer, so both directions work.
     pub fn tunnel_established(&self) -> bool {
         self.tunnel_established
     }
 
-    /// 打洞打通的直连：作为一条直连候选加入（已有时换成新的地址，测量从头开始），返回它的序号。
+    /// A direct path established by hole punching: added as a direct candidate (when one already exists it is
+    /// replaced with the new address and measurement starts over), returns its index.
     pub fn set_punched(&mut self, endpoint: SocketAddr) -> usize {
         let route = Route::Direct(endpoint);
         if let Some(i) = self.punched {
@@ -471,7 +508,7 @@ impl PeerPaths {
         self.punched
     }
 
-    /// 各候选路径的测量与状态，当前路径在内（design/status.md 第 6 节）。
+    /// Measurements and state of each candidate path, including the current one (design/status.md section 6).
     pub fn candidate_views(&self, now: Instant) -> Vec<CandidateView> {
         self.candidates
             .iter()
@@ -500,14 +537,15 @@ impl PeerPaths {
             .collect()
     }
 
-    /// 经中继 `relay` 的候选。
+    /// Candidates via relay `relay`.
     pub fn relay_index(&self, relay: KeyId) -> Option<usize> {
         self.candidates
             .iter()
             .position(|c| matches!(c.route, Route::Relay { relay: r, .. } if r == relay))
     }
 
-    /// 经中继的候选按中继编号排序：两端各自的候选列表顺序可能不同，排序后是同一份（第 8.4 节）。
+    /// Candidates via relays are sorted by relay number: the two ends' candidate lists may be in different
+    /// orders, and after sorting they are the same (section 8.4).
     pub fn relays_in_order(&self) -> Vec<usize> {
         let mut relays: Vec<(KeyId, usize)> = self
             .candidates
@@ -522,15 +560,17 @@ impl PeerPaths {
         relays.into_iter().map(|(_, i)| i).collect()
     }
 
-    /// 由调用方决定的切换（两端一起切换时）：切到第 `index` 个候选；经中继时总是重新握手，
-    /// 即使仍是当前中继，好让两端都在它上面发起新的握手。
+    /// A switch decided by the caller (during a two-ended switchover): switch to candidate `index`; via a
+    /// relay it always re-handshakes, even if it is still the current relay, so that both ends initiate a
+    /// new handshake on it.
     pub fn adopt(&mut self, index: usize, reason: SwitchReason, now: Instant) -> Option<Action> {
         self.candidates.get(index)?;
         let old_rtt_ms = self.tunnel.rtt_ms();
         let Action::Switch { to, .. } = self.switch_to(index, reason, now) else {
             return None;
         };
-        // 立即发一个隧道内探测：它触发新的握手，也尽快确认新路径
+        // Send an in-tunnel probe immediately: it triggers a new handshake and also confirms the new path as
+        // soon as possible
         self.last_tunnel_probe = None;
         let rehandshake = matches!(to, Route::Relay { .. });
         if rehandshake {
@@ -543,8 +583,10 @@ impl PeerPaths {
         })
     }
 
-    /// WireGuard 报告这个对端在重新握手之后完成了握手（调用方每次读取状态都会报告，只有在等待确认时才
-    /// 起作用）。等待期间隧道内探测必然丢失，不算作这条路径的故障：从头检测，并立即探测一次确认新路径。
+    /// WireGuard reports that this peer completed a handshake after the re-handshake (the caller reports it
+    /// on every status read, and it only takes effect while waiting for confirmation). In-tunnel probes are
+    /// bound to be lost during the wait and do not count as a failure of this path: detection starts over,
+    /// and one probe is sent immediately to confirm the new path.
     pub fn on_handshake(&mut self) {
         if self.handshake.take().is_none() {
             return;
@@ -557,13 +599,16 @@ impl PeerPaths {
         self.last_tunnel_probe = None;
     }
 
-    /// WireGuard 对这个对端的接收字节数有变化：对端的包到达了（调用方每次读取状态时报告）。
+    /// WireGuard's received byte count for this peer changed: a packet from the peer arrived (the caller
+    /// reports it on every status read).
     pub fn on_receive(&mut self, now: Instant) {
         self.last_rx = Some(now);
     }
 
-    /// 从当前路径收到了对端的 cookie 应答，而隧道还没建立：对端处于负载状态，WireGuard 会在约 5 秒后
-    /// 带着 cookie 重试。重新握手会丢掉 cookie，所以等这次重试，期间也不按疑似故障切走（第 8.4 节）。
+    /// A cookie reply from the peer was received on the current path while the tunnel is not yet established:
+    /// the peer is under load, and WireGuard will retry with the cookie after about 5 seconds. A
+    /// re-handshake would discard the cookie, so wait for this retry, and during that time do not switch
+    /// away for suspected failure (section 8.4).
     pub fn on_cookie(&mut self, now: Instant) {
         if self.tunnel_established || self.cookie_rounds >= COOKIE_ROUNDS {
             return;
@@ -578,19 +623,20 @@ impl PeerPaths {
         });
     }
 
-    /// 在等 WireGuard 带着 cookie 重试。
+    /// Waiting for WireGuard to retry with the cookie.
     fn awaiting_cookie_retry(&self, now: Instant) -> bool {
         self.handshake.is_some_and(|h| h.cookie && now < h.deadline)
     }
 
-    /// 重新握手之后等待确认的期限已到：调用方先读取 WireGuard 的握手状态（[`Self::on_handshake`]），
-    /// 再推进。
+    /// The deadline for waiting for confirmation after a re-handshake has arrived: the caller first reads
+    /// WireGuard's handshake state ([`Self::on_handshake`]), then advances.
     pub fn handshake_due(&self, now: Instant) -> bool {
         self.handshake.is_some_and(|h| now >= h.deadline)
     }
 
-    /// 刚重新握手（`old_rtt_ms` 是切换之前那条路径的往返时间）：等旧路径上的包都到达、新路径完成一次
-    /// 握手往返之后确认（第 8.4 节）。
+    /// Just re-handshaked (`old_rtt_ms` is the round-trip time of the path before the switch): confirm once
+    /// packets on the old path have all arrived and the new path has completed one handshake round trip
+    /// (section 8.4).
     fn expect_handshake(&mut self, now: Instant, old_rtt_ms: Option<f64>) {
         let new_ms = self.tunnel.rtt_ms().unwrap_or(HANDSHAKE_UNKNOWN_RTT_MS);
         let wait_ms = old_rtt_ms.unwrap_or(0.0).max(2.0 * new_ms);
@@ -603,8 +649,9 @@ impl PeerPaths {
         });
     }
 
-    /// 重新握手到期还没完成：这个对端有流量时在同一中继上再握手一次，这时旧路径上的包已经到完；
-    /// 再不成就交给疑似故障的检测（第 8.4 节）。
+    /// The re-handshake is due and has not completed: when this peer has traffic, re-handshake once more on
+    /// the same relay, by which time the packets on the old path have all arrived; if that still does not
+    /// work, leave it to suspected failure detection (section 8.4).
     fn check_handshake(&mut self, now: Instant, active: bool) -> Option<Action> {
         let check = self.handshake?;
         if now < check.deadline {
@@ -630,7 +677,8 @@ impl PeerPaths {
         })
     }
 
-    /// 两端一起切换的过程中暂停择优（[`Action::Propose`] 之后自动暂停）。
+    /// Pauses better-path selection during a two-ended switchover (paused automatically after
+    /// [`Action::Propose`]).
     pub fn set_hold(&mut self, hold: bool) {
         self.hold = hold;
     }
@@ -645,7 +693,8 @@ impl PeerPaths {
     }
 
     pub fn on_tunnel_reply(&mut self, seq: u32, now: Instant) {
-        // 更早发出、还没有应答的探测（包括超时之后还在等的）已经被这个应答越过，算作丢失
+        // Probes sent earlier that have no reply yet (including those still waited for after timing out) have
+        // been overtaken by this reply and count as lost
         let sent = if let Some(pos) = self.tunnel_outstanding.iter().position(|(s, _)| *s == seq) {
             for _ in 0..self.tunnel_late.len() {
                 self.tunnel.push(false);
@@ -657,7 +706,7 @@ impl PeerPaths {
             }
             self.tunnel_outstanding.pop_front()
         } else if let Some(pos) = self.tunnel_late.iter().position(|(s, _)| *s == seq) {
-            // 迟到的应答：路径通，只是在排队（design/mesh.md 第 7 节）
+            // A late reply: the path works and is only queueing (design/mesh.md section 7)
             for _ in 0..pos {
                 self.tunnel_late.pop_front();
                 self.tunnel.push(false);
@@ -677,13 +726,14 @@ impl PeerPaths {
         self.best_rtt_ms = Some(self.best_rtt_ms.map_or(ms, |b| b.min(ms)));
         self.tunnel_established = true;
         self.rehandshake_tried = false;
-        // 隧道内应答说明握手已经完成
+        // An in-tunnel reply means the handshake has completed
         self.handshake = None;
         self.cookie_rounds = 0;
         self.phase = Phase::Normal;
     }
 
-    /// 候选的探测结果；`extra` 是经中继路径另一段的往返时间与丢包率（对端在隧道内应答中带来的）。
+    /// Result of a candidate probe; `extra` is the round-trip time and loss rate of the other leg of a relay
+    /// path (carried by the peer in the in-tunnel reply).
     pub fn on_candidate_reply(
         &mut self,
         index: usize,
@@ -697,7 +747,8 @@ impl PeerPaths {
         let Some(pos) = c.outstanding.iter().position(|(s, _)| *s == seq) else {
             return;
         };
-        // 更早发出、还没有应答的探测已经被这个应答越过，算作丢失；之后不会再超时打断连续的应答
+        // Probes sent earlier that have no reply yet have been overtaken by this reply and count as lost; they
+        // will not later time out and interrupt the run of consecutive replies
         for _ in 0..pos {
             c.outstanding.pop_front();
             c.stats.record_loss();
@@ -705,7 +756,7 @@ impl PeerPaths {
         let (_, sent) = c.outstanding.pop_front().expect("position is in range");
         let (extra_rtt, extra_loss) = extra.unwrap_or((Duration::ZERO, 0.0));
         if extra_loss >= 1.0 {
-            // 另一段不通：这条经中继的路径整体不通
+            // The other leg is down: the relay path as a whole is down
             c.stats.record_loss();
             c.healthy_since = None;
             return;
@@ -716,7 +767,7 @@ impl PeerPaths {
         c.healthy_since.get_or_insert(now);
     }
 
-    /// 每 100 毫秒左右调用一次。`active` 表示最近 30 秒内这个对端有流量。
+    /// Called about every 100 ms. `active` means this peer has had traffic in the last 30 seconds.
     pub fn tick(&mut self, now: Instant, active: bool) -> Vec<Action> {
         let mut actions = Vec::new();
         self.expire(now);
@@ -743,7 +794,7 @@ impl PeerPaths {
             Phase::Suspect { .. } => {}
             Phase::Normal => {
                 if self.tunnel.consecutive_losses >= SUSPECT_AFTER_LOSSES {
-                    // 疑似故障：立即加探，同时探测全部候选
+                    // Suspected failure: send extra probes immediately and probe all candidates at the same time
                     let seq = self.send_tunnel(now);
                     actions.push(Action::TunnelProbe { seq });
                     self.phase = Phase::Suspect {
@@ -751,7 +802,8 @@ impl PeerPaths {
                         next: now + BURST_SPACING,
                         since: now,
                     };
-                    // 当前路径经中继时也探测这个中继：它若还能应答，说明是它丢了这条连接的索引
+                    // When the current path is via a relay, also probe that relay: if it can still reply, it lost the index
+                    // of this connection
                     let current_is_relay = self.current_kind().via_relay();
                     for index in 0..self.candidates.len() {
                         if self.role != Role::FollowTogether
@@ -773,7 +825,8 @@ impl PeerPaths {
                 if self.role == Role::FollowTogether {
                     return actions;
                 }
-                // 丢包率刚开始过高时，同疑似故障一样立即探测全部候选
+                // When the loss rate has just become too high, probe all candidates immediately, as with suspected
+                // failure
                 let lossy = self.high_loss_since == Some(now);
                 for index in 0..self.candidates.len() {
                     if index != self.current && (lossy || self.candidate_due(index, now, active)) {
@@ -781,7 +834,8 @@ impl PeerPaths {
                         actions.extend(self.probe_candidate(index, now, stack));
                     }
                 }
-                // 当前路径是直连时也从 WireGuard 端口探测它：应答带回本机的映射地址（design/mesh.md 第 6.1 节）
+                // When the current path is direct, also probe it from the WireGuard port: the reply carries back this
+                // machine's mapped address (design/mesh.md section 6.1)
                 if matches!(self.current_kind(), PathKind::Lan | PathKind::Direct)
                     && self.candidate_due(self.current, now, active)
                 {
@@ -804,7 +858,7 @@ impl PeerPaths {
         seq
     }
 
-    /// `stack`：上一个探测还在等待应答时也发出（高频探测）。
+    /// `stack`: also send when the previous probe is still waiting for a reply (high-frequency probing).
     fn probe_candidate(&mut self, index: usize, now: Instant, stack: bool) -> Option<Action> {
         let seq = self.next_seq();
         let c = &mut self.candidates[index];
@@ -822,8 +876,9 @@ impl PeerPaths {
         })
     }
 
-    /// 当前路径明显变差：往返时间比切到它以来的最好值翻倍且至少多 10 毫秒，或丢包明显
-    /// （design/mesh.md 第 7 节）。
+    /// The current path has clearly degraded: the round-trip time has doubled relative to the best value
+    /// since switching to it and is at least 10 ms more, or the loss is noticeable
+    /// (design/mesh.md section 7).
     fn degraded(&self) -> bool {
         let slower = match (self.tunnel.rtt_ms(), self.best_rtt_ms) {
             (Some(rtt), Some(best)) => rtt >= 2.0 * best && rtt >= best + DEGRADED_MIN_MS,
@@ -832,12 +887,14 @@ impl PeerPaths {
         slower || self.lossy()
     }
 
-    /// 最近 10 次隧道内探测丢失 2 次以上：低于判为故障的丢包率，但已经明显（ADR 0021）。
+    /// At least 2 of the last 10 in-tunnel probes were lost: below the loss rate judged a failure, but
+    /// already noticeable (ADR 0021).
     fn lossy(&self) -> bool {
         self.tunnel.window.iter().filter(|ok| !**ok).count() >= LOSSY_LOSSES
     }
 
-    /// 刚因第一次故障从这条更优类型的路径切走，还在高频探测的时间内（ADR 0021）。
+    /// Just switched away from this better-type path because of a first failure, and still within the
+    /// high-frequency probing time (ADR 0021).
     fn fast_recovery(&self, index: usize, now: Instant) -> bool {
         let c = &self.candidates[index];
         c.kind < self.current_kind()
@@ -846,8 +903,9 @@ impl PeerPaths {
             && backoff(&c.failures, now).is_zero()
     }
 
-    /// 有候选在高频探测，或在等待重新握手完成（等 cookie 重试的几秒不算）：调用方要推进得比
-    /// [`FAST_RECOVERY_INTERVAL`] 更密。
+    /// A candidate is being probed at high frequency, or waiting for a re-handshake to complete (the few
+    /// seconds of waiting for the cookie retry do not count): the caller must advance more densely than
+    /// [`FAST_RECOVERY_INTERVAL`].
     pub fn needs_fine_ticks(&self, now: Instant) -> bool {
         self.handshake.is_some_and(|h| !h.cookie)
             || (0..self.candidates.len()).any(|i| i != self.current && self.fast_recovery(i, now))
@@ -860,14 +918,16 @@ impl PeerPaths {
         let interval = if !active {
             IDLE_CANDIDATE_INTERVAL
         } else if self.fast_recovery(index, now) {
-            // 第一次应答之后立即确认：应答晚于最近一次探测，说明确认还没有发出
+            // Confirm immediately after the first reply: the reply is later than the most recent probe, which means
+            // the confirmation has not been sent yet
             if first_reply && c.last_reply >= c.last_probe {
                 Duration::ZERO
             } else {
                 FAST_RECOVERY_INTERVAL
             }
         } else if better && first_reply {
-            // 更优类型的候选刚有一次应答：很快再探测一次确认，不等下一个间隔
+            // A better-type candidate just got a reply: probe once more soon to confirm, without waiting for the
+            // next interval
             CONFIRM_INTERVAL
         } else if better
             || (c.last_reply.is_none()
@@ -884,8 +944,9 @@ impl PeerPaths {
             .is_none_or(|t| now.saturating_duration_since(t) >= interval)
     }
 
-    /// 超时未应答的候选探测记为丢失。隧道内探测超时只计入连续丢失（用来进入疑似故障），再等
-    /// [`LATE_HORIZON`] 仍没有应答才记为丢失（design/mesh.md 第 7 节）。
+    /// A candidate probe that timed out without a reply is recorded as lost. An in-tunnel probe timeout only
+    /// counts toward consecutive losses (used to enter suspected failure), and is recorded as lost only if
+    /// there is still no reply after another [`LATE_HORIZON`] (design/mesh.md section 7).
     fn expire(&mut self, now: Instant) {
         let timeout = self.tunnel.timeout();
         while let Some(&(seq, sent)) = self.tunnel_outstanding.front() {
@@ -920,23 +981,27 @@ impl PeerPaths {
     }
 
     fn check_failure(&mut self, now: Instant) -> Option<Action> {
-        // 对端回了 cookie：路径是通的，等 WireGuard 带着 cookie 重试（第 8.4 节）
+        // The peer replied with a cookie: the path works; wait for WireGuard to retry with the cookie
+        // (section 8.4)
         if self.awaiting_cookie_retry(now) {
             return None;
         }
-        // 加探全部丢失：最后一次加探也已超时，且期间没有任何应答
+        // All extra probes were lost: the last extra probe has also timed out, and there was no reply at all
+        // during that time
         if let Phase::Suspect { sent, since, .. } = self.phase
             && sent >= BURST_COUNT
             && self.tunnel_outstanding.is_empty()
         {
             if self.queueing(since, now) {
-                // 路径通，只是在排队：所有路径都要过同一个瓶颈，切换和重新握手都无济于事（第 8.2 节）
+                // The path works and is only queueing: all paths pass through the same bottleneck, so neither
+                // switching nor re-handshaking helps (section 8.2)
                 self.phase = Phase::Normal;
                 self.tunnel.consecutive_losses = 0;
                 return None;
             }
             if self.role.together() {
-                // 两端一起恢复：记下这次故障，交给调用方；之后重新开始一轮检测
+                // Recover together at both ends: record this failure and hand it to the caller; afterwards start a new
+                // round of detection
                 self.record_failure(now);
                 self.reset_tunnel(self.tunnel.rtt_ms);
                 return Some(Action::Lost);
@@ -962,18 +1027,21 @@ impl PeerPaths {
             }
             let action = self.fail_over(now, since, SwitchReason::Unreachable);
             if action.is_none() {
-                // 没有刚测通的候选：保持现状，重新开始一轮疑似故障，再探测全部候选
+                // No candidate has just been confirmed working: keep the current state, start a new round of suspected
+                // failure, and probe all candidates again
                 self.phase = Phase::Normal;
                 self.tunnel.consecutive_losses = SUSPECT_AFTER_LOSSES;
             }
             return action;
         }
-        // 丢包率持续过高：从开始过高时起测到的候选里选（跟随方交给决定方）
+        // The loss rate stayed too high: choose from the candidates measured since it began to be too high (the
+        // follower hands it to the decider)
         if self.role == Role::FollowTogether || self.hold {
             return None;
         }
-        // 排队时的丢包是队列满了被丢弃：换一条要过同一瓶颈的路径无济于事；没有共享瓶颈的路径往返时间
-        // 短得多，按得分切过去（第 8.2 节）
+        // Loss while queueing is the queue being full and dropping: switching to a path that passes through the
+        // same bottleneck does not help; a path without a shared bottleneck has a much shorter round-trip
+        // time, and is switched to by score (section 8.2)
         let queueing = self
             .last_late_reply
             .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON);
@@ -991,8 +1059,10 @@ impl PeerPaths {
         None
     }
 
-    /// 疑似故障以来对端的包仍在到达，且 [`LATE_HORIZON`] 内收到过隧道内应答（包括迟到的）：路径通，
-    /// 只是在排队。完全断开时对端的包也到不了；只有一个方向通时，最多晚这么久判为故障。
+    /// Since suspected failure the peer's packets are still arriving, and an in-tunnel reply (including late
+    /// ones) was received within [`LATE_HORIZON`]: the path works and is only queueing. When completely
+    /// down, the peer's packets cannot arrive either; when only one direction works, it is judged a failure
+    /// at most this much later.
     fn queueing(&self, since: Instant, now: Instant) -> bool {
         self.last_rx.is_some_and(|t| t > since)
             && self
@@ -1000,7 +1070,8 @@ impl PeerPaths {
                 .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON)
     }
 
-    /// 当前路径故障：切到 `fresh_since` 之后测通、得分最好的候选；没有时返回 `None`，保持现状。
+    /// The current path failed: switch to the candidate that has been confirmed working since `fresh_since`
+    /// and has the best score; when there is none, returns `None` and keeps the current state.
     fn fail_over(
         &mut self,
         now: Instant,
@@ -1018,8 +1089,9 @@ impl PeerPaths {
             .map(|(i, _)| i);
         let target = best?;
         self.record_failure(now);
-        // 疑似故障以来没有应答的候选，之前的连续应答已经作废：否则还没超时的探测会让一条刚刚不通的
-        // 更优路径看起来仍然健康，切走之后立刻又被切回
+        // A candidate with no reply since suspected failure has its earlier run of consecutive replies voided:
+        // otherwise probes that have not yet timed out would make a better path that has just gone down look
+        // still healthy, and after switching away it would immediately be switched back
         for c in &mut self.candidates {
             if !c.last_reply.is_some_and(|t| t >= fresh_since) {
                 c.stats.consecutive_successes = 0;
@@ -1029,7 +1101,7 @@ impl PeerPaths {
         Some(self.decide(target, reason, now))
     }
 
-    /// 决定切到第 `target` 个候选：两端一起切换时先提议。
+    /// Decides to switch to candidate `target`: for a two-ended switchover, propose first.
     fn decide(&mut self, target: usize, reason: SwitchReason, now: Instant) -> Action {
         if self.role == Role::DecideTogether {
             self.hold = true;
@@ -1041,8 +1113,10 @@ impl PeerPaths {
         self.switch_to(target, reason, now)
     }
 
-    /// 当前路径故障，记入恢复时的退避。从未连通过就失败（例如首次握手还没完成）的第一次不算故障；
-    /// 再次这样失败就照常计入，避免在探测能通而 WireGuard 不通的路径上来回切。
+    /// The current path failed; record it in the recovery backoff. A first failure without ever having
+    /// connected (for example the first handshake has not completed) does not count as a failure; a repeat
+    /// of such a failure is counted as usual, to avoid switching back and forth on a path where probes get
+    /// through but WireGuard does not.
     fn record_failure(&mut self, now: Instant) {
         let established = self.tunnel_established;
         let c = &mut self.candidates[self.current];
@@ -1055,10 +1129,10 @@ impl PeerPaths {
         c.healthy_since = None;
     }
 
-    /// 当前路径正常时，检查是否有更优的路径。
+    /// When the current path is healthy, checks whether there is a better path.
     fn check_improvement(&mut self, now: Instant) -> Option<Action> {
         let current_kind = self.current_kind();
-        // 更优类型：连续 2 次有应答，并满足故障后的退避
+        // Better type: 2 consecutive replies, and the backoff after failure is satisfied
         let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
             *i != self.current
                 && c.kind < current_kind
@@ -1069,7 +1143,7 @@ impl PeerPaths {
         if let Some((i, _)) = better_type {
             return Some(self.decide(i, SwitchReason::BetterType, now));
         }
-        // 同类型的更优路径：持续 30 秒才切换
+        // A better path of the same type: switch only after it holds for 30 seconds
         let current_score = self.tunnel.score(current_kind)?;
         let better = self
             .candidates
@@ -1089,7 +1163,8 @@ impl PeerPaths {
             .map(|(i, _)| i);
         match (better, self.better_since) {
             (Some(i), Some((j, since))) if i == j => {
-                // 当前路径丢包明显、候选连续有应答：不必等 30 秒
+                // The current path has noticeable loss and the candidate replies consecutively: no need to wait 30
+                // seconds
                 let hold = if self.lossy()
                     && self.candidates[i].stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                 {
@@ -1112,7 +1187,9 @@ impl PeerPaths {
         let to = self.candidates[target].route;
         let old_rtt_ms = self.tunnel.rtt_ms();
         self.current = target;
-        // 新路径的丢包从头统计：候选的窗口里可能还留着它故障期间的丢包；往返时间沿用候选的测量作为起点
+        // The new path's loss is counted from scratch: the candidate's window may still hold the loss from
+        // during its failure; the round-trip time carries over from the candidate's measurement as the
+        // starting point
         self.reset_tunnel(self.candidates[target].stats.rtt_ms);
         let rehandshake = matches!(to, Route::Relay { .. }) && from != to;
         self.handshake = None;
@@ -1141,14 +1218,16 @@ impl PeerPaths {
         self.better_since = None;
     }
 
-    /// 丢弃等待应答的隧道内探测：统计从头开始之后，它们的结果不再计入。
+    /// Drops in-tunnel probes awaiting replies: after statistics start over, their results are no longer
+    /// counted.
     fn clear_tunnel_probes(&mut self) {
         self.tunnel_outstanding.clear();
         self.tunnel_late.clear();
     }
 }
 
-/// 10 分钟内故障过 n 次的路径，恢复时等待：n ≤ 1 时不等待，之后 10 秒 × 2^(n-2)，最长 5 分钟。
+/// For a path that failed n times within 10 minutes, the wait on recovery: no wait when n <= 1, after that
+/// 10 seconds x 2^(n-2), at most 5 minutes.
 fn backoff(failures: &VecDeque<Instant>, now: Instant) -> Duration {
     let recent = failures
         .iter()
@@ -1181,35 +1260,41 @@ mod tests {
         }
     }
 
-    /// 模拟网络：每条路径是否通、往返时间多少；按 tick 推进时间，自动应答探测。
+    /// Simulated network: whether each path works and its round-trip time; time advances by tick and probes
+    /// are answered automatically.
     struct Sim {
         paths: PeerPaths,
         now: Instant,
         up: Vec<bool>,
         rtt: Vec<Duration>,
-        /// 隧道内的包另外排队这么久（对端的上行被自己的流量塞满、队列很深）；隧道外的候选探测不受影响。
+        /// In-tunnel packets are additionally queued for this long (the peer's uplink is filled by its own
+        /// traffic, so the queue is deep); candidate probes outside the tunnel are not affected.
         queue: Vec<Duration>,
-        /// 本端发出的包到不了对端，对端的包仍在到达（只有一个方向通）。
+        /// Packets sent by this end cannot reach the peer, while the peer's packets still arrive (only one
+        /// direction works).
         one_way: Vec<bool>,
-        /// 隧道内探测与候选探测各自每 n 个丢 1 个（0 表示不丢）。
+        /// In-tunnel probes and candidate probes each drop 1 in every n (0 means no drops).
         drop_every: Vec<u32>,
         sent: Vec<u32>,
-        /// 各路径上隧道内探测与候选探测各自的计数，用于按 `drop_every` 丢包。
+        /// Counts of in-tunnel probes and candidate probes on each path, used to drop packets per `drop_every`.
         sent_by_kind: Vec<[u32; 2]>,
-        /// 候选探测能通，但隧道内的流量不通（例如 WireGuard 握手失败）。
+        /// Candidate probes get through but in-tunnel traffic does not (for example the WireGuard handshake
+        /// fails).
         tunnel_broken: Vec<bool>,
-        /// 在这条路径上重新握手后隧道恢复（中继丢了索引的情形）。
+        /// The tunnel recovers after a re-handshake on this path (the case where the relay lost the index).
         fix_on_rehandshake: bool,
-        /// 接下来这么多次重新握手没有完成（例如对端的应答被旧路径上迟到的包带去了旧中继）。
+        /// For the next this-many re-handshakes, none completes (for example the peer's reply was carried to the
+        /// old relay by a late packet on the old path).
         lose_handshakes: u32,
-        /// WireGuard 报告握手完成的时刻。
+        /// The moment WireGuard reports the handshake as complete.
         handshakes: Vec<Instant>,
-        /// 对端处于负载状态：每次握手先回 cookie，最后一次重新握手 5 秒之后 WireGuard 带着 cookie 重试才
-        /// 完成（`None` 表示那次重试也不成）。
+        /// The peer is under load: every handshake first gets a cookie, and only the retry WireGuard makes with
+        /// the cookie 5 seconds after the last re-handshake completes (`None` means that retry does not
+        /// succeed either).
         under_load: Option<Duration>,
         cookies: Vec<Instant>,
         load_completion: Option<(Instant, usize)>,
-        /// (送达时刻, 是否隧道内, 下标, 序号)
+        /// (delivery time, whether in-tunnel, index, sequence number)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
         lost: Vec<Instant>,
@@ -1284,7 +1369,7 @@ mod tests {
                     self.tunnel_broken[i] = false;
                     self.paths.on_handshake();
                 }
-                // 有流量：当前路径通时对端的包一直在到达
+                // With traffic: while the current path works, the peer's packets keep arriving
                 let i = self.paths.current;
                 if self.up[i] && !self.tunnel_broken[i] {
                     self.paths.on_receive(now);
@@ -1318,8 +1403,8 @@ mod tests {
                             self.switches.push((now, to, rehandshake, reason));
                             let i = self.paths.current;
                             if rehandshake && let Some(retry) = self.under_load {
-                                // 删除再加回对端丢掉了之前的 cookie：从这一次重新算。WireGuard 每 5 秒
-                                // 重试一次，重试不成时每次又换来一个 cookie
+                                // Deleting and re-adding the peer discarded the earlier cookie: count from this one. WireGuard retries
+                                // every 5 seconds, and each failed retry brings another cookie
                                 self.tunnel_broken[i] = true;
                                 self.cookies.clear();
                                 self.cookies.push(now + self.rtt[i]);
@@ -1342,7 +1427,7 @@ mod tests {
                                     self.handshakes.push(now + self.rtt[i]);
                                 }
                             }
-                            // 切换后，尚在途中的旧路径探测作废
+                            // After a switch, probes still in flight on the old path are voided
                             self.inflight.retain(|f| !f.1);
                         }
                         Action::Lost => self.lost.push(now),
@@ -1372,12 +1457,13 @@ mod tests {
         ]);
         sim.run(Duration::from_secs(20));
         let lossy = sim.now;
-        // 隔一个丢一个：不会连续丢两个，靠丢包率判定
+        // Drop every other one: never two in a row, decided by the loss rate
         sim.drop_every[0] = 2;
         sim.run(Duration::from_secs(15));
         let (at, to, _, reason) = sim.switches[0];
         assert_eq!((to, reason), (relay(1), SwitchReason::HighLoss));
-        // 丢包率按最近 10 次隧道内探测（每秒一次）统计：旧样本挤出窗口约 7 秒，再持续 3 秒
+        // The loss rate is counted over the last 10 in-tunnel probes (one per second): old samples leave the
+        // window after about 7 seconds, then another 3 seconds
         let took = at.saturating_duration_since(lossy);
         assert!(took <= Duration::from_secs(12), "took {took:?}");
     }
@@ -1406,7 +1492,8 @@ mod tests {
 
     #[test]
     fn stays_on_a_congested_relay_path() {
-        // 对端的上行被自己的流量塞满：隧道内的应答迟到 4 秒，中继本身照常应答
+        // The peer's uplink is filled by its own traffic: in-tunnel replies are 4 seconds late, and the relay
+        // itself answers as usual
         let mut sim = Sim::new(vec![(relay(1), PathKind::Relay)]);
         sim.run(Duration::from_secs(20));
         sim.queue[0] = Duration::from_secs(4);
@@ -1437,7 +1524,8 @@ mod tests {
             (relay(1), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(20));
-        // 队列满了：应答迟到 4 秒，一半被丢弃。中继也要过同一个瓶颈，换过去无济于事
+        // Queue full: replies are 4 seconds late and half are dropped. The relay also passes through the same
+        // bottleneck, so switching does not help
         sim.queue[0] = Duration::from_secs(4);
         sim.drop_every[0] = 2;
         sim.run(Duration::from_secs(120));
@@ -1498,7 +1586,8 @@ mod tests {
         sim.up[0] = false;
         sim.run(Duration::from_secs(10));
         assert_eq!(sim.paths.current(), relay(1));
-        // 直连恢复：第一次故障不退避；切走后的 15 秒内高频探测，第一次应答后立即再确认
+        // Direct recovers: the first failure has no backoff; for 15 seconds after switching away, probe at high
+        // frequency, and confirm again right after the first reply
         let restored = sim.now;
         sim.up[0] = true;
         sim.run(Duration::from_secs(30));
@@ -1510,7 +1599,7 @@ mod tests {
         assert_eq!(back.3, SwitchReason::BetterType);
         assert!(!back.2, "switching to direct needs no new handshake");
         let took = back.0.saturating_duration_since(restored);
-        // 模拟按 100 毫秒推进，应答在下一次推进时处理
+        // The simulation advances by 100 ms, and the reply is handled on the next advance
         assert!(took <= Duration::from_millis(300), "recovery took {took:?}");
     }
 
@@ -1545,7 +1634,7 @@ mod tests {
             (relay(1), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(10));
-        // 第一次故障：切走后高频探测直连
+        // First failure: after switching away, probe direct at high frequency
         sim.up[0] = false;
         sim.run(Duration::from_secs(5));
         let before = sim.sent[0];
@@ -1558,7 +1647,7 @@ mod tests {
         sim.up[0] = true;
         sim.run(Duration::from_secs(5));
         assert_eq!(sim.paths.current(), direct());
-        // 10 分钟内第二次故障：恢复要退避，不再高频探测
+        // Second failure within 10 minutes: recovery must back off, and no more high-frequency probing
         sim.up[0] = false;
         sim.run(Duration::from_secs(5));
         let before = sim.sent[0];
@@ -1595,7 +1684,8 @@ mod tests {
         ]);
         sim.tunnel_broken[0] = true;
         sim.run(Duration::from_secs(300));
-        // 第一次失败不计，之后每次回到直连前的等待按 10、20、40、80 秒加倍
+        // The first failure does not count; after that, the wait before each return to direct doubles: 10, 20, 40,
+        // 80 seconds
         let returns: Vec<Instant> = sim
             .switches
             .iter()
@@ -1624,7 +1714,8 @@ mod tests {
             (relay(2), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(10));
-        // 中继 1 重启后丢了索引：探测照常应答，隧道不通，直到重新握手
+        // Relay 1 restarted and lost the index: probes are still answered, the tunnel is down, until a
+        // re-handshake
         sim.tunnel_broken[0] = true;
         let lost = sim.now;
         sim.run(Duration::from_secs(6));
@@ -1634,15 +1725,17 @@ mod tests {
             (relay(1), true, SwitchReason::RelayLostSession)
         );
         assert!(at.saturating_duration_since(lost) <= Duration::from_millis(3600));
-        // 重新握手之后中继 1 又通了，留在中继 1
+        // After the re-handshake relay 1 works again, and it stays on relay 1
         sim.switches.clear();
         sim.run(Duration::from_secs(30));
         assert!(sim.switches.is_empty(), "{:?}", sim.switches);
         assert_eq!(sim.paths.current(), relay(1));
     }
 
-    /// 换到更快的中继时，旧中继上迟到的包让对端把握手应答发去了旧中继：握手没有完成。等旧路径上的
-    /// 包到完之后在新中继上再握手一次，不等 2 秒多之后的故障检测（第 8.4 节）。
+    /// When switching to a faster relay, late packets on the old relay made the peer send the handshake reply
+    /// to the old relay: the handshake did not complete. After the packets on the old path have all
+    /// arrived, re-handshake on the new relay once more, without waiting for failure detection a little
+    /// over 2 seconds later (section 8.4).
     #[test]
     fn retries_a_rehandshake_that_did_not_complete() {
         let mut sim = Sim::new(vec![
@@ -1660,7 +1753,7 @@ mod tests {
                 (relay(2), true, SwitchReason::HandshakeIncomplete)
             ]
         );
-        // 旧路径的往返时间之后、下一次推进时再握手
+        // Re-handshake after the old path's round-trip time, on the next advance
         let waited = sim.switches[1]
             .0
             .saturating_duration_since(sim.switches[0].0);
@@ -1672,8 +1765,10 @@ mod tests {
         assert_eq!(sim.paths.current(), relay(2));
     }
 
-    /// 对端处于负载状态：换到更快的中继时，握手先换来 cookie，WireGuard 5 秒后带着它重试才完成。期间
-    /// 不再重新握手（会丢掉 cookie），也不按疑似故障来回切换（第 8.4 节）。
+    /// The peer is under load: when switching to a faster relay, the handshake first gets a cookie, and the
+    /// handshake completes only when WireGuard retries with it 5 seconds later. During that time no
+    /// re-handshake (it would discard the cookie), and no switching back and forth for suspected failure
+    /// (section 8.4).
     #[test]
     fn waits_for_the_cookie_retry_when_the_peer_is_under_load() {
         let mut sim = Sim::new(vec![
@@ -1686,7 +1781,7 @@ mod tests {
         let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
         assert_eq!(reasons, [(relay(2), SwitchReason::BetterScore)]);
         assert!(sim.paths.tunnel_established());
-        // 当前中继失效、另一个中继可用：同样只切一次
+        // The current relay failed and another relay is usable: likewise switch only once
         sim.switches.clear();
         sim.up[1] = false;
         sim.run(Duration::from_secs(30));
@@ -1702,14 +1797,16 @@ mod tests {
             (relay(2), PathKind::Relay),
         ]);
         sim.rtt[0] = 42 * MS;
-        // 带着 cookie 的重试也不成（例如 cookie 是伪造的）：两轮之后照常处理故障
+        // A retry with the cookie also fails (for example the cookie is forged): after two rounds handle the
+        // failure as usual
         sim.under_load = Some(Duration::MAX);
         sim.run(Duration::from_secs(60));
         let (first, _, _, reason) = sim.switches[0];
         assert_eq!(reason, SwitchReason::BetterScore);
         let next = sim.switches.get(1).expect("failure handling resumes");
         let waited = next.0.saturating_duration_since(first);
-        // 第二个 cookie 在第一轮结束前到达（WireGuard 5 秒后的重试），再等一轮；第三个不再延长
+        // The second cookie arrives before the first round ends (WireGuard's retry after 5 seconds), wait one
+        // more round; a third does not extend it
         assert!(
             waited >= Duration::from_secs(5) + COOKIE_RETRY
                 && waited <= 2 * COOKIE_RETRY + Duration::from_secs(1),
@@ -1728,7 +1825,8 @@ mod tests {
         sim.lose_handshakes = 2;
         sim.run(Duration::from_secs(60));
         let reasons: Vec<_> = sim.switches.iter().map(|s| s.3).collect();
-        // 第二次也没成：交给疑似故障的检测，它发现中继能应答而隧道不通，再在同一中继上握手
+        // The second attempt also failed: leave it to suspected failure detection, which finds that the relay
+        // answers while the tunnel is down, and re-handshakes once more on the same relay
         assert_eq!(
             reasons,
             [
@@ -1750,7 +1848,7 @@ mod tests {
     fn a_completed_or_idle_rehandshake_is_not_repeated() {
         let routes = vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)];
         let now = Instant::now();
-        // WireGuard 报告握手完成
+        // WireGuard reports the handshake as complete
         let mut paths = PeerPaths::new(routes.clone(), Role::DecideTogether).expect("routes");
         assert!(paths.adopt(1, SwitchReason::Rotation, now).is_some());
         assert!(paths.needs_fine_ticks(now));
@@ -1761,7 +1859,7 @@ mod tests {
             !later.iter().any(|a| matches!(a, Action::Switch { .. })),
             "{later:?}"
         );
-        // 没有流量：没有包触发握手，不算没完成
+        // No traffic: no packet triggers a handshake, so it does not count as not completed
         let mut idle = PeerPaths::new(routes, Role::DecideTogether).expect("routes");
         assert!(idle.adopt(1, SwitchReason::Rotation, now).is_some());
         assert!(idle.handshake_due(now + Duration::from_secs(1)));
@@ -1780,7 +1878,7 @@ mod tests {
             (relay(2), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(10));
-        // 中继 1 到对端的那一段坏了：中继本身能应答，重新握手也无济于事
+        // The leg from relay 1 to the peer is broken: the relay itself answers, and a re-handshake does not help
         sim.tunnel_broken[0] = true;
         sim.fix_on_rehandshake = false;
         sim.run(Duration::from_secs(10));
@@ -1839,7 +1937,7 @@ mod tests {
             (relay(2), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(20));
-        // 前半程中继 1 变慢：切到中继 2
+        // First half: relay 1 slows down; switch to relay 2
         sim.rtt = vec![80 * MS, 2 * MS];
         let first = sim.now;
         sim.run(Duration::from_secs(60));
@@ -1850,7 +1948,7 @@ mod tests {
             "{:?}",
             at.saturating_duration_since(first)
         );
-        // 后半程中继 2 变慢、中继 1 恢复：一分钟内切回中继 1
+        // Second half: relay 2 slows down and relay 1 recovers; switch back to relay 1 within a minute
         sim.rtt = vec![2 * MS, 80 * MS];
         let second = sim.now;
         sim.run(Duration::from_secs(60));
@@ -1870,7 +1968,7 @@ mod tests {
             (relay(1), PathKind::Relay),
             (relay(2), PathKind::Relay),
         ]);
-        // 优于 15% 但不到 10 毫秒
+        // Better than 15% but under 10 ms
         sim.rtt = vec![30 * MS, 22 * MS];
         sim.run(Duration::from_secs(120));
         assert!(sim.switches.is_empty());
@@ -1900,7 +1998,7 @@ mod tests {
         sim.up = vec![false, false];
         sim.run(Duration::from_secs(10));
         assert!(sim.switches.is_empty());
-        // 中继先恢复：切过去
+        // Relay recovers first: switch to it
         sim.up[1] = true;
         sim.run(Duration::from_secs(5));
         assert_eq!(sim.paths.current(), relay(1));
@@ -1951,7 +2049,7 @@ mod tests {
         );
         sim.rtt[0] = 80 * MS;
         sim.rtt[1] = 5 * MS;
-        // 丢包率持续过高也交给决定方
+        // A loss rate that stays too high is also handed to the decider
         sim.drop_every[0] = 2;
         sim.run(Duration::from_secs(90));
         assert_eq!(sim.candidate_probes, 0);
@@ -1965,7 +2063,7 @@ mod tests {
             Role::DecideTogether,
         )
         .expect("routes");
-        // 按中继编号排序，与候选列表的顺序无关
+        // Sorted by relay number, independent of the order of the candidate list
         assert_eq!(paths.relays_in_order(), vec![1, 0]);
         assert_eq!(paths.relay_index(KeyId([1; 8])), Some(1));
         assert_eq!(
@@ -1992,7 +2090,8 @@ mod tests {
         assert_eq!(sim.proposals.len(), 1, "{:?}", sim.proposals);
         let (_, index, reason) = sim.proposals[0];
         assert_eq!((index, reason), (1, SwitchReason::BetterScore));
-        // 在确认之前不再另行提议；确认后切换，之后照常择优
+        // No further proposals before confirmation; after confirmation, switch, and then select better paths as
+        // usual
         sim.run(Duration::from_secs(60));
         assert_eq!(sim.proposals.len(), 1);
         let switched = sim.paths.adopt(index, reason, sim.now);
@@ -2014,7 +2113,7 @@ mod tests {
             (relay(2), PathKind::Relay),
         ]);
         sim.run(Duration::from_secs(20));
-        // 当前中继每 5 个包丢 1 个：低于判为故障的 30%
+        // The current relay drops 1 in every 5 packets: below the 30% judged a failure
         sim.drop_every[0] = 5;
         let lossy = sim.now;
         sim.run(Duration::from_secs(25));
@@ -2022,7 +2121,7 @@ mod tests {
         assert_eq!((to, reason), (relay(2), SwitchReason::BetterScore));
         let took = at.saturating_duration_since(lossy);
         assert!(took <= Duration::from_secs(20), "took {took:?}");
-        // 之后不再回到受损的中继
+        // After that, never return to the damaged relay
         sim.run(Duration::from_secs(120));
         assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
     }
@@ -2058,7 +2157,7 @@ mod tests {
             (relay_tls(1), PathKind::RelayTls),
         ]);
         sim.run(Duration::from_secs(40));
-        // UDP 全部被拦：直连和 UDP 中继都不通，只剩 TLS
+        // All UDP is blocked: direct and UDP relay both fail, leaving only TLS
         sim.up[0] = false;
         sim.up[1] = false;
         sim.run(Duration::from_secs(10));

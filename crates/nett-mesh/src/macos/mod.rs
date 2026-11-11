@@ -1,6 +1,7 @@
-//! macOS 原生成员的平台后端（design/userspace.md 第 6 节）：utun、地址与路由只用系统调用（硬性规则 1：
-//! 组网进程不执行外部命令）；发往底层网络的套接字绑定承载默认路由的物理接口，不进入代理应用的 TUN，
-//! 物理接口变化时重新绑定。
+//! Platform backend for macOS native members (design/userspace.md section 6): utun, addresses and routes
+//! use only system calls (hard rule 1: the mesh process does not execute external commands); the
+//! sockets toward the underlying network bind to the physical interface carrying the default route and
+//! do not enter the proxy app's TUN, and rebind when the physical interface changes.
 
 mod route;
 mod sys;
@@ -19,22 +20,25 @@ use nett_core::prefix::IpPrefix;
 use crate::dataplane::{DataPlaneError, InterfaceAddress, InterfaceSpec};
 use crate::userspace::{Platform, Tun, dual_stack_udp};
 
-/// utun 每个包前的地址族头（网络字节序）。
+/// Address family header before each utun packet (network byte order).
 const AF_INET: u32 = 2;
 const AF_INET6: u32 = 30;
-/// 路由表变化之后等这么久再重新选物理接口：一次网络切换会连续产生很多条消息。
+/// After the routing table changes, wait this long before re-selecting the physical interface: one
+/// network switch produces many messages in a row.
 const SETTLE: Duration = Duration::from_millis(300);
-/// 监视线程读路由消息的超时：据此定期检查是否该退出。
+/// Read timeout of the monitor thread for routing messages: used to periodically check whether it should
+/// exit.
 const MONITOR_TIMEOUT: Duration = Duration::from_secs(1);
-/// 绑定物理接口的底层套接字最多几个（WireGuard 端口、发往中继的探测）。
+/// Maximum number of underlay sockets bound to the physical interface (the WireGuard port, probes to
+/// relays).
 const MAX_UNDERLAY: usize = 8;
 
-/// Unix 套接字对端进程的有效用户 ID（design/status.md 第 3 节）。
+/// Effective user ID of the peer process of a Unix socket (design/status.md section 3).
 pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
     sys::peer_uid(fd)
 }
 
-/// 系统时钟；误差以内核报告的最大误差为准（`ntp_gettime`）。
+/// System clock; the error is the maximum error reported by the kernel (`ntp_gettime`).
 pub struct SystemClock;
 
 impl crate::clock::Clock for SystemClock {
@@ -47,8 +51,9 @@ impl crate::clock::Clock for SystemClock {
     }
 }
 
-/// 以 launchd 服务运行时的日志（design/userspace.md 第 6.3 节）：经 syslog 进入系统日志，大小由系统管理，
-/// 用 `log show --predicate 'process == "nett"'` 查看。
+/// Logging when running as a launchd service (design/userspace.md section 6.3): goes into the system log
+/// through syslog, with its size managed by the system, and can be viewed with
+/// `log show --predicate 'process == "nett"'`.
 pub struct SystemLog;
 
 impl SystemLog {
@@ -57,7 +62,8 @@ impl SystemLog {
         Self
     }
 
-    /// info 记为 notice：系统日志默认只持久保存 notice 及以上，状态变化要留下来。
+    /// info is recorded as notice: the system log by default persists only notice and above, and state
+    /// changes must be kept.
     pub fn write(&self, level: tracing::Level, line: &str) {
         let priority = match level {
             tracing::Level::ERROR => libc::LOG_ERR,
@@ -69,7 +75,8 @@ impl SystemLog {
     }
 }
 
-/// utun 的控制套接字：每次收发一个带 4 字节地址族头的 IP 包。
+/// The control socket of a utun: each send or receive carries one IP packet with a 4-byte address family
+/// header.
 pub struct Utun(OwnedFd);
 
 impl AsFd for Utun {
@@ -102,7 +109,7 @@ impl Tun for Utun {
     }
 }
 
-/// 发往底层网络的套接字，与它们当前绑定的物理接口。
+/// Sockets toward the underlying network, and the physical interface they are currently bound to.
 #[derive(Default)]
 struct Underlay {
     sockets: Vec<UdpSocket>,
@@ -110,7 +117,7 @@ struct Underlay {
 }
 
 impl Underlay {
-    /// 按路由表重新选物理接口；变化时重新绑定所有套接字。
+    /// Re-selects the physical interface from the routing table; when it changes, rebinds all sockets.
     fn refresh(&mut self) {
         let index = physical_interface();
         if index == self.index {
@@ -136,9 +143,11 @@ fn physical_interface() -> Option<u16> {
     route::physical(&route::defaults(&dump), |i| sys::if_name_of(u32::from(i)))
 }
 
-/// 绑定双栈套接字。`IPV6_BOUND_IF` 同时作用于发往 IPv4 映射地址的流量（实测：绑定 en0 后，发往代理应用
-/// 接管的 IPv4 地址的包从 en0 发出，不绑定时从代理应用的 utun 发出）；`IP_BOUND_IF` 在 IPv6 套接字上返回
-/// EINVAL。没有物理接口时解除绑定，按路由表发送。
+/// Binds a dual-stack socket. `IPV6_BOUND_IF` also applies to traffic sent to IPv4-mapped addresses
+/// (measured: after binding en0, packets to the IPv4 addresses taken over by the proxy app go out from
+/// en0; without binding they go out from the proxy app's utun); `IP_BOUND_IF` returns EINVAL on an IPv6
+/// socket. When there is no physical interface the binding is removed and packets are sent per the
+/// routing table.
 fn bind_physical(socket: &UdpSocket, index: Option<u16>) {
     let index = u32::from(index.unwrap_or(0));
     if let Err(e) = sys::bind_to_interface(socket.as_fd(), index, true) {
@@ -146,7 +155,8 @@ fn bind_physical(socket: &UdpSocket, index: Option<u16>) {
     }
 }
 
-/// 监视路由表：物理接口变化时（换 Wi-Fi、插拔网线、唤醒）重新绑定底层套接字（design/userspace.md 第 6.4 节）。
+/// Monitors the routing table: when the physical interface changes (switching Wi-Fi, plugging a cable,
+/// waking up) rebinds the underlay sockets (design/userspace.md section 6.4).
 struct Monitor {
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -171,7 +181,7 @@ impl Monitor {
                         continue;
                     }
                     std::thread::sleep(SETTLE);
-                    // 等待期间的其他消息一并处理
+                    // Messages that arrived during the wait are handled together
                     let _ = rustix::io::ioctl_fionbio(&socket, true);
                     while rustix::io::read(&socket, &mut buf).is_ok() {}
                     let _ = rustix::io::ioctl_fionbio(&socket, false);
@@ -198,13 +208,13 @@ impl Drop for Monitor {
 }
 
 pub struct MacTun {
-    /// 只写的路由套接字：增删组网接口上的路由。
+    /// A write-only routing socket: adds and deletes routes on the mesh interface.
     route: OwnedFd,
     seq: i32,
     name: String,
     index: u32,
     addresses: Vec<InterfaceAddress>,
-    /// 本机加上的其他成员宣告的网段。
+    /// Prefixes advertised by other members that this machine has added.
     routes: BTreeSet<IpPrefix>,
     underlay: Arc<Mutex<Underlay>>,
     monitor: Option<Monitor>,
@@ -217,7 +227,7 @@ fn os(op: &'static str) -> impl FnOnce(io::Error) -> DataPlaneError {
 impl MacTun {
     pub fn open() -> Result<Self, DataPlaneError> {
         let route = sys::route_socket().map_err(os("open a routing socket"))?;
-        // 只写：不接收路由表的变化，免得没人读的消息堆积
+        // Write-only: do not receive routing table changes, so messages nobody reads do not pile up
         rustix::net::shutdown(&route, rustix::net::Shutdown::Read)
             .map_err(|e| os("open a routing socket")(e.into()))?;
         Ok(Self {
@@ -232,7 +242,8 @@ impl MacTun {
         })
     }
 
-    /// 增删一条经组网接口的路由；已经存在（增）或已经不在（删）都算成功。
+    /// Adds or deletes a route via the mesh interface; it counts as success if it already exists (add) or is
+    /// already gone (delete).
     fn route(&mut self, kind: u8, prefix: &IpPrefix) -> Result<(), DataPlaneError> {
         let via = self
             .addresses
@@ -260,7 +271,8 @@ impl MacTun {
         }
     }
 
-    /// 组网网段（IPv4 与 IPv6）经组网接口：地址按点对点配置，网段的路由另加。
+    /// The mesh prefixes (IPv4 and IPv6) via the mesh interface: addresses are configured point-to-point,
+    /// and the prefix routes are added separately.
     fn mesh_routes(&mut self) -> Result<(), DataPlaneError> {
         let prefixes: Vec<IpPrefix> = self
             .addresses
@@ -329,7 +341,7 @@ impl Platform for MacTun {
     }
 
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
-        // 物理接口的监视从组网就绪之后开始，只启动一次
+        // Monitoring of the physical interface starts after the mesh is ready, only once
         if self.monitor.is_none() {
             self.monitor = Some(
                 Monitor::spawn(Arc::clone(&self.underlay))
@@ -337,7 +349,7 @@ impl Platform for MacTun {
             );
         }
         let wanted: BTreeSet<IpPrefix> = routes.iter().copied().collect();
-        // 每次都重新添加：被其他程序删掉的路由在这里补回
+        // Added again every time: routes deleted by other programs are restored here
         for prefix in &wanted {
             self.route(route::RTM_ADD, prefix)?;
         }
@@ -358,13 +370,13 @@ mod tests {
     #[test]
     fn underlay_follows_the_physical_interface_for_ipv4_too() {
         let Some(index) = physical_interface() else {
-            return; // 没有默认路由的机器上无从比较
+            return; // No default route on this machine, so there is nothing to compare
         };
         let name = sys::if_name_of(u32::from(index)).expect("name");
         assert!(!route::is_virtual(&name), "{name}");
         let mac = MacTun::open().expect("routing socket");
         let underlay = mac.bind_underlay(0).expect("underlay");
-        // 对照：只绑定这个接口的 IPv4 套接字
+        // Comparison: an IPv4 socket bound to only this interface
         let v4 = UdpSocket::bind("0.0.0.0:0").expect("v4");
         sys::bind_to_interface(v4.as_fd(), u32::from(index), false).expect("bind v4");
         let target: SocketAddr = "192.0.2.1:9".parse().expect("addr");
@@ -386,8 +398,9 @@ mod tests {
         );
     }
 
-    /// 需要 root：创建 utun、配置地址和路由，经组网地址收发，退出后接口消失。CI 中用 sudo 运行
-    /// （`cargo test -- --ignored macos`）。
+    /// Requires root: creates a utun, configures addresses and routes, sends and receives through the mesh
+    /// address, and the interface disappears on exit. Run with sudo in CI
+    /// (`cargo test -- --ignored macos`).
     #[test]
     #[ignore = "needs root"]
     fn macos_utun_smoke() {
@@ -414,7 +427,7 @@ mod tests {
         mac.sync_routes(&["192.0.2.0/24".parse().expect("prefix")])
             .expect("routes");
 
-        // 发往组网网段中另一个地址的包进入 utun：从 TUN 读出来
+        // A packet to another address in the mesh prefixes enters the utun: read it out of the TUN
         let probe = mac
             .bind_tunnel("100.88.255.1:0".parse().expect("addr"))
             .expect("tunnel socket");
@@ -425,7 +438,8 @@ mod tests {
         ] {
             probe.send_to(b"nett", to).expect("send");
             let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            // 接口启用 IPv6 后系统自己会发组播的控制包（MLD、路由器请求），跳过它们
+            // After IPv6 is enabled on the interface the system sends multicast control packets by itself (MLD,
+            // router solicitation); skip them
             let packet = loop {
                 match tun.recv(&mut buf) {
                     Ok(n) if buf[0] >> 4 == 4 && buf[16..20] == want => break buf[..n].to_vec(),
@@ -439,7 +453,8 @@ mod tests {
             assert_eq!(packet[9], crate::userspace::packet::PROTO_UDP);
         }
 
-        // 写进 TUN、发往本机组网地址的包交给本机的套接字
+        // A packet written into the TUN and addressed to this machine's mesh address is handed to this
+        // machine's socket
         let listener = UdpSocket::bind("100.88.255.1:0").expect("listener");
         listener
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -456,7 +471,7 @@ mod tests {
         let (_, from) = listener.recv_from(&mut got).expect("delivered locally");
         assert_eq!(from, "100.88.1.2:9".parse::<SocketAddr>().expect("addr"));
 
-        // 底层套接字绑定在物理接口上（有默认路由时）
+        // The underlay socket is bound to the physical interface (when there is a default route)
         let underlay = mac.bind_underlay(0).expect("underlay");
         drop(underlay);
 

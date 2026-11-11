@@ -1,12 +1,14 @@
-//! rustix 没有提供的系统调用：绑定到接口的套接字选项，读取内核的时钟误差，创建 TUN 接口。只在这里使用 `unsafe`
-//! （CLAUDE.md "代码规则"）：把指向本地数据的指针交给内核。
+//! System calls rustix does not provide: socket options that bind to an interface, reading the kernel's
+//! clock error, and creating a TUN interface. `unsafe` is used only here (CLAUDE.md "Code rules"): it
+//! hands the kernel pointers to local data.
 #![allow(unsafe_code)]
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-/// 把打开的 `/dev/net/tun` 关联到名为 `name` 的 TUN 接口（不存在时创建）；收发的包不带额外的头。
+/// Associates an opened `/dev/net/tun` with the TUN interface named `name` (created if it does not
+/// exist); sent and received packets carry no extra header.
 pub(crate) fn tun_set_iff(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
     if name.len() >= libc::IFNAMSIZ {
         return Err(io::Error::new(
@@ -24,7 +26,8 @@ pub(crate) fn tun_set_iff(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
             ifru_flags: (libc::IFF_TUN | libc::IFF_NO_PI) as libc::c_short,
         },
     };
-    // SAFETY: `request` 是完整初始化的 ifreq，名字以 NUL 结尾；内核只在这次调用中读写它
+    // SAFETY: `request` is a fully initialized ifreq with a NUL-terminated name; the kernel reads and writes
+    // it only during this call
     let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TUNSETIFF, &raw mut request) };
     if rc == 0 {
         Ok(())
@@ -33,9 +36,10 @@ pub(crate) fn tun_set_iff(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
     }
 }
 
-/// 把套接字绑定到一个接口：只收发经这个接口的包。
+/// Binds a socket to an interface: it only sends and receives packets through that interface.
 pub(crate) fn bind_to_device(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
-    // SAFETY: 指针指向 `name` 的字节，长度为它的长度；内核按长度读取，不要求结尾的 NUL
+    // SAFETY: the pointer points to the bytes of `name`, with its length; the kernel reads by length and
+    // does not require a trailing NUL
     let rc = unsafe {
         libc::setsockopt(
             fd.as_raw_fd(),
@@ -52,12 +56,14 @@ pub(crate) fn bind_to_device(fd: BorrowedFd<'_>, name: &str) -> io::Result<()> {
     }
 }
 
-/// 内核报告的时钟最大误差（`adjtimex` 的 `maxerror`），由时间同步服务维护；没有同步时它逐秒增大，
-/// 最终达到 16 秒。只读取，不修改任何时间变量。
+/// The kernel's reported maximum clock error (`maxerror` of `adjtimex`), maintained by the time
+/// synchronization service; without synchronization it grows by the second and eventually reaches 16
+/// seconds. Read-only: no time variable is modified.
 pub(crate) fn max_clock_error() -> io::Result<Duration> {
-    // SAFETY: `timex` 只含整数字段，全零是合法值；`modes` 为 0 表示只读取
+    // SAFETY: `timex` contains only integer fields and all zeros is a valid value; `modes` of 0 means read
+    // only
     let mut tx: libc::timex = unsafe { std::mem::zeroed() };
-    // SAFETY: 指针指向本地的 `timex`，内核只在调用期间写入它
+    // SAFETY: the pointer points to the local `timex`, and the kernel writes it only during the call
     let rc = unsafe { libc::adjtimex(&mut tx) };
     if rc == -1 {
         return Err(io::Error::last_os_error());

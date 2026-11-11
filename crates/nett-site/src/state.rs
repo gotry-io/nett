@@ -1,5 +1,6 @@
-//! 站点状态（design/site.md 第 8 节）：机器、权限、访问规则，以及已签的产物与它们的版本。没有私钥：
-//! 恢复密钥在站点目录中另存一个文件，只在签名时读取。
+//! Site state (design/site.md section 8): machines, permissions, access rules, and the signed
+//! artifacts with their versions. It holds no private key: the recovery key is stored in a separate
+//! file in the site directory and read only when signing.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -20,9 +21,9 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::SiteError;
 
-/// 站点状态的格式版本。
+/// Format version of the site state.
 pub const FORMAT_V1: u32 = 1;
-/// `public` 机器默认的 WireGuard 端口。
+/// Default WireGuard port of `public` machines.
 pub const DEFAULT_LISTEN_PORT: u16 = 41820;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,22 +31,24 @@ pub const DEFAULT_LISTEN_PORT: u16 = 41820;
 pub struct State {
     pub v: u32,
     pub trust_anchors: TrustAnchorsDoc,
-    /// 组网网段：建立站点时确定，之后不能改。
+    /// Mesh prefixes: fixed when the site is created, cannot change afterwards.
     pub prefixes: MeshPrefixes,
-    /// `public` 机器默认的 WireGuard 端口。
+    /// Default WireGuard port of `public` machines.
     pub listen_port: u16,
-    /// 下一个分配的地址是组网网段中的第几个。地址不回收（design/mesh.md 第 3 节）。
+    /// Which address in the mesh prefixes is allocated next. Addresses are not reclaimed
+    /// (design/mesh.md section 3).
     pub next_host: u32,
-    /// 下一条规则的编号。编号不复用（design/site.md 第 5.1 节）。
+    /// Number of the next rule. Numbers are not reused (design/site.md section 5.1).
     pub next_rule: u32,
     #[serde(default)]
     pub machines: BTreeMap<NodeName, Machine>,
     #[serde(default)]
     pub rules: BTreeMap<RuleId, Rule>,
-    /// 移除的机器：撤销永久生效，地址不再分配。
+    /// Removed machines: revocation takes effect permanently, and the addresses are not allocated
+    /// again.
     #[serde(default)]
     pub revoked: Vec<Revoked>,
-    /// 签名的访问规则集。
+    /// The signed access rule set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_rules: Option<SignedVersion>,
 }
@@ -55,38 +58,42 @@ pub struct State {
 pub struct Machine {
     pub node_id: NodeId,
     pub reachability: Reachability,
-    /// `public` 机器的公网地址。
+    /// Public address of a `public` machine.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv4: Option<Ipv4Addr>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<Ipv6Addr>,
-    /// `public` 机器自己的 WireGuard 端口；没有时用站点默认的端口。
+    /// WireGuard port of a `public` machine itself; the site default port when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// 机器的公钥：不接 Hub 时由 `add --keys` 写明，经 Hub 入网的机器取自它的准入证明。
+    /// The machine's public key: without a Hub, given by `add --keys`; for a machine that joined
+    /// through the Hub, taken from its admission proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<NodeKeys>,
-    /// 等待经 Hub 入网（design/hub.md 第 6 节）：入网公钥、token 的过期时间与签好的初始节点策略。
+    /// Waiting to join through the Hub (design/hub.md section 6): enrollment public key, token
+    /// expiry time and the signed initial node policy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enrollment: Option<Enrollment>,
-    /// Hub 得知的公网地址（design/hub.md 第 5 节）：`public` 机器没有写明地址时用它。
+    /// Public address learned by the Hub (design/hub.md section 5): used when a `public` machine
+    /// has no address given.
     #[serde(default, skip_serializing_if = "Learned::is_empty")]
     pub learned: Learned,
-    /// 组网地址。
+    /// Mesh addresses.
     pub mesh: MeshAddresses,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
-    /// 宣告的网段。
+    /// Advertised routes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<IpPrefix>,
-    /// 签名的节点策略与准入证明。
+    /// Signed node policy and admission proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<SignedPolicy>,
-    /// 签名的宣告网段。
+    /// Signed advertised routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes_signed: Option<SignedVersion>,
-    /// 签过的宣告网段的最高版本。网段全部去掉时签名的产物随之去掉，版本留在这里：再宣告时接着增加，
-    /// 组网进程只接受更高的版本（design/mesh.md 第 4.2 节）。
+    /// Highest version of advertised routes ever signed. When all routes are removed, the signed
+    /// artifact is removed with them, but the version stays here: advertising again continues to
+    /// increase it, and the mesh process only accepts higher versions (design/mesh.md section 4.2).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub routes_version: u64,
 }
@@ -96,12 +103,13 @@ fn is_zero(v: &u64) -> bool {
 }
 
 impl Machine {
-    /// `public` 机器的 WireGuard 端口。
+    /// WireGuard port of a `public` machine.
     pub fn listen_port(&self, default: u16) -> Option<u16> {
         (self.reachability == Reachability::Public).then(|| self.port.unwrap_or(default))
     }
 
-    /// 其他成员连它的地址：写明的优先，没有写明时用 Hub 得知的（每个地址族分别取）。
+    /// Address other members use to connect to it: the one given takes precedence, otherwise the
+    /// one learned by the Hub (taken per address family).
     pub fn public_ipv4(&self) -> Option<Ipv4Addr> {
         self.ipv4.or(self.learned.ipv4.map(|l| l.ip))
     }
@@ -111,19 +119,20 @@ impl Machine {
     }
 }
 
-/// 等待入网的机器（design/hub.md 第 6 节）。入网私钥只在打印出的 token 中。
+/// A machine waiting to join (design/hub.md section 6). The enrollment private key appears only in
+/// the printed token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Enrollment {
     pub public_key: Ed25519PublicKey,
-    /// token 的过期时间（Unix 秒）。
+    /// Expiry time of the token (Unix seconds).
     pub expires_at: i64,
-    /// 签名的初始节点策略：签名之后才有。
+    /// The signed initial node policy: exists only after signing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<SignedVersion>,
 }
 
-/// Hub 得知的公网地址与来源（design/hub.md 第 5 节）。
+/// Public address learned by the Hub and its source (design/hub.md section 5).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Learned {
@@ -146,13 +155,13 @@ pub struct LearnedIp<T> {
     pub from: AddressSource,
 }
 
-/// 得知的地址从哪里来。
+/// Where a learned address comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AddressSource {
-    /// 机器连接 Hub 时本机用的全局地址。
+    /// The global address this machine used when connecting to the Hub.
     Machine,
-    /// Hub 看到的来源地址。
+    /// The source address the Hub saw.
     Hub,
 }
 
@@ -165,7 +174,8 @@ impl fmt::Display for AddressSource {
     }
 }
 
-/// 机器上 `nett keys`（或 `sudo nett install`）打印的一行：组网公钥与身份公钥。
+/// The line printed by `nett keys` (or `sudo nett install`) on a machine: mesh public key and
+/// identity public key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeKeys {
@@ -195,7 +205,8 @@ impl FromStr for NodeKeys {
     }
 }
 
-/// 机器上的 Edge：Edge 所在容器的地址，以及分配给它的 Edge 专用地址（ADR 0015）。
+/// Edge on a machine: the address of the container Edge runs in, and the Edge address assigned to
+/// it (ADR 0015).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Edge {
@@ -207,12 +218,13 @@ pub struct Edge {
 #[serde(deny_unknown_fields)]
 pub struct SignedPolicy {
     pub version: u64,
-    /// 生成节点策略和准入证明的输入的哈希：不变时沿用原来的签名。
+    /// Hash of the inputs that generate the node policy and admission proof: when unchanged, the
+    /// existing signature is reused.
     pub input: Sha256Digest,
     pub material: AdmissionMaterial,
 }
 
-/// 一份带版本号的签名产物：版本、输入的哈希与签名的载荷。
+/// A versioned signed artifact: version, hash of the inputs and the signed payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SignedVersion {
@@ -228,13 +240,13 @@ pub struct Revoked {
     pub node_id: NodeId,
 }
 
-/// 一条访问规则：只有放行（design/site.md 第 5.1 节）。两边按机器 ID 记录。
+/// An access rule: allow only (design/site.md section 5.1). Both sides are recorded by machine ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
     pub from: Vec<Selector>,
     pub to: Vec<Selector>,
-    /// 不写时为全部端口。
+    /// All ports when absent.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortRange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,11 +256,11 @@ pub struct Rule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Part {
-    /// 机器的组网地址。
+    /// The machine's mesh address.
     Mesh,
-    /// 机器的 Edge 专用地址。
+    /// The machine's Edge address.
     Edge,
-    /// 机器宣告的网段。
+    /// The routes the machine advertises.
     Routes,
 }
 
@@ -259,7 +271,7 @@ pub struct Selector {
     pub part: Part,
 }
 
-/// 规则的编号：`r1`、`r2`……
+/// Rule number: `r1`, `r2`, ...
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RuleId(pub u32);
 
@@ -334,7 +346,7 @@ impl State {
             .ok_or_else(|| SiteError::invalid(format!("there is no machine `{name}`")))
     }
 
-    /// 节点 ID 对应的机器名。
+    /// The machine name for a node ID.
     pub fn name_of(&self, node: &NodeId) -> Option<&NodeName> {
         self.machines
             .iter()
@@ -346,7 +358,7 @@ impl State {
         self.machines.values().find(|m| m.node_id == *node)
     }
 
-    /// 选择器的文本形式：`mac`、`edge-vps.edge`、`mac-app.routes`。
+    /// Text form of a selector: `mac`, `edge-vps.edge`, `mac-app.routes`.
     pub fn selector_text(&self, s: &Selector) -> String {
         let name = self
             .name_of(&s.node)
@@ -358,7 +370,8 @@ impl State {
         }
     }
 
-    /// 还不知道公网地址的 `public` 机器：不接 Hub 时命令要求写明，接了 Hub 时由 Hub 得知。
+    /// A `public` machine whose public address is not known yet: without a Hub the command requires
+    /// it to be given; with a Hub, the Hub learns it.
     pub fn unknown_public_addresses(&self) -> Vec<&NodeName> {
         self.machines
             .iter()
@@ -371,7 +384,8 @@ impl State {
             .collect()
     }
 
-    /// 站点内部的一致性：每条修改命令之后、读出站点状态之后检查（design/site.md 第 7 节）。
+    /// Internal consistency of the site: checked after every modifying command and after reading
+    /// the site state (design/site.md section 7).
     pub fn check(&self) -> Result<(), SiteError> {
         if self.machines.len() > MAX_MEMBERS {
             return Err(SiteError::invalid(format!(
@@ -379,8 +393,9 @@ impl State {
             )));
         }
         for (name, m) in &self.machines {
-            // `public` 机器可以还不知道地址：接了 Hub 时由 Hub 得知；不接 Hub 时命令要求写明
-            // （unknown_public_addresses）
+            // A `public` machine may not know its address yet: with a Hub, the Hub learns it;
+            // without a Hub, the command requires it to be given
+            // (unknown_public_addresses)
             match m.reachability {
                 Reachability::DialOnly
                     if m.ipv4.is_some() || m.ipv6.is_some() || m.port.is_some() =>
@@ -437,7 +452,8 @@ impl State {
                 }
             }
         }
-        // 公网地址加端口是其他成员连它的地方，两台机器不能相同
+        // Public address plus port is where other members connect to it; two machines cannot have
+        // the same one
         let mut endpoints = BTreeMap::new();
         for (name, m) in &self.machines {
             let Some(port) = m.listen_port(self.listen_port) else {

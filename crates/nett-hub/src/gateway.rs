@@ -1,6 +1,8 @@
-//! 节点网关（design/protocol.md、design/hub.md 第 5、6 节）：WebSocket 上的 Noise IK，Hub 是响应方。节点用自己的
-//! 身份密钥握手，Hub 按站点中登记的身份公钥认出它；不认识的身份带着准入证明来时按入网处理。之后下发期望
-//! 状态，记下确认、清单、本机状态与得知的公网地址。
+//! The node gateway (design/protocol.md, design/hub.md sections 5, 6): Noise IK over WebSocket,
+//! with the Hub as the responder. A node handshakes with its own identity key and the Hub
+//! recognizes it by the identity public key registered in the site; an unknown identity that
+//! arrives with an admission proof is handled as enrollment. After that it sends down the desired
+//! state, and records acknowledgments, the inventory, local status and the learned public address.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -28,17 +30,19 @@ use crate::hub::{EnrollError, Hub};
 use crate::now;
 use crate::tls::TlsListener;
 
-/// 握手的时限。
+/// Handshake time limit.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-/// 节点每 25 秒发一次 Ping（protocol.md 第 8 节）；这么久没有任何消息就关闭连接。
+/// A node sends a Ping every 25 seconds (protocol.md section 8); the connection is closed after
+/// this long with no message at all.
 const KEEPALIVE_SECS: u32 = 25;
 const IDLE: Duration = Duration::from_secs(KEEPALIVE_SECS as u64 * 3);
-/// 本机状态报告的上限。
+/// Upper limit on a local status report.
 const MAX_STATUS: usize = 512 * 1024;
-/// `Inventory` 中采用的地址数。
+/// Number of addresses taken in `Inventory`.
 const MAX_ADDRESSES: usize = 8;
 
-/// 连接的对端地址：`serve` 用 `into_make_service_with_connect_info::<Peer>()` 时由 axum 记下。
+/// The peer address of a connection: recorded by axum when `serve` uses
+/// `into_make_service_with_connect_info::<Peer>()`.
 #[derive(Debug, Clone, Copy)]
 pub struct Peer(pub SocketAddr);
 
@@ -70,8 +74,9 @@ pub async fn connect(
         })
 }
 
-/// Hub 看到的来源地址（design/hub.md 第 5 节）：TCP 对端是回环或私有地址时它是 Hub 前的代理，取
-/// `X-Forwarded-For` 的最后一项（最近的代理加上的那一项）；否则就是对端自己。
+/// The source address the Hub sees (design/hub.md section 5): when the TCP peer is loopback or a
+/// private address it is a proxy in front of the Hub, and the last entry of `X-Forwarded-For` is
+/// taken (the one added by the nearest proxy); otherwise it is the peer itself.
 pub fn observed(peer: Option<SocketAddr>, headers: &HeaderMap) -> Option<IpAddr> {
     let peer = peer?.ip();
     if peer.is_loopback() || is_private(peer) {
@@ -96,13 +101,14 @@ fn is_private(ip: IpAddr) -> bool {
     }
 }
 
-/// `100.64.0.0/10`（运营商级 NAT，组网地址也在其中）。
+/// `100.64.0.0/10` (carrier-grade NAT, which also contains the mesh addresses).
 fn is_shared(v4: std::net::Ipv4Addr) -> bool {
     let [a, b, ..] = v4.octets();
     a == 100 && (64..128).contains(&b)
 }
 
-/// 全局单播地址：机器报告的地址只有这种才能直接当作公网地址。
+/// Global unicast address: only this kind of address reported by a machine can be used directly as
+/// a public address.
 fn is_global(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -124,7 +130,8 @@ fn is_global(ip: IpAddr) -> bool {
     }
 }
 
-/// 每个地址族：机器报告的是全局单播地址时用它，否则用 Hub 看到的地址；回环地址不用。
+/// Per address family: use the machine's report when it is a global unicast address, otherwise the
+/// address the Hub sees; loopback addresses are not used.
 pub fn learn(reported: &[String], observed: Option<IpAddr>) -> Learned {
     let reported: Vec<IpAddr> = reported.iter().filter_map(|a| a.parse().ok()).collect();
     let pick = |v4: bool| {
@@ -167,7 +174,7 @@ fn timestamp() -> prost_types::Timestamp {
     }
 }
 
-/// 发出去的消息：编号、分片流与 Noise 加密。
+/// An outgoing message: numbering, fragment stream and Noise encryption.
 struct Outbox {
     transport: Transport,
     next_id: u64,
@@ -265,8 +272,9 @@ async fn session(
     result
 }
 
-/// 按身份公钥认出节点：站点中没有这把公钥、节点 ID 对不上、已经撤销的都拒绝。不认识的身份带着准入证明来时
-/// 按入网处理（design/hub.md 第 6 节）。
+/// Recognizes a node by identity public key: it is rejected if the site does not have this public
+/// key, the node ID does not match, or it is revoked. An unknown identity that arrives with an
+/// admission proof is handled as enrollment (design/hub.md section 6).
 async fn identify(
     hub: &Hub,
     remote: &[u8; 32],
@@ -360,7 +368,7 @@ async fn serve(
     }
 }
 
-/// 处理节点发来的一条消息；`Goodbye` 与 `Leave` 时返回 `false`。
+/// Handles one message from a node; returns `false` on `Goodbye` and `Leave`.
 async fn handle(
     hub: &Hub,
     node: &NodeId,
@@ -407,7 +415,8 @@ async fn handle(
                 .set_platform(node.as_str(), &inv.platform)
                 .await
                 .map_err(|e| e.to_string())?;
-            // 地址只取前几项：它是节点提供的数据（硬性规则 13）
+            // Only the first few addresses are taken: they are data supplied by the node (hard rule
+            // 13)
             let reported: Vec<String> = inv.addresses.into_iter().take(MAX_ADDRESSES).collect();
             if let Err(e) = hub.learned(node, learn(&reported, observed), now()).await {
                 tracing::warn!(node_id = %node, error = %e, "recording the public address");
@@ -418,7 +427,8 @@ async fn handle(
             return Ok(false);
         }
         Some(Body::LinkReport(report)) => {
-            // 只存合法的 JSON，大小有上限：它是节点提供的数据（硬性规则 13）
+            // Only valid JSON is stored, with a size limit: it is data supplied by the node (hard
+            // rule 13)
             if report.status.len() <= MAX_STATUS
                 && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&report.status)
             {
@@ -434,7 +444,8 @@ async fn handle(
     Ok(true)
 }
 
-/// 下发这台机器当前的期望状态：mesh 分区（期望状态文件的 JSON）与 hub_endpoints 分区。
+/// Sends down this machine's current desired state: the mesh partition (JSON of the desired state
+/// file) and the hub_endpoints partition.
 async fn send_desired(
     hub: &Hub,
     node: &NodeId,
@@ -487,7 +498,7 @@ mod tests {
     #[test]
     fn the_observed_address_trusts_only_the_proxy_in_front() {
         let peer = |s: &str| Some(s.parse::<SocketAddr>().expect("addr"));
-        // 本机的代理：取它加上的最后一项
+        // A local proxy: take the last entry it added
         assert_eq!(
             observed(
                 peer("127.0.0.1:50000"),
@@ -502,12 +513,12 @@ mod tests {
             ),
             Some(ip("198.51.100.7"))
         );
-        // 公网上的对端自己写的头不算数
+        // A header written by a peer on the public internet does not count
         assert_eq!(
             observed(peer("203.0.113.5:50000"), &headers(&["192.0.2.9"])),
             Some(ip("203.0.113.5"))
         );
-        // 没有代理（实验拓扑、局域网）：对端自己
+        // No proxy (lab topology, LAN): the peer itself
         assert_eq!(
             observed(peer("10.0.0.2:50000"), &headers(&[])),
             Some(ip("10.0.0.2"))
@@ -518,27 +529,28 @@ mod tests {
     #[test]
     fn the_machine_address_counts_only_when_it_is_global() {
         let one = |l: Learned| l.ipv4.map(|i| (i.ip.to_string(), i.from));
-        // 多数 VPS：网卡上就是公网地址
+        // Most VPSes: the network interface has the public address
         assert_eq!(
             one(learn(&["203.0.113.5".into()], Some(ip("203.0.113.5")))),
             Some(("203.0.113.5".into(), AddressSource::Machine))
         );
-        // 1:1 NAT 的云主机：网卡上是私有地址，用 Hub 看到的
+        // A cloud host with 1:1 NAT: the interface has a private address, so use the one the Hub
+        // sees
         assert_eq!(
             one(learn(&["172.16.0.5".into()], Some(ip("198.51.100.7")))),
             Some(("198.51.100.7".into(), AddressSource::Hub))
         );
-        // 组网地址与运营商级 NAT 都不是公网地址
+        // Mesh addresses and carrier-grade NAT are not public addresses
         assert_eq!(
             one(learn(&["100.88.0.3".into()], Some(ip("198.51.100.7")))),
             Some(("198.51.100.7".into(), AddressSource::Hub))
         );
-        // 回环（Hub 主机自己的成员经本机连接）：不知道
+        // Loopback (a member on the Hub host connecting through the local machine): unknown
         assert_eq!(
             learn(&["127.0.0.1".into()], Some(ip("127.0.0.1"))),
             Learned::default()
         );
-        // 两个地址族分别取
+        // The two address families are taken separately
         let both = learn(&["2001:db8::5".into()], Some(ip("198.51.100.7")));
         assert_eq!(both.ipv4.map(|i| i.from), Some(AddressSource::Hub));
         assert_eq!(

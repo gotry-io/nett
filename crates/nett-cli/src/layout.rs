@@ -1,8 +1,9 @@
-//! 命令行输出的排版（architecture.md 第 14.3 节）：`nett status` 与 `nett site` 共用。
+//! Layout of command line output (architecture.md section 14.3): shared by `nett status` and
+//! `nett site`.
 
 use std::fmt::Write as _;
 
-/// 键值两列，键按最长的对齐。
+/// Two columns of key and value, aligned to the longest key.
 pub(crate) fn key_values(rows: &[(&str, String)]) -> String {
     let width = rows.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     rows.iter()
@@ -10,7 +11,7 @@ pub(crate) fn key_values(rows: &[(&str, String)]) -> String {
         .collect()
 }
 
-/// 按列对齐，列之间两个空格，最后一列不补空格。
+/// Aligns by column, two spaces between columns, no padding after the last column.
 pub(crate) fn table<const N: usize>(rows: &[[String; N]]) -> String {
     let mut widths = [0usize; N];
     for row in rows {

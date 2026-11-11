@@ -1,5 +1,6 @@
-# 场景 18：a、b 都在"公网"上，有 IPv4、IPv6 两条直连候选。初始路径经中继，开始时两条直连候选都是
-# 更优类型、每 3 秒在 WireGuard 端口上探测一次
+# Scenario 18: a and b are both on the "public network" and have two direct candidates, IPv4 and
+# IPv6. The initial path is via a relay, and both direct candidates are of the better type from the
+# start and are probed on the WireGuard port once every 3 seconds
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -22,7 +23,7 @@ roles = ["relay"]
 peers = ["a", "b"]
 candidates = ["relay:r1", "direct", "direct6"]
 
-# 场景在这些成员之间收发（访问默认拒绝，ADR 0023）
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
 from = ["a", "b"]
 to = ["a", "b"]

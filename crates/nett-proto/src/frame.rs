@@ -1,5 +1,7 @@
-//! Envelope 的编码与分片（design/protocol.md 第 4.1、11 节）：一条 Noise 消息承载一条 Envelope；编码后超过
-//! [`MAX_ENVELOPE`] 的 Envelope 拆成若干条 `Chunk` 发送，接收方按 `stream_id` 重组，再解出原来的 Envelope。
+//! Envelope encoding and fragmentation (design/protocol.md sections 4.1, 11): one Noise message
+//! carries one Envelope; an Envelope that exceeds [`MAX_ENVELOPE`] after encoding is split into
+//! several `Chunk`s, which the receiver reassembles by `stream_id` and then decodes into the
+//! original Envelope.
 
 use std::collections::BTreeMap;
 
@@ -8,13 +10,14 @@ use prost::Message as _;
 use crate::v1::envelope::Body;
 use crate::v1::{Chunk, Envelope};
 
-/// 单条 Envelope 编码后的上限：加上 Noise 的认证标签仍在单条 Noise 消息之内。
+/// Upper limit of a single encoded Envelope: with the Noise authentication tag added it still fits
+/// in a single Noise message.
 pub const MAX_ENVELOPE: usize = 60 * 1024;
-/// 分片时每片携带的数据：留出 Chunk 与 Envelope 自己的字段。
+/// Data carried by each fragment: leaves room for the Chunk's and Envelope's own fields.
 const CHUNK_DATA: usize = MAX_ENVELOPE - 256;
-/// 单个分片流重组后的上限。
+/// Upper limit of a single fragment stream after reassembly.
 pub const MAX_STREAM: usize = 8 << 20;
-/// 同时在重组的流。
+/// Streams being reassembled at the same time.
 pub const MAX_STREAMS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -33,8 +36,9 @@ pub enum FrameError {
     Nested,
 }
 
-/// 把一条 Envelope 编成一条或几条要发送的消息（每条都不超过 [`MAX_ENVELOPE`]）。`next_id` 给分片的
-/// Envelope 分配编号，`stream_id` 是这条消息的分片流编号。
+/// Encodes an Envelope into one or several messages to send (each no larger than [`MAX_ENVELOPE`]).
+/// `next_id` assigns a number to the fragmented Envelope, and `stream_id` is the fragment stream
+/// number of this message.
 pub fn encode(
     envelope: &Envelope,
     next_id: &mut u64,
@@ -72,14 +76,15 @@ pub fn encode(
     Ok(out)
 }
 
-/// 重组分片：收到完整的 Envelope 时交出。
+/// Reassembles fragments: yields a complete Envelope when it is received.
 #[derive(Debug, Default)]
 pub struct Reassembler {
     streams: BTreeMap<u64, (u32, Vec<u8>)>,
 }
 
 impl Reassembler {
-    /// 处理收到的一条消息。是分片且还没收完时返回 `None`。
+    /// Handles a received message. Returns `None` when it is a fragment and has not been completely
+    /// received.
     pub fn push(&mut self, message: &[u8]) -> Result<Option<Envelope>, FrameError> {
         if message.len() > MAX_ENVELOPE {
             return Err(FrameError::TooLarge);
@@ -183,14 +188,14 @@ mod tests {
             assert_eq!(r.push(m).expect("partial"), None);
         }
         assert_eq!(r.push(&out[out.len() - 1]).expect("whole"), Some(big));
-        // 跳过一片：拒绝，丢弃这个流
+        // Skip a fragment: rejected, and this stream is dropped
         let mut r = Reassembler::default();
         r.push(&out[0]).expect("first");
         assert!(matches!(
             r.push(&out[2]),
             Err(FrameError::OutOfOrder { .. })
         ));
-        // 超过上限的不发
+        // Over the limit: not sent
         assert_eq!(
             encode(&desired(MAX_STREAM + 1), &mut id, 2),
             Err(FrameError::StreamTooLarge)

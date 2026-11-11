@@ -1,6 +1,9 @@
-//! 在 Hub 一侧发生的事（design/hub.md 第 4 节）：机器入网时交来的准入材料、机器自行退出、Hub 得知的公网
-//! 地址。Hub 把它们用到自己保存的站点副本和每一次推送上，签名工具取回之后用到站点目录中：两边用的是这同一
-//! 份逻辑，结果相同。准入材料在这里按站点的信任锚完整验证，Hub 交来的内容是不可信的输入（硬性规则 13）。
+//! What happens on the Hub side (design/hub.md section 4): admission material delivered when a
+//! machine joins, machines leaving on their own, and public addresses learned by the Hub. The Hub
+//! applies them to its own copy of the site and to every push; the signing tool fetches them and
+//! applies them to the site directory: both sides use this same logic and get the same result.
+//! Admission material is fully verified here against the site's trust anchor; what the Hub delivers
+//! is untrusted input (hard rule 13).
 
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
@@ -13,14 +16,15 @@ use crate::SiteError;
 use crate::sign::enrolled_input;
 use crate::state::{Learned, NodeKeys, SignedPolicy, State};
 
-/// `GET /api/v1/site/updates` 的回复。
+/// Response of `GET /api/v1/site/updates`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Updates {
-    /// 经 Hub 入网的机器的准入材料：站点签的初始节点策略加上机器签的准入证明。
+    /// Admission material of machines that joined through the Hub: the initial node policy signed
+    /// by the site plus the admission proof signed by the machine.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub enrolled: Vec<AdmissionMaterial>,
-    /// 自行退出（`nett leave`）的机器。
+    /// Machines that left on their own (`nett leave`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub left: Vec<NodeId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -34,7 +38,7 @@ pub struct LearnedFor {
     pub learned: Learned,
 }
 
-/// 用到站点上的事，按机器名。
+/// Events applied to a site, by machine name.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct Applied {
     pub joined: Vec<NodeName>,
@@ -43,12 +47,13 @@ pub struct Applied {
 }
 
 impl Updates {
-    /// 用到站点状态上。已经用过的（机器已经记下这份准入材料、已经移除、地址相同）跳过，不在站点中的机器
-    /// 也跳过。失败时站点状态不变。
+    /// Applies them to the site state. Ones already applied (the machine already recorded this
+    /// admission material, was already removed, or the address is the same) are skipped, and so are
+    /// machines not in the site. On failure the site state is unchanged.
     pub fn apply(&self, state: &mut State) -> Result<Applied, SiteError> {
         let mut next = state.clone();
         let mut applied = Applied::default();
-        // 撤销先于授权（硬性规则 4）
+        // Revocation comes before authorization (hard rule 4)
         for node in &self.left {
             if let Some(name) = next.name_of(node).cloned() {
                 next.remove(&name)?;
@@ -76,8 +81,10 @@ impl Updates {
     }
 }
 
-/// 记下一台机器经 Hub 入网时交来的准入材料（design/hub.md 第 6 节）：材料要能用站点的信任锚验证，机器要在
-/// 站点中、还没有公钥。返回记下的机器名；这台机器已经记下同样的公钥、或已不在站点中时返回 `None`。
+/// Records the admission material delivered when a machine joins through the Hub (design/hub.md
+/// section 6): the material must verify against the site's trust anchor, and the machine must be in
+/// the site and not yet have a public key. Returns the recorded machine name; returns `None` when
+/// the machine already recorded the same public key or is no longer in the site.
 pub fn record_enrollment(
     state: &mut State,
     material: &AdmissionMaterial,
@@ -92,7 +99,7 @@ pub fn record_enrollment(
     }
     let member = match admit(material, &trusted, &revocations) {
         Ok(member) => member,
-        // 机器入网之后又被移除了
+        // The machine was removed after it joined
         Err(e) if e.node_id().is_some_and(|n| revocations.is_node_revoked(n)) => return Ok(None),
         Err(e) => return Err(SiteError::invalid(format!("admission material: {e}"))),
     };

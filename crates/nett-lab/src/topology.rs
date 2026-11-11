@@ -1,4 +1,4 @@
-//! 拓扑描述（design/prototype.md 第 4 节）。
+//! Topology description (design/prototype.md section 4).
 
 use std::collections::BTreeSet;
 
@@ -17,7 +17,7 @@ pub struct Topology {
     pub routers: Vec<Router>,
     #[serde(rename = "link", default)]
     pub links: Vec<Link>,
-    /// 访问规则（design/mesh.md 第 12 节），按顺序展开成一份签名的规则集。
+    /// Access rules (design/mesh.md section 12), expanded in order into one signed rule set.
     #[serde(rename = "allow", default)]
     pub allows: Vec<Allow>,
 }
@@ -34,26 +34,30 @@ pub struct MeshRanges {
 pub struct Node {
     pub name: String,
     pub reachability: Reachability,
-    /// 所在的路由器；缺省时直接接在"公网"上。
+    /// The router it is behind; when absent, it attaches directly to the "public network".
     pub behind: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
-    /// 用户态数据面（design/userspace.md）：`nett mesh --userspace`。缺省用内核 WireGuard。
+    /// Userspace data plane (design/userspace.md): `nett mesh --userspace`. Kernel WireGuard by
+    /// default.
     #[serde(default)]
     pub userspace: bool,
-    /// 实验 B（真实机器，design/prototype.md 第 5.2 节）：SSH 主机名，以及公网 IPv4（`public` 节点）与
-    /// 全局 IPv6 地址。实验 A 的地址由本机的网络规划决定，不写这几项。
+    /// Lab B (real machines, design/prototype.md section 5.2): SSH host name, plus public IPv4
+    /// (`public` nodes) and global IPv6 address. Lab A's addresses are decided by this machine's
+    /// network plan, so these items are not written.
     pub ssh: Option<String>,
     pub ipv4: Option<std::net::Ipv4Addr>,
     pub ipv6: Option<std::net::Ipv6Addr>,
-    /// 节点运行 Edge（ADR 0015）：Edge 所在容器的网段。实验 A 在这个节点背后建一个"容器"命名空间，
-    /// 地址就是这里写的唯一一个 IPv4 地址（`/32`）。
+    /// The node runs Edge (ADR 0015): the prefix of the container Edge runs in. Lab A builds a
+    /// "container" namespace behind this node, whose address is the single IPv4 address (`/32`)
+    /// written here.
     pub edge: Option<EdgeSources>,
-    /// 宣告的网段（design/mesh.md 第 10 节）：节点因此带 `subnet_router` 角色。
+    /// Advertised routes (design/mesh.md section 10): the node therefore carries the
+    /// `subnet_router` role.
     #[serde(default)]
     pub routes: Vec<IpPrefix>,
-    /// 实验 A：在这个节点背后建一个"服务"命名空间，`address` 是服务的地址，`ingress` 是节点在服务网络中的
-    /// 地址（同一个 `/24`）。
+    /// Lab A: builds a "service" namespace behind this node; `address` is the service's address and
+    /// `ingress` is the node's address in the service network (the same `/24`).
     pub service: Option<Service>,
 }
 
@@ -70,8 +74,8 @@ pub struct EdgeSources {
     pub containers: Vec<IpPrefix>,
 }
 
-/// 一条放行规则：`from`、`to` 写节点名，`<节点>.edge` 表示该节点的 Edge 专用地址；`ports` 写成
-/// `8686/tcp` 或 `1000-2000/udp`，为空表示所有协议和端口。
+/// An allow rule: `from` and `to` are node names, and `<node>.edge` means that node's Edge address;
+/// `ports` is written as `8686/tcp` or `1000-2000/udp`, and empty means all protocols and ports.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Allow {
@@ -81,7 +85,7 @@ pub struct Allow {
     pub ports: Vec<String>,
 }
 
-/// 解析 `8686/tcp`、`1000-2000/udp` 形式的端口范围。
+/// Parses port ranges of the form `8686/tcp`, `1000-2000/udp`.
 pub fn parse_ports(s: &str) -> anyhow::Result<nett_trust::payload::PortRange> {
     use nett_trust::payload::{PortRange, Protocol};
     let (range, proto) = s
@@ -116,11 +120,11 @@ pub struct Router {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Nat {
-    /// 端口保持、映射与目的地址无关（`masquerade`）。
+    /// Port preserved, mapping independent of destination address (`masquerade`).
     Cone,
-    /// 每个目的地址一个随机端口（`masquerade fully-random`）。
+    /// One random port per destination address (`masquerade fully-random`).
     Symmetric,
-    /// 全局 IPv6 地址，入方向只放行已建立的连接。
+    /// Global IPv6 address; inbound only allows established connections.
     Ipv6Firewall,
 }
 
@@ -131,7 +135,8 @@ pub struct Link {
     pub candidates: Vec<String>,
 }
 
-/// 拓扑的一份副本，其中 `names` 这些节点改用用户态数据面（`userspace = true`），写到 `dir` 中，返回它的路径。
+/// A copy of the topology in which the nodes in `names` switch to the userspace data plane
+/// (`userspace = true`), written to `dir`; returns its path.
 pub fn with_userspace(
     path: &std::path::Path,
     names: &[String],
@@ -161,7 +166,7 @@ pub fn with_userspace(
         );
     }
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    // 沿用原来的文件名：有的场景以它命名报告
+    // Keep the original file name: some scenarios name their reports after it
     let copy = dir.join(path.file_name().context("topology file name")?);
     std::fs::write(&copy, out).with_context(|| format!("writing {}", copy.display()))?;
     Topology::load(&copy)?;
@@ -186,7 +191,8 @@ impl Topology {
             .map(|n| &n.name)
             .chain(self.routers.iter().map(|r| &r.name))
         {
-            // 名称用于网络命名空间和接口名，接口名最长 15 个字节
+            // The name is used for network namespaces and interface names, and an interface name is
+            // at most 15 bytes
             ensure!(
                 !name.is_empty()
                     && name.len() <= 8
@@ -218,7 +224,7 @@ impl Topology {
                     "node `{}`: edge needs at least one container prefix",
                     node.name
                 );
-                // 实验 A 用这个地址建"容器"
+                // Lab A uses this address to build the "container"
                 ensure!(
                     node.ssh.is_some()
                         || (edge.containers.len() == 1
@@ -275,7 +281,7 @@ impl Topology {
             for candidate in &link.candidates {
                 match crate::material::relay_of(candidate) {
                     None if candidate == "direct" || candidate == "direct6" => {}
-                    // 打洞：两端都是 dial-only（design/mesh.md 第 6.1 节）
+                    // Hole punching: both ends are dial-only (design/mesh.md section 6.1)
                     None if candidate == "punch" => ensure!(
                         link.peers
                             .iter()
@@ -300,7 +306,7 @@ impl Topology {
         self.nodes.iter().find(|n| n.name == name)
     }
 
-    /// 节点在拓扑中的序号，从 1 开始；用于分配地址。
+    /// The node's index in the topology, starting at 1; used to allocate addresses.
     pub fn index(&self, name: &str) -> Option<u8> {
         self.nodes
             .iter()

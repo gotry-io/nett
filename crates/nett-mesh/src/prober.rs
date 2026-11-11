@@ -1,6 +1,8 @@
-//! 探测与选路的运行时状态（design/mesh.md 第 7、8 节）：为每个对端维护候选路径，收发探测消息，
-//! 产出要发送的包和要执行的切换；双方都是 `dial-only` 时协调两端一起切换（第 8.4 节）。不碰套接字和
-//! 数据面，由 [`crate::engine`] 执行，测试中可以直接驱动。
+//! Runtime state of probing and path selection (design/mesh.md sections 7 and 8): maintains candidate
+//! paths for each peer, sends and receives probe messages, and produces the packets to send and the
+//! switches to perform; when both sides are `dial-only`, coordinates a two-ended switchover (section
+//! 8.4). It does not touch sockets or the data plane; [`crate::engine`] performs those, and tests can
+//! drive it directly.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -23,59 +25,67 @@ use crate::probe::{
 };
 use crate::punch::{Observations, Punch, PunchEvent};
 
-/// 发出的探测等待应答的上限，过后从对照表中删除（各状态机自己判定丢失）。隧道内探测保留
-/// [`LATE_HORIZON`]：排队几秒的迟到应答也要交给选路状态机（design/mesh.md 第 7 节）。
+/// Upper limit on how long a sent probe waits for a reply; after that it is removed from the lookup table
+/// (each state machine decides loss itself). In-tunnel probes are kept for [`LATE_HORIZON`]: late
+/// replies that queued for a few seconds must also be handed to the path selection state machine
+/// (design/mesh.md section 7).
 const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
-/// 对照表的上限：每个有流量的对端 10 秒内的隧道内探测不到 20 个，加上候选与中继的探测。
+/// Upper limit of the lookup table: fewer than 20 in-tunnel probes within 10 seconds for each peer with
+/// traffic, plus probes of candidates and relays.
 const MAX_OUTSTANDING: usize = 4096;
-/// 跟随方测量中继的间隔：只为向决定方提供"中继 → 本机"这一段。
+/// Interval at which the follower measures relays: only to provide the decider with the "relay -> this
+/// machine" leg.
 const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
-/// 有流量的判定窗口（design/mesh.md 第 7 节）。
+/// Window for judging whether there is traffic (design/mesh.md section 7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
-/// 切换提议的重发间隔与次数：约 2 秒收不到确认，决定方照常切换，之后中断就进入轮换（第 8.4 节）。
+/// Resend interval and count of switch proposals: if no confirmation arrives in about 2 seconds, the
+/// decider switches as usual, and a later outage enters rotation (section 8.4).
 const PROPOSAL_RETRY: Duration = Duration::from_millis(300);
 const PROPOSAL_TRIES: u32 = 7;
-/// 跟随方发出确认之后等这么久再切换：确认要经当前的会话发出，切换会删除这个会话。
+/// How long the follower waits after sending the confirmation before switching: the confirmation is sent
+/// through the current session, and switching deletes that session.
 const ACK_GRACE: Duration = Duration::from_millis(100);
-/// 轮换的时间片（第 8.4 节）。
+/// Time slice of the rotation (section 8.4).
 const ROTATION_SLOT_MS: u64 = 15_000;
-/// 时钟不可信时随机重试的间隔范围。
+/// Range of the random retry interval when the clock is not trusted.
 const RANDOM_RETRY_MIN: Duration = Duration::from_secs(5);
 const RANDOM_RETRY_MAX: Duration = Duration::from_secs(15);
 
-/// 要发出的包。
+/// Packets to send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outgoing {
-    /// 经 `nett0` 发往对端组网地址上的探测端口。
+    /// Sent through `nett0` to the probe port on the peer's mesh address.
     Tunnel { to: SocketAddr, data: Vec<u8> },
-    /// 从组网进程自己的端口发往中继。
+    /// Sent from the mesh process's own port to the relay.
     Relay { to: SocketAddr, data: Vec<u8> },
-    /// 从 WireGuard 端口发出（第 7.1 节）。
+    /// Sent from the WireGuard port (section 7.1).
     Direct { to: SocketAddr, data: Vec<u8> },
 }
 
-/// 收到的包从哪里来。
+/// Where a received packet came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Incoming {
-    /// 组网地址上的探测端口。
+    /// The probe port on the mesh address.
     Tunnel,
-    /// 组网进程发往中继的套接字。
+    /// The socket the mesh process uses to send to relays.
     Relay,
-    /// WireGuard 端口上的副本。
+    /// The copy on the WireGuard port.
     Direct,
 }
 
-/// 一个对端的选路状态在本机状态中的样子（design/status.md 第 6 节）。
+/// How a peer's path selection state appears in local status (design/status.md section 6).
 #[derive(Debug, Clone)]
 pub struct PeerView {
     pub linked: bool,
-    /// 有选路状态时的角色；`None` 表示经漫游跟随（design/mesh.md 第 8.3 节）。
+    /// Role when path selection state exists; `None` means following through roaming (design/mesh.md section
+    /// 8.3).
     pub role: Option<Role>,
-    /// 候选路径（含打通的直连）：跟随方据此判断 WireGuard 当前的 endpoint 是哪条路径。
+    /// Candidate paths (including the punched direct path): the follower uses these to tell which path
+    /// WireGuard's current endpoint is.
     pub routes: Vec<(Route, PathKind)>,
-    /// 有选路状态时各候选的测量，当前路径在内。
+    /// Measurements of each candidate when path selection state exists, including the current path.
     pub candidates: Vec<CandidateView>,
-    /// 有选路状态时当前路径上隧道内探测的测量。
+    /// Measurement of in-tunnel probes on the current path when path selection state exists.
     pub tunnel: Option<TunnelView>,
 }
 
@@ -86,7 +96,7 @@ pub struct TunnelView {
     pub jitter_ms: f64,
 }
 
-/// 要对数据面执行的切换。
+/// The switch to perform on the data plane.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Switch {
     pub peer: NodeId,
@@ -98,7 +108,8 @@ pub struct Switch {
 
 enum CandidateMeta {
     Direct,
-    /// `tls`：经传输适配进程的 TLS 传输；测量不计入本机到这个中继的 UDP 测量。
+    /// `tls`: TLS transport via the transport adapter; the measurement is not counted as this machine's UDP
+    /// measurement to this relay.
     Relay {
         relay: KeyId,
         key: ProbeKey,
@@ -107,35 +118,37 @@ enum CandidateMeta {
 }
 
 struct Peer {
-    /// 期望状态中有到它的路径（站点描述中有这一对的 `link`）。
+    /// The desired state has a path to it (the site description has a `link` for this pair).
     linked: bool,
     public_key: X25519PublicKey,
     mesh_addrs: [IpAddr; 2],
     direct_key: Option<ProbeKey>,
-    /// 前 `configured` 条来自期望状态，之后是打通的直连。
+    /// The first `configured` come from the desired state, followed by punched direct paths.
     routes: Vec<(Route, PathKind)>,
     meta: Vec<CandidateMeta>,
     configured: usize,
-    /// 决定方，以及双方都是 `dial-only` 时的两端，才有选路状态。
+    /// Only the decider, and both ends when both sides are `dial-only`, have path selection state.
     paths: Option<PeerPaths>,
-    /// 双方都是 `dial-only` 时两端一起切换的状态。
+    /// State of the two-ended switchover when both sides are `dial-only`.
     together: Option<Together>,
-    /// 双方都是 `dial-only`、配置了打洞候选时的打洞状态（design/mesh.md 第 6.1 节）。
+    /// Hole punching state when both sides are `dial-only` and hole punching candidates are configured
+    /// (design/mesh.md section 6.1).
     punch: Option<Punch>,
     reports: HashMap<KeyId, (Duration, f64)>,
     last_activity: Option<Instant>,
 }
 
-/// 两端一起切换（design/mesh.md 第 8.4 节）。
+/// Two-ended switchover (design/mesh.md section 8.4).
 #[derive(Debug, Clone, Default)]
 struct Together {
-    /// 决定方：等待确认的提议。
+    /// Decider: the proposal awaiting confirmation.
     proposal: Option<Proposal>,
-    /// 跟随方：最近一次接受的提议轮次，更早的轮次直接丢弃。
+    /// Follower: the proposal round most recently accepted; earlier rounds are dropped directly.
     accepted_round: u32,
-    /// 跟随方：已经确认、等待执行的切换（目标候选、执行时刻）。
+    /// Follower: the switch that has been confirmed and is waiting to be executed (target candidate,
+    /// execution time).
     accepted: Option<(usize, Instant)>,
-    /// 当前路径中断，正在轮换。
+    /// The current path is broken and rotation is in progress.
     rotation: Option<Rotation>,
 }
 
@@ -151,9 +164,9 @@ struct Proposal {
 
 #[derive(Debug, Clone, Default)]
 struct Rotation {
-    /// 时钟可信：最近一次重新握手所在的时间片。
+    /// Clock trusted: the time slice in which the most recent re-handshake took place.
     slot: Option<u64>,
-    /// 时钟不可信：下一次随机重试的时刻。
+    /// Clock not trusted: the time of the next random retry.
     next_random: Option<Instant>,
 }
 
@@ -169,7 +182,7 @@ enum Pending {
     Monitor {
         relay: KeyId,
     },
-    /// 打洞探测。
+    /// Hole punching probe.
     Punch,
 }
 
@@ -178,26 +191,29 @@ pub struct Prober {
     peers: BTreeMap<NodeId, Peer>,
     by_mesh_addr: HashMap<IpAddr, NodeId>,
     by_key_id: HashMap<KeyId, NodeId>,
-    /// 线上的序号 → 哪个对端的哪个探测。各状态机的序号各自独立，这里换成全局唯一的序号。
+    /// Sequence number on the wire -> which probe of which peer. Each state machine's sequence numbers are
+    /// independent, and here they are mapped to globally unique sequence numbers.
     outstanding: HashMap<u32, (NodeId, Pending, Instant)>,
     wire_seq: u32,
-    /// 本机到各中继的测量，随隧道内应答带给对端。
+    /// This machine's measurements to each relay, carried to the peer with in-tunnel replies.
     relay_stats: HashMap<KeyId, PathStats>,
-    /// 跟随方要测的中继：编号 → (地址, 令牌)。
+    /// Relays the follower must measure: number -> (address, token).
     monitored: HashMap<KeyId, (SocketAddr, ProbeKey, Option<Instant>)>,
-    /// 最近一次切换提议的轮次。
+    /// The round of the most recent switch proposal.
     round: u32,
-    /// 收到确认后要执行的切换，在下一次 [`Prober::tick`] 交出。
+    /// The switch to perform after a confirmation is received, handed out at the next [`Prober::tick`].
     ready: Vec<Switch>,
-    /// 本机时钟误差在 2 秒以内：轮换按时间片，否则按随机间隔（第 8.4 节）。
+    /// The local clock error is within 2 seconds: rotation uses time slices; otherwise random intervals
+    /// (section 8.4).
     clock_trusted: bool,
-    /// `public` 节点告诉本机的映射地址（design/mesh.md 第 6.1 节）。
+    /// The mapped address that `public` nodes report to this machine (design/mesh.md section 6.1).
     observations: Observations,
-    /// 交给调用方上报的事件。
+    /// Events to be reported by the caller.
     events: Vec<Event>,
 }
 
-/// 这一端在这一对中的角色（design/mesh.md 第 8.3、8.4 节）；`None` 表示经漫游跟随的一方。
+/// The role of this side in this pair (design/mesh.md sections 8.3 and 8.4); `None` means the side that
+/// follows through roaming.
 pub fn role(
     own: &NodeId,
     own_reach: Reachability,
@@ -213,8 +229,8 @@ pub fn role(
     }
 }
 
-/// 由谁决定这一对的路径（design/mesh.md 第 8.3 节）：`dial-only` 对 `public` 时 `dial-only` 一方决定，
-/// 否则成员 ID 较小的一方决定。
+/// Who decides the path of this pair (design/mesh.md section 8.3): when `dial-only` meets `public`, the
+/// `dial-only` side decides; otherwise the side with the smaller member ID decides.
 pub fn is_decider(
     own: &NodeId,
     own_reach: Reachability,
@@ -228,8 +244,9 @@ pub fn is_decider(
     }
 }
 
-/// 候选在 WireGuard 中的 endpoint 与测量用的信息。TLS 候选的 endpoint 是传输适配进程的回环端口，
-/// 由 `tls` 给出；没有分到端口的 TLS 候选不用。
+/// A candidate's endpoint in WireGuard and the information used for measurement. The endpoint of a TLS
+/// candidate is the transport adapter's loopback port, given by `tls`; a TLS candidate that was not
+/// assigned a port is not used.
 fn routes(
     candidates: &[Candidate],
     tls: &BTreeMap<NodeId, SocketAddr>,
@@ -249,7 +266,8 @@ fn routes(
             Candidate::RelayTls { relay, token, .. } => {
                 Some(relay_route(relay, *tls.get(relay)?, token, true))
             }
-            // 打洞的地址在打洞时交换，打通之后才成为一条候选
+            // The address for hole punching is exchanged during hole punching, and becomes a candidate only after
+            // the punch succeeds
             Candidate::Punch => None,
         })
         .unzip()
@@ -302,12 +320,13 @@ impl Prober {
         }
     }
 
-    /// 取走要上报的事件。
+    /// Takes the events to report.
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
     }
 
-    /// 有对端在高频探测刚切走的更优路径（design/mesh.md 第 7 节），或在等待重新握手完成（第 8.4 节）。
+    /// A peer is probing at high frequency the better path it just switched away from (design/mesh.md
+    /// section 7), or is waiting for a re-handshake to complete (section 8.4).
     pub fn needs_fine_ticks(&self, now: Instant) -> bool {
         self.peers.values().any(|p| {
             p.paths
@@ -316,7 +335,8 @@ impl Prober {
         })
     }
 
-    /// 有对端重新握手之后等待确认的期限已到：调用方先读取 WireGuard 的握手状态，再推进。
+    /// A peer's deadline for waiting for confirmation after a re-handshake has arrived: the caller first
+    /// reads WireGuard's handshake state, then advances.
     pub fn handshake_due(&self, now: Instant) -> bool {
         self.peers.values().any(|p| {
             p.paths
@@ -325,8 +345,9 @@ impl Prober {
         })
     }
 
-    /// WireGuard 端口上来了一个 cookie 应答（只读副本）：交给当前路径就是 `from`、隧道还没建立的对端
-    /// （design/mesh.md 第 8.4 节）。cookie 应答本身无法验证，作用只是推迟一次故障切换。
+    /// A cookie reply arrived on the WireGuard port (read-only copy): handed to the peer whose current path
+    /// is `from` and whose tunnel is not yet established (design/mesh.md section 8.4). The cookie reply
+    /// itself cannot be verified; its only effect is to postpone one failure switch.
     fn on_cookie_reply(&mut self, from: SocketAddr, at: Instant) {
         for peer in self.peers.values_mut() {
             if let Some(paths) = peer.paths.as_mut()
@@ -338,20 +359,23 @@ impl Prober {
         }
     }
 
-    /// WireGuard 报告这个对端加入（或重新握手时重新加入）以来完成过握手。
+    /// WireGuard reports that this peer has completed a handshake since it joined (or re-joined on a
+    /// re-handshake).
     pub fn on_handshake(&mut self, id: &NodeId) {
         if let Some(paths) = self.peers.get_mut(id).and_then(|p| p.paths.as_mut()) {
             paths.on_handshake();
         }
     }
 
-    /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
+    /// Whether the local clock error is within 2 seconds (design/mesh.md section 8.4), updated periodically
+    /// by the runtime.
     pub fn set_clock_trusted(&mut self, trusted: bool) {
         self.clock_trusted = trusted;
     }
 
-    /// 按已准入的成员和期望状态中的候选路径更新。候选列表没有变化的对端保留选路状态。`tls` 是各 TLS
-    /// 中继在传输适配进程上的回环端口（[`crate::config::DesiredMesh::tls_endpoints`]）。
+    /// Updates from the admitted members and the candidate paths in the desired state. Peers whose candidate
+    /// list has not changed keep their path selection state. `tls` is the loopback port of each TLS relay
+    /// on the transport adapter ([`crate::config::DesiredMesh::tls_endpoints`]).
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
@@ -379,7 +403,7 @@ impl Prober {
                 .as_ref()
                 .and_then(|p| p.paths.as_ref().map(|paths| (paths, &p.together, &p.punch)))
                 .filter(|(paths, _, _)| Some(paths.role()) == role);
-            // 保留选路状态时，打通的直连也留下
+            // When path selection state is kept, the punched direct path is kept too
             if kept.is_some()
                 && let Some(prev) = &previous
             {
@@ -404,7 +428,8 @@ impl Prober {
                 (None, None) => (None, None),
             };
             for m in &meta {
-                // 跟随方只测 UDP 中继：测量供对端估算经中继路径的另一段
+                // The follower measures only UDP relays: the measurement lets the peer estimate the other leg of the
+                // relay path
                 if let CandidateMeta::Relay {
                     relay,
                     key,
@@ -463,7 +488,8 @@ impl Prober {
             .collect();
     }
 
-    /// 当前路径的 endpoint：有选路状态时取选路状态，否则取第一条候选（之后由 WireGuard 的漫游跟随）。
+    /// Endpoint of the current path: with path selection state it is taken from it, otherwise from the first
+    /// candidate (afterwards WireGuard's roaming follows).
     pub fn endpoint(&self, peer: &NodeId) -> Option<SocketAddr> {
         let p = self.peers.get(peer)?;
         match &p.paths {
@@ -472,7 +498,8 @@ impl Prober {
         }
     }
 
-    /// 期望的 endpoint，用于纠正被漫游改掉的 endpoint（第 8.3 节）。经漫游跟随的一方返回 `None`。
+    /// The intended endpoint, used to correct an endpoint changed by roaming (section 8.3). The side that
+    /// follows through roaming returns `None`.
     pub fn desired_endpoint(&self, peer: &NodeId) -> Option<SocketAddr> {
         self.peers
             .get(peer)?
@@ -481,21 +508,22 @@ impl Prober {
             .map(|p| p.current().endpoint())
     }
 
-    /// 记录对端最近有流量。
+    /// Records that the peer recently had traffic.
     pub fn mark_active(&mut self, peer: &NodeId, now: Instant) {
         if let Some(p) = self.peers.get_mut(peer) {
             p.last_activity = Some(now);
         }
     }
 
-    /// WireGuard 对这个对端的接收字节数有变化：对端的包仍在到达（design/mesh.md 第 8.2 节）。
+    /// WireGuard's received byte count for this peer changed: the peer's packets are still arriving
+    /// (design/mesh.md section 8.2).
     pub fn on_receive(&mut self, peer: &NodeId, now: Instant) {
         if let Some(paths) = self.peers.get_mut(peer).and_then(|p| p.paths.as_mut()) {
             paths.on_receive(now);
         }
     }
 
-    /// 一个对端的选路状态（design/status.md 第 6 节）。
+    /// Path selection state of a peer (design/status.md section 6).
     pub fn peer_view(&self, peer: &NodeId, now: Instant) -> Option<PeerView> {
         let p = self.peers.get(peer)?;
         Some(PeerView {
@@ -518,7 +546,7 @@ impl Prober {
         })
     }
 
-    /// 本机的 NAT 类型与映射地址（design/mesh.md 第 6.1 节）。
+    /// This machine's NAT type and mapped addresses (design/mesh.md section 6.1).
     pub fn own_nat(&self, now: Instant) -> crate::punch::OwnInfo {
         self.observations.own(now)
     }
@@ -545,7 +573,8 @@ impl Prober {
         let mut out = Vec::new();
         let mut switches = std::mem::take(&mut self.ready);
 
-        // 过期的对照项：中继测量记为丢失，其余由各状态机自己判定
+        // Expired lookup entries: relay measurements are recorded as lost, and the rest are decided by each
+        // state machine itself
         let expired: Vec<u32> = self
             .outstanding
             .iter()
@@ -569,7 +598,7 @@ impl Prober {
             let Some(peer) = self.peers.get_mut(&id) else {
                 continue;
             };
-            // 轮换中总是探测隧道：本端的探测收到应答就是双向确认
+            // During rotation always probe the tunnel: a reply to this end's probe is a two-way confirmation
             let active = peer
                 .last_activity
                 .is_some_and(|t| now.saturating_duration_since(t) < ACTIVE_WINDOW)
@@ -648,12 +677,12 @@ impl Prober {
                     Action::Lost => self.start_rotation(&id),
                 }
             }
-            // 新的提议立即发出，等待中的按间隔重发
+            // A new proposal is sent immediately; those already waiting are resent at intervals
             out.extend(self.send_proposal(&id, now));
             out.extend(self.punch_tick(&id, now, now_ms));
         }
 
-        // 跟随方也测中继，供对端估算经中继路径的另一段
+        // The follower also measures relays, for the peer to estimate the other leg of the relay path
         let due: Vec<KeyId> = self
             .monitored
             .iter()
@@ -686,13 +715,15 @@ impl Prober {
     }
 
     fn next_round(&mut self, now_ms: u64) -> u32 {
-        // 以 Unix 秒为下限：重启之后的轮次也大于重启之前的，跟随方不会当作过期
+        // Use Unix seconds as the lower bound: rounds after a restart are also greater than those before it, so
+        // the follower does not treat them as stale
         let secs = u32::try_from(now_ms / 1000).unwrap_or(u32::MAX);
         self.round = self.round.wrapping_add(1).max(secs);
         self.round
     }
 
-    /// 决定方要切到第 `index` 个候选：目标是中继或打通的直连时开始提议；其他直连直接切换。
+    /// The decider is to switch to candidate `index`: when the target is a relay or a punched direct path,
+    /// proposing begins; other direct paths are switched directly.
     fn propose(
         &mut self,
         id: &NodeId,
@@ -731,7 +762,8 @@ impl Prober {
         }
     }
 
-    /// 发出（或重发）等待确认的提议；重发次数用完仍没有确认，决定方照常切换（第 8.4 节）。
+    /// Sends (or resends) the proposal awaiting confirmation; when the resends are used up with still no
+    /// confirmation, the decider switches as usual (section 8.4).
     fn send_proposal(&mut self, id: &NodeId, now: Instant) -> Vec<Outgoing> {
         let Some(peer) = self.peers.get_mut(id) else {
             return vec![];
@@ -782,8 +814,9 @@ impl Prober {
         }
     }
 
-    /// 两端一起切换的推进：跟随方执行已确认的提议；轮换中按时间片（或随机间隔）重新握手，本端的隧道内
-    /// 探测收到应答就停在当前中继（第 8.4 节）。
+    /// Advancing the two-ended switchover: the follower executes the confirmed proposal; during rotation it
+    /// re-handshakes by time slice (or random interval), and stops at the current relay once this end's
+    /// in-tunnel probe gets a reply (section 8.4).
     fn coordinate(&mut self, id: &NodeId, now: Instant, now_ms: u64) -> Vec<Action> {
         let trusted = self.clock_trusted;
         let Some(peer) = self.peers.get_mut(id) else {
@@ -806,7 +839,8 @@ impl Prober {
         let Some(rotation) = together.rotation.as_mut() else {
             return vec![];
         };
-        // 已经重新握手过，本端的隧道内探测收到了应答：双向都通，停在这个中继
+        // Already re-handshaked, and this end's in-tunnel probe got a reply: both directions work, stay on this
+        // relay
         if (rotation.slot.is_some() || rotation.next_random.is_some()) && paths.tunnel_established()
         {
             together.rotation = None;
@@ -844,7 +878,8 @@ impl Prober {
             .collect()
     }
 
-    /// 处理收到的包，返回要发出的应答。认证不过或格式不对的包不作任何响应。
+    /// Handles a received packet and returns the reply to send. Packets that fail authentication or have a
+    /// bad format get no response at all.
     pub fn on_packet(
         &mut self,
         kind: Incoming,
@@ -855,7 +890,8 @@ impl Prober {
     ) -> Vec<Outgoing> {
         match (kind, data.first().copied()) {
             (Incoming::Tunnel, Some(probe::TUNNEL_PROBE)) => {
-                // 只应答来自已准入成员组网地址的探测；来源已由 WireGuard 按 AllowedIPs 认证
+                // Reply only to probes from the mesh address of an admitted member; the source has already been
+                // authenticated by WireGuard through AllowedIPs
                 let (Some(seq), true) = (
                     probe::decode_tunnel_probe(data),
                     self.by_mesh_addr.contains_key(&from.ip()),
@@ -926,7 +962,8 @@ impl Prober {
                     return vec![];
                 };
                 let reply = probe.reply(self.own_key_id, from).encode(key);
-                // 打洞期间：对方到本机这个方向通了（design/mesh.md 第 6.1 节）
+                // During hole punching: the direction from the other side to this machine works (design/mesh.md
+                // section 6.1)
                 if let Some(peer) = self
                     .by_key_id
                     .get(&head.key_id)
@@ -962,7 +999,8 @@ impl Prober {
                 };
                 match self.outstanding.remove(&reply.seq) {
                     Some((owner, Pending::Candidate { index, local }, _)) if owner == id => {
-                        // 对方看到的来源就是本机 WireGuard 端口的映射地址（design/mesh.md 第 6.1 节）
+                        // The source the other side sees is the mapped address of this machine's WireGuard port (design/mesh.md
+                        // section 6.1)
                         self.observations.record(from.ip(), reply.observed, at);
                         if let Some(paths) =
                             self.peers.get_mut(&owner).and_then(|p| p.paths.as_mut())
@@ -989,8 +1027,9 @@ impl Prober {
         }
     }
 
-    /// 切换提议与确认（第 8.4 节）。来源已由 WireGuard 按 AllowedIPs 认证；只接受这一对中对方角色的消息，
-    /// 过期轮次和不在候选中的中继直接丢弃。
+    /// Switch proposals and confirmations (section 8.4). The source has already been authenticated by
+    /// WireGuard through AllowedIPs; only messages from the other side's role in this pair are accepted,
+    /// and stale rounds and relays not among the candidates are dropped directly.
     fn on_switch_message(
         &mut self,
         sender: &NodeId,
@@ -1021,7 +1060,7 @@ impl Prober {
                     together.accepted_round = message.round;
                     together.accepted = Some((index, at + ACK_GRACE));
                 }
-                // 同一轮次的重发：上一份确认丢了，再确认一次
+                // A resend of the same round: the previous confirmation was lost, so confirm once more
                 let ack = SwitchMessage {
                     kind: SWITCH_ACK,
                     ..message
@@ -1051,7 +1090,8 @@ impl Prober {
         }
     }
 
-    /// 打洞提议与确认（design/mesh.md 第 6.1 节）。来源已由 WireGuard 认证；只接受这一对中对方角色的消息。
+    /// Hole punching proposals and confirmations (design/mesh.md section 6.1). The source has been
+    /// authenticated by WireGuard; only messages from the other side's role in this pair are accepted.
     fn on_punch_message(
         &mut self,
         sender: &NodeId,
@@ -1083,8 +1123,9 @@ impl Prober {
         }
     }
 
-    /// 打洞的推进：决定方在适合时提议；打洞期间每 200 毫秒从 WireGuard 端口向对方的地址发探测；打通的
-    /// 地址作为一条直连候选加入选路状态（design/mesh.md 第 6.1 节）。
+    /// Advancing hole punching: the decider proposes when appropriate; during punching, probes are sent every
+    /// 200 ms from the WireGuard port to the other side's addresses; the punched address is added to path
+    /// selection state as a direct candidate (design/mesh.md section 6.1).
     fn punch_tick(&mut self, id: &NodeId, now: Instant, now_ms: u64) -> Vec<Outgoing> {
         let own = self.observations.own(now);
         let next_round = self
@@ -1181,7 +1222,8 @@ impl Prober {
     }
 
     fn on_relay_reply(&mut self, data: &[u8], at: Instant) {
-        // 应答中的编号是本机的；按序号找回是哪个探测，再用那个中继的令牌认证
+        // The number in the reply is this machine's; look up which probe it was by sequence number, then
+        // authenticate with that relay's token
         let Some(head) = OuterReply::peek(data) else {
             return;
         };
@@ -1210,7 +1252,7 @@ impl Prober {
         }
         self.outstanding.remove(&seq);
         let rtt = at.saturating_duration_since(sent);
-        // 随隧道内应答带给对端的是本机到中继的 UDP 测量
+        // What is carried to the peer with the in-tunnel reply is this machine's UDP measurement to the relay
         if !tls {
             self.relay_stats.entry(relay).or_default().record_reply(rtt);
         }
@@ -1257,7 +1299,7 @@ fn switch_of(peer: &NodeId, public_key: X25519PublicKey, action: Action) -> Opti
     }
 }
 
-/// 随机重试用的随机数：只用于错开两端的重试，不承担安全作用。
+/// Random number for random retries: used only to stagger the two ends' retries, with no security role.
 fn random_u32() -> u32 {
     use ring::rand::SecureRandom as _;
     let mut b = [0u8; 4];
@@ -1292,16 +1334,18 @@ mod tests {
         mesh: SocketAddr,
     }
 
-    /// A（dial-only，决定方）经直连或中继 R 到 B（public）；模拟网络按链路的通断投递真实编码的消息。
+    /// A (dial-only, decider) reaches B (public) via direct or relay R; the simulated network delivers
+    /// really encoded messages according to whether each link is up.
     struct Net {
         a: Node,
         b: Node,
         relay: SocketAddr,
         direct_up: bool,
         relay_up: bool,
-        /// B 发回 A 的隧道内包另外排队这么久（B 的上行被塞满、队列很深）。
+        /// In-tunnel packets from B to A are additionally queued this long (B's uplink is filled, the queue is
+        /// deep).
         tunnel_queue: Duration,
-        /// 排队中的隧道内应答：（送达时刻，内容）。
+        /// In-tunnel replies in the queue: (delivery time, content).
         queued: Vec<(Instant, Vec<u8>)>,
         now: Instant,
         switches: Vec<(Instant, Switch)>,
@@ -1408,7 +1452,7 @@ mod tests {
             }
         }
 
-        /// 模拟中继：令牌认证后应答。
+        /// Simulated relay: replies after token authentication.
         fn relay_reply(&self, data: &[u8], from: SocketAddr) -> Option<Vec<u8>> {
             let head = OuterProbe::peek(data)?;
             for token in [TOKEN_A, TOKEN_B] {
@@ -1434,7 +1478,8 @@ mod tests {
             }
         }
 
-        /// 投递一个节点发出的包；对方的应答立即投递回来（往返时间视为 0，由 tick 的粒度决定）。
+        /// Delivers a packet sent by a node; the other side's reply is delivered back immediately (the
+        /// round-trip time is treated as 0, determined by the granularity of tick).
         fn deliver(&mut self, from_a: bool, out: Outgoing) {
             let up = self.current_up();
             let (src, dst) = if from_a {
@@ -1496,7 +1541,7 @@ mod tests {
                         .prober
                         .on_packet(Incoming::Tunnel, self.b.mesh, &data, at, 0);
                 }
-                // 有流量：当前路径通时 B 的包一直在到达
+                // With traffic: while the current path works, B's packets keep arriving
                 if self.current_up() {
                     let b = self.b.id.clone();
                     self.a.prober.on_receive(&b, now);
@@ -1550,7 +1595,7 @@ mod tests {
         let mut net = Net::new();
         net.run(Duration::from_secs(10));
         assert!(net.switches.is_empty());
-        // 跟随方的中继测量随隧道内应答带给了决定方
+        // The follower's relay measurement was carried to the decider with the in-tunnel reply
         assert!(
             net.a.prober.peers[&net.b.id]
                 .reports
@@ -1571,7 +1616,7 @@ mod tests {
         let (at, s) = net.switches.last().expect("switched back");
         assert_eq!(s.to.endpoint(), addr("198.51.100.2:41820"));
         assert_eq!(s.reason, SwitchReason::BetterType);
-        // 切走后的 15 秒内高频探测；模拟每 100 毫秒推进一次
+        // High-frequency probing for 15 seconds after switching away; the simulation advances every 100 ms
         let took = at.saturating_duration_since(restored);
         assert!(took <= Duration::from_millis(300), "took {took:?}");
     }
@@ -1580,7 +1625,8 @@ mod tests {
     fn late_tunnel_replies_keep_a_congested_path() {
         let mut net = Net::new();
         net.run(Duration::from_secs(10));
-        // B 的上行被塞满：隧道内应答迟到 4 秒，超过对照表平常的保留时间
+        // B's uplink is filled: in-tunnel replies are 4 seconds late, beyond the lookup table's usual retention
+        // time
         net.tunnel_queue = Duration::from_secs(4);
         net.run(Duration::from_secs(60));
         assert!(net.switches.is_empty(), "{:?}", net.switches);
@@ -1590,7 +1636,7 @@ mod tests {
     fn ignores_unauthenticated_and_foreign_probes() {
         let mut net = Net::new();
         let now = net.now;
-        // 不是成员组网地址发来的隧道内探测
+        // An in-tunnel probe not sent from a member's mesh address
         let probe = probe::encode_tunnel_probe(1);
         assert!(
             net.b
@@ -1598,7 +1644,7 @@ mod tests {
                 .on_packet(Incoming::Tunnel, addr("100.88.0.77:5000"), &probe, now, 0)
                 .is_empty()
         );
-        // 用错误密钥算校验码的直连探测
+        // A direct probe whose checksum is computed with the wrong key
         let forged = OuterProbe {
             kind: DIRECT_PROBE,
             key_id: net.a.prober.own_key_id,
@@ -1612,7 +1658,7 @@ mod tests {
                 .on_packet(Incoming::Direct, net.a.wg, &forged, now, 0)
                 .is_empty()
         );
-        // 任意字节
+        // Arbitrary bytes
         assert!(
             net.b
                 .prober
@@ -1621,21 +1667,22 @@ mod tests {
         );
     }
 
-    /// A、B 都是 `dial-only`（A 的 ID 较小，是决定方），经中继 R1、R2；隧道只在两端的 endpoint 指向同一个
-    /// 可用的中继时连通。两端的候选列表顺序不同。
+    /// A and B are both `dial-only` (A has the smaller ID and is the decider), via relays R1 and R2; the
+    /// tunnel works only when both ends' endpoints point to the same working relay. The two ends' candidate
+    /// lists are in different orders.
     struct Pair {
         a: Node,
         b: Node,
         relays: [SocketAddr; 2],
         relay_up: [bool; 2],
-        /// 经这个中继时每隔几个隧道内的探测（或提议）丢一个，应答不丢。
+        /// Via this relay, every few in-tunnel probes (or proposals) one is dropped; replies are not dropped.
         lossy: Option<(usize, u32)>,
         sent: u32,
         now: Instant,
         now_ms: u64,
         switches: Vec<(Instant, bool, Switch)>,
-        /// 两端各在一个端口受限的锥形 NAT 之后：映射地址固定；只有本机先向对方的地址发过包，对方的包
-        /// 才进得来。
+        /// Each end sits behind a port-restricted cone NAT: the mapped address is fixed; only after this machine
+        /// first sends a packet to the other side's address can the other side's packets get in.
         mapped: [SocketAddr; 2],
         opened: [std::collections::HashSet<SocketAddr>; 2],
         direct_sent: [usize; 2],
@@ -1646,8 +1693,8 @@ mod tests {
             Self::build(false)
         }
 
-        /// 配置了打洞候选；两端都从两个 `public` 节点得知了自己的映射地址（`symmetric` 时两个观察者看到的
-        /// 端口不同）。
+        /// Hole punching candidates are configured; both ends have learned their own mapped addresses from two
+        /// `public` nodes (with `symmetric`, the two observers see different ports).
         fn with_punch(symmetric: bool) -> Self {
             let mut pair = Self::build(true);
             let now = pair.now;
@@ -1750,7 +1797,7 @@ mod tests {
                 lossy: None,
                 sent: 0,
                 now,
-                // 时间片边界之后 1 秒
+                // 1 second after the time slice boundary
                 now_ms: 1_800_000_001_000 - 1_800_000_001_000 % ROTATION_SLOT_MS + 1_000,
                 switches: Vec::new(),
                 mapped: [addr("198.51.100.201:41820"), addr("198.51.100.202:41820")],
@@ -1768,7 +1815,7 @@ mod tests {
 
         fn tunnel_up(&mut self, lossy: bool) -> bool {
             let (a, b) = self.endpoints();
-            // 打通的直连：两端都指向对方的映射地址
+            // The punched direct path: both ends point to the other side's mapped address
             if a == Some(self.mapped[1]) && b == Some(self.mapped[0]) {
                 return true;
             }
@@ -1843,7 +1890,7 @@ mod tests {
                 Outgoing::Direct { to, data } => {
                     let (src, dst) = if from_a { (0, 1) } else { (1, 0) };
                     self.direct_sent[src] += 1;
-                    // 发出即在本机的 NAT 上打开到这个地址的映射
+                    // Sending opens a mapping to this address on this machine's NAT
                     self.opened[src].insert(to);
                     if to != self.mapped[dst] || !self.opened[dst].contains(&self.mapped[src]) {
                         return;
@@ -1913,7 +1960,8 @@ mod tests {
         let mut pair = Pair::new();
         pair.run(Duration::from_secs(10));
         let (start, _) = pair.endpoints();
-        // 当前中继严重丢包但仍能传递一部分：决定方经隧道提议，对端确认后两端一起切换
+        // The current relay has severe loss but can still pass some traffic: the decider proposes through the
+        // tunnel, and after the peer confirms both ends switch together
         let current = pair
             .relays
             .iter()
@@ -1929,7 +1977,8 @@ mod tests {
             .iter()
             .map(|(_, from_a, s)| (*from_a, s.reason, s.rehandshake))
             .collect();
-        // 丢包明显时同类更优路径 5 秒即切换，可能先于判为故障
+        // When loss is noticeable, a better path of the same type switches within 5 seconds, possibly before it
+        // is judged a failure
         assert!(
             reasons.contains(&(true, SwitchReason::HighLoss, true))
                 || reasons.contains(&(true, SwitchReason::BetterScore, true)),
@@ -1939,7 +1988,7 @@ mod tests {
             reasons.contains(&(false, SwitchReason::Proposed, true)),
             "{reasons:?}"
         );
-        // 两端切换的时刻相差不超过半秒
+        // The two ends' switch times differ by no more than half a second
         let at = |side: bool| {
             pair.switches
                 .iter()
@@ -1967,7 +2016,7 @@ mod tests {
         let (a, b) = pair.endpoints();
         assert_eq!(a, b);
         assert_ne!(a, start);
-        // 双方都按时间片轮换；在另一个中继上确认后停下，不再轮换
+        // Both sides rotate by time slice; after confirming on another relay they stop and no longer rotate
         let rotations: Vec<(Instant, bool)> = pair
             .switches
             .iter()
@@ -1998,7 +2047,7 @@ mod tests {
             }
             .encode()
         };
-        // 跟随方确认决定方的提议
+        // The follower confirms the decider's proposal
         let acks = pair.b.prober.on_packet(
             Incoming::Tunnel,
             pair.a.mesh,
@@ -2007,7 +2056,7 @@ mod tests {
             now_ms,
         );
         assert_eq!(acks.len(), 1);
-        // 过期的轮次、不在候选中的中继、来自跟随方的提议：都不应答
+        // Stale round, a relay not among the candidates, a proposal from the follower: none are answered
         let stale = pair.b.prober.on_packet(
             Incoming::Tunnel,
             pair.a.mesh,
@@ -2030,7 +2079,7 @@ mod tests {
             now_ms,
         );
         assert!(stale.is_empty() && unknown.is_empty() && wrong_role.is_empty());
-        // 不是成员组网地址发来的
+        // Not sent from a member's mesh address
         let foreign = pair.b.prober.on_packet(
             Incoming::Tunnel,
             addr("100.88.0.77:41821"),
@@ -2082,7 +2131,8 @@ mod tests {
             .iter()
             .map(|(_, from_a, s)| (*from_a, s.reason, s.rehandshake))
             .collect();
-        // 决定方择优切过去，跟随方按提议切换；直连不需要重新握手
+        // The decider switches to the better one, the follower switches per the proposal; a direct path needs no
+        // re-handshake
         assert!(
             reasons.contains(&(true, SwitchReason::BetterType, false)),
             "{reasons:?}"
@@ -2104,7 +2154,7 @@ mod tests {
                 .any(|e| matches!(e, Event::PunchSucceeded { .. })),
             "{events:?}"
         );
-        // 之后停在直连上
+        // Stay on the direct path afterwards
         let before = pair.switches.len();
         pair.run(Duration::from_secs(60));
         assert_eq!(pair.switches.len(), before);

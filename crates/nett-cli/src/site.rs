@@ -1,7 +1,9 @@
-//! `nett site`：用户自己电脑上的签名工具（design/site.md）。站点目录（默认 `~/.config/nett`）中有恢复密钥
-//! `recovery.pk8`（权限 `0600`，只在签名时读取）和站点状态 `state.json`；每条修改命令列出要签名的内容，
-//! 确认后签名，为期望状态有变化的机器重写 `nodes/<机器>/desired.json`。站点的模型、签名与组成在
-//! `nett-site` 中，这里只是命令行。
+//! `nett site`: the signing tool on the user's own computer (design/site.md). The site directory
+//! (default `~/.config/nett`) holds the recovery key `recovery.pk8` (permissions `0600`, read only
+//! when signing) and the site state `state.json`; every modifying command lists what will be
+//! signed, signs after confirmation, and rewrites `nodes/<machine>/desired.json` for machines whose
+//! desired state changed. The site model, signing and composition live in `nett-site`; this module
+//! is only the command line.
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, IsTerminal as _, Write as _};
@@ -60,9 +62,9 @@ Changes are listed before they are signed; --yes signs without asking (needed wh
 With a Hub, signed changes are pushed to it and reach the machines from there.
 The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it is not set.";
 
-/// 一次修改：在站点状态的副本上进行。
+/// One modification: made on a copy of the site state.
 type Change = Box<dyn FnOnce(&mut State) -> anyhow::Result<()>>;
-/// 推送成功之后要做的事（打印新机器上要运行的一行）。
+/// What to do after a successful push (print the one line to run on the new machine).
 type After<'a> = &'a dyn Fn(&State) -> anyhow::Result<()>;
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
@@ -98,7 +100,8 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     let machine = |s: &str| -> anyhow::Result<NodeName> { Ok(s.parse()?) };
-    // 接了 Hub 时每条命令先取回 Hub 一侧发生的事（design/hub.md 第 4 节）
+    // When linked to a Hub, every command first fetches what happened on the Hub side
+    // (design/hub.md section 4)
     if !matches!(words.as_slice(), ["init"] | ["link", _])
         && let Some(hub) = SiteHub::load(&dir)?
     {
@@ -134,7 +137,8 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             };
             let id = new_node_id()?;
             if opts.keys.is_none() {
-                // 接了 Hub：签好节点策略，新机器经 Hub 入网（design/hub.md 第 3.3、6 节）
+                // Linked to a Hub: sign the node policy; the new machine joins through the Hub
+                // (design/hub.md sections 3.3 and 6)
                 let Some(hub) = SiteHub::load(&dir)? else {
                     bail!(
                         "--keys is needed: run `nett keys` or `sudo nett install` on the machine and \
@@ -209,9 +213,12 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     modify(&dir, yes, &[], change, None)
 }
 
-/// 取回 Hub 一侧发生的事，记进站点目录（design/hub.md 第 4 节）：入网的机器记下公钥与准入材料，退出的机器
-/// 移除、规则随之清理并以新的版本重签（收窄），得知的公网地址记下。只有记录与收窄，不用确认。Hub 不在时
-/// 跳过：命令之后的推送会报告。
+/// Fetches what happened on the Hub side and records it in the site directory (design/hub.md
+/// section 4): machines that joined have their public keys and admission material recorded,
+/// machines that left are removed, their rules are cleaned up and re-signed with a new version
+/// (narrowing), and learned public addresses are recorded. These are only recording and narrowing,
+/// so no confirmation is needed. Skipped when the Hub is unreachable: the push after the command
+/// reports it.
 fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
     let Ok(updates) = crate::hub::fetch_updates(hub) else {
         return Ok(());
@@ -237,7 +244,7 @@ fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
         println!("  {line}");
     }
     save_with_outputs(&site, &stored, &next, &outputs(&next)?)?;
-    // 送不到时下一条命令再推
+    // If it cannot be delivered, the next command pushes again
     if let Err(e) = crate::hub::push(hub, &next) {
         println!("  (pushing this to the Hub failed: {e:#})");
     }
@@ -245,7 +252,8 @@ fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 各台机器的期望状态；组成失败（生成的期望状态组网进程不接受）时整条命令失败。
+/// The desired state of every machine; if composition fails (the generated desired state is not
+/// accepted by the mesh process), the whole command fails.
 fn outputs(state: &State) -> anyhow::Result<Vec<(NodeName, DesiredMeshDoc)>> {
     let mut outputs = Vec::new();
     for name in state.machines.keys() {
@@ -256,7 +264,8 @@ fn outputs(state: &State) -> anyhow::Result<Vec<(NodeName, DesiredMeshDoc)>> {
     Ok(outputs)
 }
 
-/// 保存站点状态，重写各台机器的期望状态文件，删除已移除的机器的文件。返回写了文件的机器。
+/// Saves the site state, rewrites each machine's desired state file and deletes the files of
+/// removed machines. Returns the machines whose files were written.
 fn save_with_outputs(
     site: &SiteDir,
     old: &State,
@@ -275,8 +284,9 @@ fn save_with_outputs(
     Ok(written)
 }
 
-/// 让一台机器经 Hub 入网：`change` 之后给它一把新的入网密钥（design/hub.md 第 6 节），签名、推送，再打印
-/// 新机器上要运行的一行。入网私钥只在这一行里。
+/// Lets a machine join through the Hub: after `change`, gives it a new enrollment key
+/// (design/hub.md section 6), signs, pushes, then prints the one line to run on the new machine.
+/// The enrollment private key appears only in this line.
 fn enroll(
     dir: &Path,
     hub: &SiteHub,
@@ -318,8 +328,9 @@ fn list_or_none(items: &[&str], none: bool, what: &str) -> anyhow::Result<Option
     }
 }
 
-/// 一条修改命令（design/site.md 第 7 节）：修改 → 签名 → 列出变化 → 确认 → 写期望状态 → 保存站点状态。
-/// `force` 中的机器即使没有变化也重签节点策略（`invite`）。接了 Hub 时 `after` 在推送成功之后运行。
+/// One modifying command (design/site.md section 7): modify, sign, list the changes, confirm, write
+/// the desired state, save the site state. Machines in `force` get their node policy re-signed even
+/// if nothing changed (`invite`). When linked to a Hub, `after` runs after a successful push.
 fn modify(
     dir: &Path,
     yes: bool,
@@ -332,7 +343,7 @@ fn modify(
     let mut new = old.clone();
     change(&mut new)?;
     let hub = SiteHub::load(dir)?;
-    // 不接 Hub 时没有人能告诉站点公网地址（design/site.md 第 4 节）
+    // Without a Hub, nobody can tell the site a public address (design/site.md section 4)
     if hub.is_none()
         && let Some(name) = new.unknown_public_addresses().first()
     {
@@ -342,8 +353,9 @@ fn modify(
     let lines = describe(&old, &new);
     let outputs = outputs(&new)?;
     if lines.is_empty() {
-        // 没有要签的：只补上缺少或不一致的期望状态文件；接了 Hub 时再推一次（上一次可能没有送到，
-        // 内容相同时 Hub 不换代数）
+        // Nothing to sign: only fill in missing or inconsistent desired state files; when linked to
+        // a Hub, push once more (the last push may not have been delivered; the Hub does not change
+        // the generation when the content is the same)
         let written = write_outputs(&site, &outputs)?;
         if written.is_empty() {
             println!("Nothing changed.");
@@ -376,7 +388,7 @@ fn modify(
         "the change is signed and saved, but pushing it to the Hub failed; the next nett site \
          command pushes it again"
     })?;
-    // 还没有连过 Hub 的机器仍按文件应用
+    // Machines that have not connected to the Hub yet are still applied from files
     let offline: Vec<NodeName> = written
         .into_iter()
         .filter(|n| {
@@ -407,7 +419,7 @@ fn write_outputs(
     Ok(written)
 }
 
-/// 期望状态有变化的机器和应用的方法（design/local-signing.md 第 5 节）。
+/// Machines whose desired state changed and how to apply it (design/local-signing.md section 5).
 fn print_written(site: &SiteDir, written: &[NodeName]) {
     if written.is_empty() {
         return;
@@ -424,7 +436,7 @@ The files contain no private keys. To apply one on its machine:
     );
 }
 
-/// 签名之前确认：不是终端时要 `--yes`。
+/// Confirmation before signing: `--yes` is required when not on a terminal.
 fn confirm(yes: bool, question: &str) -> anyhow::Result<()> {
     if yes {
         return Ok(());
@@ -463,15 +475,18 @@ Next, for each machine:
     Ok(())
 }
 
-/// `nett site invite`（不接 Hub）：重签这台机器的节点策略，重写它的期望状态（design/site.md 第 3 节）。
+/// `nett site invite` (no Hub): re-signs this machine's node policy and rewrites its desired state
+/// (design/site.md section 3).
 fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
     if let Some(hub) = SiteHub::load(dir)? {
         let state = SiteDir::open(dir)?.load()?;
         if state.machine(name)?.keys.is_none() {
-            // 还没有入网：换一把入网密钥，原来的 token 随之作废（design/hub.md 第 3.3 节）
+            // Not enrolled yet: switch to a new enrollment key, and the old token is invalidated
+            // (design/hub.md section 3.3)
             return enroll(dir, &hub, yes, name, Box::new(|_| Ok(())));
         }
-        // 已是成员的机器用自己的身份密钥连接 Hub，从那里接收期望状态（design/hub.md 第 3.5 节）
+        // A machine that is already a member connects to the Hub with its own identity key and
+        // receives its desired state from there (design/hub.md section 3.5)
         crate::hub::push(&hub, &state)?;
         let token = crate::hub::join_token(&hub, &state, name)?;
         println!("{name} is already a member. On {name}, run:\n  sudo nett install {token}");
@@ -489,7 +504,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
     match SiteHub::load(dir)? {
         Some(hub) => match crate::hub::status(&hub, &state, machine, json) {
             Ok(()) => return Ok(()),
-            // Hub 不在时照样列出站点中的机器
+            // When the Hub is unreachable, the machines in the site are still listed
             Err(e) if machine.is_none() => {
                 eprintln!("Cannot reach the Hub: {e:#}\nShowing the site only.\n")
             }
@@ -610,7 +625,7 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `22/tcp`、`3425/tcp,3430/tcp`、`60000-61000/udp`。
+/// `22/tcp`, `3425/tcp,3430/tcp`, `60000-61000/udp`.
 fn parse_ports(s: &str) -> anyhow::Result<Vec<PortRange>> {
     s.split(',').map(parse_port_range).collect()
 }
@@ -640,7 +655,7 @@ fn parse_port_range(s: &str) -> anyhow::Result<PortRange> {
     })
 }
 
-/// 站点目录的默认位置（design/site.md 第 3 节）。
+/// Default location of the site directory (design/site.md section 3).
 fn default_dir() -> anyhow::Result<PathBuf> {
     site_dir(
         std::env::var_os("XDG_CONFIG_HOME"),
@@ -648,12 +663,13 @@ fn default_dir() -> anyhow::Result<PathBuf> {
     )
 }
 
-/// 给定 `XDG_CONFIG_HOME` 与家目录时的默认站点目录。
+/// Default site directory for a given `XDG_CONFIG_HOME` and home directory.
 pub(crate) fn site_dir(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<PathBuf> {
     Ok(config_home(xdg, home)?.join("nett"))
 }
 
-/// `$XDG_CONFIG_HOME`，没有设置时 `~/.config`；按 XDG 规范，相对路径的 `XDG_CONFIG_HOME` 不用。
+/// `$XDG_CONFIG_HOME`, or `~/.config` when unset; per the XDG specification, a relative
+/// `XDG_CONFIG_HOME` is ignored.
 fn config_home(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<PathBuf> {
     if let Some(xdg) = xdg.map(PathBuf::from).filter(|p| p.is_absolute()) {
         return Ok(xdg);
@@ -665,8 +681,10 @@ fn config_home(xdg: Option<OsString>, home: Option<OsString>) -> anyhow::Result<
     Ok(home.join(".config"))
 }
 
-/// 签名工具生成的期望状态是不是给这台机器的：其中本节点准入材料的组网公钥必须是 `mesh_public`
-/// （`sudo nett install --config`，design/release.md 第 4 节）。拷错了机器的文件时在复制之前就报错。
+/// Whether the desired state generated by the signing tool is for this machine: the mesh public key
+/// in this node's admission material must be `mesh_public` (`sudo nett install --config`,
+/// design/release.md section 4). If the file was copied from the wrong machine, it fails before
+/// copying.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn check_desired_for(
     bytes: &[u8],
@@ -675,7 +693,8 @@ pub(crate) fn check_desired_for(
     let desired =
         nett_mesh::config::DesiredMesh::from_json(bytes).context("not a valid desired state")?;
     let mut members = nett_mesh::members::MemberSet::default();
-    // 只是在复制之前发现拷错了文件：验证的基准是组网进程自己的信任存储（design/mesh.md 第 4.2 节）
+    // This only catches a wrong file before copying: the baseline for verification is the mesh
+    // process's own trust store (design/mesh.md section 4.2)
     let own = nett_mesh::members::OwnPolicy {
         node_id: &desired.node_id,
         now: None,
@@ -695,8 +714,9 @@ pub(crate) fn check_desired_for(
     Ok(desired.node_id.clone())
 }
 
-/// 站点目录中给这台机器的期望状态（`sudo nett install`，design/release.md 第 4 节）：`nodes/` 下
-/// 本节点的组网公钥是 `mesh_public` 的那一份，返回它的路径和内容。还没有 `nodes/` 时返回 `None`。
+/// The desired state for this machine in the site directory (`sudo nett install`, design/release.md
+/// section 4): under `nodes/`, the one whose node mesh public key is `mesh_public`; returns its
+/// path and content. Returns `None` when there is no `nodes/` yet.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn find_desired_for(
     site: &Path,
@@ -709,7 +729,7 @@ pub(crate) fn find_desired_for(
         Err(e) => return Err(e).with_context(|| format!("reading {}", nodes.display())),
     };
     let mut found = Vec::new();
-    // 一个站点最多这么多台机器，多出的条目不是签名工具写的
+    // A site has at most this many machines; extra entries were not written by the signing tool
     for entry in entries.take(MAX_MEMBERS) {
         let path = entry
             .with_context(|| format!("reading {}", nodes.display()))?
@@ -731,9 +751,11 @@ pub(crate) fn find_desired_for(
     Ok(found.pop())
 }
 
-/// 读一份期望状态文件：只读普通文件（不读设备、管道，不跟随符号链接），大小有上限。不存在或不是普通
-/// 文件时返回 `None`。`sudo nett install` 以 root 从用户可写的目录读它：先打开再检查打开的文件，检查与
-/// 读取之间换不了文件；以非阻塞方式打开，换成管道也不会让它卡住。
+/// Reads a desired state file: only regular files (no devices or pipes, symlinks are not followed),
+/// with a size limit. Returns `None` if it does not exist or is not a regular file. `sudo nett
+/// install` reads it as root from a user-writable directory: it opens first and then checks the
+/// opened file, so the file cannot be swapped between the check and the read; it opens without
+/// blocking, so replacing it with a pipe does not make it hang.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn read_desired(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     use nett_mesh::config::MAX_DESIRED_BYTES;
@@ -746,7 +768,7 @@ pub(crate) fn read_desired(path: &Path) -> anyhow::Result<Option<Vec<u8>>> {
     {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        // 符号链接：O_NOFOLLOW 打开失败（ELOOP）
+        // Symlink: opening with O_NOFOLLOW fails (ELOOP)
         Err(e) if e.raw_os_error() == Some(libc::ELOOP) => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
@@ -791,7 +813,7 @@ mod tests {
         )
     }
 
-    /// 以 `--yes` 运行一条 `nett site` 命令。
+    /// Runs a `nett site` command with `--yes`.
     fn site(dir: &Path, args: &[&str]) -> anyhow::Result<()> {
         let mut argv: Vec<OsString> = args.iter().map(OsString::from).collect();
         argv.extend(["--dir".into(), dir.as_os_str().to_owned(), "--yes".into()]);
@@ -813,7 +835,7 @@ mod tests {
             config_home(None, os("/home/u")).expect("home"),
             Path::new("/home/u/.config")
         );
-        // 相对路径的 XDG_CONFIG_HOME 不用（XDG 规范）
+        // A relative XDG_CONFIG_HOME is ignored (XDG specification)
         assert_eq!(
             config_home(os("relative"), os("/home/u")).expect("home"),
             Path::new("/home/u/.config")
@@ -858,8 +880,8 @@ mod tests {
         assert_eq!(state.rules.len(), 1);
         assert_eq!(state.rules[&RuleId(1)].ports.len(), 2);
         assert_eq!(state.access_rules.as_ref().map(|r| r.version), Some(1));
-        // 没有 --keys：不改
-        // 不接 Hub 时公钥与 public 机器的地址都要写明
+        // No --keys: no change
+        // Without a Hub, both the public keys and the addresses of public machines must be given
         let e = site(&dir, &["add", "nas"]).expect_err("needs keys");
         assert!(e.to_string().contains("--keys is needed"), "{e}");
         let (_, line) = keys();
@@ -875,7 +897,7 @@ mod tests {
             check_desired_for(&bytes, &mac_key).expect("mine"),
             state.machines[&name("mac")].node_id
         );
-        // 去掉网段：引用它的规则一起删除
+        // Remove a prefix: the rules that reference it are deleted with it
         site(&dir, &["routes", "mac", "--none"]).expect("no routes");
         let state = SiteDir::open(&dir).expect("open").load().expect("load");
         assert!(state.rules.is_empty());
@@ -884,7 +906,7 @@ mod tests {
         assert!(!mac_file.exists());
         let state = SiteDir::open(&dir).expect("open").load().expect("load");
         assert_eq!(state.revoked.len(), 1);
-        // invite 重签节点策略
+        // invite re-signs the node policy
         let before = state.machines[&name("vps")]
             .policy
             .as_ref()
@@ -912,7 +934,8 @@ mod tests {
         let link = dir.join("link.json");
         std::os::unix::fs::symlink(&file, &link).expect("symlink");
         assert_eq!(read_desired(&link).expect("no error"), None);
-        // 换成管道：以非阻塞方式打开，立刻发现不是普通文件，不等写入方
+        // Replaced with a pipe: opened without blocking, it is immediately found not to be a
+        // regular file, without waiting for a writer
         let fifo = dir.join("fifo.json");
         let made = std::process::Command::new("mkfifo")
             .arg(&fifo)
@@ -947,11 +970,13 @@ mod tests {
         let mac_file =
             std::fs::read(dir.join(NODES_DIR).join("mac").join(DESIRED_FILE)).expect("out");
         assert!(check_desired_for(&mac_file, &mac_key).is_ok());
-        // 另一台机器的文件、不是期望状态的文件都在复制之前被拒绝
+        // A file from another machine, or a file that is not a desired state, is rejected before
+        // copying
         assert!(check_desired_for(&mac_file, &vps_key).is_err());
         assert!(check_desired_for(b"{}", &mac_key).is_err());
 
-        // install 不带 --config 时在站点目录中按组网公钥找到本机的那一份，其他条目跳过
+        // install without --config finds this machine's file in the site directory by mesh public
+        // key; other entries are skipped
         std::fs::create_dir_all(dir.join(NODES_DIR).join("stray").join(DESIRED_FILE)).expect("dir");
         std::fs::create_dir_all(dir.join(NODES_DIR).join("junk")).expect("dir");
         std::fs::write(dir.join(NODES_DIR).join("junk").join(DESIRED_FILE), b"{}").expect("junk");
@@ -962,7 +987,7 @@ mod tests {
         assert_eq!(bytes, mac_file);
         let (other, _) = keys();
         assert!(find_desired_for(&dir, &other).expect("search").is_none());
-        // 两份都是给本机的（拷贝出来的副本）：不猜，要求 --config
+        // Both are for this machine (copies): no guessing, --config is required
         std::fs::create_dir_all(dir.join(NODES_DIR).join("copy")).expect("dir");
         std::fs::write(
             dir.join(NODES_DIR).join("copy").join(DESIRED_FILE),

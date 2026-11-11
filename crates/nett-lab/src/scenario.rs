@@ -1,4 +1,4 @@
-//! 场景。每个场景输出一份 JSON 报告（design/prototype.md 第 7 节）。
+//! Scenarios. Each scenario outputs a JSON report (design/prototype.md section 7).
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -17,10 +17,10 @@ use crate::topology::Topology;
 mod hub;
 pub use hub::{enroll_here, hub, leave_here};
 
-/// 连通性检查的最长等待时间。
+/// Maximum wait for connectivity checks.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
 
-/// 等待组网进程应用期望状态的上限。
+/// Upper bound for waiting for the mesh process to apply the desired state.
 const APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Serialize)]
@@ -50,7 +50,7 @@ impl Report {
         }
     }
 
-    /// 只记录、不判定的数据。
+    /// Data that is only recorded, not judged.
     fn record(&mut self, name: &str, detail: impl Into<String>) {
         self.checks.push(Check {
             name: name.to_owned(),
@@ -69,13 +69,14 @@ impl Report {
     }
 }
 
-/// 实验期间运行的组网进程；结束时（包括出错返回时）一并结束并拆除网络。
+/// Mesh processes running during a lab run; they are ended and the network torn down together when
+/// the run finishes (including when it returns with an error).
 struct Lab {
     underlay: Underlay,
     processes: Vec<(String, Child)>,
-    /// 中继节点上的 nett-relay。
+    /// nett-relay on a relay node.
     relays: Vec<(String, Child)>,
-    /// 测量用的辅助进程（探测流、长连接）。
+    /// Helper processes for measurement (probe streams, long-lived connections).
     helpers: Vec<Child>,
 }
 
@@ -118,8 +119,9 @@ fn events(node: &LabNode) -> Vec<Value> {
         .collect()
 }
 
-/// 出错时的现场：各节点最近的事件与日志、WireGuard 对端的状态（endpoint、最近一次握手、收发字节），
-/// 附在错误信息里，CI 的日志中就能看到。
+/// The state of the scene on error: each node's recent events and logs, and the state of WireGuard
+/// peers (endpoint, latest handshake, bytes sent and received), attached to the error message so it
+/// shows in CI logs.
 fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
     let tail = |path: &Path, n: usize| -> String {
         let text = std::fs::read_to_string(path).unwrap_or_default();
@@ -140,7 +142,8 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
                 out.push_str(&format!("\n   {file}:\n    {}", tail(&path, n)));
             }
         }
-        // 本机状态：用户态成员没有内核 WireGuard 接口，`wg show` 读不到它的对端（design/status.md 第 9 节）
+        // Local status: a userspace member has no kernel WireGuard interface, so `wg show` cannot
+        // read its peers (design/status.md section 9)
         if let Ok(doc) = nett_mesh::status::query(&node.dir.join("mesh.sock")) {
             out.push_str("\n   status:");
             for p in &doc.peers {
@@ -170,7 +173,8 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
                 ));
             }
         }
-        // 只读不含密钥的字段：`wg show ... dump` 的第一行有接口私钥（硬性规则 10）
+        // Read only fields that contain no keys: the first line of `wg show ... dump` has the
+        // interface private key (hard rule 10)
         if let Some(net) = lab.underlay.node(&node.name) {
             for field in ["endpoints", "latest-handshakes", "transfer"] {
                 if let Ok(text) = run(
@@ -192,7 +196,7 @@ fn count(events: &[Value], kind: &str) -> usize {
     events.iter().filter(|e| e["event"] == kind).count()
 }
 
-/// 等到某个节点的事件满足条件。
+/// Waits until a node's events satisfy a condition.
 fn wait_for(
     node: &LabNode,
     what: &str,
@@ -213,7 +217,8 @@ fn wait_for(
     }
 }
 
-/// 经 `nett status --json` 读一个节点的本机状态（design/status.md）。套接字按路径连接，不受网络命名空间限制。
+/// Reads a node's local status through `nett status --json` (design/status.md). The socket is
+/// connected by path and is not limited by network namespaces.
 fn nett_status(nett: &Path, node: &LabNode) -> anyhow::Result<nett_mesh::status::StatusDoc> {
     let socket = node.dir.join("mesh.sock");
     let out = run(
@@ -235,7 +240,8 @@ fn wg_peers(netns: &str) -> anyhow::Result<BTreeSet<String>> {
         .collect()
 }
 
-/// 进程的 RSS 与 PSS（KiB）。多个进程共享同一个可执行文件的代码页，PSS 按共享份数分摊。
+/// RSS and PSS of a process (KiB). Multiple processes share the code pages of the same executable,
+/// and PSS divides them by the number of sharers.
 fn memory(pid: u32) -> String {
     let field = |file: &str, key: &str| -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/{file}"))
@@ -251,9 +257,11 @@ fn memory(pid: u32) -> String {
     )
 }
 
-/// 先等到能连通（最多 [`CONNECT_DEADLINE`]），再连续 ping 3 次。对端在 NAT 之后时，它的第一次握手
-/// 可能早于本机配置好它而被丢弃，WireGuard 5 秒后重试（场景 20 实测这段时间）；没有 endpoint 时
-/// `ping` 遇到发送错误会立即退出，所以由这里反复尝试。
+/// First waits until connectivity is established (at most [`CONNECT_DEADLINE`]), then pings 3 times
+/// in a row. When the peer is behind NAT, its first handshake may be dropped because it arrives
+/// before this side has configured it, and WireGuard retries after 5 seconds (scenario 20 measures
+/// this time); without an endpoint, `ping` exits immediately on a send error, so this function
+/// keeps retrying.
 fn ping(netns: &str, target: &str) -> anyhow::Result<String> {
     let started = Instant::now();
     while run_in(netns, "ping", ["-c", "1", "-W", "1", target]).is_err() {
@@ -280,7 +288,7 @@ fn start(
     start_with(topo, generated, underlay, nett, |_| Vec::new())
 }
 
-/// `extra(节点名)` 是这个节点的组网进程额外的命令行参数。
+/// `extra(node name)` is the extra command line arguments of this node's mesh process.
 fn start_with(
     topo: &Topology,
     generated: &Generated,
@@ -296,8 +304,10 @@ fn start_with(
         helpers: Vec::new(),
     };
     for node in &generated.nodes {
-        // 每次实验重新生成密钥与信任锚：上一次留下的信任存储会让新的期望状态被拒绝（design/mesh.md
-        // 第 4.2 节）。同一次实验中重启组网进程不经过这里，信任存储保留
+        // Keys and the trust anchor are regenerated for every lab run: the trust store left by the
+        // previous run would cause the new desired state to be rejected (design/mesh.md section
+        // 4.2). Restarting a mesh process within the same run does not go through here, and the
+        // trust store is kept
         let state = node.dir.join("state");
         match std::fs::remove_dir_all(&state) {
             Ok(()) => {}
@@ -345,7 +355,8 @@ impl Lab {
         args.extend(extra.iter().map(Into::into));
         let child = spawn_in(&net.netns, nett, &args, &dir.join("mesh.log"))?;
         self.processes.push((node.name.clone(), child));
-        // 传输适配进程读组网进程写出的配置（design/mesh.md 第 5.3 节）
+        // The transport adapter reads the configuration written by the mesh process (design/mesh.md
+        // section 5.3)
         if node.tls {
             let child = spawn_in(
                 &net.netns,
@@ -362,8 +373,9 @@ impl Lab {
         Ok(())
     }
 
-    /// 在节点的命名空间中启动一个测量辅助进程（`nett-lab` 自己的子命令）。
-    /// 在任意一个命名空间中运行测量子命令（例如节点背后的服务）。
+    /// Starts a measurement helper process (a subcommand of `nett-lab` itself) in the node's
+    /// namespace.
+    /// Runs a measurement subcommand in any namespace (for example the service behind a node).
     fn helper_in(&mut self, netns: &str, args: &[&str], log: &Path) -> anyhow::Result<()> {
         let me = std::env::current_exe().context("locating nett-lab")?;
         let child = spawn_in(netns, &me, args, log)?;
@@ -397,7 +409,8 @@ impl Lab {
         Ok(())
     }
 
-    /// 在命名空间中启动一个外部工具（例如 tcpdump），结束时一并结束。
+    /// Starts an external tool (for example tcpdump) in a namespace, and ends it together with the
+    /// run.
     fn tool(
         &mut self,
         netns: &str,
@@ -410,7 +423,7 @@ impl Lab {
         Ok(())
     }
 
-    /// 重启一个中继节点上的 nett-relay（场景 3）。
+    /// Restarts nett-relay on a relay node (scenario 3).
     fn restart_relay(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
         if let Some(pos) = self.relays.iter().position(|(n, _)| *n == node.name) {
             let (_, mut child) = self.relays.remove(pos);
@@ -420,7 +433,7 @@ impl Lab {
         self.spawn_relay(node, nett)
     }
 
-    /// 结束一个节点的组网进程并等它退出。
+    /// Ends a node's mesh process and waits for it to exit.
     fn stop(&mut self, name: &str) -> anyhow::Result<()> {
         let i = self
             .processes
@@ -434,11 +447,12 @@ impl Lab {
     }
 }
 
-/// 场景 14：准入验证；同时验证两个节点经直连通信（G1）。
+/// Scenario 14: admission verification; also verifies that two nodes communicate over a direct
+/// connection (G1).
 pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
-    // 上一次异常退出留下的网络
+    // Network left behind by an earlier abnormal exit
     underlay.down()?;
     let generated = material::generate(&topo, &underlay, out, true)?;
     let mut lab = start(&topo, &generated, underlay, nett)?;
@@ -449,7 +463,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
     }
 
-    // 合法的对端被配置，反例都不被配置
+    // Valid peers are configured; none of the negative cases are
     let ns_a = lab.underlay.node(&a.name).context("node a")?.netns.clone();
     let peers = wg_peers(&ns_a)?;
     let expected: BTreeSet<String> = generated.nodes[1..]
@@ -462,7 +476,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         format!("wg peers on {}: {peers:?}; expected {expected:?}", a.name),
     );
 
-    // 每个反例各有一条拒绝事件
+    // Each negative case has one rejection event
     let ev = events(a);
     let rejected: Vec<Option<String>> = ev
         .iter()
@@ -488,7 +502,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         ),
     );
 
-    // 两个节点经直连通信
+    // The two nodes communicate over a direct connection
     for target in [b.mesh_ipv4.to_string(), b.mesh_ipv6.to_string()] {
         let result = ping(&ns_a, &target);
         report.check(
@@ -501,8 +515,9 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         );
     }
 
-    // 本机状态（design/status.md 第 9 节）：每个成员列出其他成员和它们的名字；刚 ping 过的一对已连通、
-    // 有路径；反例在 a 上列为问题。用户态成员（`--userspace`）上同样可读
+    // Local status (design/status.md section 9): each member lists the other members and their
+    // names; a pair that was just pinged is connected and has a path; the negative cases are listed
+    // as problems on a. The same is readable on userspace members (`--userspace`)
     for node in &generated.nodes {
         let status = nett_status(nett, node);
         let (listed, connected) = match &status {
@@ -573,7 +588,8 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         }
     }
 
-    // 重新加载一份只带低版本材料的期望状态：被拒绝，已生效的对端保持不变
+    // Reload a desired state that only carries lower-version material: it is rejected, and the
+    // peers already in effect stay unchanged
     let desired_a = a.dir.join("desired.json");
     let original = std::fs::read(&desired_a).context("reading desired state of a")?;
     let downgraded = match &generated.lower_version_of_second {
@@ -605,7 +621,8 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             result.is_ok(),
             result.err().map(|e| format!("{e:#}")).unwrap_or_default(),
         );
-        // 经本机接口重新加载同一份文件：报告已生效，并列出被拒绝的低版本材料（design/status.md 第 4.1 节）
+        // Reload the same file through the local interface: reports that it is in effect, and lists
+        // the rejected lower-version material (design/status.md section 4.1)
         let reloaded = run(
             &nett.display().to_string(),
             [
@@ -626,7 +643,8 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         std::fs::write(&desired_a, &original).context("restoring desired state")?;
     }
 
-    // 组网进程停止期间，内核中的 WireGuard 照常工作；重启后沿用已有的接口和对端
+    // While the mesh process is stopped, WireGuard in the kernel keeps working; after the restart
+    // it keeps the existing interface and peers
     lab.stop(&a.name)?;
     let while_stopped = ping(&ns_a, &b.mesh_ipv4.to_string());
     report.check(
@@ -653,7 +671,8 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         ),
     );
 
-    // 重启之后再拿到低版本材料：以信任存储中已生效的版本为基准，照样拒绝（design/mesh.md 第 4.2 节）
+    // Getting lower-version material again after the restart: it is still rejected, with the
+    // version in effect in the trust store as the baseline (design/mesh.md section 4.2)
     if let Some(text) = &downgraded {
         std::fs::write(&desired_a, text).context("rewriting desired state")?;
         lab.stop(&a.name)?;
@@ -672,7 +691,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         std::fs::write(&desired_a, &original).context("restoring desired state")?;
     }
 
-    // 各节点 WireGuard 的现场，供排查
+    // WireGuard state of each node, for troubleshooting
     for node in &generated.nodes {
         if let Some(net) = lab.underlay.node(&node.name) {
             let dump =
@@ -681,7 +700,8 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         }
     }
 
-    // 资源占用只记录（场景 21 在 G6 按"负载后静置 10 分钟"的方法正式测量）
+    // Resource usage is only recorded (scenario 21 measures it formally in G6 with the method "idle
+    // for 10 minutes after load")
     for (name, child) in &lab.processes {
         report.record(&format!("memory:{name}"), memory(child.id()));
     }
@@ -698,7 +718,8 @@ pub fn write_report(out: &Path, report: &Report) -> anyhow::Result<PathBuf> {
     Ok(path)
 }
 
-/// 实验工具自检：在已知的故障上确认测量和故障注入本身是准的。不是 nett 的验收场景。
+/// Lab tool self-check: confirms on known faults that the measurement and fault injection
+/// themselves are accurate. Not an acceptance scenario for nett.
 pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     use crate::fault::{self, Netem};
     use crate::measure::{now_ms, probe_stats, tcp_stats};
@@ -752,7 +773,7 @@ pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repo
         &out.join("tcp-source.log"),
     )?;
 
-    // 2 秒的双向 100% 丢包
+    // 2 seconds of 100% packet loss in both directions
     std::thread::sleep(Duration::from_secs(3));
     let net_b = lab.underlay.node(&b.name).context("node b")?.netns.clone();
     let before = fault::counters(&net_b, "eth0")?;
@@ -762,7 +783,7 @@ pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repo
     fault::clear_link(&lab.underlay, &b.name)?;
     std::thread::sleep(Duration::from_secs(3));
 
-    // 1 秒的 UDP 拦截（WireGuard 的外层是 UDP）
+    // 1 second of UDP blocking (the outer layer of WireGuard is UDP)
     let block_ms = now_ms();
     fault::block_udp(&b.name)?;
     std::thread::sleep(Duration::from_secs(1));
@@ -803,8 +824,10 @@ pub fn selftest(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repo
     Ok(report)
 }
 
-/// 在同一拓扑中部署 Tailscale，确认对比对象可用：直连、直连被拦时经 DERP 回退，测量工具在它上面同样可用。
-/// 中断时间只记录，与 nett 的对比在 G2 的场景中进行。
+/// Deploys Tailscale in the same topology and confirms the comparison target is usable: direct
+/// connection, fallback via DERP when the direct connection is blocked, and the measurement tools
+/// work on it as well. The interruption time is only recorded; the comparison with nett happens in
+/// the G2 scenarios.
 pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
     use crate::fault::{self, Netem};
     use crate::measure::{now_ms, probe_stats, tcp_stats};
@@ -822,7 +845,7 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
         helpers: Vec::new(),
     };
     let names: Vec<&str> = topo.nodes.iter().map(|n| n.name.as_str()).collect();
-    // 在 lab 之后声明：先于 lab 析构，进程结束之后再拆网络
+    // Declared after lab: dropped before lab, so the networks are torn down after the processes end
     let ts = TailscaleLab::up(out, &names)?;
     let mut report = Report::new("tailscale-baseline");
     report.record("versions", versions());
@@ -833,7 +856,7 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
         .underlay
         .public_ipv4(b)
         .context("b has a public address")?;
-    // 直连走 IPv4 或 IPv6 都算
+    // A direct connection over either IPv4 or IPv6 counts
     let net_b = lab.underlay.node(b).context("node b")?;
     let mut b_addrs = vec![std::net::IpAddr::V4(b_underlay)];
     b_addrs.extend(net_b.ipv6.map(std::net::IpAddr::V6));
@@ -862,7 +885,8 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
         icmp.err().map(|e| format!("{e:#}")).unwrap_or_default(),
     );
 
-    // 测量工具在 Tailscale 上同样可用；2 秒双向丢包后的中断时间只记录
+    // The measurement tools work on Tailscale as well; the interruption time after 2 seconds of
+    // bidirectional loss is only recorded
     let probe_file = out.join("probe.txt");
     let tcp_file = out.join("tcp.txt");
     let probe_addr = format!("{ip_b}:7000");
@@ -920,7 +944,7 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
         format!("{tcp:?}"),
     );
 
-    // 拦掉 a 到 b 的直连 UDP（IPv4 与 IPv6）：Tailscale 应回退到 DERP
+    // Block direct UDP from a to b (IPv4 and IPv6): Tailscale should fall back to DERP
     fault::block_udp_with(a, &b_addrs)?;
     std::thread::sleep(Duration::from_secs(8));
     let via_derp = ts.cli(
@@ -943,7 +967,8 @@ pub fn tailscale(topology: &Path, out: &Path) -> anyhow::Result<Report> {
     Ok(report)
 }
 
-/// 中继冒烟测试：两个成员之间只有经中继的候选，确认真实的 WireGuard 握手和数据经 nett-relay 转发。
+/// Relay smoke test: between two members there is only a candidate via the relay; confirms that
+/// real WireGuard handshakes and data are forwarded through nett-relay.
 pub fn relay_smoke(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
@@ -997,14 +1022,16 @@ pub fn relay_smoke(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<R
     Ok(report)
 }
 
-/// 按底层链路的流量判断当前路径（design/prototype.md 第 6.1 节）：每 [`SAMPLE_INTERVAL`] 读一次各接口的
-/// 接收字节数。
-/// 一次采样：时刻（Unix 毫秒）与各接口的累计接收字节数。
+/// Judges the current path by the traffic on the underlay links (design/prototype.md section 6.1):
+/// reads the received bytes of each interface once every [`SAMPLE_INTERVAL`].
+/// One sample: the time (Unix milliseconds) and the cumulative received bytes of each interface.
 type Sample = (u64, Vec<u64>);
 
-/// 采样间隔：恢复时间要分辨到几十毫秒；一次读取不到 1 毫秒。
+/// Sampling interval: recovery has to be resolved to tens of milliseconds; one read takes less than
+/// 1 millisecond.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(20);
-/// 判定流量已经离开一组链路：从某一刻起持续这么久低于阈值。
+/// Judges that traffic has left a set of links: below the threshold continuously for this long from
+/// some moment.
 const QUIET_HOLD_MS: u64 = 200;
 
 struct PathMonitor {
@@ -1039,7 +1066,8 @@ impl PathMonitor {
         }
     }
 
-    /// 最近 `window` 内每个采样间隔的合计接收速率都低于 `bytes_per_s`。
+    /// In the most recent `window`, the combined receive rate in every sampling interval is below
+    /// `bytes_per_s`.
     fn quiet_for(&self, window: Duration, bytes_per_s: u64) -> bool {
         let Ok(v) = self.samples.lock() else {
             return false;
@@ -1063,7 +1091,7 @@ impl PathMonitor {
             })
     }
 
-    /// 最近 `window` 内各接口的平均接收速率（字节/秒）。
+    /// Average receive rate of each interface in the most recent `window` (bytes/second).
     fn rates(&self, window: Duration) -> Vec<u64> {
         let Ok(v) = self.samples.lock() else {
             return vec![];
@@ -1085,7 +1113,8 @@ impl PathMonitor {
             .collect()
     }
 
-    /// `[from_ms, to_ms]` 内每秒承载流量最多的接口（低于 `bytes_per_s` 时为空）。
+    /// The interface carrying the most traffic per second within `[from_ms, to_ms]` (empty when
+    /// below `bytes_per_s`).
     fn busiest_per_second(&self, from_ms: u64, to_ms: u64, bytes_per_s: u64) -> Vec<Option<usize>> {
         let Ok(v) = self.samples.lock() else {
             return vec![];
@@ -1114,7 +1143,8 @@ impl PathMonitor {
         out
     }
 
-    /// `after_ms` 之后，被观察的接口合计接收速率从哪一刻起持续 [`QUIET_HOLD_MS`] 低于 `bytes_per_s`。
+    /// After `after_ms`, from which moment the combined receive rate of the observed interfaces
+    /// stays below `bytes_per_s` for [`QUIET_HOLD_MS`].
     fn first_quiet(&self, after_ms: u64, bytes_per_s: u64) -> Option<u64> {
         let v = self.samples.lock().ok()?;
         let quiet = |w: &[Sample]| {
@@ -1151,21 +1181,25 @@ impl Drop for PathMonitor {
     }
 }
 
-/// 故障切换一次运行的结果。
+/// Result of one failover run.
 #[derive(Debug, Clone, Serialize)]
 pub struct FailoverRun {
     pub system: String,
-    /// 从开始传输到流量稳定在直连上（毫秒）。
+    /// From the start of the transfer until traffic stabilizes on the direct connection
+    /// (milliseconds).
     pub settled_after_ms: u64,
-    /// 探测流最长的中断（毫秒）。
+    /// The longest interruption of the probe stream (milliseconds).
     pub outage_ms: u64,
-    /// 从故障解除到流量回到直连（毫秒），按底层链路判断（每 200 毫秒采样一次）。
+    /// From fault removal until traffic returns to the direct connection (milliseconds), judged
+    /// from the underlay links (sampled every 200 milliseconds).
     pub recovery_ms: Option<u64>,
-    /// nett：从故障解除到决定方切回直连的事件（毫秒），用来区分决定的快慢与测量的粒度。
+    /// nett: the event from fault removal to the decider switching back to the direct connection
+    /// (milliseconds), used to tell decision speed apart from measurement granularity.
     pub switched_back_ms: Option<u64>,
-    /// nett：故障之后第一次切换去了哪里（场景 7 应当是 TLS 传输的回环端口）。
+    /// nett: where the first switch after the fault went (in scenario 7 it should be the loopback
+    /// port of the TLS transport).
     pub fell_back_to: Option<String>,
-    /// 长连接是否被重置。
+    /// Whether the long-lived connection was reset.
     pub tcp_ended: Option<String>,
     pub tcp_kbps: u64,
     #[serde(skip)]
@@ -1174,20 +1208,23 @@ pub struct FailoverRun {
     restored_at_ms: u64,
 }
 
-/// 时间的比较中，差距小于这个值视为相同：接收端时间戳的抖动（design/prototype.md 第 6.1 节）。
+/// In time comparisons, a difference smaller than this is treated as equal: jitter of the receiver
+/// timestamps (design/prototype.md section 6.1).
 const COMPARE_TOLERANCE_MS: u64 = 10;
 
-/// nett 的时间不比 Tailscale 长（容差之内）。
+/// nett's time is no longer than Tailscale's (within tolerance).
 fn not_worse(nett: Option<u64>, tailscale: Option<u64>) -> bool {
     matches!((nett, tailscale), (Some(n), Some(t)) if n < t + COMPARE_TOLERANCE_MS)
 }
 
-/// 恢复时间不超过这个值，也算不比 Tailscale 差（design/prototype.md 第 6.1 节）。
+/// A recovery time not exceeding this value also counts as no worse than Tailscale
+/// (design/prototype.md section 6.1).
 const RECOVERY_FLOOR_MS: u64 = 200;
-/// 中继链路上的流量低于这个速率，视为流量已经不走中继（长连接约 13 Mbit/s）。
+/// Traffic on the relay link below this rate is regarded as no longer going through the relay (the
+/// long-lived connection is about 13 Mbit/s).
 const RELAY_QUIET_BYTES_PER_S: u64 = 100_000;
 const WARMUP: Duration = Duration::from_secs(3);
-/// 等待流量稳定在直连上的上限。
+/// Upper bound for waiting for traffic to stabilize on the direct connection.
 const SETTLE_TIMEOUT: Duration = Duration::from_secs(90);
 const FAULT_HOLD: Duration = Duration::from_secs(12);
 const RECOVERY_WAIT: Duration = Duration::from_secs(30);
@@ -1239,16 +1276,17 @@ fn start_workload(
     Ok((probe_file, tcp_file))
 }
 
-/// 故障切掉什么（design/prototype.md 第 6.2 节）。
+/// What the fault cuts (design/prototype.md section 6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Cut {
-    /// 场景 1 与 8：a 与 b 之间的直连 UDP。
+    /// Scenarios 1 and 8: direct UDP between a and b.
     Direct,
-    /// 场景 7 与 9：a 的全部 UDP，在它的上游拦截。
+    /// Scenarios 7 and 9: all of a's UDP, blocked upstream of it.
     AllUdp,
 }
 
-/// 场景 1 与 8、7 与 9：切断之后 12 秒恢复。`relay_links` 是较差路径（中继或 DERP）经过的接口。
+/// Scenarios 1 and 8, 7 and 9: recovery 12 seconds after the cut. `relay_links` are the interfaces
+/// the worse path (relay or DERP) passes through.
 fn failover_run(
     lab: &mut Lab,
     out: &Path,
@@ -1263,7 +1301,8 @@ fn failover_run(
     let monitor = PathMonitor::start(relay_links);
     let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
     std::thread::sleep(WARMUP);
-    // 故障之前流量必须已经稳定在直连上：探测流持续收到（最近 3 秒至少 25 个），而中继链路没有流量
+    // Before the fault, traffic must already be stable on the direct connection: the probe stream
+    // keeps arriving (at least 25 in the last 3 seconds), and the relay links carry no traffic
     let deadline = Instant::now() + SETTLE_TIMEOUT;
     let flowing = || {
         let now = now_ms();
@@ -1375,7 +1414,7 @@ fn tailscale_failover_once(topo: &Topology, out: &Path, cut: Cut) -> anyhow::Res
     };
     let ts = TailscaleLab::up(out, &["a", "b"])?;
     let ip_b = ts.ipv4("b")?;
-    // 等到直连：tailscale ping 在拿到直连应答后停止
+    // Wait until direct: tailscale ping stops after getting a direct reply
     ts.cli("a", &["ping", "-c", "20", &ip_b.to_string()]).ok();
     let links = vec![(CONTROL_NETNS.to_owned(), "eth0".to_owned())];
     let run = failover_run(&mut lab, out, "tailscale", ip_b.into(), links, cut)?;
@@ -1393,8 +1432,9 @@ fn percentile(values: &mut [u64], p: f64) -> Option<u64> {
     Some(values[rank - 1])
 }
 
-/// 场景 1、8 与 Tailscale 对比：中断时间、恢复时间的 p95 与最大值不超过 Tailscale，长连接不断
-/// （design/prototype.md 第 6.1、6.2 节）。
+/// Scenarios 1 and 8 compared with Tailscale: the p95 and maximum of interruption time and recovery
+/// time do not exceed Tailscale's, and the long-lived connection stays up (design/prototype.md
+/// sections 6.1 and 6.2).
 pub fn failover(
     topology: &Path,
     nett: &Path,
@@ -1444,7 +1484,8 @@ pub fn failover(
     };
     let nett_s = summary("nett");
     if cut == Cut::AllUdp {
-        // UDP 全部被拦：直接改用 TLS，不逐个尝试 UDP 中继（design/mesh.md 第 8.2 节）
+        // All UDP blocked: switch directly to TLS, without trying UDP relays one by one
+        // (design/mesh.md section 8.2)
         let fell_back = runs
             .iter()
             .filter(|r| r.system == "nett")
@@ -1494,7 +1535,8 @@ pub fn failover(
             not_worse(nett_s.0, ts_s.0) && not_worse(nett_s.1, ts_s.1),
             "p95 and max",
         );
-        // 恢复期间流量照常经较差的路径：不超过绝对下限也算不比 Tailscale 差（design/prototype.md 第 6.1 节）
+        // During recovery traffic keeps going over the worse path: not exceeding the absolute floor
+        // also counts as no worse than Tailscale (design/prototype.md section 6.1)
         let within_floor = |n: Option<u64>| n.is_some_and(|n| n <= RECOVERY_FLOOR_MS);
         report.check(
             "recovery:not-worse-than-tailscale",
@@ -1507,7 +1549,8 @@ pub fn failover(
     Ok(report)
 }
 
-/// 场景 2、3 的故障：当前中继的链路 100% 丢包，或重启当前中继的进程。
+/// Fault of scenarios 2 and 3: 100% packet loss on the current relay's link, or restarting the
+/// current relay's process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelayFault {
     Loss,
@@ -1518,23 +1561,25 @@ pub enum RelayFault {
 pub struct RelayRun {
     pub system: String,
     pub faulted: String,
-    /// 故障之后流量所在的中继；没有流量时为空。
+    /// The relay where traffic is after the fault; empty when there is no traffic.
     pub after: Option<String>,
     pub outage_ms: u64,
     pub tcp_ended: Option<String>,
 }
 
-/// 故障持续多久之后统计。
+/// How long after the fault to start counting.
 const RELAY_FAULT_HOLD: Duration = Duration::from_secs(20);
 
-/// 最近 2 秒承载流量最多的中继链路（低于 [`RELAY_QUIET_BYTES_PER_S`] 时为空）。
+/// The relay link that carried the most traffic in the last 2 seconds (empty when below
+/// [`RELAY_QUIET_BYTES_PER_S`]).
 fn busiest(monitor: &PathMonitor) -> Option<usize> {
     let rates = monitor.rates(Duration::from_secs(2));
     let (i, r) = rates.iter().enumerate().max_by_key(|(_, r)| **r)?;
     (*r >= RELAY_QUIET_BYTES_PER_S).then_some(i)
 }
 
-/// 等流量稳定在某一个中继上：探测流持续收到，且有一条中继链路承载流量。返回它的序号。
+/// Waits until traffic stabilizes on one relay: the probe stream keeps arriving and one relay link
+/// carries traffic. Returns its index.
 fn settle_on_relay(
     monitor: &PathMonitor,
     probe_file: &Path,
@@ -1556,7 +1601,8 @@ fn settle_on_relay(
     }
 }
 
-/// `links`：每个中继（或 DERP）的名称与它的链路。`fault` 对第 i 个中继执行故障。
+/// `links`: each relay's (or DERP's) name and its link. `fault` applies the fault to the i-th
+/// relay.
 fn relay_fault_run(
     lab: &mut Lab,
     out: &Path,
@@ -1656,7 +1702,7 @@ fn tailscale_relay_fault_once(
         relays: Vec::new(),
         helpers: Vec::new(),
     };
-    // 两端之间没有直连：只能经 DERP
+    // No direct connection between the two ends: only via DERP
     let a_egress = lab.underlay.egress_ipv4("a").context("a egress")?;
     crate::fault::block_udp_with("b", &[a_egress.into()])?;
     let ts = std::cell::RefCell::new(TailscaleLab::up_with(out, &["a", "b"], 2)?);
@@ -1678,7 +1724,7 @@ fn tailscale_relay_fault_once(
         &links,
         |lab, i| match kind {
             RelayFault::Loss => {
-                // DERP 的链路接在"公网"网桥上，两端都加 netem
+                // DERP links attach to the "public network" bridge, and netem is added at both ends
                 let (ns, port) = (derp_netns(i + 1), format!("v-derp{}", i + 1));
                 for (n, dev) in [
                     (ns.as_str(), "eth0"),
@@ -1703,8 +1749,9 @@ fn tailscale_relay_fault_once(
     Ok(run)
 }
 
-/// 场景 2（中继失效）、3（中继进程重启）与 Tailscale 对比：中断时间的 p95 与最大值不超过 Tailscale，
-/// 长连接不断（design/prototype.md 第 6.2 节）。
+/// Scenario 2 (relay failure) and 3 (relay process restart) compared with Tailscale: the p95 and
+/// maximum of interruption time do not exceed Tailscale's, and the long-lived connection stays up
+/// (design/prototype.md section 6.2).
 pub fn relay_fault(
     topology: &Path,
     nett: &Path,
@@ -1791,38 +1838,42 @@ pub fn relay_fault(
     Ok(report)
 }
 
-/// 场景 4–6 的路径质量波动（design/prototype.md 第 6.2 节）。
+/// Path quality fluctuations of scenarios 4-6 (design/prototype.md section 6.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Wave {
-    /// 持续的随机丢包（百分比）。
+    /// Sustained random packet loss (percent).
     Loss(f32),
-    /// 延迟抖动：平均延迟与抖动（毫秒）。
+    /// Delay jitter: average delay and jitter (milliseconds).
     Jitter(u32),
-    /// 间歇断开：断 2 秒、通 8 秒。
+    /// Intermittent disconnection: 2 seconds down, 8 seconds up.
     Flap,
-    /// 两条路径的延迟交替变好：前半程当前中继加这么多毫秒的延迟，后半程换成另一个中继加。
+    /// Delays of the two paths improve alternately: in the first half the current relay gets this
+    /// many milliseconds of delay, in the second half the other relay does.
     Alternate(u32),
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WaveRun {
     pub system: String,
-    /// 期间流量在中继之间换了几次。
+    /// How many times traffic changed between relays during this period.
     pub switches: usize,
-    /// 是否回到过之前离开的路径（来回切换）。
+    /// Whether it returned to a path it had left before (switching back and forth).
     pub returned: bool,
-    /// 交替变好时，每个半程开始后跟随到更快路径所用的秒数。
+    /// With alternating improvement, the number of seconds to follow to the faster path after each
+    /// half starts.
     pub follow_s: Vec<Option<usize>>,
     pub tcp_kbps: u64,
     pub tcp_ended: Option<String>,
-    /// 探测流的送达率（千分比）与最长中断。
+    /// Delivery rate of the probe stream (per mille) and the longest interruption.
     pub delivered_permille: u64,
     pub max_gap_ms: u64,
-    /// 最长的几段中断：（距损伤开始的毫秒数，时长），用于判断中断发生在切换时还是损伤变化时。
+    /// The longest few interruptions: (milliseconds since the impairment started, duration), used
+    /// to judge whether an interruption happened during a switch or when the impairment changed.
     pub longest_gaps: Vec<(u64, u64)>,
 }
 
-/// `impair(lab, i, wave)` 在第 i 个中继的链路上施加（`Some`）或解除（`None`）损伤。
+/// `impair(lab, i, wave)` applies (`Some`) or lifts (`None`) an impairment on the i-th relay's
+/// link.
 fn wave_run(
     lab: &mut Lab,
     out: &Path,
@@ -1841,7 +1892,8 @@ fn wave_run(
             .collect(),
     );
     if let Wave::Alternate(ms) = wave {
-        // 排队规则在开始传输之前建好，之后只改过滤器：替换排队规则会丢掉正在排队的包
+        // The queueing discipline is set up before the transfer starts and afterwards only the
+        // filter changes: replacing the queueing discipline would drop packets being queued
         crate::fault::prepare_delay("a", &["delay".into(), format!("{ms}ms")])?;
     }
     let (probe_file, tcp_file) = start_workload(lab, "a", "b", target, out)?;
@@ -1881,7 +1933,8 @@ fn wave_run(
             std::thread::sleep(duration);
         }
         Wave::Alternate(_) => {
-            // 延迟加在数据方向上：发送方 a 到中继（或 DERP）那一段，两种系统的往返时间都只增加一次延迟
+            // The delay is added in the data direction: the segment from sender a to the relay (or
+            // DERP), so the round-trip time of both systems increases by the delay only once
             let ips = relay_ips.context("alternating needs the relay addresses")?;
             crate::fault::route_delay("a", ips[current])?;
             std::thread::sleep(duration / 2);
@@ -1904,7 +1957,8 @@ fn wave_run(
         crate::fault::clear_eth0("a")?;
     }
     let busiest = monitor.busiest_per_second(start_ms, end_ms, RELAY_QUIET_BYTES_PER_S);
-    // 交替变好：每个半程开始后，流量换到更快的那个中继用了多少秒
+    // Alternating improvement: after each half starts, how many seconds it took for traffic to move
+    // to the faster relay
     let follow_s: Vec<Option<usize>> = if matches!(wave, Wave::Alternate(_)) {
         let half = busiest.len() / 2;
         [(0, 1 - current), (half, current)]
@@ -1914,7 +1968,8 @@ fn wave_run(
     } else {
         Vec::new()
     };
-    // 注入损伤之前所在的中继是起点：损伤开始后第一秒内就离开，也算一次切换
+    // The relay it was on before the impairment was injected is the starting point: leaving within
+    // the first second after the impairment starts also counts as a switch
     let mut switches = 0;
     let mut last = Some(current);
     let mut visited = vec![current];
@@ -1922,7 +1977,7 @@ fn wave_run(
     for b in busiest.into_iter().flatten() {
         if last.is_some_and(|l| l != b) {
             switches += 1;
-            // 回到之前离开过的路径：来回切换
+            // Returned to a path it had left before: switching back and forth
             returned |= visited.contains(&b);
             visited.push(b);
         }
@@ -1975,7 +2030,8 @@ fn derp_impair(i: usize, netem: Option<&crate::fault::Netem>) -> anyhow::Result<
     Ok(())
 }
 
-/// 场景 4–6 与 Tailscale 对比：切换次数不多于 Tailscale，吞吐不低于它的 95%，最长中断不超过它，长连接不断。
+/// Scenarios 4-6 compared with Tailscale: no more switches than Tailscale, throughput not below 95%
+/// of it, longest interruption not above it, and the long-lived connection stays up.
 pub fn wave(
     topology: &Path,
     nett: &Path,
@@ -2045,7 +2101,7 @@ pub fn wave(
         if !with_tailscale {
             continue;
         }
-        // Tailscale：两个 DERP 区域，两端之间没有直连
+        // Tailscale: two DERP regions, no direct connection between the two ends
         let dir = out.join(format!("tailscale-{i}"));
         let underlay = Underlay::plan(&topo)?;
         underlay.down()?;
@@ -2114,7 +2170,8 @@ pub fn wave(
             ),
         );
     }
-    // 交替变好时每个半程跟随一次更优的路径；其他波动离开受损路径至多一次、不往返
+    // With alternating improvement, each half follows a better path once; other fluctuations leave
+    // the impaired path at most once, without going back and forth
     let allowed = if matches!(wave, Wave::Alternate(_)) {
         2
     } else {
@@ -2161,11 +2218,14 @@ pub fn wave(
     Ok(report)
 }
 
-/// 场景 15 中旧路径送来一串迟到包的间隔（design/prototype.md 第 6.3 节）。
+/// Interval at which a burst of late packets arrives from the old path in scenario 15
+/// (design/prototype.md section 6.3).
 const ROAMING_KICK_INTERVAL: Duration = Duration::from_secs(60);
 
-/// 场景 15：漫游纠正（只对 nett）。切换到中继之后，旧的直连路径每分钟送来一串延迟 3 秒、乱序的包；
-/// 决定方的 endpoint 每次被改回旧路径后 1.5 秒内纠正，长连接不断；偏离的总时长只记录。
+/// Scenario 15: roaming correction (nett only). After switching to a relay, the old direct path
+/// sends a burst of packets delayed by 3 seconds and reordered every minute; the decider's endpoint
+/// is corrected within 1.5 seconds each time it is changed back to the old path, and the long-lived
+/// connection stays up; the total deviation time is only recorded.
 pub fn roaming(
     topology: &Path,
     nett: &Path,
@@ -2193,7 +2253,9 @@ pub fn roaming(
         .find(|n| n.name == "b")
         .context("node b")?;
     let (ns_a, ns_b) = (crate::net::netns("a"), crate::net::netns("b"));
-    // b 是发送方：每次被拨回直连后，b 在收到 a 的下一个包之前会经直连发出若干个包，3 秒后迟到地到达 a
+    // b is the sender: after each time it is dialed back to the direct connection, before b
+    // receives a's next packet it sends several packets over the direct connection, which arrive at
+    // a late after 3 seconds
     let (probe_file, tcp_file) = start_workload(&mut lab, "b", "a", a.mesh_ipv4.into(), out)?;
     let b_direct = format!(
         "{}:{}",
@@ -2213,7 +2275,8 @@ pub fn roaming(
     let a_key = crate::material::wg_text(&a.mesh_public_key);
     let b_key = crate::material::wg_text(&b.mesh_public_key);
     let a_egress = lab.underlay.egress_ipv4("a").context("a egress")?;
-    // 等到两端都经直连：a 的 endpoint 是 b 的直连地址，b 看到的 a 的地址是 a 的出口地址（映射地址）
+    // Wait until both ends are on the direct connection: a's endpoint is b's direct address, and
+    // the address of a that b sees is a's egress address (the mapped address)
     let deadline = Instant::now() + SETTLE_TIMEOUT;
     let a_mapped = loop {
         std::thread::sleep(Duration::from_secs(1));
@@ -2227,7 +2290,8 @@ pub fn roaming(
             anyhow::bail!("a did not settle on the direct path within {SETTLE_TIMEOUT:?}");
         }
     };
-    // 只拦 a → b 的直连：a 切到中继；b → a 的直连仍然通，但加上 3 秒延迟与乱序
+    // Only block the direct a -> b: a switches to the relay; the direct b -> a still works, but
+    // with 3 seconds of delay and reordering added
     crate::fault::block_udp_from("b", a_egress)?;
     crate::fault::delay_to("b", a_egress, 3000, 500)?;
     wait_for(a, "a switch to a relay", |ev| {
@@ -2235,7 +2299,7 @@ pub fn roaming(
     })?;
     std::thread::sleep(Duration::from_secs(3));
 
-    // 抓包留作现场：b 发出的直连包，以及它们是否到达 a
+    // Packet capture is kept for the record: the direct packets b sends, and whether they reach a
     let b_ip = lab
         .underlay
         .public_ipv4("b")
@@ -2263,7 +2327,9 @@ pub fn roaming(
         &["-n", "-l", "-i", "eth0", "udp", "and", "src", "host", &b_ip],
         &out.join("cap-a-direct-in.txt"),
     )?;
-    // 每分钟把 b 的 endpoint 拨回直连一次：b 发出的一串直连包 3 秒后迟到、乱序地到达 a，把 a 的 endpoint 改回旧路径
+    // Every minute, dial b's endpoint back to the direct connection once: the burst of direct
+    // packets b sends arrives at a 3 seconds late and reordered, changing a's endpoint back to the
+    // old path
     let start_ms = now_ms();
     let end = Instant::now() + duration;
     let mut last_kick = Instant::now() - ROAMING_KICK_INTERVAL;
@@ -2285,7 +2351,7 @@ pub fn roaming(
         std::thread::sleep(Duration::from_millis(100));
     }
     let end_ms = now_ms();
-    // 偏离的每一段：开始到结束
+    // Each deviation: from start to end
     let mut episodes = Vec::new();
     let mut since = None;
     for (t, deviated) in &samples {
@@ -2366,8 +2432,10 @@ fn iperf(lab: &mut Lab, target: std::net::Ipv4Addr, out: &Path, tag: &str) -> an
     Ok((bps / 1000.0) as u64)
 }
 
-/// 场景 18：在 WireGuard 端口上探测（design/mesh.md 第 7.1 节）。IPv4、IPv6 的直连探测收发正常；主机上另有
-/// 连接跟踪与 NAT 规则时照常；未认证的探测得不到任何响应；WireGuard 流量的吞吐与不开探测时没有可测出的差异。
+/// Scenario 18: probing on the WireGuard port (design/mesh.md section 7.1). Direct probes over IPv4
+/// and IPv6 work normally; they work as usual when the host also has connection tracking and NAT
+/// rules; unauthenticated probes get no response at all; the throughput of WireGuard traffic shows
+/// no measurable difference from running without probes.
 pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     use crate::net::{INET_NETNS, OUTSIDER_NETNS, add_netns, attach, netns};
     let topo = Topology::load(topology)?;
@@ -2377,7 +2445,8 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
     let mut lab = start(&topo, &generated, underlay, nett)?;
     let mut report = Report::new("18-wg-port");
     let ns_b = netns("b");
-    // 抓包：探测与应答（IPv4 在 UDP 头之后第 1 个字节；IPv6 在第 48 个字节），以及发给陌生人的任何 UDP
+    // Packet capture: probes and replies (IPv4 at the 1st byte after the UDP header; IPv6 at the
+    // 48th byte), and any UDP sent to the stranger
     let captures = [
         (
             "v4-probes",
@@ -2401,7 +2470,7 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         let file = out.join(format!("cap-{name}.txt"));
         lab.tool(&ns_b, "tcpdump", &["-n", "-l", "-i", "eth0", filter], &file)?;
     }
-    // 类似 Docker 的连接跟踪与 NAT 规则
+    // Connection tracking and NAT rules similar to Docker's
     run(
         "ip",
         ["-n", &ns_b, "link", "add", "docker0", "type", "dummy"],
@@ -2443,7 +2512,7 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         .context("node b")?;
     let (_probe, _tcp) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
 
-    // 陌生人：向 b 的 WireGuard 端口发伪造的探测和随机握手
+    // The stranger: sends forged probes and random handshakes to b's WireGuard port
     add_netns(OUTSIDER_NETNS)?;
     attach(OUTSIDER_NETNS, INET_NETNS, "v-x", "br0")?;
     run(
@@ -2488,7 +2557,8 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         )?;
         lab.helpers.push(child);
     }
-    // 两轮以上的候选探测（更优类型每 3 秒，同类每 15 秒）
+    // Two or more rounds of candidate probing (every 3 seconds for a better type, every 15 seconds
+    // for the same type)
     std::thread::sleep(Duration::from_secs(35));
 
     let count_of = |name: &str| lines(&out.join(format!("cap-{name}.txt")));
@@ -2503,7 +2573,8 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         format!("{leaked} packets sent to the outsider"),
     );
 
-    // 吞吐：组网进程在运行（原始套接字与过滤器在工作）与停掉之后（内核 WireGuard 照常工作）
+    // Throughput: with the mesh process running (raw sockets and filters at work) and after it is
+    // stopped (kernel WireGuard keeps working)
     let server = spawn_in(
         &ns_b,
         Path::new("iperf3"),
@@ -2538,40 +2609,45 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
     Ok(report)
 }
 
-/// 场景 16：当前中继变慢时，经隧道提议的延迟（毫秒，加在中继链路的两端）。
+/// Scenario 16: delay proposed through the tunnel when the current relay slows down (milliseconds,
+/// added at both ends of the relay link).
 const PAIR_SLOW_MS: u32 = 40;
-/// 场景 16：等待流量换到另一个中继的上限（同类更优路径要持续 30 秒）。
+/// Scenario 16: upper bound for waiting for traffic to move to another relay (a better path of the
+/// same type has to last 30 seconds).
 const PAIR_SWITCH_WAIT: Duration = Duration::from_secs(90);
-/// 场景 17：故障之后观察的时长。
+/// Scenario 17: how long to observe after the fault.
 const PAIR_OUTAGE_WATCH: Duration = Duration::from_secs(60);
-/// 场景 17 的通过标准：在三个时间片（45 秒）内恢复。
+/// Pass criterion of scenario 17: recovery within three time slices (45 seconds).
 const PAIR_RECOVERY_LIMIT_MS: u64 = 45_000;
-/// 场景 16 的通过标准：中断不超过 1 秒。
+/// Pass criterion of scenario 16: interruption no longer than 1 second.
 const PAIR_SWITCH_OUTAGE_LIMIT_MS: u64 = 1_000;
 
-/// 双方都是 `dial-only` 的一次运行（design/prototype.md 第 6.2 节场景 16、17）。
+/// A run where both sides are `dial-only` (design/prototype.md section 6.2, scenarios 16 and 17).
 #[derive(Debug, Clone, Serialize)]
 pub struct PairRun {
     pub system: String,
     pub from: String,
     pub after: Option<String>,
-    /// 场景 16：探测流最长的中断；场景 17：从故障到探测流恢复（观察期内没有恢复为空）。
+    /// Scenario 16: the longest interruption of the probe stream; scenario 17: from the fault to
+    /// the recovery of the probe stream (empty if it did not recover within the observation
+    /// period).
     pub outage_ms: Option<u64>,
-    /// 两端各自执行切换的时刻之差（毫秒）。
+    /// Difference between the moments the two ends each perform the switch (milliseconds).
     pub sides_apart_ms: Option<u64>,
     pub tcp_ended: Option<String>,
 }
 
-/// 场景 16 或 17。
+/// Scenario 16 or 17.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PairFault {
-    /// 当前中继变慢：经隧道提议与确认，两端一起切换。
+    /// The current relay slows down: proposal and confirmation through the tunnel, and both ends
+    /// switch together.
     Slow,
-    /// 当前中继失效、没有 Hub：靠时间片汇合。`skew_ms` 是 b 的时钟偏差。
+    /// The current relay fails, no Hub: rendezvous by time slices. `skew_ms` is b's clock skew.
     Outage { skew_ms: i64 },
 }
 
-/// 某个节点在 `after_ms` 之后第一次切换路径的时刻与原因。
+/// The moment and reason of a node's first path switch after `after_ms`.
 fn first_switch(node: &LabNode, after_ms: u64) -> Option<(u64, String)> {
     events(node).iter().find_map(|e| {
         let at = e["at_ms"].as_u64()?;
@@ -2580,7 +2656,8 @@ fn first_switch(node: &LabNode, after_ms: u64) -> Option<(u64, String)> {
     })
 }
 
-/// 故障开始后，探测流在什么时刻恢复（最长的一段中断结束时）；到 `to_ms` 仍未恢复为空。
+/// The moment the probe stream recovers after the fault starts (when the longest interruption
+/// ends); empty if it has not recovered by `to_ms`.
 fn resumed_at(probe_file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<Option<u64>> {
     let stats = crate::measure::probe_stats(probe_file, from_ms, to_ms)?;
     let Some((start, len)) = stats.gaps.iter().max_by_key(|g| g.1).copied() else {
@@ -2603,7 +2680,8 @@ fn nett_pair_once(
         let PairFault::Outage { skew_ms } = fault else {
             return Vec::new();
         };
-        // 双方各自认为的时钟误差：b 偏差不超过 2 秒时双方都按时间片，否则都改用随机间隔
+        // The clock skew each side believes: when b's skew is at most 2 seconds both sides use time
+        // slices, otherwise both switch to random intervals
         let trusted = if skew_ms.unsigned_abs() <= 2_000 {
             "yes"
         } else {
@@ -2646,7 +2724,8 @@ fn nett_pair_once(
         PairFault::Outage { .. } => (PAIR_OUTAGE_WATCH, crate::fault::Netem::loss(100.0)),
     };
     crate::fault::set_link(&lab.underlay, &relays[current].name, &netem)?;
-    // 流量换到另一个中继、探测流持续 5 秒之后提前结束
+    // Ends early after traffic moves to another relay and the probe stream has continued for 5
+    // seconds
     let deadline = Instant::now() + watch;
     let mut stable_since = None;
     while Instant::now() < deadline {
@@ -2689,7 +2768,8 @@ fn nett_pair_once(
     })
 }
 
-/// Tailscale 一组（场景 17，结果只记录）：两端之间没有直连，流量经 DERP；同时停掉 Headscale 和当前 DERP。
+/// Tailscale group (scenario 17, results only recorded): no direct connection between the two ends,
+/// traffic goes via DERP; Headscale and the current DERP are stopped at the same time.
 fn tailscale_pair_once(topo: &Topology, out: &Path) -> anyhow::Result<PairRun> {
     use crate::measure::{now_ms, tcp_stats};
     use crate::tailscale::{TailscaleLab, derp_netns};
@@ -2743,8 +2823,9 @@ fn tailscale_pair_once(topo: &Topology, out: &Path) -> anyhow::Result<PairRun> {
     })
 }
 
-/// 场景 16（当前路径可用，经隧道提议与确认后两端一起切换）与 17（当前路径断开、没有 Hub，靠时间片
-/// 汇合），design/prototype.md 第 6.2 节。
+/// Scenario 16 (the current path is usable; after proposal and confirmation through the tunnel both
+/// ends switch together) and 17 (the current path is down, no Hub, rendezvous by time slices),
+/// design/prototype.md section 6.2.
 pub fn dial_only_pair(
     topology: &Path,
     nett: &Path,
@@ -2818,7 +2899,7 @@ pub fn dial_only_pair(
                 .filter(|r| r.outage_ms.is_some_and(|o| o <= PAIR_RECOVERY_LIMIT_MS))
                 .count();
             if skew_ms.unsigned_abs() <= 2_000 {
-                // 20 次中至少 18 次
+                // At least 18 out of 20
                 let needed = (repeat * 9).div_ceil(10);
                 report.check(
                     "nett:recovered-within-45s",
@@ -2851,35 +2932,38 @@ pub fn dial_only_pair(
     Ok(report)
 }
 
-/// 场景 10–13：等待打通直连的时长。
+/// Scenarios 10-13: how long to wait for the direct connection to be established.
 const PUNCH_WATCH: Duration = Duration::from_secs(40);
-/// 流量离开中继的判定：中继链路持续空闲这么久。
+/// Criterion for traffic leaving the relay: the relay link stays idle for this long.
 const PUNCH_QUIET: Duration = Duration::from_secs(3);
-/// 打洞期间不中断：探测流没有丢包，最长的空档小于两个正常间隔（丢一个包就是 200 毫秒；没有丢包时
-/// 调度的抖动也能让空档到 140 毫秒上下）。
+/// No interruption during hole punching: the probe stream has no loss, and the longest gap is less
+/// than two normal intervals (losing one packet is 200 milliseconds; even without loss, scheduling
+/// jitter can make the gap about 140 milliseconds).
 const PUNCH_MAX_GAP_MS: u64 = 190;
 
-/// 打洞一次运行的结果（design/prototype.md 第 6.2 节场景 10–13）。
+/// Result of one hole punching run (design/prototype.md section 6.2, scenarios 10-13).
 #[derive(Debug, Clone, Serialize)]
 pub struct PunchRun {
     pub system: String,
-    /// 从探测流稳定到流量离开中继（中继链路开始持续空闲）的毫秒数；没有离开为空。
+    /// Milliseconds from the probe stream becoming stable to traffic leaving the relay (the relay
+    /// link starting to stay idle); empty if it did not leave.
     pub direct_after_ms: Option<u64>,
-    /// 探测流稳定之后最长的中断。
+    /// The longest interruption after the probe stream became stable.
     pub max_gap_ms: u64,
-    /// nett：打洞事件。
+    /// nett: hole punching events.
     pub punch: Vec<String>,
     pub tcp_ended: Option<String>,
 }
 
-/// 按拓扑决定的通过标准。
+/// Pass criteria decided by the topology.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PunchExpect {
-    /// 两端锥形，或两端都有全局 IPv6：每次都打通，且不中断。
+    /// Both ends cone, or both ends have a global IPv6 address: succeeds every time, without
+    /// interruption.
     Direct,
-    /// 一端对称型：成功率不低于 Tailscale。
+    /// One end symmetric: success rate not below Tailscale's.
     AtLeastTailscale,
-    /// 两端都是对称型：不尝试打洞，连接不受影响。
+    /// Both ends symmetric: no hole punching is attempted, and the connection is not affected.
     Stay,
 }
 
@@ -2894,7 +2978,8 @@ fn punch_expect(topo: &Topology) -> PunchExpect {
     }
 }
 
-/// 开始传输后等探测流稳定，再等流量离开 `relay_links`（打通直连）。
+/// After the transfer starts, waits for the probe stream to stabilize, then for traffic to leave
+/// `relay_links` (the direct connection is established).
 fn punch_watch(
     lab: &mut Lab,
     out: &Path,
@@ -3000,8 +3085,9 @@ fn tailscale_punch_once(topo: &Topology, out: &Path) -> anyhow::Result<PunchRun>
     Ok(run)
 }
 
-/// 场景 10–13：两端都在 NAT（或 IPv6 有状态防火墙）之后，开始经中继，看能否打通直连、打洞期间是否
-/// 中断（design/prototype.md 第 6.2 节）。通过标准按拓扑决定。
+/// Scenarios 10-13: both ends are behind NAT (or an IPv6 stateful firewall) and start via a relay;
+/// checks whether the direct connection is established and whether there is an interruption during
+/// hole punching (design/prototype.md section 6.2). Pass criteria are decided by the topology.
 pub fn punch(
     topology: &Path,
     nett: &Path,
@@ -3118,7 +3204,8 @@ pub fn punch(
     Ok(report)
 }
 
-/// 分片的计数（各命名空间 `/proc/net/snmp`、`/proc/net/snmp6` 之和）：生成的分片，以及为重组收到的分片。
+/// Fragment counts (the sum of `/proc/net/snmp` and `/proc/net/snmp6` over all namespaces):
+/// fragments generated, and fragments received for reassembly.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct Fragments {
     created: u64,
@@ -3128,7 +3215,7 @@ struct Fragments {
 fn fragments(netns: &[String]) -> anyhow::Result<Fragments> {
     let mut total = Fragments::default();
     for ns in netns {
-        // `Ip:` 一行字段名、一行数值
+        // `Ip:` one line of field names, one line of values
         let snmp = run_in(ns, "cat", ["/proc/net/snmp"])?;
         let ip: Vec<&str> = snmp.lines().filter(|l| l.starts_with("Ip:")).collect();
         if let [names, values] = ip.as_slice() {
@@ -3158,10 +3245,12 @@ fn fragments(netns: &[String]) -> anyhow::Result<Fragments> {
     Ok(total)
 }
 
-/// 大块传输最慢的速率（字节/秒）：低于它就算传不完，按它定出等待的上限。
+/// Slowest rate of the bulk transfer (bytes/second): below it the transfer counts as unable to
+/// finish, and the wait limit is derived from it.
 const BULK_MIN_RATE: u64 = 4 * 1024 * 1024;
 
-/// 经隧道从 `from` 向 `to` 传 `bytes` 个字节并校验内容（`port` 区分每一次传输）。
+/// Transfers `bytes` bytes from `from` to `to` through the tunnel and checks the content (`port`
+/// distinguishes each transfer).
 fn bulk_transfer(
     lab: &mut Lab,
     from: &LabNode,
@@ -3208,9 +3297,10 @@ fn bulk_transfer(
     }
 }
 
-/// 场景 19（design/prototype.md 第 6.3 节）：外层路径的 MTU 依次为 1500、1360、1300，经直连在两个方向
-/// 上各传 `bytes` 个字节并校验内容，统计期间外层的分片。`nett0` 的 MTU 固定为 1280：外层包 IPv4 为
-/// 1340 字节，IPv6 为 1360 字节。
+/// Scenario 19 (design/prototype.md section 6.3): the MTU of the outer path is 1500, 1360, 1300 in
+/// turn; over the direct connection `bytes` bytes are transferred in each direction and the content
+/// is checked, and the outer fragmentation during that time is counted. The MTU of `nett0` is fixed
+/// at 1280: the outer packet is 1340 bytes for IPv4 and 1360 bytes for IPv6.
 pub fn mtu(topology: &Path, nett: &Path, out: &Path, bytes: u64) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let ipv6 = topo
@@ -3254,11 +3344,11 @@ pub fn mtu(topology: &Path, nett: &Path, out: &Path, bytes: u64) -> anyhow::Resu
             let name = format!("mtu-{mtu}:{}-to-{}", from.name, to.name);
             let unfragmented = after == before;
             match (mtu, ipv6) {
-                // 外层包装得下：完整，且没有分片
+                // The outer packet fits: complete, and no fragmentation
                 (1500 | 1360, _) => report.check(&name, result.complete() && unfragmented, detail),
-                // IPv4 的 1300：靠分片传输完整
+                // IPv4 at 1300: transferred completely by fragmentation
                 (_, false) => report.check(&name, result.complete(), detail),
-                // IPv6 的 1300：记录（design/prototype.md 第 6.3 节）
+                // IPv6 at 1300: recorded (design/prototype.md section 6.3)
                 (_, true) => report.record(&name, detail),
             }
         }
@@ -3268,19 +3358,21 @@ pub fn mtu(topology: &Path, nett: &Path, out: &Path, bytes: u64) -> anyhow::Resu
     Ok(report)
 }
 
-/// 场景 20 中 a 抓到的一个 WireGuard 握手消息。
+/// A WireGuard handshake message that a captured in scenario 20.
 #[derive(Debug, Clone, Copy, Serialize)]
 struct Handshake {
     at_ms: u64,
-    /// 1 握手发起、2 握手应答、3 cookie 应答（按长度区分：148、92、64 字节）。
+    /// 1 handshake initiation, 2 handshake response, 3 cookie reply (told apart by length: 148, 92,
+    /// 64 bytes).
     kind: u8,
-    /// a 发出的（否则是 a 收到的）。
+    /// Sent by a (otherwise received by a).
     outgoing: bool,
-    /// 另一端的地址（中继）。
+    /// Address of the other end (the relay).
     remote: std::net::IpAddr,
 }
 
-/// 解析 `tcpdump -n -tt` 的输出：`1794049442.233309 IP 192.168.1.11.41820 > 198.51.100.4.41900: UDP, length 148`。
+/// Parses the output of `tcpdump -n -tt`: `1794049442.233309 IP 192.168.1.11.41820 >
+/// 198.51.100.4.41900: UDP, length 148`.
 fn handshakes(capture: &Path, own: std::net::Ipv4Addr) -> Vec<Handshake> {
     let host = |s: &str| -> Option<std::net::IpAddr> {
         let s = s.trim_end_matches(':');
@@ -3313,7 +3405,8 @@ fn handshakes(capture: &Path, own: std::net::Ipv4Addr) -> Vec<Handshake> {
         .collect()
 }
 
-/// 场景 20 的公共部分：relays.toml 的拓扑，a 经中继向 b 发探测流和长连接，在 a 上抓握手消息。
+/// Common part of scenario 20: the topology of relays.toml; a sends a probe stream and a long-lived
+/// connection to b via a relay, and handshake messages are captured on a.
 struct WgRun {
     lab: Lab,
     generated: Generated,
@@ -3324,7 +3417,8 @@ struct WgRun {
 }
 
 impl WgRun {
-    /// `delay`：先在 a 上建好延迟队列（[`crate::fault::prepare_delay`]），之后只改过滤器。
+    /// `delay`: first sets up the delay queue on a ([`crate::fault::prepare_delay`]), and
+    /// afterwards only the filter changes.
     fn start(topology: &Path, nett: &Path, out: &Path, delay: bool) -> anyhow::Result<Self> {
         let topo = Topology::load(topology)?;
         let underlay = Underlay::plan(&topo)?;
@@ -3380,7 +3474,7 @@ impl WgRun {
             .with_context(|| format!("node {name}"))
     }
 
-    /// 等到探测流连续 3 秒正常。
+    /// Waits until the probe stream is normal for 3 consecutive seconds.
     fn wait_flowing(&self, limit: Duration) -> anyhow::Result<()> {
         let deadline = Instant::now() + limit;
         loop {
@@ -3397,7 +3491,8 @@ impl WgRun {
         }
     }
 
-    /// a 当前经哪个中继：最近一次路径切换的目标，还没有切换过时是第一个候选。
+    /// Which relay a is currently on: the target of the most recent path switch, or the first
+    /// candidate if there has been no switch.
     fn current_relay(&self) -> anyhow::Result<String> {
         let a = self.node("a")?;
         let to = events(a)
@@ -3420,7 +3515,8 @@ impl WgRun {
             .with_context(|| format!("path `{to}` is not via r1 or r2"))
     }
 
-    /// 让当前中继失效，等 a 切到另一个中继、探测流恢复，再恢复这个中继。返回失效的时刻。
+    /// Makes the current relay fail, waits for a to switch to the other relay and the probe stream
+    /// to recover, then restores this relay. Returns the moment of failure.
     fn fail_current_relay(&self, limit: Duration) -> anyhow::Result<(u64, Option<u64>)> {
         let relay = self.current_relay()?;
         let at = crate::measure::now_ms();
@@ -3446,7 +3542,7 @@ impl WgRun {
         Ok((at, resumed))
     }
 
-    /// a 在 `from_ms` 之后的路径切换：（时刻，原因，目标）。
+    /// Path switches of a after `from_ms`: (moment, reason, target).
     fn switches_since(&self, from_ms: u64) -> anyhow::Result<Vec<(u64, String, String)>> {
         Ok(events(self.node("a")?)
             .iter()
@@ -3465,7 +3561,7 @@ impl WgRun {
 }
 
 impl WgRun {
-    /// 中继保存的会话索引数（它每秒写一次状态文件）。
+    /// Number of session indexes the relay holds (it writes the state file once per second).
     fn relay_sessions(&self, relay: &str) -> anyhow::Result<usize> {
         let path = self.node(relay)?.dir.join("relay-state.json");
         let text = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -3474,7 +3570,8 @@ impl WgRun {
         Ok(state.sessions.len())
     }
 
-    /// 在中继上丢掉接下来一个来自 a 的握手发起（代替中继因索引冲突丢弃一次握手，design/mesh.md 第 5.1 节）。
+    /// Drops the next handshake initiation from a at the relay (stands in for the relay dropping a
+    /// handshake because of an index collision, design/mesh.md section 5.1).
     fn drop_next_initiation(&self, relay: &str) -> anyhow::Result<()> {
         let from = self
             .lab
@@ -3495,7 +3592,7 @@ impl WgRun {
         Ok(())
     }
 
-    /// a 在 `from_ms` 之后发出的握手发起与收到的应答。
+    /// Handshake initiations a sent and responses it received after `from_ms`.
     fn handshakes_since(&self, from_ms: u64) -> Vec<Handshake> {
         handshakes(&self.capture, self.a_ipv4)
             .into_iter()
@@ -3504,8 +3601,9 @@ impl WgRun {
     }
 }
 
-/// 场景 20(a)、(b)：删除再添加对端之后的握手时间，以及新中继丢掉第一个握手发起时的重试。每次让当前中继
-/// 失效，a 切到另一个中继并重新握手。
+/// Scenario 20(a), (b): handshake time after deleting and re-adding the peer, and the retry when
+/// the new relay drops the first handshake initiation. Each time the current relay is made to fail,
+/// a switches to the other relay and handshakes again.
 pub fn wg_rehandshake(
     topology: &Path,
     nett: &Path,
@@ -3516,7 +3614,7 @@ pub fn wg_rehandshake(
     let mut report = Report::new("20ab-wg-rehandshake");
     let mut timings = Vec::new();
     for i in 0..repeat + 1 {
-        // 最后一次在目标中继上丢掉第一个握手发起
+        // The last time drops the first handshake initiation at the target relay
         let dropped = i == repeat;
         let relay = run_.current_relay()?;
         let target = if relay == "r1" { "r2" } else { "r1" };
@@ -3530,7 +3628,8 @@ pub fn wg_rehandshake(
         let Some((switch_at, _, _)) = switched.first().cloned() else {
             anyhow::bail!("a did not switch away from {relay}");
         };
-        // 内核在加回对端时立即发出握手发起，可能比组网进程记下切换事件早一毫秒
+        // The kernel sends the handshake initiation immediately when the peer is added back, which
+        // may be a millisecond earlier than the mesh process records the switch event
         let seen = run_.handshakes_since(switch_at.saturating_sub(100));
         let inits: Vec<u64> = seen
             .iter()
@@ -3584,8 +3683,10 @@ pub fn wg_rehandshake(
     Ok(report)
 }
 
-/// 场景 20(b)、(d)：经中继连续运行 `duration`，跨过多次密钥轮换（发起方每 2 分钟一次）。第一次轮换的握手
-/// 发起在中继上被丢掉，WireGuard 约 5 秒后自己重试，期间旧会话照常使用。每分钟记录中继的会话索引数。
+/// Scenario 20(b), (d): runs through the relay for `duration`, across several key rotations (one
+/// every 2 minutes from the initiator). The handshake initiation of the first rotation is dropped
+/// at the relay, WireGuard retries by itself after about 5 seconds, and the old session keeps being
+/// used meanwhile. The relay's session index count is recorded every minute.
 pub fn wg_rekey(
     topology: &Path,
     nett: &Path,
@@ -3640,7 +3741,8 @@ pub fn wg_rekey(
     let half = sessions.len() / 2;
     let early = sessions[..half].iter().max().copied().unwrap_or(0);
     let late = sessions[half..].iter().max().copied().unwrap_or(0);
-    // 每次握手留下两个索引，空闲 180 秒后删除；每 2 分钟轮换一次时最多三次握手的索引同时在表中
+    // Each handshake leaves two indexes, deleted after 180 seconds idle; with a rotation every 2
+    // minutes, the indexes of at most three handshakes are in the table at the same time
     report.check(
         "d:relay-index-table-stable",
         late <= early.max(6),
@@ -3651,7 +3753,7 @@ pub fn wg_rekey(
     Ok(report)
 }
 
-/// 把"陌生人"命名空间接到"公网"上（198.51.100.99）。
+/// Attaches the "stranger" namespace to the "public network" (198.51.100.99).
 fn add_outsider() -> anyhow::Result<()> {
     use crate::net::{INET_NETNS, OUTSIDER_NETNS, add_netns, attach};
     add_netns(OUTSIDER_NETNS)?;
@@ -3671,7 +3773,8 @@ fn add_outsider() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一个命名空间中 nft 计数器的包数（`nft list table` 输出中第一个 `packets N`）。
+/// Packet count of an nft counter in a namespace (the first `packets N` in the output of `nft list
+/// table`).
 fn nft_packets(ns: &str, table: &str) -> anyhow::Result<u64> {
     let text = run_in(ns, "nft", ["list", "table", table])?;
     let n = text
@@ -3683,20 +3786,23 @@ fn nft_packets(ns: &str, table: &str) -> anyhow::Result<u64> {
     Ok(n)
 }
 
-/// 洪泛持续的时间：足够 a 换中继（计划内的切换要等同类更优路径持续 30 秒），并让 WireGuard 带着 cookie
-/// 重试几轮。
+/// How long the flood lasts: long enough for a to change relay (a planned switch has to wait for a
+/// better path of the same type to last 30 seconds) and for WireGuard to retry several rounds with
+/// a cookie.
 const COOKIE_FLOOD: Duration = Duration::from_secs(90);
 
-/// a 换中继的方式。
+/// How a changes relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CookieCase {
-    /// 当前中继失效。
+    /// The current relay fails.
     Failover,
-    /// 当前中继变慢（加 40 毫秒延迟），旧中继仍然可用。
+    /// The current relay slows down (40 milliseconds of delay added), and the old relay is still
+    /// usable.
     Planned,
 }
 
-/// 场景 20(c) 的一次运行：b 被大量握手发起压到负载状态，a 换到另一个中继、重新握手。
+/// One run of scenario 20(c): b is pushed into the under-load state by a flood of handshake
+/// initiations, and a changes to another relay and handshakes again.
 fn cookie_once(
     topology: &Path,
     nett: &Path,
@@ -3776,7 +3882,8 @@ fn cookie_once(
             crate::fault::route_delay("a", ip)?;
         }
     }
-    // 看完整个洪泛期：换中继之后是否来回切换、隧道是否恢复
+    // Watch the whole flood period: whether it switches back and forth after changing relay, and
+    // whether the tunnel recovers
     std::thread::sleep(Duration::from_millis(
         flood_until.saturating_sub(crate::measure::now_ms()),
     ));
@@ -3813,8 +3920,10 @@ fn cookie_once(
             completed.zip(first_switch).map(|(c, s)| c - s)
         ),
     );
-    // 用户态数据面按来源限额（design/userspace.md 第 4.1 节），被洪水的一方只要求洪水的来源带 cookie，
-    // a 经中继的握手直接得到应答；内核成员的 cookie 在两个用例合计检查（wg_cookie）
+    // The userspace data plane limits per source (design/userspace.md section 4.1): the flooded
+    // side only requires the flood's source to carry a cookie, and a's handshake via the relay gets
+    // a response directly; the cookie of a kernel member is checked across the two cases together
+    // (wg_cookie)
     if b.userspace {
         report.check(
             &format!("{label}:handshake-answered-without-cookie"),
@@ -3822,7 +3931,7 @@ fn cookie_once(
             format!("{cookies_to_a} cookie replies, response at {completed:?}"),
         );
     }
-    // 来回切换：回到了之前离开过的中继
+    // Switching back and forth: returned to a relay it had left before
     let mut visited: Vec<&str> = vec![];
     let mut returned = false;
     for (_, _, to) in &switches {
@@ -3867,8 +3976,10 @@ fn cookie_once(
     Ok((cookies_to_a, b.userspace))
 }
 
-/// 场景 20(c)：b 被大量握手发起压到负载状态时，a 换中继、重新握手。经中继送回的 cookie 应答要能到达 a，
-/// 握手要在负载持续期间完成。分两种：当前中继失效；当前中继变慢、旧中继仍然可用（计划内的切换）。
+/// Scenario 20(c): when b is pushed into the under-load state by a flood of handshake initiations,
+/// a changes relay and handshakes again. The cookie reply sent back through the relay must reach a,
+/// and the handshake must complete while the load lasts. Two kinds: the current relay fails; the
+/// current relay slows down while the old relay is still usable (a planned switch).
 pub fn wg_cookie(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let mut report = Report::new("20c-wg-cookie");
     let mut cookies = Vec::new();
@@ -3883,9 +3994,11 @@ pub fn wg_cookie(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         cookies.push((dir, n));
         userspace = b_userspace;
     }
-    // 内核 WireGuard 按握手队列的瞬时积压判断负载：a 的握手到达时队列恰好没满，b 就直接应答，不要 cookie
-    // （握手更快完成）。cookie 经中继送达只需在两个用例中出现一次（design/prototype.md 场景 20(c)）；握手
-    // 完成、隧道恢复、不来回切换在每个用例中都要满足
+    // Kernel WireGuard judges load by the instantaneous backlog of the handshake queue: when a's
+    // handshake arrives and the queue happens not to be full, b responds directly without a cookie
+    // (the handshake completes faster). The cookie arriving through the relay only needs to appear
+    // once across the two cases (design/prototype.md scenario 20(c)); the handshake completing, the
+    // tunnel recovering and no switching back and forth must hold in every case
     if !userspace {
         report.check(
             "cookie-reaches-a-through-the-relay",
@@ -3897,7 +4010,8 @@ pub fn wg_cookie(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     Ok(report)
 }
 
-/// 测量用的辅助子命令：静置之前结束它们，组网和中继的进程照常运行。
+/// Helper subcommands for measurement: ended before the idle period, while the mesh and relay
+/// processes keep running.
 const LOAD_HELPERS: [&str; 6] = [
     "probe-send",
     "probe-recv",
@@ -3916,7 +4030,7 @@ fn cmdline(pid: u32) -> Vec<String> {
 }
 
 impl Lab {
-    /// 结束探测流、长连接和大块传输的辅助进程。
+    /// Ends the helper processes of the probe stream, long-lived connection and bulk transfer.
     fn stop_load(&mut self) {
         for child in &mut self.helpers {
             let args = cmdline(child.id());
@@ -3927,7 +4041,7 @@ impl Lab {
         }
     }
 
-    /// 要测内存的进程：（名称，pid）。
+    /// Processes whose memory is measured: (name, pid).
     fn measured(&self) -> Vec<(String, u32)> {
         let mut out: Vec<(String, u32)> = self
             .processes
@@ -3948,7 +4062,8 @@ impl Lab {
     }
 }
 
-/// 进程的内存（KiB）：RSS 及其中的匿名页与文件页（可执行文件的代码页等，多个进程共享），PSS，线程数。
+/// Memory of a process (KiB): RSS and the anonymous pages and file pages within it (code pages of
+/// the executable and so on, shared by multiple processes), PSS, and the thread count.
 struct Memory {
     rss: u64,
     anon: u64,
@@ -3988,13 +4103,16 @@ fn mem_available_kib() -> Option<u64> {
         .ok()
 }
 
-/// 空闲预算（硬性规则 14）：组网进程、传输适配进程、nett-relay 各 5 MB。
+/// Idle budget (hard rule 14): 5 MB each for the mesh process, the transport adapter and
+/// nett-relay.
 const IDLE_BUDGET_KIB: u64 = 5 * 1024;
-/// 每段负载传输的数据量。
+/// Amount of data transferred in each load phase.
 const RESOURCE_BULK: u64 = 128 * 1024 * 1024;
 
-/// 场景 21（design/prototype.md 第 6.3 节）：先有负载地运行——直连、切到 UDP 中继、再切到 TLS，经中继和
-/// TLS 各传一块数据，再回到直连——然后停掉负载、静置 `idle`，测各进程的 RSS 与 PSS。用 release 构建。
+/// Scenario 21 (design/prototype.md section 6.3): first runs under load (direct, switch to a UDP
+/// relay, then switch to TLS, transfer one block of data through the relay and through TLS, then
+/// return to direct), then stops the load, idles for `idle`, and measures each process's RSS and
+/// PSS. Uses a release build.
 pub fn resources(
     topology: &Path,
     nett: &Path,
@@ -4025,7 +4143,7 @@ pub fn resources(
     let a_egress = lab.underlay.egress_ipv4("a").context("a egress address")?;
     let mut port = 7200u16;
     let mut load = |lab: &mut Lab, what: &str| -> anyhow::Result<()> {
-        // 让切换完成，再传一块数据
+        // Let the switch complete, then transfer one block of data
         std::thread::sleep(Duration::from_secs(8));
         let result = bulk_transfer(lab, &a, &b, RESOURCE_BULK, port, out)
             .map_err(|e| e.context(diagnose(lab, &generated.nodes)))?;
@@ -4080,7 +4198,8 @@ pub fn resources(
             mem_available_kib()
         ),
     );
-    // 超过预算的进入下一阶段之前要查明原因（design/prototype.md 第 6.3 节）
+    // For anything over budget, find the cause before entering the next phase (design/prototype.md
+    // section 6.3)
     report.check(
         "idle-rss-within-5-mb",
         over.is_empty(),
@@ -4091,27 +4210,31 @@ pub fn resources(
     Ok(report)
 }
 
-/// 拥塞场景中 b 的上行队列长度（包）：2 Mbit/s 时约 5 秒，相当于限速的 VPS 或上传缓冲很深的家庭宽带。
+/// Length of b's uplink queue in the congestion scenario (packets): about 5 seconds at 2 Mbit/s,
+/// equivalent to a rate-limited VPS or a home broadband with a very deep upload buffer.
 const CONGESTION_QUEUE_PACKETS: u32 = 1000;
-/// 拥塞开始之前，等路径稳定的时间。
+/// How long to wait for the path to stabilize before congestion starts.
 const CONGESTION_SETTLE: Duration = Duration::from_secs(10);
-/// 解除限速之后继续观察的时间：队列排空、迟到的应答回来。
+/// How long to keep observing after the rate limit is lifted: the queue drains and late replies
+/// come back.
 const CONGESTION_DRAIN: Duration = Duration::from_secs(8);
 
-/// 拥塞一次运行的结果。
+/// Result of one congestion run.
 #[derive(Debug, Clone, Serialize)]
 pub struct CongestionRun {
     pub system: String,
-    /// 期间的路径变化：nett 为切换事件，Tailscale 为 `tailscale status` 中对端地址的变化（每秒采样）。
+    /// Path changes during this period: for nett the switch events, for Tailscale the changes of
+    /// the peer's address in `tailscale status` (sampled every second).
     pub changes: Vec<String>,
     pub tcp_kbps: u64,
     pub tcp_ended: Option<String>,
-    /// 探测流（b 到 a）最长的中断。
+    /// The longest interruption of the probe stream (b to a).
     pub max_gap_ms: u64,
 }
 
-/// b 的上行限速到 `rate_kbit`、队列很深，b 向 a 的 `target` 持续发送长连接与探测流 `duration`。
-/// `sample` 每秒调用一次，返回当前路径的描述（nett 用事件，不需要采样）。
+/// Limits b's uplink to `rate_kbit` with a very deep queue, and b sends a long-lived connection and
+/// a probe stream to a's `target` for `duration`. `sample` is called once per second and returns a
+/// description of the current path (nett uses events and does not need sampling).
 fn congestion_run(
     lab: &mut Lab,
     out: &Path,
@@ -4170,7 +4293,7 @@ fn congestion_run(
     ))
 }
 
-/// Tailscale 当前到 `peer` 的路径：直连的地址，或经 DERP。
+/// Tailscale's current path to `peer`: the direct address, or via DERP.
 fn tailscale_path(ts: &crate::tailscale::TailscaleLab, peer: std::net::Ipv4Addr) -> Option<String> {
     let status: Value = serde_json::from_str(&ts.cli("a", &["status", "--json"]).ok()?).ok()?;
     let ip = peer.to_string();
@@ -4186,7 +4309,8 @@ fn tailscale_path(ts: &crate::tailscale::TailscaleLab, peer: std::net::Ipv4Addr)
     })
 }
 
-/// 场景 24 的 nett 一次运行：期间的路径变化取各节点的切换事件。
+/// One nett run of scenario 24: the path changes during this period are taken from each node's
+/// switch events.
 fn nett_congestion_once(
     topo: &Topology,
     nett: &Path,
@@ -4236,7 +4360,8 @@ fn nett_congestion_once(
     Ok(run)
 }
 
-/// 场景 24 的 Tailscale 一次运行。没有直连候选的拓扑拦掉两端之间的直连 UDP，经 DERP。
+/// One Tailscale run of scenario 24. For topologies without a direct candidate, the direct UDP
+/// between the two ends is blocked, so traffic goes via DERP.
 fn tailscale_congestion_once(
     topo: &Topology,
     out: &Path,
@@ -4276,8 +4401,9 @@ fn tailscale_congestion_once(
     Ok(run)
 }
 
-/// 场景 24（design/prototype.md 第 6.2 节）：拥塞。路径没有断，只是排队：nett 不切换、不重新握手，
-/// 长连接不断；吞吐与最长中断不比 Tailscale 差。
+/// Scenario 24 (design/prototype.md section 6.2): congestion. The path is not down, only queueing:
+/// nett does not switch or handshake again, and the long-lived connection stays up; throughput and
+/// the longest interruption are no worse than Tailscale's.
 pub fn congestion(
     topology: &Path,
     nett: &Path,
@@ -4351,9 +4477,11 @@ pub fn congestion(
     Ok(report)
 }
 
-/// 访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 6、8 节，ADR 0015、0016）。拓扑中 `edge`
-/// 运行 Edge（背后有一个"容器"，节点像 Docker 一样对它做源地址伪装），`app` 是容器内成员（背后有一个服务，
-/// 宣告服务的地址），只放行 `edge` 的 Edge 访问服务的 8686；`other` 是普通成员。
+/// Access control, Edge addresses and container members (design/local-signing.md sections 6 and 8,
+/// ADR 0015, 0016). In the topology `edge` runs Edge (with a "container" behind it, and the node
+/// masquerades its traffic like Docker); `app` is a container member (with a service behind it,
+/// advertising the service's address), and only the Edge of `edge` is allowed to access port 8686
+/// of the service; `other` is an ordinary member.
 pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
@@ -4383,7 +4511,8 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
     for n in &generated.nodes {
         wait_for(n, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
     }
-    // 容器内成员在 NAT 之后、只接受它自己发起的连接：从它出发等隧道通（规则放行 app 访问另外两个）
+    // The container member is behind NAT and only accepts connections it initiates itself: starting
+    // from it, wait for the tunnel to come up (the rules allow app to access the other two)
     for target in [edge.mesh_ipv4, other.mesh_ipv4] {
         let r = ping(&ns_app, &target.to_string());
         report.check(
@@ -4393,7 +4522,8 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         );
     }
 
-    // app 背后的服务：宣告的地址上监听 8686、2222；同一网络中另一个没有宣告的地址上也监听 8686
+    // The service behind app: listens on 8686 and 2222 on the advertised address; also listens on
+    // 8686 on another, unadvertised address in the same network
     let svc_ns = crate::net::service_netns("app");
     let (svc, ingress) = topo
         .node("app")
@@ -4442,8 +4572,9 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         routes_on_edge.trim().replace('\n', "; "),
     );
 
-    // Edge 访问服务放行的端口：连上；服务看到的来源是 app 在服务网络中的地址（Edge 的源地址转换在 Docker 的
-    // 伪装之前生效，app 转发时换成自己的地址）
+    // Edge accesses the port the service allows: connects; the source the service sees is app's
+    // address in the service network (Edge's source NAT takes effect before Docker's masquerade,
+    // and app replaces it with its own address when forwarding)
     let result = connect(&container, svc, 8686);
     std::thread::sleep(Duration::from_millis(300));
     let seen = std::fs::read_to_string(&logs[0]).unwrap_or_default();
@@ -4470,9 +4601,10 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         format!("{:?}", unexpected.lines().collect::<Vec<_>>()),
     );
 
-    // 模拟 other 被攻破：它在自己这一端给 app 的对端加上没有宣告的地址和路由，把包发过去。app 必须丢弃
+    // Simulate other being compromised: on its own side it adds an unadvertised address and route
+    // to app's peer and sends packets over. app must drop them
     let peers = run_in(&ns_other, "wg", ["show", "nett0", "allowed-ips"])?;
-    // 按组网地址找到 app 的对端，公钥用 wg 自己的写法
+    // Find app's peer by mesh address; the public key is in wg's own notation
     let app_mesh = format!("{}/32", app.mesh_ipv4);
     let app_line = peers
         .lines()
@@ -4510,7 +4642,8 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         ),
     );
 
-    // 成员之间默认拒绝（ADR 0023）：同一条隧道上，规则放行 edge 访问 other，反方向没有规则
+    // Default deny between members (ADR 0023): on the same tunnel, the rules allow edge to access
+    // other, and there is no rule in the reverse direction
     let r = ping(&ns_edge, &other.mesh_ipv4.to_string());
     report.check(
         "member-allowed-by-rule",
@@ -4528,8 +4661,10 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
         },
     );
 
-    // 防冒用：edge 节点上以 Edge 专用地址为源发出的包不离开本机。在 other 上计数从组网接口进来的包：
-    // 以 Edge 专用地址为源的应为 0，以 edge 的组网地址为源的（对照）大于 0
+    // Anti-spoofing: packets sent from the edge node with the Edge address as source do not leave
+    // the machine. Count packets arriving from the mesh interface on other: those with the Edge
+    // address as source should be 0, and those with edge's mesh address as source (the control)
+    // greater than 0
     let rules = format!(
         "table inet lab_count {{\n chain c {{\n  type filter hook prerouting priority -300;\n  \
          iifname \"nett0\" ip saddr {edge_ip} counter\n  \

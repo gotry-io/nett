@@ -1,5 +1,5 @@
-//! `nett status`：本机组网的状态（design/status.md 第 7 节），以及 `nett reload`（第 4.1 节）。都经组网进程的
-//! 本机套接字。
+//! `nett status`: the status of this machine's mesh (design/status.md section 7), and `nett reload`
+//! (section 4.1). Both go through the mesh process's local socket.
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -52,7 +52,8 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nett reload`：请组网进程重新读取期望状态文件，显示它是否被接受（design/status.md 第 4.1 节）。
+/// `nett reload`: asks the mesh process to re-read the desired state file and shows whether it was
+/// accepted (design/status.md section 4.1).
 pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut socket = PathBuf::from(status::DEFAULT_SOCKET);
     while let Some(arg) = parser.next()? {
@@ -65,14 +66,14 @@ pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 请 `socket` 上的组网进程重新读取期望状态文件，返回要显示的结果；被拒绝时是错误。`nett reload` 与
-/// macOS 的 `nett install` 共用。
+/// Asks the mesh process on `socket` to re-read the desired state file and returns the result to
+/// show; an error when rejected. Shared by `nett reload` and macOS `nett install`.
 pub fn reload_at(socket: &std::path::Path) -> anyhow::Result<String> {
     let outcome = status::reload(socket).map_err(|e| explain(e, socket))?;
     reload_text(&outcome, Timestamp::now())
 }
 
-/// `applied` 时的输出；`rejected` 作为错误返回（退出码 1）。
+/// Output for `applied`; `rejected` is returned as an error (exit code 1).
 fn reload_text(outcome: &ReloadOutcome, now: Timestamp) -> anyhow::Result<String> {
     match outcome {
         ReloadOutcome::Rejected { reason } => {
@@ -94,7 +95,8 @@ fn reload_text(outcome: &ReloadOutcome, now: Timestamp) -> anyhow::Result<String
     }
 }
 
-/// 连不上时说清楚是没有运行、还是权限不够。
+/// When it cannot connect, says clearly whether the process is not running or the permissions are
+/// insufficient.
 fn explain(e: QueryError, socket: &std::path::Path) -> anyhow::Error {
     let path = socket.display();
     match &e {
@@ -131,7 +133,7 @@ fn find_peer(doc: &StatusDoc, wanted: &str) -> anyhow::Result<usize> {
     bail!("no peer `{wanted}`; peers: {}", known.join(", "))
 }
 
-// ---- 总览（第 7.1 节） ----
+// ---- Overview (section 7.1) ----
 
 pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
     let mut out = String::new();
@@ -233,7 +235,7 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
     out
 }
 
-// ---- 一个对端（第 7.2 节） ----
+// ---- One peer (section 7.2) ----
 
 fn peer_detail(doc: &StatusDoc, p: &PeerStatus, now: Timestamp) -> String {
     let mut head = vec![(
@@ -337,7 +339,7 @@ fn peer_detail(doc: &StatusDoc, p: &PeerStatus, now: Timestamp) -> String {
     out
 }
 
-// ---- 文案 ----
+// ---- Wording ----
 
 fn dash() -> String {
     "-".to_owned()
@@ -350,7 +352,7 @@ fn labelled(name: Option<&str>, id: &str) -> String {
     }
 }
 
-/// 按名字排序，没有名字的按节点 ID。
+/// Sorted by name; those without a name by node ID.
 fn sort_key(p: &PeerStatus) -> &str {
     p.name.as_ref().map_or(p.id.as_str(), |n| n.as_str())
 }
@@ -367,7 +369,8 @@ fn node_label(node: &NodeRef) -> String {
         .map_or_else(|| node.id.to_string(), ToString::to_string)
 }
 
-/// `what` 后面跟上节点名；没有节点（读不出 ID、中继不是成员）时只写 `what`。
+/// `what` followed by the node name; when there is no node (the ID cannot be read, the relay is not
+/// a member), only `what`.
 fn with_node(what: &str, node: Option<&NodeRef>) -> String {
     match node {
         Some(node) => format!("{what} {}", node_label(node)),
@@ -408,7 +411,8 @@ fn kind_label(kind: PathKindDoc, relay: Option<&NodeRef>, punched: bool) -> Stri
     }
 }
 
-/// 切换原因（`SwitchReason`）的说法；新版本才有的原因按名字显示。
+/// How a switch reason (`SwitchReason`) is described; reasons that only newer versions have are
+/// shown by name.
 fn switch_reason(reason: &str) -> String {
     match reason {
         "unreachable" => "unreachable".to_owned(),
@@ -462,7 +466,7 @@ fn names(doc: &StatusDoc) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-/// 一个事件的说法；新版本才有的事件按名字显示。
+/// How an event is described; events that only newer versions have are shown by name.
 fn event_text(e: &EventRecord, names: &std::collections::HashMap<String, String>) -> String {
     let field = |k: &str| match e.fields.get(k) {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -496,7 +500,7 @@ fn event_text(e: &EventRecord, names: &std::collections::HashMap<String, String>
     }
 }
 
-// ---- 格式 ----
+// ---- Format ----
 
 fn addresses(addrs: &[std::net::IpAddr]) -> String {
     if addrs.is_empty() {
@@ -513,7 +517,7 @@ fn join<T: ToString>(items: &[T]) -> String {
         .join(", ")
 }
 
-/// 往返时间：不到 10 毫秒保留一位小数，其余取整。
+/// Round-trip time: below 10 milliseconds keeps one decimal place, otherwise rounded to an integer.
 pub(crate) fn ms(v: f64) -> String {
     if v < 10.0 {
         format!("{v:.1} ms")
@@ -522,7 +526,7 @@ pub(crate) fn ms(v: f64) -> String {
     }
 }
 
-/// 丢包率取整；不到 1% 但不为 0 时写 `<1%`。
+/// Packet loss is rounded to an integer; when below 1% but not 0, written as `<1%`.
 fn loss(v: f64) -> String {
     let pct = v * 100.0;
     if pct > 0.0 && pct < 1.0 {
@@ -532,7 +536,7 @@ fn loss(v: f64) -> String {
     }
 }
 
-/// 十进制单位。
+/// Decimal units.
 fn bytes(n: u64) -> String {
     const UNITS: [&str; 5] = ["kB", "MB", "GB", "TB", "PB"];
     if n < 1000 {
@@ -570,7 +574,7 @@ mod tests {
         Timestamp::from_unix_seconds(NOW - seconds_ago).to_string()
     }
 
-    /// design/status.md 第 7 节示例中的那台 Mac。
+    /// The Mac in the example in design/status.md section 7.
     fn doc() -> StatusDoc {
         let id = |c: char| format!("node_01JD7M3XQ4W8N2K5R9T6V3B7C{c}");
         serde_json::from_value(serde_json::json!({
@@ -730,7 +734,7 @@ EVENTS
         assert_eq!(ago_s(59), "59s ago");
         assert_eq!(ago_s(60), "1m ago");
         assert_eq!(ago_s(3 * 86_400 + 5), "3d ago");
-        // 时钟回拨时不出现负数
+        // No negative numbers when the clock goes backwards
         assert_eq!(ago_s(-5), "0s ago");
     }
 

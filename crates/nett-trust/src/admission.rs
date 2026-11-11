@@ -1,4 +1,5 @@
-//! 组网准入：信任锚 → 含 mesh 模块的签名节点策略 → 准入证明（design/mesh.md 第 4.1 节，ADR 0014）。
+//! Mesh admission: trust anchors → signed node policy containing the mesh module → admission proof
+//! (design/mesh.md section 4.1, ADR 0014).
 
 use std::collections::BTreeMap;
 
@@ -14,10 +15,11 @@ use crate::payload::{MeshAddresses, Module, Role};
 use crate::revocation::Revocations;
 use crate::signed::{SignatureError, SignedPayload, Signer};
 
-/// 准入证明载荷格式的版本。
+/// Version of the admission proof payload format.
 pub const PROOF_V1: u64 = 1;
 
-/// 准入证明载荷：入网私钥对节点 ID、身份公钥、组网公钥的签名（design/auth.md 第 8.2、10.5 节）。
+/// The admission proof payload: the enrollment private key's signature over the node ID, identity
+/// public key and mesh public key (design/auth.md sections 8.2, 10.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionProofDoc {
@@ -42,7 +44,7 @@ impl AdmissionProofDoc {
     }
 }
 
-/// 准入证明的传输形式：载荷的字节与 Ed25519 签名。
+/// The transport form of an admission proof: the payload bytes and an Ed25519 signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionProof {
@@ -52,7 +54,7 @@ pub struct AdmissionProof {
     pub signature: [u8; 64],
 }
 
-/// 一个成员的准入材料：签名节点策略加准入证明。
+/// One member's admission material: the signed node policy plus the admission proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdmissionMaterial {
@@ -60,7 +62,7 @@ pub struct AdmissionMaterial {
     pub proof: AdmissionProof,
 }
 
-/// 通过准入验证的成员。
+/// A member that passed admission verification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Member {
     pub node_id: NodeId,
@@ -69,18 +71,19 @@ pub struct Member {
     pub identity_public_key: X25519PublicKey,
     pub addresses: MeshAddresses,
     pub roles: Vec<Role>,
-    /// 有 `edge` 角色时的 Edge 专用地址与 Edge 的来源（ADR 0015）。
+    /// With the `edge` role, the Edge address and the origin of Edge traffic (ADR 0015).
     pub edge: Option<EdgeMember>,
     pub signer: Signer,
-    /// 节点策略产物的哈希。
+    /// Hash of the node policy artifact.
     pub policy_hash: Sha256Digest,
-    /// 准入证明载荷的哈希。
+    /// Hash of the admission proof payload.
     pub proof_hash: Sha256Digest,
-    /// 节点策略载荷的过期时间：只在本机首次接受自己的策略时检查（design/auth.md 第 10.2 节检查 6）。
+    /// Expiry time of the node policy payload: checked only when this machine first accepts its own
+    /// policy (design/auth.md section 10.2 check 6).
     pub policy_expires_at: Timestamp,
 }
 
-/// 成员的 Edge：Edge 专用地址，以及 Edge 发出的流量从哪些容器网段来。
+/// A member's Edge: the Edge address, and from which container prefixes Edge traffic comes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EdgeMember {
     pub addresses: MeshAddresses,
@@ -111,7 +114,7 @@ pub enum AdmissionError {
 }
 
 impl AdmissionError {
-    /// 被拒绝的节点；格式错误到无法读出节点 ID 时为空。
+    /// The rejected node; empty when the format is so wrong that the node ID cannot be read.
     pub fn node_id(&self) -> Option<&NodeId> {
         match self {
             Self::ProofFormat(_) | Self::ProofDocument(_) | Self::ProofVersion(_) => None,
@@ -124,8 +127,9 @@ impl AdmissionError {
     }
 }
 
-/// 验证一个成员的准入材料。验证的是签名链条和撤销记录，不检查批准的过期时间
-/// （design/auth.md 第 10.2 节检查 6）；版本号由 [`AppliedMembers`] 检查。
+/// Verifies one member's admission material. What is verified is the signature chain and
+/// revocations; the expiry of the approval is not checked (design/auth.md section 10.2 check 6);
+/// the version number is checked by [`AppliedMembers`].
 pub fn admit(
     material: &AdmissionMaterial,
     anchors: &TrustAnchors,
@@ -168,7 +172,8 @@ pub fn admit(
         identity_public_key: proof.identity_public_key,
         addresses: policy.addresses.mesh,
         roles: policy.roles.clone(),
-        // 载荷解析时已确认角色、来源和地址同时出现或同时没有
+        // Payload parsing has already confirmed that the role, origin and address either all appear
+        // or all are absent
         edge: policy
             .addresses
             .edge
@@ -185,14 +190,16 @@ pub fn admit(
     })
 }
 
-/// 已生效的成员版本。版本号只增不减；与已生效版本完全相同的材料视为幂等（design/auth.md 第 10.2 节检查 7）。
+/// Member versions already in effect. Version numbers only increase; material identical to the
+/// version in effect is treated as idempotent (design/auth.md section 10.2 check 7).
 #[derive(Debug, Clone, Default)]
 pub struct AppliedMembers {
     by_node: BTreeMap<NodeId, AppliedRecord>,
 }
 
-/// 一个成员已生效的材料：版本与两份载荷的哈希。组网进程把它保存在本机的信任存储中，重启之后据此拒绝
-/// 旧版本（design/mesh.md 第 4.2 节）。
+/// A member's material in effect: the version and the hashes of the two payloads. The mesh process
+/// keeps it in the local trust store, and after a restart uses it to reject older versions
+/// (design/mesh.md section 4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppliedRecord {
@@ -203,9 +210,9 @@ pub struct AppliedRecord {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionCheck {
-    /// 新成员，或版本更高。
+    /// A new member, or a higher version.
     Newer,
-    /// 与已生效的材料完全相同。
+    /// Identical to the material in effect.
     Unchanged,
 }
 
@@ -231,7 +238,7 @@ impl AppliedMembers {
         }
     }
 
-    /// 记录一个通过 [`Self::check`] 的成员。
+    /// Records a member that passed [`Self::check`].
     pub fn record(&mut self, member: &Member) {
         self.by_node
             .insert(member.node_id.clone(), AppliedRecord::of(member));
@@ -241,7 +248,7 @@ impl AppliedMembers {
         &self.by_node
     }
 
-    /// 已生效的版本；撤销的成员由调用方移除。
+    /// Versions in effect; revoked members are removed by the caller.
     pub fn remove(&mut self, node_id: &NodeId) {
         self.by_node.remove(node_id);
     }
@@ -256,8 +263,10 @@ impl AppliedRecord {
         }
     }
 
-    /// 与这份已生效的材料比较：版本更高为 [`VersionCheck::Newer`]，完全相同为
-    /// [`VersionCheck::Unchanged`]，更低或同版本不同内容为错误。
+    /// Compares with this material in effect: a higher version is [`VersionCheck::Newer`],
+    /// identical is
+    /// [`VersionCheck::Unchanged`], and a lower version, or the same version with different content, is
+    /// an error.
     pub fn compare(&self, member: &Member) -> Result<VersionCheck, VersionError> {
         let offered = Self::of(member);
         if offered.policy_version > self.policy_version {
@@ -357,7 +366,8 @@ mod tests {
         PayloadDoc::EnrollmentPolicy {
             v: 1,
             artifacts: policies.into_iter().map(Artifact::NodePolicy).collect(),
-            // 准入验证不检查过期时间：一份早已过期的批准照样有效
+            // Admission verification does not check expiry: an approval that expired long ago is
+            // still valid
             expires_at: Timestamp::from_unix_seconds(0),
         }
         .to_canonical()
@@ -480,7 +490,7 @@ mod tests {
             );
         }
 
-        // 断言是为另一份载荷生成的：challenge 对不上
+        // The assertion was generated for another payload: the challenge does not match
         let mut swapped = f
             .passkey_es
             .sign(bytes, RP_ID, ORIGIN, UP_UV)
@@ -501,14 +511,14 @@ mod tests {
         let f = fixture();
         let mut m = material(&f, 1);
 
-        // 准入证明由另一把入网私钥签名
+        // The admission proof is signed by another enrollment private key
         m.proof = proof(NODE_A, 2, &EnrollmentKeyPair::generate().expect("key"));
         assert_eq!(
             admit(&m, &f.anchors, &Revocations::default()),
             Err(AdmissionError::BadProof(id(NODE_A)))
         );
 
-        // 换掉准入证明中的组网公钥：签名不再成立
+        // The mesh public key in the admission proof is replaced: the signature no longer holds
         let mut swapped = proof(NODE_A, 2, &f.enrollment);
         let original = X25519PublicKey::from_bytes([2; 32]).to_string();
         let replaced = X25519PublicKey::from_bytes([3; 32]).to_string();
@@ -522,7 +532,7 @@ mod tests {
             Err(AdmissionError::BadProof(id(NODE_A)))
         );
 
-        // 准入证明属于载荷之外的节点
+        // The admission proof belongs to a node other than the one in the payload
         m.proof = proof(NODE_B, 2, &f.enrollment);
         assert_eq!(
             admit(&m, &f.anchors, &Revocations::default()),
@@ -564,7 +574,8 @@ mod tests {
         assert_eq!(applied.check(&v2), Ok(VersionCheck::Newer));
         applied.record(&v2);
 
-        // 重发同一份材料（例如完整快照）是幂等的，签名不同也一样：比较的是产物和准入证明
+        // Resending the same material (for example a full snapshot) is idempotent, even with a
+        // different signature: what is compared is the artifact and the admission proof
         let v2_again = admit_ok(&f, &material(&f, 2));
         assert_eq!(applied.check(&v2_again), Ok(VersionCheck::Unchanged));
         assert!(matches!(
@@ -576,7 +587,7 @@ mod tests {
             })
         ));
 
-        // 同一版本、不同内容
+        // Same version, different content
         let mut other = policy(NODE_A, 2, &f.enrollment);
         other.roles.clear();
         let conflicting = admit_ok(

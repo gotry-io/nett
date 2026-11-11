@@ -1,6 +1,9 @@
-//! nett-node 的主循环（design/hub.md 第 5 节，design/protocol.md 第 6、8 节）：连接 Hub，收到期望状态时写成组网
-//! 进程的期望状态文件、经本机接口请它重新加载，把结果作为 `StateAck` 报给 Hub；定时读组网进程的本机状态，
-//! 有变化时上报；断线后按指数退避重连。Hub 不在时组网照常（硬性规则 8），这里只是送达和汇报。
+//! The nett-node main loop (design/hub.md section 5, design/protocol.md sections 6, 8): connects to
+//! the Hub, and when it receives the desired state writes it as the mesh process's desired state
+//! file, asks the mesh process to reload it over the local interface, and reports the result to the
+//! Hub as `StateAck`; periodically reads the mesh process's local status and reports it when it
+//! changes; after a disconnect it reconnects with exponential backoff. The mesh keeps working while
+//! the Hub is away (hard rule 8); this loop only delivers and reports.
 
 use std::future::Future;
 use std::io::Write as _;
@@ -29,15 +32,16 @@ use crate::config::HubConfig;
 use crate::tls::connector;
 use crate::url::HubUrl;
 
-/// 读一次组网进程本机状态的间隔（design/hub.md 第 5 节）。
+/// Interval for reading the mesh process's local status once (design/hub.md section 5).
 pub const STATUS_EVERY: Duration = Duration::from_secs(15);
-/// 保活（protocol.md 第 8 节）：每 25 秒一次 Ping，连续 3 次没有回音视为断开。
+/// Keepalive (protocol.md section 8): one Ping every 25 seconds; 3 consecutive missed replies count
+/// as a disconnect.
 const PING_EVERY: Duration = Duration::from_secs(25);
 const MISSED_PINGS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// 入网时等第一份期望状态的上限。
+/// Upper limit on waiting for the first desired state at enrollment.
 const ENROLL_TIMEOUT: Duration = Duration::from_secs(20);
-/// 重连的退避：起始 1 秒，上限 60 秒，带随机抖动。
+/// Reconnect backoff: starts at 1 second, capped at 60 seconds, with random jitter.
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
 
@@ -51,19 +55,19 @@ pub enum SessionError {
     Broken(String),
 }
 
-/// 一台机器上的 nett-node。
+/// The nett-node on one machine.
 pub struct Node {
     pub config: HubConfig,
     pub identity: StaticSecret,
-    /// 组网进程读的期望状态文件。
+    /// The desired state file read by the mesh process.
     pub desired: PathBuf,
-    /// 组网进程的本机套接字（design/status.md 第 3 节）。
+    /// The mesh process's local socket (design/status.md section 3).
     pub socket: PathBuf,
 }
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-/// 一直运行，直到 `shutdown` 完成。
+/// Runs until `shutdown` completes.
 pub async fn run(node: Node, shutdown: impl Future<Output = ()>) {
     tokio::pin!(shutdown);
     let mut backoff = BACKOFF_MIN;
@@ -104,7 +108,7 @@ fn envelope(id: u64, body: Body) -> Envelope {
     }
 }
 
-/// 发出去的消息：编号、分片流与 Noise 加密。
+/// An outgoing message: numbering, fragment stream and Noise encryption.
 struct Outbox {
     transport: Transport,
     next_id: u64,
@@ -129,9 +133,11 @@ impl Outbox {
     }
 }
 
-/// 连接 Hub：TCP、TLS（按证书或固定的指纹校验，硬性规则 11）、WebSocket，再以身份密钥做 Noise IK 握手。
-/// 入网时 `admission_proof` 是准入证明的 JSON（design/hub.md 第 6 节），平时为空。返回本机这一端的地址：
-/// Hub 据此得知 `public` 机器的公网地址（第 5 节）。
+/// Connects to the Hub: TCP, TLS (verified by certificate or pinned fingerprint, hard rule 11),
+/// WebSocket, then a Noise IK handshake with the identity key. At enrollment `admission_proof` is
+/// the JSON of the admission proof (design/hub.md section 6), and is empty otherwise. Returns this
+/// machine's own address: from it the Hub learns the public address of a `public` machine (section
+/// 5).
 async fn connect(
     config: &HubConfig,
     identity: &StaticSecret,
@@ -215,7 +221,7 @@ async fn connect(
     }
 }
 
-/// 连接之后的第一条消息：版本、平台与本机这一端的地址。
+/// The first message after connecting: version, platform and this machine's own address.
 fn inventory(local: Option<std::net::SocketAddr>) -> Body {
     Body::Inventory(Inventory {
         nett_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -224,7 +230,7 @@ fn inventory(local: Option<std::net::SocketAddr>) -> Body {
     })
 }
 
-/// 等 Hub 发来的下一条消息，直到 `deadline`。
+/// Waits for the next message from the Hub, until `deadline`.
 async fn next_envelope(
     ws: &mut Ws,
     out: &mut Outbox,
@@ -259,8 +265,9 @@ async fn next_envelope(
     }
 }
 
-/// 入网的那一次连接（design/hub.md 第 6 节）：`Hello` 带着准入证明，返回 Hub 发来的第一份期望状态的 mesh
-/// 分区。核对它是 `join::enroll` 的事。
+/// The connection used for enrollment (design/hub.md section 6): `Hello` carries the admission
+/// proof, and it returns the mesh partition of the first desired state sent by the Hub. Checking it
+/// is the job of `join::enroll`.
 pub async fn enroll(
     config: &HubConfig,
     identity: &StaticSecret,
@@ -302,7 +309,8 @@ pub async fn enroll(
     ))
 }
 
-/// 告诉 Hub 这台机器退出（`nett leave`，auth.md 第 8.3 节），等 Hub 处理完关闭连接。
+/// Tells the Hub this machine is leaving (`nett leave`, auth.md section 8.3), and waits for the Hub
+/// to finish and close the connection.
 pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), SessionError> {
     let (mut ws, transport, _) = connect(config, identity, Vec::new()).await?;
     let mut out = Outbox {
@@ -313,7 +321,8 @@ pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), Se
     out.send(&mut ws, Body::Leave(Leave {})).await?;
     let mut reassembler = Reassembler::default();
     let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
-    // Hub 记下退出之后关闭连接；在那之前发来的期望状态不用理会
+    // The Hub closes the connection after recording the departure; desired state it sends before
+    // that can be ignored
     loop {
         match next_envelope(&mut ws, &mut out, &mut reassembler, deadline).await {
             Ok(Some(_)) => {}
@@ -329,7 +338,7 @@ pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), Se
 }
 
 impl Node {
-    /// 一次连接，直到断开。
+    /// One connection, until it disconnects.
     pub async fn session(&self) -> Result<(), SessionError> {
         let (mut ws, transport, local) = connect(&self.config, &self.identity, Vec::new()).await?;
         tracing::info!(url = %self.config.url, "connected to the Hub");
@@ -346,7 +355,8 @@ impl Node {
         status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut missed = 0u32;
         let mut reported: Option<Vec<u8>> = None;
-        // 写好了文件、组网进程还没给出结果的代数：读状态时再请它重新读取一次
+        // A generation whose file is written but for which the mesh process has not yet given a
+        // result: ask it to read again when reading status
         let mut pending: Option<u64> = None;
         loop {
             tokio::select! {
@@ -372,7 +382,7 @@ impl Node {
                             let ack = self.apply(desired).await;
                             pending = is_pending(&ack).then_some(ack.generation);
                             out.send(&mut ws, Body::StateAck(ack)).await?;
-                            // 应用之后立即报一次状态
+                            // Report status immediately after applying
                             status.reset_immediately();
                         }
                         Some(Body::Error(e)) => {
@@ -431,13 +441,13 @@ impl Node {
         serde_json::to_vec(&value).ok()
     }
 
-    /// 应用一份期望状态，按分区确认（protocol.md 第 6.2 节）。
+    /// Applies a desired state and acknowledges it per partition (protocol.md section 6.2).
     async fn apply(&self, desired: DesiredState) -> StateAck {
         let mut partitions = Vec::new();
         for p in desired.partitions {
             let (result, reason) = match PartitionKind::try_from(p.kind) {
                 Ok(PartitionKind::Mesh) => self.apply_mesh(&p.content).await,
-                // 只有一个 Hub 地址时不需要做什么（design/hub.md 第 5 节）
+                // Nothing to do when there is only one Hub address (design/hub.md section 5)
                 Ok(PartitionKind::HubEndpoints) => (AckResult::Applied, String::new()),
                 _ => (
                     AckResult::Rejected,
@@ -456,9 +466,10 @@ impl Node {
         }
     }
 
-    /// 写成组网进程的期望状态文件（先写临时文件再改名），经本机接口请它重新读取，结果映射到 `StateAck`：
-    /// `applied`（附问题）→ applied，`rejected` → rejected，`busy` 或组网进程没有应答 → pending
-    /// （design/hub.md 第 5 节）。
+    /// Writes the mesh process's desired state file (a temporary file first, then rename), asks it
+    /// over the local interface to read again, and maps the result to `StateAck`: `applied` (with
+    /// issues) → applied, `rejected` → rejected, `busy` or no answer from the mesh process →
+    /// pending (design/hub.md section 5).
     async fn apply_mesh(&self, content: &[u8]) -> (AckResult, String) {
         if content.len() as u64 > MAX_DESIRED_BYTES {
             return (AckResult::Rejected, "the desired state is too large".into());
@@ -482,8 +493,9 @@ impl Node {
             .ok()
             .flatten()
             .and_then(|b| serde_json::from_slice(&b).ok());
-        // 文件已经是这一份时不重写，但照样请组网进程重新读取：它可能拒绝过这一份，重连之后 Hub 再发来时，
-        // 确认要是组网进程给出的结果
+        // When the file already holds this version it is not rewritten, but the mesh process is
+        // still asked to read again: it may have rejected this version, and when the Hub sends it
+        // again after a reconnect, the acknowledgment must be the result the mesh process gives
         if current.as_ref() != Some(&doc) {
             let json = match serde_json::to_vec_pretty(&doc) {
                 Ok(j) => j,
@@ -496,7 +508,7 @@ impl Node {
         self.reload().await
     }
 
-    /// 请组网进程重新读取期望状态文件。
+    /// Asks the mesh process to read the desired state file again.
     async fn reload(&self) -> (AckResult, String) {
         let socket = self.socket.clone();
         match tokio::task::spawn_blocking(move || nett_mesh::status::reload(&socket)).await {
@@ -506,8 +518,10 @@ impl Node {
     }
 }
 
-/// 重新读取的结果对应的确认（design/hub.md 第 5 节）：`applied`（附问题）→ applied，`rejected` →
-/// rejected；`busy`、组网进程没有应答 → pending，文件已经写好，组网进程启动时或下一次请求时读它。
+/// The acknowledgment corresponding to the result of the re-read (design/hub.md section 5):
+/// `applied` (with issues) → applied, `rejected` → rejected; `busy`, or no answer from the mesh
+/// process → pending: the file is already written, and the mesh process reads it at startup or on
+/// the next request.
 pub fn ack_for(outcome: Result<ReloadOutcome, QueryError>) -> (AckResult, String) {
     match outcome {
         Ok(ReloadOutcome::Applied { problems }) => {
@@ -540,7 +554,8 @@ fn is_pending(ack: &StateAck) -> bool {
         .any(|p| p.kind == PartitionKind::Mesh as i32 && p.result == AckResult::Pending as i32)
 }
 
-/// 期望状态文件：先写临时文件、落盘，再改名。沿用原来的权限；没有时 `0644`，组网进程以专用的身份读它。
+/// The desired state file: write a temporary file, sync to disk, then rename. Keeps the existing
+/// permissions; `0644` if there are none, and the mesh process reads it under a dedicated identity.
 fn write_desired(path: &std::path::Path, json: &[u8]) -> Result<(), String> {
     let io = |e: std::io::Error| format!("writing {}: {e}", path.display());
     let mode = std::fs::metadata(path).map_or(0o644, |m| m.permissions().mode() & 0o777);
@@ -666,7 +681,7 @@ mod tests {
             0o600
         );
         assert!(!dir.join("desired.json.new").exists());
-        // 不跟随指向别处的符号链接
+        // Do not follow symbolic links that point elsewhere
         let elsewhere = dir.join("elsewhere");
         std::os::unix::fs::symlink(&elsewhere, dir.join("desired.json.new")).expect("symlink");
         write_desired(&path, doc).expect("the stale link is removed first");
@@ -716,7 +731,8 @@ mod apply_tests {
             .expect("signed")
     }
 
-    /// 文件已经是这一份时也要问组网进程：它可能拒绝过这一份，重连之后不能报成已应用。
+    /// Also ask the mesh process when the file already holds this version: it may have rejected it,
+    /// and after a reconnect it must not be reported as applied.
     #[tokio::test]
     async fn an_unchanged_file_is_still_confirmed_by_the_mesh_process() {
         let dir = std::env::temp_dir().join(format!("nett-node-apply-{}", std::process::id()));
@@ -732,7 +748,7 @@ mod apply_tests {
             },
             identity: StaticSecret::from([9; 32]),
             desired: dir.join("desired.json"),
-            // 没有组网进程在这里应答
+            // No mesh process answers here
             socket: dir.join("mesh.sock"),
         };
         let content = serde_json::to_vec(&doc).expect("json");
@@ -749,7 +765,7 @@ mod apply_tests {
             .expect("mtime");
         assert_eq!(written, again, "the same content is not written again");
 
-        // 给另一台机器的期望状态
+        // Desired state for another machine
         let mut other = doc.clone();
         other.node_id = new_node_id().expect("id");
         let (result, reason) = node

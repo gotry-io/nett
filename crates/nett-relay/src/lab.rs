@@ -1,5 +1,6 @@
-//! 实验构建（`lab` 特性）：中继分配读自本地文件（design/prototype.md 第 3 节）。官方构建中，分配由本机的
-//! 组网进程提供（design/mesh.md 第 5.2 节）。
+//! Lab build (`lab` feature): relay allocation is read from a local file (design/prototype.md
+//! section 3). In official builds the allocation is provided by the local mesh process
+//! (design/mesh.md section 5.2).
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -13,14 +14,15 @@ use crate::relay::{AssignedMember, AssignmentError, Relay};
 #[serde(deny_unknown_fields)]
 pub struct RelayConfig {
     pub listen: SocketAddr,
-    /// TLS（WebSocket）入口（design/mesh.md 第 5.3 节）。
+    /// TLS (WebSocket) entry point (design/mesh.md section 5.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsDoc>,
     pub members: Vec<MemberDoc>,
     pub connections: Vec<[X25519PublicKey; 2]>,
 }
 
-/// TLS 入口的监听地址与 PEM 格式的证书链、私钥文件。
+/// The listen address of the TLS entry point and the PEM-format certificate chain and private key
+/// files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsDoc {

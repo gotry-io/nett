@@ -1,4 +1,5 @@
-//! `nett relay`（实验构建）：中继分配读自本地文件，收到 `SIGTERM` 或 `SIGINT` 时退出。
+//! `nett relay` (lab build): relay allocations are read from a local file; exits on `SIGTERM`
+//! or `SIGINT`.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;

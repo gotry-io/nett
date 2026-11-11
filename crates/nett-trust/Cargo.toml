@@ -23,5 +23,5 @@ zeroize = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [features]
-# 生成签名：只供实验工具和测试使用，正式构建不开启
+# Generating signatures: only for lab tools and tests; not enabled in official builds
 signing = ["dep:zeroize"]

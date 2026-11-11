@@ -1,9 +1,11 @@
-//! 用户态数据面的核心（design/userspace.md 第 4 节）：不做 I/O。数据面线程把 WireGuard 端口和 TUN 收到的包
-//! 交给它，按它返回的 [`Action`] 收发；控制命令也在同一个线程里执行，状态不加锁。
+//! Core of the userspace data plane (design/userspace.md section 4): does no I/O. The data plane thread
+//! hands it the packets received on the WireGuard port and the TUN, and sends and receives according to
+//! the [`Action`] it returns; control commands are executed in the same thread, so state needs no locks.
 //!
-//! 入方向：分流 → 解密 → 校验内层包 → 来源必须在该对端的 `AllowedIPs` 内 → 目标必须是本机 → 过滤 → TUN。
-//! 出方向：TUN → 按目的地址最长前缀匹配对端 → 记录连接 → 加密 → 对端当前的 endpoint。任何一步不通过就丢弃，
-//! 不作响应。
+//! Inbound: demultiplex -> decrypt -> validate the inner packet -> the source must be within that peer's
+//! `AllowedIPs` -> the destination must be this machine -> filter -> TUN.
+//! Outbound: TUN -> longest prefix match of the destination address to a peer -> record the connection ->
+//! encrypt -> the peer's current endpoint. A packet that fails any step is dropped with no response.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -19,16 +21,20 @@ use crate::access::FilterSpec;
 use crate::dataplane::{PeerSpec, PeerStat};
 use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY};
 
-/// 每个来源 IP 每秒最多进入会话层的握手消息数（design/userspace.md 第 4.1 节）。高于会话层回 cookie 的阈值
-/// （每秒 100 个），之间的部分照常得到 cookie。
+/// The maximum number of handshake messages per source IP per second that enter the session layer
+/// (design/userspace.md section 4.1). It is higher than the threshold at which the session layer replies
+/// with a cookie (100 per second), and the part in between gets a cookie as usual.
 pub const HANDSHAKES_PER_SOURCE: u32 = 128;
-/// 所有来源合计每秒最多进入会话层的握手消息数。
+/// The maximum number of handshake messages per second, summed over all sources, that enter the session
+/// layer.
 pub const HANDSHAKES_TOTAL: u32 = 2048;
-/// 握手限额的来源表最多的条数；满了之后，这一秒内的新来源一律超额。
+/// The maximum number of entries in the handshake limit's source table; once full, new sources within
+/// that second are all over the limit.
 pub const HANDSHAKE_SOURCES: usize = 4096;
 const BUDGET_WINDOW: Duration = Duration::from_secs(1);
 
-/// 握手消息的限额：按来源 IP 计数，每秒清零。超额的在任何加解密之前丢弃，洪水只占一次接收和一次查表。
+/// Limit on handshake messages: counted per source IP and reset every second. Over-limit ones are dropped
+/// before any encryption or decryption, so a flood costs only one receive and one table lookup.
 #[derive(Debug)]
 struct HandshakeBudget {
     window: Instant,
@@ -69,14 +75,15 @@ impl HandshakeBudget {
     }
 }
 
-/// 数据面要执行的动作。
+/// Actions for the data plane to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// 从 WireGuard 端口发出。
+    /// Send from the WireGuard port.
     Udp { to: SocketAddr, datagram: Vec<u8> },
-    /// 写入 TUN，交给本机协议栈。
+    /// Write to the TUN, handing it to this machine's protocol stack.
     Tun(Vec<u8>),
-    /// 交给引擎（[`crate::prober::Incoming::Direct`]）：直连探测消息，以及 cookie 应答的副本。
+    /// Hand to the engine ([`crate::prober::Incoming::Direct`]): direct probe messages, and copies of cookie
+    /// replies.
     Probe { from: SocketAddr, data: Vec<u8> },
 }
 
@@ -111,9 +118,9 @@ pub struct Plane<S> {
     sessions: S,
     peers: Vec<Peer>,
     filter: Filter,
-    /// 本机的组网地址：只有发往它们的包写入 TUN。
+    /// This machine's mesh addresses: only packets addressed to them are written to the TUN.
     local: Vec<IpAddr>,
-    /// 闲置的 TLS 回环端口：从它们进来的包丢弃（design/mesh.md 第 5.3 节）。
+    /// Idle TLS loopback ports: packets coming in from them are dropped (design/mesh.md section 5.3).
     guarded: BTreeSet<u16>,
     handshakes: HandshakeBudget,
 }
@@ -143,7 +150,8 @@ impl<S: Sessions> Plane<S> {
         self.guarded = idle.iter().copied().collect();
     }
 
-    /// 让对端恰好是 `peers`。`endpoint` 为空的已有对端保留当前的 endpoint；已有会话保持不变。
+    /// Makes the peers exactly `peers`. An existing peer with an empty `endpoint` keeps its current endpoint;
+    /// existing sessions are unchanged.
     pub fn sync_peers(&mut self, peers: &[PeerSpec]) {
         let mut next = Vec::with_capacity(peers.len());
         for spec in peers {
@@ -177,7 +185,8 @@ impl<S: Sessions> Plane<S> {
         Ok(())
     }
 
-    /// 与内核上"删除对端再加回"相同：会话和计数清零，下一个包触发新的握手。
+    /// The same as "delete the peer and add it back" on the kernel: the session and counters are reset, and
+    /// the next packet triggers a new handshake.
     pub fn rehandshake(&mut self, spec: &PeerSpec) -> Result<(), UnknownPeer> {
         let peer = self
             .peers
@@ -205,7 +214,7 @@ impl<S: Sessions> Plane<S> {
             .collect()
     }
 
-    /// WireGuard 端口收到的一个包。
+    /// A packet received on the WireGuard port.
     pub fn from_udp(
         &mut self,
         from: SocketAddr,
@@ -264,7 +273,7 @@ impl<S: Sessions> Plane<S> {
         }
     }
 
-    /// TUN 读出的一个包：本机发往组网的流量。
+    /// A packet read from the TUN: traffic from this machine to the mesh.
     pub fn from_tun(&mut self, packet: &[u8], now: Instant, out: &mut Vec<Action>) {
         let Some(ip) = packet::parse(packet) else {
             return;
@@ -278,7 +287,8 @@ impl<S: Sessions> Plane<S> {
         self.apply(outputs, now, out);
     }
 
-    /// 推进会话定时器，清理过期的连接。每 [`super::session::TIMER_TICK`] 调用一次。
+    /// Advances the session timers and cleans up expired connections. Called once every
+    /// [`super::session::TIMER_TICK`].
     pub fn tick(&mut self, now: Instant, out: &mut Vec<Action>) {
         let mut outputs = Vec::new();
         self.sessions.tick(&mut outputs);
@@ -301,7 +311,7 @@ impl<S: Sessions> Plane<S> {
         self.peers.iter_mut().find(|p| p.key == *key)
     }
 
-    /// 对端还没有 endpoint 时（`dial-only` 对端等它先连过来）丢弃。
+    /// Dropped when the peer has no endpoint yet (a `dial-only` peer waiting for it to connect first).
     fn send_to_peer(&mut self, key: &X25519PublicKey, datagram: Vec<u8>, out: &mut Vec<Action>) {
         let Some(peer) = self.peer_mut(key) else {
             return;
@@ -313,7 +323,7 @@ impl<S: Sessions> Plane<S> {
         out.push(Action::Udp { to, datagram });
     }
 
-    /// 最长前缀匹配：对端的 `AllowedIPs` 中包含 `dst` 的最长网段。
+    /// Longest prefix match: the longest prefix among the peer's `AllowedIPs` that contains `dst`.
     fn route(&self, dst: IpAddr) -> Option<X25519PublicKey> {
         self.peers
             .iter()
@@ -336,7 +346,8 @@ impl<S: Sessions> Plane<S> {
         let Some(peer) = self.peers.iter().find(|p| p.key == *key) else {
             return;
         };
-        // 来源地址由 WireGuard 的公钥保证：只接受这个对端被允许使用的地址
+        // The source address is guaranteed by WireGuard's public key: only addresses this peer is allowed to use
+        // are accepted
         if !peer.allowed.iter().any(|a| a.contains(ip.src)) {
             return;
         }
@@ -397,7 +408,7 @@ mod tests {
         }
     }
 
-    /// a 与 b 互为对端；b 放行所有来自 a 的连接时 `open`。
+    /// a and b are peers of each other; `open` when b allows all connections from a.
     fn pair(open: bool) -> (Node, Node) {
         let mut a = node("100.88.0.1", "198.51.100.1:41820");
         let mut b = node("100.88.0.2", "198.51.100.2:41820");
@@ -414,7 +425,8 @@ mod tests {
         (a, b)
     }
 
-    /// 在 a、b 之间来回投递发往对方的 UDP 包，直到没有新的；返回两边写入 TUN 的包。
+    /// Delivers UDP packets addressed to the other side back and forth between a and b until there are no new
+    /// ones; returns the packets both sides wrote to the TUN.
     fn exchange(a: &mut Node, b: &mut Node, from_a: Vec<Action>) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
         let now = Instant::now();
         let (mut tun_a, mut tun_b) = (Vec::new(), Vec::new());
@@ -456,12 +468,12 @@ mod tests {
         let out = send(&mut a, &syn);
         let (_, at_b) = exchange(&mut a, &mut b, out);
         assert_eq!(at_b, [syn]);
-        // b 从认证通过的包学到 a 的 endpoint
+        // b learns a's endpoint from an authenticated packet
         let stat = &b.plane.stats(SystemTime::now())[0];
         assert_eq!(stat.endpoint, Some(a.at));
         assert!(stat.last_handshake.is_some() && stat.rx_bytes > 0 && stat.tx_bytes > 0);
 
-        // 回包方向：b 的 TCP 应答（带 ACK）在 a 上直接放行，即使 a 没有任何规则
+        // Return direction: b's TCP reply (with ACK) is allowed directly on a, even if a has no rules at all
         let reply = build::tcp(b.mesh, 22, a.mesh, 40000, SYN | 0x10);
         let out = send(&mut b, &reply);
         let (_, at_a) = exchange(&mut b, &mut a, out);
@@ -471,27 +483,28 @@ mod tests {
     #[test]
     fn denied_spoofed_and_misaddressed_packets_are_dropped() {
         let (mut a, mut b) = pair(false);
-        // 没有规则：新建连接拒绝
+        // No rules: new connections are rejected
         let packet = build::tcp(a.mesh, 1, b.mesh, 22, SYN);
         let out = send(&mut a, &packet);
         assert!(exchange(&mut a, &mut b, out).1.is_empty());
 
         let (mut a, mut b) = pair(true);
-        // a 伪造来源：b 只接受 a 被允许使用的地址
+        // a forges the source: b accepts only the addresses a is allowed to use
         let forged = build::udp(ip("100.88.0.9"), 1, b.mesh, 53);
         let out = send_raw(&mut a, &b, &forged);
         assert!(exchange(&mut a, &mut b, out).1.is_empty());
-        // 目标不是 b 的地址
+        // The destination is not b's address
         let elsewhere = build::udp(a.mesh, 1, ip("100.88.0.7"), 53);
         let out = send_raw(&mut a, &b, &elsewhere);
         assert!(exchange(&mut a, &mut b, out).1.is_empty());
-        // 对照：同一条会话上的正常包能到
+        // Comparison: a normal packet on the same session gets through
         let ok = build::udp(a.mesh, 1, b.mesh, 53);
         let out = send(&mut a, &ok);
         assert_eq!(exchange(&mut a, &mut b, out).1, [ok]);
     }
 
-    /// 不经过 a 的选路和过滤，直接用 a 与 b 的会话加密一个包：模拟一个被攻破的成员。
+    /// Without going through a's path selection and filtering, encrypts a packet directly with the session of
+    /// a and b: simulates a compromised member.
     fn send_raw(a: &mut Node, b: &Node, packet: &[u8]) -> Vec<Action> {
         let mut outputs = Vec::new();
         a.plane.sessions.send(&b.key, packet, &mut outputs);
@@ -503,7 +516,8 @@ mod tests {
     #[test]
     fn padding_is_stripped_before_the_tun() {
         let (mut a, mut b) = pair(true);
-        // 长度不是 16 的倍数：会话层补齐，写入 TUN 前去掉
+        // The length is not a multiple of 16: the session layer pads it, and it is stripped before writing to the
+        // TUN
         let odd = build::echo(a.mesh, b.mesh, true, 1);
         assert_ne!(odd.len() % 16, 0);
         let out = send(&mut a, &odd);
@@ -544,12 +558,13 @@ mod tests {
         let flooder = ip("203.0.113.66");
         let admitted = (0..10_000).filter(|_| budget.admit(flooder, start)).count();
         assert_eq!(admitted, HANDSHAKES_PER_SOURCE as usize);
-        // 洪水用完了它自己的额度，其他来源不受影响
+        // The flood used up its own quota and other sources are not affected
         assert!(budget.admit(ip("198.51.100.3"), start));
-        // 下一秒重新计数
+        // Counting starts over in the next second
         assert!(budget.admit(flooder, start + BUDGET_WINDOW));
 
-        // 很多来源：合计不超过总额，来源表不超过上限
+        // Many sources: the total does not exceed the overall limit, and the source table does not exceed its
+        // upper limit
         let mut budget = HandshakeBudget::new(start);
         let mut total = 0;
         for i in 0..20_000u32 {
@@ -570,7 +585,7 @@ mod tests {
         };
         let now = Instant::now();
         let mut at_b = Vec::new();
-        // 洪水：类型 1 的垃圾包，用完这个来源的额度（它们本身也得不到响应）
+        // Flood: garbage packets of type 1 use up this source's quota (they get no response themselves)
         let mut junk = vec![0x5a; 148];
         junk[0] = 1;
         for _ in 0..HANDSHAKES_PER_SOURCE {
@@ -578,11 +593,12 @@ mod tests {
                 .from_udp(sa("203.0.113.66:5000"), &junk, now, &mut at_b);
         }
         assert!(at_b.is_empty(), "{at_b:?}");
-        // 超额之后，同一来源发来的有效握手也不交给会话层，不作任何响应
+        // After the limit is exceeded, even valid handshakes from the same source are not handed to the session
+        // layer, with no response
         b.plane
             .from_udp(sa("203.0.113.66:5000"), &datagram, now, &mut at_b);
         assert!(at_b.is_empty(), "{at_b:?}");
-        // 另一个来源（a 的真实地址）照常完成握手
+        // Another source (a's real address) completes the handshake as usual
         assert_eq!(exchange(&mut a, &mut b, out).1, [packet]);
     }
 

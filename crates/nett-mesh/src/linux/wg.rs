@@ -1,4 +1,4 @@
-//! 内核 WireGuard 的通用 netlink 接口（`include/uapi/linux/wireguard.h`）。
+//! Kernel WireGuard's generic netlink interface (`include/uapi/linux/wireguard.h`).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -45,10 +45,11 @@ const WGALLOWEDIP_A_CIDR_MASK: u16 = 3;
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
 
-/// 设置对端的单条消息的上限；超过时拆成多条（与 wireguard-tools 一样按页大小）。
+/// Upper limit of a single message that sets peers; beyond it, split into several (by page size, as with
+/// wireguard-tools).
 const SET_MESSAGE_BUDGET: usize = 4096;
 
-/// 接口上一个对端的当前状态。
+/// Current state of a peer on the interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PeerState {
     pub public_key: X25519PublicKey,
@@ -57,7 +58,8 @@ pub(crate) struct PeerState {
     pub allowed_ips: Vec<IpPrefix>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
-    /// 最近一次完成握手的时刻（墙上时钟）；对端加入以来还没有完成握手时为空。
+    /// Time of the most recent completed handshake (wall clock); empty when no handshake has completed since
+    /// the peer joined.
     pub last_handshake: Option<SystemTime>,
 }
 
@@ -68,10 +70,11 @@ pub(crate) struct Device {
     pub peers: Vec<PeerState>,
 }
 
-/// 对端的一项变更。
+/// One change to a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PeerChange {
-    /// 新增或更新：`AllowedIPs` 整体替换；`endpoint` 为空时保留内核当前的 endpoint。
+    /// Add or update: `AllowedIPs` is replaced as a whole; when `endpoint` is empty the kernel's current
+    /// endpoint is kept.
     Upsert {
         public_key: X25519PublicKey,
         endpoint: Option<SocketAddr>,
@@ -79,7 +82,7 @@ pub(crate) enum PeerChange {
         allowed_ips: Vec<IpPrefix>,
     },
     Remove(X25519PublicKey),
-    /// 只改 endpoint；对端不存在时内核不创建它。
+    /// Changes only the endpoint; the kernel does not create the peer if it does not exist.
     Endpoint {
         public_key: X25519PublicKey,
         endpoint: SocketAddr,
@@ -90,7 +93,8 @@ fn genl_header(cmd: u8, version: u8) -> [u8; 4] {
     [cmd, version, 0, 0]
 }
 
-/// 查询 WireGuard 的通用 netlink 族 ID（内核加载 wireguard 模块后动态分配）。
+/// Queries the family ID of WireGuard's generic netlink family (assigned dynamically by the kernel after
+/// the wireguard module is loaded).
 pub(crate) fn resolve_family(sock: &mut Socket) -> Result<u16, NlError> {
     let mut m = Message::new(GENL_ID_CTRL, NLM_F_ACK);
     m.fixed(&genl_header(CTRL_CMD_GETFAMILY, 1));
@@ -106,8 +110,9 @@ pub(crate) fn resolve_family(sock: &mut Socket) -> Result<u16, NlError> {
     Err(NlError::Malformed("no family id in reply"))
 }
 
-/// 设置私钥和监听端口。私钥与当前相同时内核不做任何改动，会话不受影响。端口为空时不改：新建的接口
-/// 启用时由内核分配；`Some(0)` 让内核重新分配一个。
+/// Sets the private key and listen port. When the private key is the same as the current one the kernel
+/// changes nothing and sessions are unaffected. When the port is empty it is not changed: a newly created
+/// interface gets one from the kernel when enabled; `Some(0)` makes the kernel reassign one.
 pub(crate) fn set_device(
     sock: &mut Socket,
     family: u16,
@@ -144,7 +149,8 @@ pub(crate) fn get_device(sock: &mut Socket, family: u16, ifindex: u32) -> Result
                     for peer in attrs(payload) {
                         let (_, peer) = peer?;
                         let peer = parse_peer(peer)?;
-                        // 一个对端的 AllowedIPs 可能跨多条消息，后续消息中以同一个公钥继续
+                        // One peer's AllowedIPs may span several messages, and subsequent messages continue with the same
+                        // public key
                         match device.peers.last_mut() {
                             Some(last) if last.public_key == peer.public_key => {
                                 last.allowed_ips.extend(peer.allowed_ips);
@@ -160,7 +166,8 @@ pub(crate) fn get_device(sock: &mut Socket, family: u16, ifindex: u32) -> Result
     Ok(device)
 }
 
-/// 应用对端变更。只做增量修改，不使用"替换全部对端"：替换会清掉现有会话，中断进行中的连接。
+/// Applies peer changes. Only incremental changes are made, never "replace all peers": replacing would
+/// clear existing sessions and interrupt connections in progress.
 pub(crate) fn apply_peers(
     sock: &mut Socket,
     family: u16,
@@ -281,7 +288,8 @@ fn parse_peer(buf: &[u8]) -> Result<PeerState, NlError> {
     })
 }
 
-/// `struct __kernel_timespec`（两个 64 位整数：秒、纳秒）；全零表示还没有握手。
+/// `struct __kernel_timespec` (two 64-bit integers: seconds, nanoseconds); all zeros means no handshake
+/// yet.
 fn parse_timespec(b: &[u8]) -> Result<Option<SystemTime>, NlError> {
     let (secs, nanos) = b
         .split_at_checked(8)
@@ -323,7 +331,8 @@ fn parse_allowed_ip(buf: &[u8]) -> Result<IpPrefix, NlError> {
     IpPrefix::new(addr, cidr).ok_or(NlError::Malformed("allowed ip prefix"))
 }
 
-/// `sockaddr_in` / `sockaddr_in6`：族为本机字节序，端口和 IPv4 地址为网络字节序。
+/// `sockaddr_in` / `sockaddr_in6`: the family is in host byte order, and the port and IPv4 address are in
+/// network byte order.
 fn encode_sockaddr(addr: &SocketAddr) -> Vec<u8> {
     match addr {
         SocketAddr::V4(a) => {

@@ -1,8 +1,10 @@
-//! 进程内的状态过滤（design/userspace.md 第 5 节）：与 Linux 相同的 [`FilterSpec`]，只作用于从隧道进来、
-//! 发往本机的新建连接，没有规则放行的拒绝（ADR 0023）。
+//! In-process stateful filtering (design/userspace.md section 5): the same [`FilterSpec`] as on Linux,
+//! applied only to new connections coming in from the tunnel and addressed to this machine, rejecting
+//! those no rule allows (ADR 0023).
 //!
-//! 只为 UDP 流和 ICMP 回显记录状态：TCP 的新建连接就是带 SYN、不带 ACK 的包，其他 TCP 包不属于任何连接时
-//! 由本机协议栈丢弃或复位，不能借此建立连接。
+//! State is recorded only for UDP flows and ICMP echo: a new TCP connection is a packet with SYN and
+//! without ACK, and other TCP packets that belong to no connection are dropped or reset by this
+//! machine's protocol stack and cannot be used to establish a connection.
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -13,9 +15,10 @@ use nett_trust::payload::Protocol;
 use super::packet::{Ip, Transport};
 use crate::access::{FilterSpec, Match};
 
-/// 连接表最多的条数（硬性规则 14）：满了淘汰最久没用的一条。
+/// Maximum number of entries in the connection table (hard rule 14): when full, the least recently used
+/// one is evicted.
 pub const MAX_FLOWS: usize = 4096;
-/// 连接表中的条目空闲这么久之后过期。
+/// Entries in the connection table expire after being idle this long.
 pub const FLOW_IDLE: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -31,17 +34,20 @@ enum Flow {
     },
 }
 
-/// 过滤规则与连接表。初始时没有规则：所有新建连接都拒绝（硬性规则 6）。
+/// Filter rules and connection table. Initially there are no rules: all new connections are rejected
+/// (hard rule 6).
 #[derive(Debug, Default)]
 pub struct Filter {
     rules: FilterSpec,
-    /// 本机的组网地址：内嵌包头的来源是它们的 ICMP 差错报文属于本机发出的连接。
+    /// This machine's mesh addresses: an ICMP error message whose embedded header's source is one of them
+    /// belongs to a connection this machine made.
     local: Vec<IpAddr>,
     flows: HashMap<Flow, Instant>,
 }
 
 impl Filter {
-    /// 整体替换规则，在调用方的线程中一次完成，没有中间状态。已建立的流不受影响。
+    /// Replaces the rules as a whole, done in one step on the caller's thread with no intermediate state.
+    /// Established flows are not affected.
     pub fn set_rules(&mut self, rules: FilterSpec) {
         self.rules = rules;
     }
@@ -50,7 +56,8 @@ impl Filter {
         self.local = local;
     }
 
-    /// 本机经隧道发出的包：记录 UDP 流和回显请求，让它们的回包通过。
+    /// Packets this machine sends through the tunnel: records UDP flows and echo requests, so that their
+    /// return packets pass.
     pub fn outbound(&mut self, ip: &Ip, now: Instant) {
         let flow = match ip.transport {
             Transport::Udp { src_port, dst_port } => Flow::Udp {
@@ -73,7 +80,7 @@ impl Filter {
         self.flows.insert(flow, now);
     }
 
-    /// 从隧道进来、发往本机的包是否放行。
+    /// Whether a packet coming in from the tunnel and addressed to this machine is allowed.
     pub fn inbound(&mut self, ip: &Ip, now: Instant) -> bool {
         let flow = match ip.transport {
             Transport::Tcp { syn, ack, .. } => {
@@ -106,13 +113,13 @@ impl Filter {
         self.allowed(ip)
     }
 
-    /// 删除空闲超过 [`FLOW_IDLE`] 的条目。
+    /// Deletes entries idle for longer than [`FLOW_IDLE`].
     pub fn expire(&mut self, now: Instant) {
         self.flows
             .retain(|_, seen| now.saturating_duration_since(*seen) < FLOW_IDLE);
     }
 
-    /// 按规则的顺序，第一条匹配的规则决定；都不匹配时拒绝。
+    /// In rule order, the first matching rule decides; reject when none match.
     fn allowed(&self, ip: &Ip) -> bool {
         self.rules
             .rules
@@ -197,7 +204,8 @@ mod tests {
         assert!(!f.inbound(&p(&build::tcp(peer(), 40000, me(), 22, SYN)), now));
         assert!(!f.inbound(&p(&build::udp(peer(), 40000, me(), 53)), now));
         assert!(!f.inbound(&p(&build::echo(peer(), me(), true, 1)), now));
-        // 不属于任何连接的 TCP 包交给本机协议栈，它们不能建立连接
+        // TCP packets that belong to no connection are handed to this machine's protocol stack; they cannot
+        // establish a connection
         assert!(f.inbound(&p(&build::tcp(peer(), 40000, me(), 22, ACK)), now));
         assert!(f.inbound(&p(&build::tcp(peer(), 40000, me(), 22, SYN | ACK)), now));
     }
@@ -217,13 +225,14 @@ mod tests {
             },
         ]);
         assert!(f.inbound(&p(&build::tcp(peer(), 1, me(), 22, SYN)), now));
-        // 第三条放行整个网段的所有协议，但 100.88.0.3 先被第一条拒绝
+        // The third rule allows all protocols for the whole prefix, but 100.88.0.3 is rejected first by the
+        // first rule
         assert!(!f.inbound(&p(&build::tcp(ip("100.88.0.3"), 1, me(), 22, SYN)), now));
         assert!(f.inbound(&p(&build::udp(ip("100.88.0.4"), 1, me(), 53)), now));
-        // 端口规则只匹配它的协议
+        // A port rule matches only its protocol
         let mut udp_only = filter(vec![allow_tcp(peer(), 53)]);
         assert!(!udp_only.inbound(&p(&build::udp(peer(), 1, me(), 53)), now));
-        // 地址族不同的规则不匹配
+        // A rule of a different address family does not match
         let mut v4 = filter(vec![allow_tcp(peer(), 22)]);
         assert!(!v4.inbound(
             &p(&build::tcp(ip("fd00:88::2"), 1, ip("fd00:88::1"), 22, SYN)),
@@ -274,13 +283,13 @@ mod tests {
             f.outbound(&p(&build::udp(me(), 10000 + port, peer(), 53)), at);
         }
         assert_eq!(f.flows(), MAX_FLOWS);
-        // 满了：淘汰最久没用的一条（端口 10000）
+        // Full: the least recently used one is evicted (port 10000)
         let later = start + Duration::from_secs(10);
         f.outbound(&p(&build::udp(me(), 9999, peer(), 53)), later);
         assert_eq!(f.flows(), MAX_FLOWS);
         assert!(!f.inbound(&p(&build::udp(peer(), 53, me(), 10000)), later));
         assert!(f.inbound(&p(&build::udp(peer(), 53, me(), 10001)), later));
-        // 回包刷新了 10001 的时间；其他的空闲过期
+        // A return packet refreshed the time of 10001; the others expire from being idle
         f.expire(start + FLOW_IDLE + Duration::from_secs(5));
         assert_eq!(f.flows(), 2);
     }

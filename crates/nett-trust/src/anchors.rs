@@ -1,4 +1,4 @@
-//! 信任锚清单（design/auth.md 第 11.1 节）。
+//! Trust anchor list (design/auth.md section 11.1).
 
 use nett_core::id::PasskeyId;
 use serde::{Deserialize, Serialize};
@@ -8,10 +8,10 @@ use crate::canonical::{CanonicalError, to_canonical};
 use crate::encoding::Sha256Digest;
 use crate::keys::{Algorithm, AnchorKey, KeyError};
 
-/// 清单格式的版本。
+/// Version of the list format.
 const FORMAT_V1: u64 = 1;
 
-/// 信任锚清单的文档形式，字段与 design/auth.md 第 11.1 节一致。
+/// The document form of the trust anchor list, with fields matching design/auth.md section 11.1.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrustAnchorsDoc {
@@ -56,7 +56,7 @@ pub enum AnchorsError {
     RecoveryKey(KeyError),
 }
 
-/// 已校验的信任锚清单。
+/// A validated trust anchor list.
 #[derive(Debug, Clone)]
 pub struct TrustAnchors {
     version: u64,
@@ -114,7 +114,8 @@ impl TrustAnchors {
         self.version
     }
 
-    /// 入网 token 中的 128 位指纹：清单规范形式的 SHA-256 的前 16 字节（design/auth.md 第 10.5 节）。
+    /// The 128-bit fingerprint in the enrollment token: the first 16 bytes of the SHA-256 of the
+    /// list's canonical form (design/auth.md section 10.5).
     pub fn fingerprint(&self) -> [u8; 16] {
         self.fingerprint
     }
@@ -139,7 +140,8 @@ impl TrustAnchors {
     }
 }
 
-/// passkey 绑定 RP ID：控制台地址的主机名必须等于 RP ID，或是它的子域名（WebAuthn 的规则）。
+/// Passkey-bound RP ID: the hostname of the console address must equal the RP ID or be a subdomain
+/// of it (the WebAuthn rule).
 fn origin_matches_rp_id(origin: &str, rp_id: &str) -> bool {
     let Some(authority) = origin.strip_prefix("https://") else {
         return false;

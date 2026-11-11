@@ -1,5 +1,7 @@
-//! 数据面线程（design/userspace.md 第 4 节）：用 `poll` 同时等待 TUN、WireGuard 端口和控制命令；会话、
-//! 对端表和连接表只属于这个线程。控制命令经有界队列送来，带超时等待应答。
+//! Data plane thread (design/userspace.md section 4): uses `poll` to wait on the TUN, the WireGuard port
+//! and control commands at the same time; the sessions, peer table and connection table belong only to
+//! this thread. Control commands arrive through a bounded queue, and the sender waits for the reply with a
+//! timeout.
 
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
@@ -17,17 +19,19 @@ use super::session::{Sessions, TIMER_TICK};
 use crate::access::FilterSpec;
 use crate::dataplane::{DataPlaneError, DirectRecv, DirectSend, PeerSpec, PeerStat};
 
-/// 控制命令队列的上限。
+/// Upper limit of the control command queue.
 const COMMANDS: usize = 64;
-/// 等待数据面线程应答的上限（硬性规则 14）。
+/// Upper limit on waiting for the data plane thread's reply (hard rule 14).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
-/// 每次唤醒最多从一个来源读这么多个包，TUN 与 UDP 轮流处理，一边的洪水不会饿死另一边。
+/// At most this many packets are read from one source per wakeup, with the TUN and UDP handled in turn,
+/// so a flood on one side does not starve the other.
 const BATCH: usize = 64;
-/// 接收缓冲区：一个 UDP 数据报或 IP 包的最大长度。
+/// Receive buffer: the maximum length of a UDP datagram or IP packet.
 const MAX_PACKET: usize = 65_535;
-/// 交给引擎的直连探测队列的上限；满了丢弃（只影响一次测量）。
+/// Upper limit of the queue of direct probes handed to the engine; when full they are dropped (affecting
+/// only one measurement).
 const PROBES: usize = 256;
-/// [`DirectRecv::recv`] 的等待上限。
+/// Upper limit on the wait of [`DirectRecv::recv`].
 const PROBE_WAIT: Duration = Duration::from_millis(500);
 
 pub(super) enum Command {
@@ -45,7 +49,7 @@ pub(super) enum Command {
     Shutdown,
 }
 
-/// 数据面线程的句柄；丢弃时让线程退出并等它结束。
+/// Handle of the data plane thread; dropping it makes the thread exit and waits for it to finish.
 pub(super) struct Worker {
     commands: SyncSender<Command>,
     wake: UnixDatagram,
@@ -53,7 +57,8 @@ pub(super) struct Worker {
 }
 
 impl Worker {
-    /// 启动数据面线程。`socket` 是 WireGuard 端口的套接字（非阻塞）；直连探测与 cookie 副本放进返回的接收端。
+    /// Starts the data plane thread. `socket` is the WireGuard port's socket (non-blocking); direct probes and
+    /// cookie copies are put into the returned receiver.
     pub(super) fn spawn<S, T>(
         plane: Plane<S>,
         tun: T,
@@ -91,7 +96,7 @@ impl Worker {
         ))
     }
 
-    /// 发一个命令并等待应答。
+    /// Sends a command and waits for the reply.
     pub(super) fn call<R>(
         &self,
         command: impl FnOnce(SyncSender<R>) -> Command,
@@ -102,7 +107,7 @@ impl Worker {
             Err(TrySendError::Full(_)) => return Err(DataPlaneError::Worker("command queue full")),
             Err(TrySendError::Disconnected(_)) => return Err(DataPlaneError::Worker("stopped")),
         }
-        // 唤醒失败只在缓冲区已满时发生，那时线程已经有待处理的唤醒
+        // A wakeup failure happens only when the buffer is full, and then the thread already has a pending wakeup
         let _ = self.wake.send(&[0]);
         rx.recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| DataPlaneError::Worker("did not answer in time"))
@@ -119,7 +124,7 @@ impl Drop for Worker {
     }
 }
 
-/// 数据面线程交给引擎的直连探测与 cookie 副本。
+/// Direct probes and cookie copies the data plane thread hands to the engine.
 pub(super) struct ProbeQueue(Receiver<(SocketAddr, Vec<u8>)>);
 
 impl DirectRecv for ProbeQueue {
@@ -128,7 +133,8 @@ impl DirectRecv for ProbeQueue {
             Ok(first) => first,
             Err(RecvTimeoutError::Timeout) => return Ok(Vec::new()),
             Err(RecvTimeoutError::Disconnected) => {
-                // 数据面线程已经退出；仍按超时返回，让调用方照常检查是否该退出
+                // The data plane thread has already exited; still return on timeout, so the caller checks as usual
+                // whether it should exit
                 std::thread::sleep(PROBE_WAIT);
                 return Ok(Vec::new());
             }
@@ -139,7 +145,7 @@ impl DirectRecv for ProbeQueue {
     }
 }
 
-/// 从 WireGuard 端口发出直连探测：与数据面线程共用同一个套接字。
+/// Sends direct probes from the WireGuard port: shares the same socket with the data plane thread.
 pub(super) struct ProbeSender {
     pub(super) socket: UdpSocket,
 }
@@ -151,7 +157,7 @@ impl DirectSend for ProbeSender {
     }
 }
 
-/// 双栈套接字发往 IPv4 地址时用映射地址。
+/// Uses the mapped address when a dual-stack socket sends to an IPv4 address.
 fn outgoing(to: SocketAddr, v6: bool) -> SocketAddr {
     match to {
         SocketAddr::V4(a) if v6 => SocketAddr::new(IpAddr::V6(a.ip().to_ipv6_mapped()), a.port()),
@@ -159,7 +165,7 @@ fn outgoing(to: SocketAddr, v6: bool) -> SocketAddr {
     }
 }
 
-/// 双栈套接字收到的 IPv4 来源是映射地址，还原为 IPv4。
+/// An IPv4 source received on a dual-stack socket is a mapped address; restores it to IPv4.
 fn incoming(from: SocketAddr) -> SocketAddr {
     match from {
         SocketAddr::V6(a) => match a.ip().to_ipv4_mapped() {
@@ -229,7 +235,8 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
         }
     }
 
-    /// 等待任一来源可读，最多 `wait`。返回（命令、UDP、TUN）各自是否可读。
+    /// Waits until any source is readable, for at most `wait`. Returns whether each of (command, UDP, TUN) is
+    /// readable.
     fn wait(&self, wait: Duration) -> io::Result<(bool, bool, bool)> {
         let mut fds = [
             PollFd::new(&self.wake, PollFlags::IN),
@@ -249,12 +256,13 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
         Ok((readable(&fds[0]), readable(&fds[1]), readable(&fds[2])))
     }
 
-    /// 处理所有待处理的命令；收到退出命令时返回 `false`。
+    /// Handles all pending commands; returns `false` when an exit command is received.
     fn commands_ready(&mut self) -> bool {
         let mut drain = [0u8; 64];
         while self.wake.recv(&mut drain).is_ok() {}
         while let Ok(command) = self.commands.try_recv() {
-            // 应答失败说明调用方已经超时放弃，命令照样执行完
+            // A failed reply means the caller has already timed out and given up; the command is executed to
+            // completion all the same
             match command {
                 Command::SyncPeers(peers, reply) => {
                     self.plane.sync_peers(&peers);
@@ -289,7 +297,8 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
 
     fn execute(&mut self, out: &mut Vec<Action>) {
         for action in out.drain(..) {
-            // 发送失败（缓冲区满、没有路由）与丢包相同，由 WireGuard 和路径层处理
+            // A send failure (buffer full, no route) is the same as packet loss, handled by WireGuard and the path
+            // layer
             match action {
                 Action::Udp { to, datagram } => {
                     let _ = self.socket.send_to(&datagram, outgoing(to, self.v6));
@@ -297,7 +306,7 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                 Action::Tun(packet) => {
                     let _ = self.tun.send(&packet);
                 }
-                // 队列满了丢弃：只影响一次测量
+                // Dropped when the queue is full: affects only one measurement
                 Action::Probe { from, data } => {
                     let _ = self.probes.try_send((from, data));
                 }

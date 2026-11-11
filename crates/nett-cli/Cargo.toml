@@ -17,11 +17,12 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 lexopt.workspace = true
-# 签名工具 `nett site`（design/local-signing.md）在用户的电脑上运行，各平台都有
+# The signing tool `nett site` (design/local-signing.md) runs on the user's computer, on every
+# platform
 nett-core.workspace = true
 nett-mesh.workspace = true
 nett-site.workspace = true
-# 签名工具与 Hub 之间的 API 客户端、各台机器上的 nett-node（design/hub.md）
+# The API client between the signing tool and the Hub, and nett-node on each machine (design/hub.md)
 nett-node.workspace = true
 nett-proto.workspace = true
 base64.workspace = true
@@ -31,15 +32,16 @@ serde_json.workspace = true
 nett-relay = { workspace = true, optional = true }
 nett-transport = { workspace = true, optional = true }
 
-# 组网进程：Linux，以及 macOS 原生成员（design/userspace.md）
+# Mesh process: Linux, and the macOS native member (design/userspace.md)
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 tokio = { workspace = true, features = ["rt", "signal", "macros", "net", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 x25519-dalek.workspace = true
 
-# libc 已在依赖树中（nett-mesh 用它）：以不跟随符号链接、非阻塞的方式打开期望状态文件；安装服务时确认以
-# root 运行；macOS 上按 SUDO_UID 查运行 sudo 的用户的家目录
+# libc is already in the dependency tree (nett-mesh uses it): opens the desired state file without
+# following symlinks and without blocking; confirms that the process runs as root when installing
+# the service; on macOS, looks up the home directory of the user who ran sudo by SUDO_UID
 [target.'cfg(target_os = "linux")'.dependencies]
 libc.workspace = true
 rustix = { workspace = true, features = ["thread", "process"] }
@@ -49,8 +51,9 @@ libc.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [features]
-# 实验构建：组网进程的实验选项（事件文件、模拟时钟误差、传输适配进程的配置），以及中继和传输适配进程
-# （design/prototype.md 第 3、7 节），官方构建不开启
+# Lab build: lab options of the mesh process (event file, simulated clock skew, transport adapter
+# configuration), plus the relay and the transport adapter (design/prototype.md sections 3 and 7);
+# not enabled in official builds
 lab = [
     "nett-mesh/lab",
     "dep:nett-relay",

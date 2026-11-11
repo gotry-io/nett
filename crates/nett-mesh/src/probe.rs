@@ -1,7 +1,9 @@
-//! 探测消息（design/mesh.md 第 7.2 节）：编解码与校验码。
+//! Probe messages (design/mesh.md section 7.2): encoding, decoding and checksums.
 //!
-//! 首个字节是类型，与 WireGuard 的四种消息（1–4）都不同。隧道外的消息都是 64 字节、末尾 16 字节为
-//! 校验码；应答与探测等长，不能用来放大流量。格式不对或认证不过的包由调用方丢弃，不作任何响应。
+//! The first byte is the type, different from all four WireGuard messages (1-4). Messages outside the
+//! tunnel are all 64 bytes, with the last 16 bytes being the checksum; a reply is the same length as the
+//! probe and cannot be used to amplify traffic. Packets with a bad format or failed authentication are
+//! dropped by the caller with no response.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
@@ -12,7 +14,7 @@ use zeroize::Zeroizing;
 
 use crate::key::PrivateKey;
 
-/// 组网地址上的隧道内探测端口，只在 `nett0` 上监听。
+/// The in-tunnel probe port on the mesh address, listening only on `nett0`.
 pub const TUNNEL_PROBE_PORT: u16 = 41821;
 
 pub const TUNNEL_PROBE: u8 = 0x80;
@@ -25,18 +27,19 @@ pub const PUNCH_PROPOSAL: u8 = 0x86;
 pub const PUNCH_ACK: u8 = 0x87;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 
-/// WireGuard 的 cookie 应答：类型与长度（WireGuard 协议）。组网进程从 WireGuard 端口拿到它的副本，据此
-/// 知道对端处于负载状态、WireGuard 会带着 cookie 重试（design/mesh.md 第 8.4 节）。
+/// WireGuard's cookie reply: type and length (WireGuard protocol). The mesh process gets a copy of it from
+/// the WireGuard port, and from it learns that the peer is under load and WireGuard will retry with the
+/// cookie (design/mesh.md section 8.4).
 pub const WG_COOKIE_REPLY: u8 = 3;
 pub const WG_COOKIE_LEN: usize = 64;
 
-/// 隧道外消息的长度。
+/// Length of messages outside the tunnel.
 pub const OUTER_LEN: usize = 64;
 const MAC_LEN: usize = 16;
 const MAC_AT: usize = OUTER_LEN - MAC_LEN;
-/// 发送时间与接收方时钟之差的上限，限制重放。
+/// Upper limit of the difference between the send time and the receiver's clock, limiting replay.
 pub const MAX_CLOCK_SKEW_MS: u64 = 30_000;
-/// 隧道内应答最多带的中继测量条数。
+/// Maximum number of relay measurements an in-tunnel reply carries.
 pub const MAX_RELAY_REPORTS: usize = 16;
 const TUNNEL_PROBE_LEN: usize = 8;
 const SWITCH_LEN: usize = 16;
@@ -45,7 +48,7 @@ const RELAY_REPORT_LEN: usize = 12;
 
 const DIRECT_KEY_LABEL: &[u8] = b"nett direct probe v1";
 
-/// 公钥（或其他标识）的 8 字节编号：SHA-256 的前 8 字节。
+/// 8-byte identifier of a public key (or other identity): the first 8 bytes of SHA-256.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct KeyId(pub [u8; 8]);
 
@@ -58,7 +61,8 @@ impl KeyId {
     }
 }
 
-/// 校验码的密钥：直连探测由双方组网密钥派生，中继探测是分配时下发的令牌。
+/// Key of the checksum: for direct probes it is derived from both sides' mesh keys; for relay probes it is
+/// the token issued at allocation.
 #[derive(Clone)]
 pub struct ProbeKey(hmac::Key);
 
@@ -67,7 +71,9 @@ impl ProbeKey {
         Self(hmac::Key::new(hmac::HMAC_SHA256, token))
     }
 
-    /// 由本机组网私钥与对端组网公钥派生直连探测的密钥。对端公钥是小阶点等使共享值全为 0 时返回 `None`。
+    /// Derives the direct probe key from this machine's mesh private key and the peer's mesh public key.
+    /// Returns `None` when the peer's public key is a small-order point or otherwise makes the shared
+    /// value all zeros.
     pub fn direct(own: &PrivateKey, peer: &X25519PublicKey) -> Option<Self> {
         let secret = StaticSecret::from(*own.as_bytes());
         let own_public = PublicKey::from(&secret);
@@ -98,7 +104,8 @@ impl ProbeKey {
     }
 
     fn verify(&self, data: &[u8], mac: &[u8]) -> bool {
-        // 截断后的校验码按常量时间比较：逐字节异或后合并，不在第一个不同处提前返回
+        // The truncated checksum is compared in constant time: XOR byte by byte and combine, without returning
+        // early at the first difference
         let expected = self.mac(data);
         mac.len() == MAC_LEN
             && expected
@@ -117,17 +124,18 @@ impl hkdf::KeyType for HmacKeyLen {
     }
 }
 
-/// 隧道外的探测（直连 `0x82`、中继 `0x90`）。
+/// Probes outside the tunnel (direct `0x82`, relay `0x90`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OuterProbe {
     pub kind: u8,
-    /// 直连：发送方组网公钥的编号；中继：令牌编号。
+    /// Direct: the identifier of the sender's mesh public key; relay: the token identifier.
     pub key_id: KeyId,
     pub seq: u32,
     pub sent_ms: u64,
 }
 
-/// 隧道外的应答（直连 `0x83`、中继 `0x91`），带应答方看到的来源地址。
+/// Replies outside the tunnel (direct `0x83`, relay `0x91`), carrying the source address as seen by the
+/// replier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OuterReply {
     pub kind: u8,
@@ -149,7 +157,8 @@ impl OuterProbe {
         b
     }
 
-    /// 读出未认证的头部，供接收方按编号选择密钥；之后必须用 [`Self::verify`] 认证。
+    /// Reads the unauthenticated header, so the receiver can choose the key by identifier; it must then be
+    /// authenticated with [`Self::verify`].
     pub fn peek(b: &[u8]) -> Option<Self> {
         let kind = *b.first()?;
         if b.len() != OUTER_LEN || !matches!(kind, DIRECT_PROBE | RELAY_PROBE) || b[1..4] != [0; 3]
@@ -164,7 +173,7 @@ impl OuterProbe {
         })
     }
 
-    /// 认证并检查发送时间。
+    /// Authenticates and checks the send time.
     pub fn verify(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<Self> {
         let probe = Self::peek(b)?;
         let fresh = now_ms.abs_diff(probe.sent_ms) <= MAX_CLOCK_SKEW_MS;
@@ -172,7 +181,7 @@ impl OuterProbe {
             .then_some(probe)
     }
 
-    /// 应答：类型加 1，原样带回序号和发送时间。
+    /// Reply: the type plus 1, with the sequence number and send time carried back unchanged.
     pub fn reply(&self, key_id: KeyId, observed: SocketAddr) -> OuterReply {
         OuterReply {
             kind: self.kind + 1,
@@ -234,16 +243,17 @@ impl OuterReply {
     }
 }
 
-/// 应答方到一个中继的最新测量，随隧道内应答带给对端（design/mesh.md 第 7.2 节）。
+/// The replier's latest measurement to a relay, carried to the peer with the in-tunnel reply (design/mesh.md
+/// section 7.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayReport {
     pub relay: KeyId,
     pub rtt_ms: u16,
-    /// 丢包率，千分比。
+    /// Loss rate, in per mille.
     pub loss_permille: u16,
 }
 
-/// 隧道内探测：`类型 | 0 | 0 | 0 | 序号`。
+/// In-tunnel probe: `type | 0 | 0 | 0 | sequence number`.
 pub fn encode_tunnel_probe(seq: u32) -> [u8; TUNNEL_PROBE_LEN] {
     let mut b = [0u8; TUNNEL_PROBE_LEN];
     b[0] = TUNNEL_PROBE;
@@ -256,17 +266,18 @@ pub fn decode_tunnel_probe(b: &[u8]) -> Option<u32> {
         .then(|| u32::from_be_bytes([b[4], b[5], b[6], b[7]]))
 }
 
-/// 切换的目标（design/mesh.md 第 8.4 节）。
+/// Target of a switch (design/mesh.md section 8.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SwitchTarget {
-    /// 经这个中继（中继节点 ID 的编号）。
+    /// Via this relay (the identifier of the relay node ID).
     Relay(KeyId),
-    /// 这一对打通的直连（第 6.1 节）。
+    /// The direct path punched for this pair (section 6.1).
     Punched,
 }
 
-/// 切换提议与确认：`类型 | 目标种类 | 0 | 0 | 轮次 | 目标中继的编号`。目标种类 0 为中继，1 为打通的
-/// 直连（中继编号为 0）。经隧道收发，来源已由 WireGuard 认证。
+/// Switch proposal and confirmation: `type | target kind | 0 | 0 | round | identifier of the target relay`.
+/// Target kind 0 is a relay, 1 is a punched direct path (relay identifier is 0). Sent and received
+/// through the tunnel; the source has been authenticated by WireGuard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchMessage {
     pub kind: u8,
@@ -307,20 +318,22 @@ impl SwitchMessage {
     }
 }
 
-/// 本机所在 NAT 的类型（design/mesh.md 第 6.1 节）。
+/// The type of NAT this machine is behind (design/mesh.md section 6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NatType {
     Unknown,
-    /// 映射与目的地址无关：两个 `public` 节点看到同一个映射地址。
+    /// The mapping is independent of the destination address: two `public` nodes see the same mapped address.
     Cone,
-    /// 每个目的地址一个映射。
+    /// One mapping per destination address.
     Symmetric,
 }
 
-/// 打洞提议与确认（design/mesh.md 第 6.1 节）：
-/// `类型 | NAT 类型 | 地址标志 | 0 | 轮次 | IPv4 地址 | IPv4 端口 | IPv6 地址 | IPv6 端口`，共 32 字节。
-/// 地址标志的第 0 位表示有 IPv4 映射地址，第 1 位表示有 IPv6 地址；没有的字段为 0。
+/// Hole punching proposal and confirmation (design/mesh.md section 6.1):
+/// `type | NAT type | address flags | 0 | round | IPv4 address | IPv4 port | IPv6 address | IPv6 port`, 32
+/// bytes in total.
+/// Bit 0 of the address flags means there is an IPv4 mapped address, and bit 1 means there is an IPv6
+/// address; fields that are absent are 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PunchMessage {
     pub kind: u8,
@@ -385,7 +398,7 @@ impl PunchMessage {
     }
 }
 
-/// 隧道内应答：`类型 | 条数 | 0 | 0 | 序号 | 每条 12 字节的中继测量`。
+/// In-tunnel reply: `type | count | 0 | 0 | sequence number | relay measurements of 12 bytes each`.
 pub fn encode_tunnel_reply(seq: u32, reports: &[RelayReport]) -> Vec<u8> {
     let reports = &reports[..reports.len().min(MAX_RELAY_REPORTS)];
     let mut b = Vec::with_capacity(TUNNEL_PROBE_LEN + reports.len() * RELAY_REPORT_LEN);
@@ -423,7 +436,7 @@ pub fn decode_tunnel_reply(b: &[u8]) -> Option<(u32, Vec<RelayReport>)> {
     Some((seq, reports))
 }
 
-/// 未指定地址：`observed` 无从得知时使用。
+/// Unspecified address: used when `observed` cannot be known.
 pub const UNSPECIFIED: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
 #[cfg(test)]

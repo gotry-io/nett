@@ -1,6 +1,8 @@
-//! 节点网关的端到端测试（design/hub.md 第 5 节）：Hub 在 127.0.0.1 上自己终止 TLS（测试证书，按指纹校验），
-//! 一个真实的 nett-node 会话连上来：收到期望状态、写成期望状态文件、确认；站点变化之后收到新的一份。站点里
-//! 没有的身份、对不上的节点 ID、错误的 Hub 公钥都连不上。
+//! End-to-end test of the node gateway (design/hub.md section 5): the Hub terminates TLS itself on
+//! 127.0.0.1 (test certificate, verified by fingerprint), and a real nett-node session connects: it
+//! receives the desired state, writes it as the desired state file and acknowledges; after the site
+//! changes it receives a new one. Identities not in the site, mismatched node IDs and a wrong Hub
+//! public key all fail to connect.
 
 mod common;
 
@@ -28,12 +30,12 @@ fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
         },
         identity,
         desired: dir.join("desired.json"),
-        // 没有组网进程：期望状态写好之后确认为 pending
+        // No mesh process: after the desired state is written it is acknowledged as pending
         socket: dir.join("mesh.sock"),
     }
 }
 
-/// 等到 Hub 记下这台机器确认了 `generation`。
+/// Waits until the Hub records that this machine acknowledged `generation`.
 async fn acked(hub: &Hub, node_id: &str, generation: i64) -> nett_hub::db::NodeRow {
     for _ in 0..200 {
         if let Some(row) = hub
@@ -57,7 +59,7 @@ fn written(path: &PathBuf) -> DesiredMeshDoc {
 
 #[tokio::test]
 async fn nodes_receive_apply_and_acknowledge_the_desired_state() {
-    // Hub 的地址在 linked 之前就要定下：先占一个端口
+    // The Hub's address must be fixed before linking: reserve a port first
     let (hub, app, token, site, mut state) = linked("gateway", "https://127.0.0.1").await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
@@ -87,7 +89,7 @@ async fn nodes_receive_apply_and_acknowledge_the_desired_state() {
         .expect("signed");
     assert_eq!(written(&dir.join("desired.json")), expected);
 
-    // 站点变化：Hub 下发新的一份
+    // Site changes: the Hub sends down a new one
     state
         .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
@@ -134,24 +136,24 @@ async fn unknown_or_mismatched_machines_are_refused() {
         Err(SessionError::Refused { code, .. }) => code,
         other => panic!("expected a refusal, got {other:?}"),
     };
-    // 站点里没有的身份
+    // An identity not in the site
     assert_eq!(
         refused(node(&url, &mac, identity(9), &dir).session().await),
         ErrorCode::NodeUnknown
     );
-    // mac 的身份冒充 nas
+    // mac's identity impersonates nas
     assert_eq!(
         refused(node(&url, &nas, identity(2), &dir).session().await),
         ErrorCode::NodeUnknown
     );
-    // 错误的 Hub 公钥：握手失败
+    // Wrong Hub public key: the handshake fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.hub_key = Bytes32([7; 32]);
     assert!(matches!(
         wrong.session().await,
         Err(SessionError::Connect(_))
     ));
-    // 证书指纹不对：TLS 失败
+    // Wrong certificate fingerprint: TLS fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.tls_fingerprint = Some(Bytes32([1; 32]));
     assert!(matches!(

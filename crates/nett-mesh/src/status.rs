@@ -1,9 +1,12 @@
-//! 本机状态（design/status.md）：组网进程在本机套接字上回答只读的状态查询。
+//! Local status (design/status.md): the mesh process answers read-only status queries on the local socket.
 //!
-//! - [`StatusDoc`] 是回复的格式，`nett status`（以后还有 nett-node）读它。同一主版本内只增加字段：读的一方
-//!   忽略不认识的字段，以后增加的字段带默认值；
-//! - [`Recorder`] 包在事件出口外，记下最近的事件、需要处理的问题和每个对端最近一次切换；
-//! - [`StatusServer`] 接受连接：一个连接一次查询，回复后关闭；[`query`] 是对应的客户端。
+//! - [`StatusDoc`] is the reply format, read by `nett status` (and later nett-node). Within the same major
+//!   version only fields are added: the reader ignores fields it does not recognize, and fields added
+//!   later carry defaults;
+//! - [`Recorder`] wraps the event sink and records recent events, problems that need attention, and the
+//!   most recent switch of each peer;
+//! - [`StatusServer`] accepts connections: one query per connection, closed after the reply; [`query`] is
+//!   the matching client.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
@@ -26,46 +29,49 @@ use serde::{Deserialize, Serialize};
 use crate::config::Reachability;
 use crate::event::{Event, EventSink};
 
-/// 接口的主版本（design/status.md 第 4 节）。
+/// Major version of the interface (design/status.md section 4).
 pub const VERSION: u32 = 1;
 
-/// 默认的套接字路径（design/status.md 第 3 节）。
+/// Default socket path (design/status.md section 3).
 #[cfg(target_os = "macos")]
 pub const DEFAULT_SOCKET: &str = "/var/run/nett/mesh.sock";
 #[cfg(not(target_os = "macos"))]
 pub const DEFAULT_SOCKET: &str = "/run/nett/mesh.sock";
 
-/// 请求的长度上限。
+/// Upper limit on the length of a request.
 const MAX_REQUEST: u64 = 1024;
-/// 回复之后最多丢弃这么多对方没被读走的输入。
+/// After the reply, at most this much of the peer's unread input is discarded.
 const MAX_DRAIN: u64 = 64 * 1024;
-/// 回复的长度上限：按成员上限估算的数倍。
+/// Upper limit on the length of a reply: several times the estimate based on the member limit.
 pub const MAX_REPLY: u64 = 4 << 20;
-/// 套接字读写的超时。
+/// Timeout for socket reads and writes.
 const IO_TIMEOUT: Duration = Duration::from_secs(1);
-/// 等后台线程交出快照的上限：期望状态应用期间它可能忙于数据面操作。
+/// Upper limit on waiting for the background thread to hand over a snapshot: while a desired state is
+/// being applied it may be busy with data plane operations.
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(2);
-/// 等一份重新读取的期望状态应用完的上限（design/status.md 第 4.1 节）。
+/// Upper limit on waiting for a re-read desired state to finish applying (design/status.md section 4.1).
 pub const RELOAD_TIMEOUT: Duration = Duration::from_secs(10);
-/// 同时进行的 `reload` 的上限：读取期望状态的一方逐个处理。
+/// Upper limit on concurrent `reload`s: the party that reads the desired state handles them one by one.
 pub const MAX_PENDING_RELOADS: usize = 4;
-/// 保留的最近事件数。
+/// Number of recent events kept.
 const MAX_EVENTS: usize = 32;
-/// 按节点记的问题（成员、宣告网段被拒绝）最多保留的项数。
+/// Maximum number of per-node problems (members, advertised prefixes rejected) kept.
 const MAX_NODE_PROBLEMS: usize = 32;
-/// 数据面操作失败后，在这段时间内列为问题：失败的操作会自动重试，持续失败时一直在列。
+/// After a data plane operation fails, it is listed as a problem for this long: the failed operation is
+/// retried automatically, and while it keeps failing it stays listed.
 const DATA_PLANE_WINDOW: Duration = Duration::from_secs(300);
-/// 接受连接的线程的栈：只做小块的读写和序列化。
+/// Stack of the thread that accepts connections: it only does small reads, writes and serialization.
 const SERVER_STACK: usize = 256 * 1024;
-/// 等连接的超时：据此定期检查是否该退出，不依赖套接字文件还在。
+/// Timeout for waiting for a connection: used to periodically check whether it should exit, without
+/// depending on the socket file still existing.
 const ACCEPT_POLL: Duration = Duration::from_millis(500);
 
-// ---- 状态文档（design/status.md 第 6 节） ----
+// ---- Status document (design/status.md section 6) ----
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusDoc {
     pub v: u32,
-    /// 组网进程的 `nett` 版本。
+    /// `nett` version of the mesh process.
     pub version: String,
     pub node: NodeStatus,
     pub config: ConfigStatus,
@@ -78,20 +84,21 @@ pub struct StatusDoc {
 pub struct NodeStatus {
     pub id: NodeId,
     pub name: Option<NodeName>,
-    /// 本机在已准入的成员中；不在时没有地址，也不与任何对端通信。
+    /// This machine is among the admitted members; when it is not, there is no address and it does not
+    /// communicate with any peer.
     pub admitted: bool,
     pub mesh: Vec<IpAddr>,
-    /// 有 `edge` 角色时的 Edge 专用地址。
+    /// The Edge address when there is an `edge` role.
     pub edge: Vec<IpAddr>,
-    /// 本机宣告的网段。
+    /// Prefixes advertised by this machine.
     pub routes: Vec<IpPrefix>,
     pub reachability: Reachability,
     pub dataplane: DataPlaneKind,
-    /// WireGuard 实际监听的端口；接口还没有就绪时为空。
+    /// The port WireGuard actually listens on; empty while the interface is not ready yet.
     pub listen_port: Option<u16>,
-    /// `dial-only` 节点的 NAT 类型与映射地址（design/mesh.md 第 6.1 节）。
+    /// NAT type and mapped addresses of a `dial-only` node (design/mesh.md section 6.1).
     pub nat: Option<NatStatus>,
-    /// 时钟误差在 2 秒以内（design/mesh.md 第 8.4 节）。
+    /// Clock error within 2 seconds (design/mesh.md section 8.4).
     pub clock_trusted: bool,
     pub started_at: Timestamp,
 }
@@ -118,14 +125,14 @@ pub struct NatStatus {
 pub enum NatKind {
     Cone,
     Symmetric,
-    /// 还没有两个 `public` 节点的观察，或是新版本才有的类型。
+    /// There are not yet observations from two `public` nodes, or the type exists only in a newer version.
     #[serde(other)]
     Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConfigStatus {
-    /// 生效的期望状态最近一次被接受的时间。
+    /// The time the desired state in effect was most recently accepted.
     pub applied_at: Option<Timestamp>,
     pub access_rules_version: Option<u64>,
 }
@@ -138,10 +145,11 @@ pub struct PeerStatus {
     pub edge: Vec<IpAddr>,
     pub routes: Vec<IpPrefix>,
     pub state: PeerState,
-    /// 期望状态中没有到它的路径时为空。
+    /// Empty when the desired state has no path to it.
     pub role: Option<PeerRole>,
     pub path: Option<PathStatus>,
-    /// 当前路径上隧道内探测的测量；本机不测量（经漫游跟随）时为空。
+    /// Measurement of in-tunnel probes on the current path; empty when this machine does not measure
+    /// (following through roaming).
     pub rtt_ms: Option<f64>,
     pub loss: Option<f64>,
     pub jitter_ms: Option<f64>,
@@ -149,22 +157,23 @@ pub struct PeerStatus {
     pub last_received: Option<Timestamp>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
-    /// 本机选路时的各候选路径，当前路径在内。
+    /// The candidate paths during this machine's path selection, including the current path.
     pub candidates: Vec<CandidateStatus>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerState {
-    /// 最近 30 秒内收到过对端的包。
+    /// Packets from the peer were received in the last 30 seconds.
     Connected,
-    /// 在向它发送，还没有收到过。
+    /// Sending to it, and nothing has been received yet.
     Connecting,
-    /// 在向它发送，曾经收到过，最近 30 秒内没有。
+    /// Sending to it, something was received before, but nothing in the last 30 seconds.
     Unreachable,
-    /// 两个方向最近 30 秒内都没有包：没有流量时不探测，无从判断。
+    /// No packets in either direction in the last 30 seconds: with no traffic there is no probing, so there
+    /// is no way to tell.
     Idle,
-    /// 期望状态中没有到它的路径。
+    /// The desired state has no path to it.
     NoPath,
     #[serde(other)]
     Other,
@@ -173,9 +182,9 @@ pub enum PeerState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PeerRole {
-    /// 本机决定路径（design/mesh.md 第 8.3 节）。
+    /// This machine decides the path (design/mesh.md section 8.3).
     Decider,
-    /// 本机跟随对端的选择。
+    /// This machine follows the peer's choice.
     Follower,
     #[serde(other)]
     Other,
@@ -185,10 +194,12 @@ pub enum PeerRole {
 pub struct PathStatus {
     pub kind: PathKindDoc,
     pub relay: Option<NodeRef>,
-    /// 直连时是对端的地址；经中继时是中继的地址（TLS 时是中继的 TLS 地址）。
+    /// For a direct path, the peer's address; via a relay, the relay's address (for TLS, the relay's TLS
+    /// address).
     pub endpoint: Option<SocketAddr>,
     pub punched: bool,
-    /// 切到这条路径的时间与原因；本机跟随对端，或启动以来还没有切换过时为空。
+    /// The time and reason of the switch to this path; empty when this machine follows the peer or no switch
+    /// has happened since startup.
     pub since: Option<Timestamp>,
     pub reason: Option<String>,
 }
@@ -232,11 +243,11 @@ pub enum CandidateStateDoc {
     Other,
 }
 
-/// 需要处理的情况（design/status.md 第 6 节）。
+/// Situations that need attention (design/status.md section 6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Problem {
     pub kind: ProblemKind,
-    /// 与某个节点有关时是这个节点（读不出节点 ID 时为空）。
+    /// The node involved, when related to a node (empty when the node ID cannot be read).
     pub node: Option<NodeRef>,
     pub at: Timestamp,
     pub reason: String,
@@ -245,21 +256,21 @@ pub struct Problem {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProblemKind {
-    /// 期望状态整份被拒绝，继续使用上一份。
+    /// The whole desired state was rejected; the previous one stays in use.
     ConfigRejected,
-    /// 本机不在已准入的成员中。
+    /// This machine is not among the admitted members.
     NotAdmitted,
     MemberRejected,
     AccessRulesRejected,
     RoutesRejected,
     DataPlaneFailed,
-    /// 信任存储读写失败（design/mesh.md 第 4.2 节）。
+    /// Reading or writing the trust store failed (design/mesh.md section 4.2).
     TrustStore,
     #[serde(other)]
     Other,
 }
 
-/// 一个事件：时间，加上与日志相同的事件字段（`event` 是事件名）。
+/// An event: the time, plus the same event fields as the log (`event` is the event name).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     pub at: Timestamp,
@@ -276,17 +287,18 @@ impl EventRecord {
     }
 }
 
-/// 一次 `reload` 的结果（design/status.md 第 4.1 节）。
+/// Result of a `reload` (design/status.md section 4.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ReloadOutcome {
-    /// 已经生效；`problems` 是应用之后仍需处理的情况。
+    /// It took effect; `problems` are the situations that still need attention after applying.
     Applied { problems: Vec<Problem> },
-    /// 整份被拒绝，继续使用上一份。
+    /// The whole was rejected; the previous one stays in use.
     Rejected { reason: String },
 }
 
-/// 等一次 `reload` 应用完的一方：后台线程应用之后把结果交到这里。
+/// The party waiting for a `reload` to finish applying: the background thread hands the result here
+/// after applying.
 pub type ReloadReply = std::sync::mpsc::SyncSender<ReloadOutcome>;
 
 pub fn timestamp(t: SystemTime) -> Timestamp {
@@ -296,7 +308,7 @@ pub fn timestamp(t: SystemTime) -> Timestamp {
     )
 }
 
-/// 单调时钟上的时刻换成墙上时钟：`now` 与 `wall` 是同一时刻。
+/// Converts an instant on the monotonic clock to wall clock time: `now` and `wall` are the same moment.
 pub fn wall_time(now: Instant, wall: SystemTime, t: Instant) -> Timestamp {
     timestamp(
         wall.checked_sub(now.saturating_duration_since(t))
@@ -304,15 +316,15 @@ pub fn wall_time(now: Instant, wall: SystemTime, t: Instant) -> Timestamp {
     )
 }
 
-// ---- 事件记录 ----
+// ---- Event recording ----
 
-/// 包在事件出口外：照常交出每个事件，同时记下状态查询要用的部分。
+/// Wraps the event sink: hands out every event as usual, and records the parts that status queries need.
 pub struct Recorder<E> {
     inner: E,
     started_at: Timestamp,
     events: VecDeque<EventRecord>,
     problems: Problems,
-    /// 每个对端最近一次切换的时间与原因。
+    /// The time and reason of each peer's most recent switch.
     switches: HashMap<NodeId, (Timestamp, String)>,
 }
 
@@ -324,7 +336,7 @@ struct Problems {
     access: Option<(Timestamp, String)>,
     routes: BTreeMap<Option<NodeId>, (Timestamp, String)>,
     data_plane: Option<(Instant, Timestamp, String)>,
-    /// 一直列出，直到下一次写入成功。
+    /// Stays listed until the next write succeeds.
     trust_store: Option<(Timestamp, String)>,
 }
 
@@ -339,8 +351,9 @@ impl<E: EventSink> Recorder<E> {
         }
     }
 
-    /// 一份新的期望状态通过了格式校验、即将应用：上一份留下的问题作废，应用过程中仍存在的会重新报告
-    /// （验证失败的材料每次应用都会报告）。
+    /// A new desired state has passed format validation and is about to be applied: problems left by the
+    /// previous one are void, and those that still exist during applying are reported again (material
+    /// that fails verification is reported on every apply).
     pub fn begin_apply(&mut self) {
         let data_plane = self.problems.data_plane.take();
         let trust_store = self.problems.trust_store.take();
@@ -355,7 +368,8 @@ impl<E: EventSink> Recorder<E> {
         self.started_at
     }
 
-    /// 把记下的问题、最近的事件和切换的时间与原因填进快照。`names` 用来给问题中的节点配上名字。
+    /// Fills the recorded problems, recent events, and the time and reason of switches into the snapshot.
+    /// `names` is used to attach names to the nodes in problems.
     pub fn fill(&self, doc: &mut StatusDoc, names: &BTreeMap<NodeId, NodeName>, now: Instant) {
         doc.problems = self.problems(&doc.node.id, names, now);
         doc.events = self.events.iter().cloned().collect();
@@ -369,7 +383,8 @@ impl<E: EventSink> Recorder<E> {
         }
     }
 
-    /// 现在需要处理的情况（design/status.md 第 6 节）。`own` 是本机的节点 ID。
+    /// The situations that currently need attention (design/status.md section 6). `own` is this machine's
+    /// node ID.
     pub fn problems(
         &self,
         own: &NodeId,
@@ -463,7 +478,8 @@ impl<E: EventSink> Recorder<E> {
             }
             _ => {}
         }
-        // 每次应用都会出现、或内容很长的事件不进最近事件：它们说明不了"刚才发生了什么"
+        // Events that appear on every apply, or that are very long, do not go into recent events: they cannot
+        // say "what just happened"
         if matches!(
             event,
             Event::PeersApplied { .. }
@@ -488,7 +504,7 @@ impl<E: EventSink> EventSink for Recorder<E> {
     }
 }
 
-// ---- 本机套接字（design/status.md 第 3、4 节） ----
+// ---- Local socket (design/status.md sections 3 and 4) ----
 
 #[derive(Debug, Deserialize)]
 struct Request {
@@ -514,15 +530,17 @@ struct ErrorBody {
     message: String,
 }
 
-/// 接口背后的组网进程。
+/// The mesh process behind the interface.
 pub trait StatusSource: Send + 'static {
-    /// 当前的快照；后台线程忙、在 [`QUERY_TIMEOUT`] 内交不出时为 `None`。
+    /// The current snapshot; `None` when the background thread is busy and cannot hand one over within
+    /// [`QUERY_TIMEOUT`].
     fn snapshot(&self) -> Option<StatusDoc>;
-    /// 重新读取期望状态文件并等它应用完；已有太多在等、或 [`RELOAD_TIMEOUT`] 内没应用完时为 `None`。
+    /// Re-reads the desired state file and waits for it to finish applying; `None` when too many are already
+    /// waiting or applying did not finish within [`RELOAD_TIMEOUT`].
     fn reload(&self) -> Option<ReloadOutcome>;
 }
 
-/// 接受状态查询的线程。丢弃时停止线程并删除套接字。
+/// The thread that accepts status queries. Dropping it stops the thread and deletes the socket.
 pub struct StatusServer {
     path: PathBuf,
     stop: Arc<AtomicBool>,
@@ -530,7 +548,8 @@ pub struct StatusServer {
 }
 
 impl StatusServer {
-    /// 在 `path` 建立套接字并开始接受连接。目录不存在时以 `0700` 建立；套接字为 `0600`。
+    /// Creates the socket at `path` and starts accepting connections. If the directory does not exist it is
+    /// created with `0700`; the socket is `0600`.
     pub fn spawn(path: &Path, source: impl StatusSource) -> std::io::Result<Self> {
         let listener = bind(path)?;
         listener.set_nonblocking(true)?;
@@ -556,7 +575,8 @@ impl StatusServer {
                         }
                     }
                     match listener.accept() {
-                        // macOS 上接受的连接继承监听套接字的非阻塞标志；查询用阻塞读写加超时
+                        // On macOS an accepted connection inherits the listening socket's non-blocking flag; queries use
+                        // blocking reads and writes with a timeout
                         Ok((stream, _)) => {
                             let result = stream
                                 .set_nonblocking(false)
@@ -606,7 +626,7 @@ fn bind(path: &Path) -> std::io::Result<UnixListener> {
                     format!("another process is serving {}", path.display()),
                 ));
             }
-            // 上一次异常退出留下的套接字
+            // The socket left by the previous abnormal exit
             std::fs::remove_file(path)?;
         }
         Ok(_) => {
@@ -618,7 +638,8 @@ fn bind(path: &Path) -> std::io::Result<UnixListener> {
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    // 先在临时名字上建立并设好权限，再改名：套接字一出现在约定的路径上就是 0600
+    // Create it under a temporary name and set its permissions first, then rename: the moment the socket
+    // appears at the agreed path it is already 0600
     let tmp = path.with_extension(format!("sock.{}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
     let listener = UnixListener::bind(&tmp)?;
@@ -627,7 +648,8 @@ fn bind(path: &Path) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// 只接受 root 和组网进程自己的运行身份（套接字的权限之外再检查一次）。
+/// Accepts only root and the mesh process's own running identity (a second check in addition to the
+/// socket's permissions).
 fn peer_allowed(stream: &UnixStream) -> std::io::Result<bool> {
     let uid = peer_uid(stream)?;
     Ok(uid == 0 || uid == rustix::process::geteuid().as_raw())
@@ -644,8 +666,9 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     crate::macos::peer_uid(stream.as_fd())
 }
 
-/// 处理一个连接。回复之后关闭写方向，再丢弃对方没被读走的输入（最多 [`MAX_DRAIN`]）：带着未读数据关闭
-/// 时，Linux 向对方发送复位，对方可能还没读到回复。
+/// Handles one connection. After the reply, closes the write direction, then discards the peer's unread
+/// input (at most [`MAX_DRAIN`]): when closing with unread data, Linux sends a reset to the peer, and the
+/// peer may not have read the reply yet.
 fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
     let result = answer(&stream, source);
@@ -657,8 +680,9 @@ fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()>
     result
 }
 
-/// 读的总时限 [`IO_TIMEOUT`]：每次读之前把读超时设为剩下的时间。按每次读计算时，一点一点发送的对方能
-/// 一直占住这个线程（design/status.md 第 4 节）。
+/// Total time limit for reading [`IO_TIMEOUT`]: before each read the read timeout is set to the time
+/// remaining. If computed per read, a peer sending bit by bit could hold this thread indefinitely
+/// (design/status.md section 4).
 struct Deadline<'a> {
     stream: &'a UnixStream,
     until: Instant,
@@ -762,7 +786,7 @@ fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std::io::Resul
     stream.write_all(&bytes)
 }
 
-// ---- 客户端 ----
+// ---- Client ----
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
@@ -784,18 +808,20 @@ pub enum QueryError {
     Reply(String),
 }
 
-/// 向 `path` 上的组网进程查询状态。
+/// Queries the status of the mesh process at `path`.
 pub fn query(path: &Path) -> Result<StatusDoc, QueryError> {
     let value = query_raw(path)?;
     serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))
 }
 
-/// 与 [`query`] 相同，返回未经解析的回复：其中可能有这个版本不认识的字段（`nett status --json` 原样输出）。
+/// Same as [`query`], returns the unparsed reply: it may contain fields this version does not recognize
+/// (`nett status --json` outputs it as is).
 pub fn query_raw(path: &Path) -> Result<serde_json::Value, QueryError> {
     request(path, "status", QUERY_TIMEOUT)
 }
 
-/// 请 `path` 上的组网进程重新读取期望状态文件，等它应用完（design/status.md 第 4.1 节）。
+/// Asks the mesh process at `path` to re-read the desired state file and waits for it to finish applying
+/// (design/status.md section 4.1).
 pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
     let value = request(path, "reload", RELOAD_TIMEOUT)?;
     let doc: ReloadReplyDoc =
@@ -803,7 +829,7 @@ pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
     Ok(doc.reload)
 }
 
-/// 发一个请求，读回回复；组网进程那一侧最多用 `wait` 处理它。
+/// Sends a request and reads back the reply; the mesh process side handles it for at most `wait`.
 fn request(path: &Path, query: &str, wait: Duration) -> Result<serde_json::Value, QueryError> {
     let io = |source| QueryError::Io {
         path: path.to_owned(),
@@ -915,7 +941,7 @@ mod tests {
         }
     }
 
-    /// 测试用的短路径（macOS 上 Unix 套接字路径最长 104 字节）。
+    /// A short path for tests (Unix socket paths on macOS are at most 104 bytes).
     fn temp_dir() -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let dir = std::env::temp_dir().join(format!(
@@ -944,7 +970,8 @@ mod tests {
         assert_eq!(mode(&dir), 0o700);
         assert_eq!(mode(&path), 0o600);
         assert_eq!(query(&path).expect("query"), sample());
-        // 读的一方忽略不认识的字段：新版本多出的字段不影响旧版本的 nett
+        // The reader ignores fields it does not recognize: fields added in a newer version do not affect an older
+        // nett
         let mut newer = serde_json::to_value(sample()).expect("value");
         newer["future_field"] = serde_json::json!({"x": 1});
         newer["peers"][0]["state"] = "something_new".into();
@@ -968,7 +995,7 @@ mod tests {
             "unsupported_version"
         );
         assert_eq!(code(b"{\"v\":1,\"query\":\"stats\"}\n"), "unknown_query");
-        // 超过长度上限的请求不读完
+        // A request over the length limit is not read to the end
         let mut long = vec![b' '; 4096];
         long.push(b'\n');
         assert_eq!(code(&long), "bad_request");
@@ -989,7 +1016,8 @@ mod tests {
         let _server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mut slow = UnixStream::connect(&path).expect("connect");
         let started = Instant::now();
-        // 每 200 毫秒发一个字节，不发换行：按每次读计算超时的话，可以一直占住处理连接的线程
+        // Send one byte every 200 ms, with no newline: if the timeout were computed per read, this could hold
+        // the connection-handling thread indefinitely
         let mut closed = false;
         for _ in 0..40 {
             if slow.write_all(b" ").is_err() {
@@ -1003,9 +1031,9 @@ mod tests {
             "still accepting bytes after {:?}",
             started.elapsed()
         );
-        // 读请求与回复之后丢弃输入各有一次时限
+        // Reading the request and discarding input after the reply each have a time limit
         assert!(started.elapsed() < IO_TIMEOUT * 5);
-        // 之后的查询照常得到回答
+        // Later queries are answered as usual
         assert!(query(&path).is_ok());
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1021,7 +1049,7 @@ mod tests {
                 reason: "bad json".into()
             }
         );
-        // 线上的形式（design/status.md 第 4.1 节）
+        // The form on the wire (design/status.md section 4.1)
         assert_eq!(
             raw(&path, b"{\"v\":1,\"query\":\"reload\"}\n"),
             serde_json::json!({"v": 1, "reload": {"result": "rejected", "reason": "bad json"}})
@@ -1040,7 +1068,7 @@ mod tests {
         let dir = temp_dir();
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("mesh.sock");
-        // 上一次异常退出留下的套接字：文件还在，没有进程在听
+        // The socket left by the previous abnormal exit: the file is still there and no process is listening
         drop(UnixListener::bind(&path).expect("bind"));
         assert!(path.exists());
         let live = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("takes over");
@@ -1081,7 +1109,7 @@ mod tests {
         r.emit(Event::DataPlaneFailed {
             reason: "netlink".into(),
         });
-        // 事件照常交给原来的出口
+        // Events are still handed to the original sink as usual
         assert_eq!(r.inner.0.len(), 3);
         let names = BTreeMap::from([(node(3), "nas".parse().expect("name"))]);
         let mut doc = sample();
@@ -1100,7 +1128,8 @@ mod tests {
             doc.problems[1].node.as_ref().and_then(|n| n.name.clone()),
             names.get(&node(3)).cloned()
         );
-        // 下一份期望状态被接受：上一份留下的问题作废；数据面的失败按时间窗口，过后消失
+        // The next desired state is accepted: problems left by the previous one are void; data plane failures
+        // follow the time window and disappear afterwards
         r.begin_apply();
         r.fill(&mut doc, &names, now);
         assert_eq!(doc.problems.len(), 1);
@@ -1127,7 +1156,7 @@ mod tests {
         let path = doc.peers[0].path.as_ref().expect("path");
         assert_eq!(path.reason.as_deref(), Some("better_type"));
         assert!(path.since.is_some());
-        // 跟随的一方不写切换原因：路径是对端选的
+        // The following side does not write a switch reason: the path was chosen by the peer
         let mut doc = sample();
         doc.peers[0].role = Some(PeerRole::Follower);
         r.fill(&mut doc, &BTreeMap::new(), Instant::now());

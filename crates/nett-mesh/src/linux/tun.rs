@@ -1,5 +1,7 @@
-//! 用户态数据面在 Linux 上的平台后端（DSM、旧内核与实验场景，design/userspace.md）：TUN 接口经
-//! `/dev/net/tun` 创建，随组网进程退出而删除；地址、MTU 与路由经 rtnetlink 配置，与内核后端相同。
+//! Platform backend of the userspace data plane on Linux (DSM, old kernels and lab scenarios,
+//! design/userspace.md): the TUN interface is created through `/dev/net/tun` and deleted when the mesh
+//! process exits; addresses, MTU and routes are configured through rtnetlink, the same as the kernel
+//! backend.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
