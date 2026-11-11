@@ -21,9 +21,22 @@ Status comes from the mesh process's local interface. This is the local interfac
 ## 3. Local socket
 
 - **Location**: a Unix socket, `/run/nett/mesh.sock` on Linux and for container members, `/var/run/nett/mesh.sock` on macOS. `nett mesh --socket <path>` can move it elsewhere (a lab scenario runs several members on one host), and `nett status --socket <path>` matches it;
-- **Permissions**: the directory is `0700` and the socket `0600`, owned by the mesh process's run identity; the mesh process additionally checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and accepts only root and its own run identity. `nett status` therefore has to run with `sudo`, and for a container member use `docker exec <container> /nett status` (runs as root inside the container). Status contains no keys, but it does contain the public addresses of the members, the advertised routes and the access rule version, which is the structure of the whole network: ordinary users and programs on the machine cannot see it;
+- **Permissions**: the directory is `0700` (`0711` on Linux, for the helper socket of section 3.1) and the socket `0600`, owned by the mesh process's run identity; the mesh process additionally checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and accepts only root and its own run identity. `nett status` therefore has to run with `sudo`, and for a container member use `docker exec <container> /nett status` (runs as root inside the container). Status contains no keys, but it does contain the public addresses of the members, the advertised routes and the access rule version, which is the structure of the whole network: ordinary users and programs on the machine cannot see it;
 - **Creation**: the socket is for inspection only; if it cannot be created, the mesh process logs a warning and the mesh keeps working (hard rule 8). When a socket already exists at the path, it first tries to connect: if a process answers, it does not take over; if nothing answers (left behind by an abnormal exit), it removes the socket and creates a new one; if the path holds some other kind of file, it leaves it alone. The socket is first created under a temporary name and set to `0600`, then renamed to the agreed path, so it is already `0600` when it appears. The mesh process removes it on exit. If the directory does not exist it is created with `0700`: the Linux systemd unit creates it in advance with `RuntimeDirectory=nett`, and on macOS and in containers the mesh process creates it itself;
 - The socket is local to the machine and is not a network listener (hard rule 2).
+
+### 3.1 Helper socket
+
+nett-relay and the transport adapter run as their own low-privilege users and fetch their configuration from the mesh process (ADR 0013) over a second socket, `helpers.sock` next to `mesh.sock`. On Linux the directory is `0711` (others can reach a known name but not list it), `mesh.sock` stays `0600`, and `helpers.sock` is `0666`: the mesh process checks the caller's identity on every connection and accepts only the system users `nett-relay` and `nett-transport`, each for its own query. One query per connection, as in section 4, at most 1 KiB:
+
+```json
+{"v": 1, "query": "relay", "fingerprint": "sha256:…"}
+{"v": 1, "query": "transport"}
+```
+
+- `relay` (only from `nett-relay`): the reply is the relay assignment of mesh.md section 5.2 with each member's mesh public key resolved, or `null` when this machine is not a relay. The request carries the fingerprint of the relay's TLS certificate, which the mesh process shows in status (section 6);
+- `transport` (only from `nett-transport`): the reply is the transport adapter's configuration (mesh.md section 5.3): the WireGuard port, and for each TLS relay its loopback port, address and certificate fingerprint;
+- Both helpers ask again every 5 seconds and when they start, and apply the reply only when it changed. The replies hold probe tokens, which is why each query is limited to its own user.
 
 ## 4. Messages and versions
 
@@ -60,6 +73,22 @@ Status comes from the mesh process's local interface. This is the local interfac
 - `nett reload` sends this request and shows the result: the exit code is 0 for `applied`, listing `problems`; 1 for `rejected` or when the mesh process cannot be reached. For a container member use `docker exec <container> /nett reload`. **Do not use `docker kill -s HUP`**: whenever any signal is sent with `docker kill`, Docker records the container as manually stopped, and a `unless-stopped` container then does not start automatically after Docker restarts (host reboot);
 - On macOS, `sudo nett install` sends the same request when the desired state has changed (release.md section 4); `SIGHUP` still works (systemd's `systemctl reload`), only without a result to inspect.
 
+### 4.2 Coordination with nett-node
+
+```json
+{"v": 1, "query": "coordinate"}
+```
+
+- nett-node (root only) keeps this connection open while it runs; both sides then write one JSON object per line, each at most 1 KiB. It carries the switch proposals and confirmations that go through the Hub when both ends of a pair are `dial-only` (mesh.md section 8.4), so the mesh process never connects to the Hub:
+
+  ```json
+  {"hub": true}
+  {"path_switch": {"peer": "node_01J…", "message": "<base64>"}}
+  ```
+
+- nett-node sends `hub` when the connection opens and whenever its Hub session comes up or goes down; the mesh process uses the Hub path only while it is `true`. `path_switch` from the mesh process names the peer it is for, and from nett-node the peer it came from; the message is authenticated end to end and opaque to nett-node and the Hub;
+- One coordinator at a time: a new `coordinate` connection replaces the old one. Lines in each direction queue up to 16 and further ones are dropped (the sender retries); a line that is not valid is dropped and the connection kept.
+
 ## 5. Node names
 
 The desired state gains an unsigned `names` entry: a map from node ID to node name. The signing tool writes it from the names of the machines in the site (site.md section 4); after joining the Hub, the Hub delivers it, from the same source as hostnames (mesh.md section 11).
@@ -78,7 +107,8 @@ Times are UTC in RFC 3339 format; durations and relative times are computed by `
 
 | Part | Contents |
 |---|---|
-| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), whether the clock is trusted (mesh.md section 8.4), the time the mesh process started |
+| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), LAN addresses with their prefix length (private IPv4 and IPv6 unique local addresses on interfaces other than the mesh interface and loopback, at most 8, used by the Hub for LAN direct candidates, mesh.md section 6), whether the clock is trusted (mesh.md section 8.4), the time the mesh process started |
+| `relay` | On a relay: UDP and TLS ports, the number of members and links assigned, the TLS certificate fingerprint nett-relay reported and when it last fetched its assignment (mesh.md section 5.2); absent elsewhere |
 | `config` | The time the desired state in effect was accepted; the version of the access rule set. A rejected desired state is listed in `problems` (when a reload fails, the previous one stays in use) |
 | `peers` | One entry for each admitted member, see the table below |
 | `problems` | Situations that need attention, each with a time and a reason: this machine is not among the admitted members, desired state rejected, a member's admission material rejected, access rule set or advertised routes rejected, data plane operation failed, trust store read or write failed (mesh.md section 4.2). The first five belong to one desired state: they are discarded when the next desired state is accepted, and those that still exist are reported again on application (material that fails verification is reported on every application). Data plane operations are retried automatically after a failure and are listed if one happened in the last 5 minutes, and stay listed while the failure continues. A trust store read or write failure stays listed until the next successful write |

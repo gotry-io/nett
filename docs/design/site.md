@@ -15,7 +15,7 @@ The user maintains the whole network on their own computer with the `nett site` 
 
 | Content | How maintained | Signing |
 |---|---|---|
-| Machines: name, reachability, public address and port | `add`, `set`, `remove` | Not signed; removal generates a revocation |
+| Machines: name, reachability, public address and port, relay | `add`, `set`, `relay`, `remove` | Not signed; removal generates a revocation |
 | A machine's public keys | Without a Hub, `add --keys`; with a Hub, given to the Hub by the machine when it enrolls (hub.md section 6) | Written into the admission material |
 | Permissions: Edge, advertised routes, access rules | `edge`, `routes`, `allow`, `rules remove` | Both widening and narrowing are signed with a new version (section 7) |
 | Connections and candidate paths | Derived from the access rules (section 6) | Not signed |
@@ -29,6 +29,7 @@ All site content is stored by the tool in the site directory (section 8), and th
 | `nett site init` | Create the site: recovery key, trust anchor list, mesh prefixes (section 8) |
 | `nett site add <machine>` | Add a machine (section 4) |
 | `nett site set <machine>` | Change a machine's reachability, public address and port |
+| `nett site relay <machine>` | Run a relay on a `public` machine, or stop it with `--off` (section 4.1) |
 | `nett site remove <machine>` | Remove a machine, cleaning up the rules that reference it |
 | `nett site invite <machine>` | Prepare what an added machine needs to enroll: with a Hub, prints the enrollment command (hub.md sections 3.3 and 3.5); without one, re-signs and rewrites its desired state file |
 | `nett site edge <machine>` | Set this machine's Edge sources (section 5.2) |
@@ -39,7 +40,7 @@ All site content is stored by the tool in the site directory (section 8), and th
 | `nett site link` | Link with the Hub (hub.md section 3.1) |
 
 - Run only on the computer that holds the site, as an ordinary user, without `sudo`; the site directory defaults to `$XDG_CONFIG_HOME/nett` (`~/.config/nett` when unset), and `--dir` can place it elsewhere;
-- Modifying commands (`add`, `set`, `remove`, `edge`, `routes`, `allow`, `rules remove`) list the changes, confirm, sign and deliver according to section 7; when not on a terminal, `--yes` is required;
+- Modifying commands (`add`, `set`, `relay`, `remove`, `edge`, `routes`, `allow`, `rules remove`) list the changes, confirm, sign and deliver according to section 7; when not on a terminal, `--yes` is required;
 - Viewing commands (`rules`, `status`) output the full content with `--json`.
 
 ## 4. Machines
@@ -69,6 +70,21 @@ Wrote the desired state for edge-vps in ~/.config/nett/nodes/<machine>/desired.j
   ```
 
 - Running `add` again later with the same name creates a new machine: a new node ID and address, without the earlier rules, Edge and routes. When a machine leaves by itself (`nett leave`, auth.md section 8.3), it is handled the same way (hub.md section 4).
+
+### 4.1 Relays
+
+```
+$ nett site relay edge-vps --tls 8443
+~ edge-vps runs a relay: UDP 41822, TLS 8443
+Connections:
+  ~ mac - nas  punch, relay edge-vps (udp, tls)
+Sign and push? [y/N] y
+```
+
+- A relay forwards ciphertext between members that cannot reach each other directly, or when the direct path is worse (mesh.md section 5). It runs on a `public` Linux machine as the separate service nett-relay, which holds no mesh key and has no management privileges (hard rule 1);
+- `--port` sets the UDP relay port (default `41822`); `--tls <port>` also serves the TLS transport on that TCP port (default `443`, mesh.md section 5.3), `--no-tls` serves UDP only. When a reverse proxy already holds 443 on the machine, pick another port (mesh.md section 5.3). `--off` stops the relay; the paths through it go away from every connection;
+- The relay creates its own TLS certificate the first time it starts; the members check it by fingerprint. With a Hub, the Hub learns the fingerprint from the machine's status, and the TLS candidates appear after that; without a Hub, give it with `--fingerprint` from `sudo nett status` on that machine;
+- Being a relay is not signed: a relay sees only ciphertext, and a wrong relay affects connectivity, not privileges. The probe token between each member and each relay (mesh.md section 7.2) is derived from the site's relay key (section 8), so the site and the Hub compute the same tokens and store none of them.
 
 ## 5. Permissions
 
@@ -113,10 +129,10 @@ When the desired state is composed (with a Hub, the Hub composes it with the sam
 
 1. **Every pair of machines involved in an access rule**: each selector on either side of a rule corresponds to one machine (`<machine>`, `<machine>.edge` and `<machine>.routes` all correspond to the machine itself), a connection is established between each pair across the two sides, except a machine with itself;
 2. **Every `dial-only` member with all `public` members**: used to determine the NAT type and mapped address (mesh.md section 6.1), and also redundancy on failure (architecture.md section 12.3);
-3. The candidate paths of each connection are generated per mesh.md section 6: when one end is `public`, the other end connects directly to its public address (generated separately when there are IPv4 and IPv6 addresses); when both ends are `dial-only`, hole punching is used for a direct connection; relay candidates are added after relays are implemented.
+3. The candidate paths of each connection are generated per mesh.md section 6: when one end is `public`, the other end connects directly to its public address (generated separately when there are IPv4 and IPv6 addresses); when both ends are `dial-only`, hole punching is used for a direct connection; with a Hub, a LAN direct path when both ends report addresses in the same LAN prefix behind the same public address; and through every relay other than the two ends (section 4.1), in the order of the relays' node IDs, UDP before TLS, until the connection has 6 candidates. Both ends get the same relays, and each relay gets the connections that list it.
 
 - A connection is only a channel: access is still decided by the rules, denied by default (ADR 0023). There is no connection between two machines that no rule involves, and in `nett status` this pair is `no path`;
-- A connection with both ends `dial-only` has only hole punching candidates: when both ends are behind symmetric NAT it cannot be punched through (mesh.md section 6.1), and before relay candidates are added it may not connect. The change listing says `punch only; may not connect` for such a connection;
+- A connection with both ends `dial-only` and no relay in the site has only hole punching candidates: when both ends are behind symmetric NAT it cannot be punched through (mesh.md section 6.1). The change listing says `punch only; may not connect` for such a connection, and suggests `nett site relay`;
 - When rules change, connections are added or removed accordingly and listed in the same change:
 
   ```
@@ -157,7 +173,7 @@ Next, for each machine:
 ```
 
 - When `init` creates the directory, its mode is set to `0700`. The mesh prefixes are fixed at creation and cannot be changed later: IPv4 is `100.88.0.0/16`, and IPv6 is a randomly generated ULA `/48` (mesh.md section 3);
-- The directory contains: the recovery key `recovery.pk8` (`0600`, read only when signing); the site state `state.json`: the trust anchor list, mesh prefixes, the machines (node ID, name, reachability, address and port, public keys, Edge, routes, signed artifacts and versions), access rules (number, selectors, ports, note, plus the expanded signed rule set and version), revocations, and assigned addresses; without a Hub there are also the generated desired states `nodes/<machine>/desired.json`;
+- The directory contains: the recovery key `recovery.pk8` (`0600`, read only when signing); the site state `state.json`: the trust anchor list, mesh prefixes, the machines (node ID, name, reachability, address and port, public keys, Edge, routes, signed artifacts and versions), access rules (number, selectors, ports, note, plus the expanded signed rule set and version), revocations, assigned addresses, and the relay key (32 random bytes, created with the first relay, from which the probe tokens are derived, section 4.1); without a Hub there are also the generated desired states `nodes/<machine>/desired.json`;
 - Backing up this directory is enough, and the recovery key gets a separate offline backup (local-signing.md section 3). With a Hub, the Hub keeps a copy of the most recent push, and the admission proofs of machines that enrolled through the Hub are also fetched and stored here (hub.md section 4); the site state is whatever this directory holds.
 
 ## 9. Verification
