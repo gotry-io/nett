@@ -836,6 +836,19 @@ impl<D: DataPlane> Engine<D> {
                         ipv6: own.v6.map(SocketAddr::V6),
                     }
                 }),
+            lan: crate::lan::addresses(
+                &self
+                    .interface
+                    .as_ref()
+                    .map(|i| {
+                        i.spec
+                            .addresses
+                            .iter()
+                            .filter_map(|a| IpPrefix::containing(a.addr, a.prefix_len))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+            ),
             clock_trusted: self.clock_trusted,
             started_at,
         };

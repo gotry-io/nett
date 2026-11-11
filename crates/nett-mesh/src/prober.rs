@@ -280,6 +280,10 @@ fn routes(
                 (Route::Direct(*endpoint), PathKind::Direct),
                 CandidateMeta::Direct,
             )),
+            Candidate::Lan { endpoint } => Some((
+                (Route::Direct(*endpoint), PathKind::Lan),
+                CandidateMeta::Direct,
+            )),
             Candidate::Relay {
                 relay,
                 endpoint,
@@ -757,6 +761,7 @@ impl Prober {
             Some((Route::Direct(_), _)) if paths.punched_index() == Some(index) => {
                 Some(SwitchTarget::Punched)
             }
+            Some((Route::Direct(_), PathKind::Lan)) => Some(SwitchTarget::Lan),
             _ => None,
         };
         match target {
@@ -1063,6 +1068,22 @@ impl Prober {
                 let Some(probe) = OuterProbe::verify(data, key, now_ms) else {
                     return vec![];
                 };
+                // A probe from a LAN address reached this machine's LAN address: answered only when this
+                // machine has a LAN direct candidate to that address (hard rule 2)
+                if crate::lan::is_lan(from.ip())
+                    && !self
+                        .by_key_id
+                        .get(&head.key_id)
+                        .and_then(|id| self.peers.get(id))
+                        .is_some_and(|p| {
+                            p.routes.iter().any(|(r, k)| {
+                                *k == PathKind::Lan
+                                    && matches!(r, Route::Direct(e) if e.ip() == from.ip())
+                            })
+                        })
+                {
+                    return vec![];
+                }
                 let reply = probe.reply(self.own_key_id, from).encode(key);
                 // During hole punching: the direction from the other side to this machine works (design/mesh.md
                 // section 6.1)
@@ -1190,6 +1211,7 @@ impl Prober {
                 let index = match message.target {
                     SwitchTarget::Relay(relay) => paths.relay_index(relay),
                     SwitchTarget::Punched => paths.punched_index(),
+                    SwitchTarget::Lan => paths.lan_index(),
                 }?;
                 if message.round < together.accepted_round {
                     return None;
@@ -2186,6 +2208,67 @@ mod tests {
         );
         let decider = probes_to(1, &a_priv, &a_pub);
         assert!(decider.contains(&loopback), "{decider:?}");
+    }
+
+    /// A direct probe from a LAN address reached this machine on its LAN: it is answered only when this
+    /// machine has a LAN direct candidate to that address (hard rule 2); probes from public addresses are
+    /// answered as before.
+    #[test]
+    fn probes_from_the_lan_need_a_lan_candidate() {
+        let mesh = Mesh::new(&[1, 2]);
+        let (a_priv, a_pub) = keypair(1);
+        let (b_priv, b_pub) = keypair(2);
+        let anchors =
+            TrustAnchors::from_doc(&mesh.desired(1, vec![]).trust_anchors).expect("anchors");
+        let members: BTreeMap<NodeId, Member> = [(1, a_pub), (2, b_pub)]
+            .into_iter()
+            .map(|(n, key)| {
+                let m = admit(
+                    &mesh.material_for(mesh.policy(n, 1), key),
+                    &anchors,
+                    &Revocations::default(),
+                )
+                .expect("admitted");
+                (m.node_id.clone(), m)
+            })
+            .collect();
+        let mut a = Prober::new(&a_pub);
+        a.update(
+            &node_id(1),
+            Reachability::Public,
+            &a_priv,
+            &members,
+            &[(
+                node_id(2),
+                PeerPathConfig {
+                    reachability: Reachability::DialOnly,
+                    candidates: vec![Candidate::Lan {
+                        endpoint: addr("192.168.1.20:50002"),
+                    }],
+                },
+            )]
+            .into(),
+            &BTreeMap::new(),
+        );
+        let key = ProbeKey::direct(&b_priv, &a_pub).expect("key");
+        let now_ms = 1_700_000_000_000;
+        let probe = OuterProbe {
+            kind: DIRECT_PROBE,
+            key_id: KeyId::of(b_pub.as_bytes()),
+            seq: 1,
+            sent_ms: now_ms,
+        }
+        .encode(&key);
+        let mut answered = |from: &str| {
+            !a.on_packet(Incoming::Direct, addr(from), &probe, Instant::now(), now_ms)
+                .is_empty()
+        };
+        assert!(
+            answered("192.168.1.20:50002"),
+            "the LAN candidate's address"
+        );
+        assert!(!answered("192.168.1.30:50002"), "another LAN address");
+        assert!(answered("198.51.100.5:41820"), "a public address");
     }
 
     #[test]

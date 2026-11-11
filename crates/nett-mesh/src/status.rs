@@ -113,6 +113,9 @@ pub struct NodeStatus {
     pub listen_port: Option<u16>,
     /// NAT type and mapped addresses of a `dial-only` node (design/mesh.md section 6.1).
     pub nat: Option<NatStatus>,
+    /// LAN addresses, from which the Hub composes LAN direct candidates (design/mesh.md section 6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lan: Vec<crate::lan::LanAddress>,
     /// Clock error within 2 seconds (design/mesh.md section 8.4).
     pub clock_trusted: bool,
     pub started_at: Timestamp,
@@ -970,6 +973,7 @@ mod tests {
                 dataplane: DataPlaneKind::Kernel,
                 listen_port: Some(41820),
                 nat: None,
+                lan: vec![],
                 clock_trusted: true,
                 started_at: Timestamp::from_unix_seconds(1_700_000_000),
             },

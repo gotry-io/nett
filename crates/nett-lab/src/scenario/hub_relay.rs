@@ -8,6 +8,8 @@
 //! - a and b, both behind symmetric NATs, reach each other through a relay over UDP;
 //! - The relay process they use is killed: the decider proposes the other relay through the Hub, both
 //!   move there together without rotating by time slot, and the pair stays reachable;
+//! - c, on a's LAN behind the same NAT, gets a LAN direct candidate from the addresses both report, and
+//!   the pair moves onto the LAN;
 //! - With all of a's UDP blocked upstream, the pair moves to TLS and stays reachable;
 //! - `nett site relay <relay> --off` takes the relay out of every connection.
 
@@ -39,7 +41,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
     let mut namespaces = std::collections::BTreeMap::new();
-    for name in ["h", "r1", "r2", "a", "b"] {
+    for name in ["h", "r1", "r2", "a", "b", "c"] {
         let net = underlay
             .node(name)
             .with_context(|| format!("the hub-relay scenario needs a node `{name}`"))?;
@@ -81,7 +83,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         hub_ns: ns_h.clone(),
         hub_ip,
         site_ns: ns_h.clone(),
-        members: vec!["r1".into(), "r2".into(), "a".into(), "b".into()],
+        members: vec!["r1".into(), "r2".into(), "a".into(), "b".into(), "c".into()],
         hub: None,
     };
     let init = run_in(
@@ -107,7 +109,13 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
 
     // r, a and b join through the Hub: one command on the computer, one on the machine
     let mut nodes = Vec::new();
-    for (name, public) in [("r1", true), ("r2", true), ("a", false), ("b", false)] {
+    for (name, public) in [
+        ("r1", true),
+        ("r2", true),
+        ("a", false),
+        ("b", false),
+        ("c", false),
+    ] {
         let mut args = vec!["add", name, "--yes"];
         if public {
             args.push("--public");
@@ -159,7 +167,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         lab.processes.push((format!("node:{name}"), child));
         nodes.push(node);
     }
-    let (a, b) = (&nodes[2], &nodes[3]);
+    let (a, b, c) = (&nodes[2], &nodes[3], &nodes[4]);
     let relay_node = |name: &str| -> anyhow::Result<&LabNode> {
         nodes.iter().find(|n| n.name == name).context("relay node")
     };
@@ -333,6 +341,48 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     let r = relay_node(&used)?;
     let relay = spawn_relay(nett, &ns(&used)?, r)?;
     lab.relays.push((used.clone(), relay));
+
+    // c is on a's LAN: the Hub composes a LAN direct candidate from the addresses both report, and the
+    // pair moves onto it (both dial-only: the decider proposes it through the tunnel)
+    h.site_cmd(&["allow", "a", "c", "--yes"])?;
+    let deadline = Instant::now() + LEARN;
+    let lan = loop {
+        let doc = desired(&a.dir.join("desired.json"))?;
+        let found = doc
+            .paths
+            .iter()
+            .filter(|p| p.peer == c.node_id)
+            .flat_map(|p| &p.candidates)
+            .find_map(|c| match c {
+                Candidate::Lan { endpoint } => Some(*endpoint),
+                _ => None,
+            });
+        if found.is_some() || Instant::now() >= deadline {
+            break found;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let net_c = lab.underlay.node("c").context("planned node")?;
+    report.check(
+        "lan:candidate",
+        lan.is_some_and(|e| e.ip() == std::net::IpAddr::V4(net_c.ipv4)),
+        format!("a's LAN candidate to c: {lan:?}, c is at {}", net_c.ipv4),
+    );
+    let deadline = Instant::now() + FALLBACK;
+    while (kind(a, c) != "Lan" || kind(c, a) != "Lan") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let reachable = ping(&ns("a")?, &c.mesh_ipv4.to_string());
+    report.check(
+        "lan:path",
+        kind(a, c) == "Lan" && kind(c, a) == "Lan" && reachable.is_ok(),
+        format!(
+            "a -> c: {}, c -> a: {}; {}",
+            kind(a, c),
+            kind(c, a),
+            reachable.unwrap_or_else(|e| format!("{e:#}"))
+        ),
+    );
 
     // All of a's UDP blocked upstream: the pair moves to TLS
     crate::fault::block_udp_upstream(&lab.underlay, "a")?;

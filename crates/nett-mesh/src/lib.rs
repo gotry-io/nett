@@ -12,6 +12,8 @@ pub mod helper;
 pub mod key;
 #[cfg(feature = "lab")]
 pub mod lab;
+#[allow(unsafe_code)]
+pub mod lan;
 #[cfg(target_os = "linux")]
 pub mod linux;
 #[cfg(target_os = "macos")]

@@ -508,6 +508,11 @@ impl PeerPaths {
         self.punched
     }
 
+    /// The LAN direct candidate of this pair.
+    pub fn lan_index(&self) -> Option<usize> {
+        self.candidates.iter().position(|c| c.kind == PathKind::Lan)
+    }
+
     /// Measurements and state of each candidate path, including the current one (design/status.md section 6).
     pub fn candidate_views(&self, now: Instant) -> Vec<CandidateView> {
         self.candidates

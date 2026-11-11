@@ -71,7 +71,7 @@ impl Updates {
             };
             let m = next.machine_mut(&name)?;
             if m.learned != l.learned {
-                m.learned = l.learned;
+                m.learned = l.learned.clone();
                 applied.learned.push(name);
             }
         }

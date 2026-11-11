@@ -128,6 +128,9 @@ pub enum Candidate {
         fingerprint: CertFingerprint,
         token: ProbeToken,
     },
+    /// LAN direct path (design/mesh.md section 6): the peer's LAN address and WireGuard port, composed by
+    /// the Hub when both are on the same LAN.
+    Lan { endpoint: SocketAddr },
     /// Try hole punching for a direct path (design/mesh.md section 6.1): both sides are `dial-only`. The
     /// addresses are exchanged during hole punching, not here.
     Punch,
