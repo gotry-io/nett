@@ -132,7 +132,7 @@ A fatal error (such as a revoked node or a refused enrollment) is sent and then 
 | | Hub → node | `BackupChunk` | A chunk of the encrypted backup |
 | Mesh | Hub → node | The mesh partition in `DesiredState` | Addresses, peer public keys and admission material, candidate paths, relay list |
 | | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh process's local state (`status.md` section 6), sent when it changes |
-| | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4) |
+| | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4): node → Hub names the peer it is for, Hub → node the peer it came from, and carries the mesh process's message (at most 64 bytes), authenticated end to end with a key only the two members can derive. The Hub passes it on only between two members that the site connects (site.md section 6) and only to a node that is connected at the time; it is not queued, and the mesh processes resend |
 | Recovery | node → Hub | `ArtifactSync` | After the Hub is restored from a backup, the node sends back the signed artifacts and revocations in effect (section 6.4) |
 
 ## 6. Desired state
@@ -243,6 +243,7 @@ message Task {
 | Node connections | 256 at a time, the site's member limit; more are refused with HTTP 503 before the WebSocket upgrade |
 | Handshakes in progress | 16 at a time, each within 10 seconds; more are closed without a reply |
 | Messages per session | 50 per second on average, bursts of 200; a node above that gets `RATE_LIMITED` and the session closes |
+| `PathSwitch` queued for a node | 16; further ones are dropped |
 | Acknowledgement reasons | 1024 characters kept |
 | Events | 100 per machine, kept 30 days (hub.md section 8) |
 

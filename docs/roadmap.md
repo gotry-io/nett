@@ -65,7 +65,7 @@ Proceed in order: first pass the prototype gate, then replace the existing hand-
 
 ## M2: Mesh enhancements
 
-- Multi-hop relaying and automatic path finding
+- Multi-hop relaying and automatic path finding; relay choice from a line quality matrix, traffic limits per relay
 - QUIC transport, obfuscation wrapping, UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 
