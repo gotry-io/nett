@@ -6,6 +6,7 @@ pub mod api;
 pub mod db;
 pub mod gateway;
 pub mod hub;
+pub mod openapi;
 pub mod tls;
 
 pub fn now() -> i64 {

@@ -19,13 +19,17 @@ pub const CONNECT_PATH: &str = "/node/v1/connect";
 /// as is).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LinkRequest {
+    /// The one-time secret from the link code, base64url.
+    #[cfg_attr(feature = "openapi", schema(value_type = String))]
     pub secret: Bytes32,
     pub trust_anchors: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct LinkResponse {
     /// The site's `owner` token (auth.md section 6), which appears only here, once.
     pub token: String,
@@ -34,12 +38,14 @@ pub struct LinkResponse {
 /// Reply of `PUT /api/v1/site`: the generation after the Hub accepts it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct PushResponse {
     pub generation: u64,
 }
 
 /// `GET /api/v1/site/status`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StatusResponse {
     pub hub_version: String,
     pub url: String,
@@ -48,6 +54,7 @@ pub struct StatusResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct MachineStatus {
     pub name: String,
     pub node_id: String,
@@ -82,6 +89,7 @@ pub struct MachineStatus {
 
 /// API errors (design/api-resources.md section 2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Problem {
     pub title: String,
     #[serde(default)]
@@ -90,6 +98,7 @@ pub struct Problem {
 
 /// One event of a machine, newest first in `GET /api/v1/site/events`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct Event {
     /// Unix seconds.
     pub at: i64,

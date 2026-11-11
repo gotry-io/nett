@@ -26,8 +26,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true
+# Schemas for the Hub's OpenAPI document; only nett-hub enables it
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Only in tests, interoperate with an independent Noise implementation to confirm that the handshake
 # and transport messages are computed per the specification
 snow = { version = "0.10.0", default-features = false, features = ["default-resolver", "use-curve25519", "use-chacha20poly1305", "use-blake2", "use-getrandom", "std"] }
+
+[features]
+openapi = ["dep:utoipa"]

@@ -21,6 +21,7 @@ cargo deny --locked check
 
 - The Hub's SQL queries are checked at compile time against the offline data in `.sqlx/`. After changing a query or a migration, regenerate it with `cargo sqlx prepare --workspace` against a database created from `crates/nett-hub/migrations/`.
 - Protobuf types are generated from `proto/`: `cargo run -p nett-proto-gen`, and commit the result.
+- The Hub's OpenAPI document is generated from its handlers: after changing the API, run `cargo run -p nett-hub -- openapi > docs/api/openapi.json`; a test fails while the committed copy is stale.
 - Mesh behavior is tested in lab scenarios built from Linux network namespaces (root required): see `nett-lab --help` and [docs/design/prototype.md](docs/design/prototype.md). For example:
 
   ```bash

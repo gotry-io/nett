@@ -1,0 +1,510 @@
+{
+  "components": {
+    "schemas": {
+      "Event": {
+        "description": "One event of a machine, newest first in `GET /api/v1/site/events`.",
+        "properties": {
+          "at": {
+            "description": "Unix seconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "kind": {
+            "description": "`connected`, `disconnected`, `joined`, `left`, `config`, `upgrade`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "kind",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "LinkRequest": {
+        "additionalProperties": false,
+        "description": "`POST /api/v1/link`: the random secret in the link code, plus the site's trust anchor list (JSON\nas is).",
+        "properties": {
+          "secret": {
+            "description": "The one-time secret from the link code, base64url.",
+            "type": "string"
+          },
+          "trust_anchors": {}
+        },
+        "required": [
+          "secret",
+          "trust_anchors"
+        ],
+        "type": "object"
+      },
+      "LinkResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "token": {
+            "description": "The site's `owner` token (auth.md section 6), which appears only here, once.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token"
+        ],
+        "type": "object"
+      },
+      "MachineStatus": {
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "applied_generation": {
+            "description": "The generation and result the machine last acknowledged (`applied`, `rejected`, `pending`).",
+            "format": "int64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_seen": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "nett_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "online": {
+            "type": "boolean"
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "result": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "description": "The mesh process's local status (design/status.md section 6), and the time it was reported\n(Unix seconds)."
+          },
+          "status_at": {
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "upgrade_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "upgrade_result": {
+            "description": "The machine's answer to the release manifest (`applied`, `pending`, `rejected`) and its\nreason (design/release.md section 7).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "node_id",
+          "address",
+          "online"
+        ],
+        "type": "object"
+      },
+      "Problem": {
+        "description": "API errors (design/api-resources.md section 2).",
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "type": "object"
+      },
+      "PushResponse": {
+        "additionalProperties": false,
+        "description": "Reply of `PUT /api/v1/site`: the generation after the Hub accepts it.",
+        "properties": {
+          "generation": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "generation"
+        ],
+        "type": "object"
+      },
+      "StatusResponse": {
+        "description": "`GET /api/v1/site/status`.",
+        "properties": {
+          "generation": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "hub_version": {
+            "type": "string"
+          },
+          "machines": {
+            "items": {
+              "$ref": "#/components/schemas/MachineStatus"
+            },
+            "type": "array"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub_version",
+          "url",
+          "generation",
+          "machines"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "owner_token": {
+        "description": "The site's owner token from `nett site link`",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "The API the signing tool `nett site` uses to link a site to its Hub, push it and read the machines' status (design/hub.md section 4). Errors are application/problem+json.",
+    "license": {
+      "name": "MIT OR Apache-2.0"
+    },
+    "title": "nett Hub API",
+    "version": "0.1.5"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/link": {
+      "post": {
+        "operationId": "link",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LinkRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LinkResponse"
+                }
+              }
+            },
+            "description": "Linked"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The trust anchor list is not valid"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "The link code is wrong, expired or used"
+          }
+        },
+        "summary": "Links the site to this Hub with the one-time secret from the link code, and pins the site's\ntrust anchor list (design/hub.md section 3.1). Returns the site's owner token, once.",
+        "tags": [
+          "site"
+        ],
+        "x-nett-risk": "high",
+        "x-nett-scope": "link code"
+      }
+    },
+    "/api/v1/site": {
+      "put": {
+        "operationId": "push",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          },
+          "description": "The site state, as `state.json` in the site directory",
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PushResponse"
+                }
+              }
+            },
+            "description": "Accepted"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not a site state"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No or a wrong owner token"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not accepted, with the reason"
+          }
+        },
+        "security": [
+          {
+            "owner_token": []
+          }
+        ],
+        "summary": "Pushes the whole site state (design/site.md section 8). Every signed artifact in it is verified\nagainst the pinned trust anchors; older versions, changed content under the same version and a\nrevoked machine coming back are refused (design/hub.md section 4). Returns the generation.",
+        "tags": [
+          "site"
+        ],
+        "x-nett-risk": "medium",
+        "x-nett-scope": "owner"
+      }
+    },
+    "/api/v1/site/events": {
+      "get": {
+        "operationId": "events",
+        "parameters": [
+          {
+            "description": "The machine's node ID",
+            "in": "query",
+            "name": "node",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "description": "How many, 1 to 100 (default 20)",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "format": "int64",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Event"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Newest first"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "`node` is not a node ID"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No or a wrong owner token"
+          }
+        },
+        "security": [
+          {
+            "owner_token": []
+          }
+        ],
+        "summary": "A machine's recent events (design/hub.md section 8), newest first: `?node=<ID>&limit=<n>`.\nNode IDs need no URL decoding.",
+        "tags": [
+          "machines"
+        ],
+        "x-nett-risk": "low",
+        "x-nett-scope": "owner"
+      }
+    },
+    "/api/v1/site/status": {
+      "get": {
+        "operationId": "status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatusResponse"
+                }
+              }
+            },
+            "description": "The status of every machine"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No or a wrong owner token"
+          }
+        },
+        "security": [
+          {
+            "owner_token": []
+          }
+        ],
+        "summary": "Every machine's connection, version, last acknowledgement, upgrade answer and local status\n(design/hub.md section 3.4).",
+        "tags": [
+          "machines"
+        ],
+        "x-nett-risk": "low",
+        "x-nett-scope": "owner"
+      }
+    },
+    "/api/v1/site/updates": {
+      "get": {
+        "operationId": "updates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            },
+            "description": "The updates (nett_site::updates::Updates)"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No or a wrong owner token"
+          }
+        },
+        "security": [
+          {
+            "owner_token": []
+          }
+        ],
+        "summary": "Hub-side enrollment, leave and learned addresses (design/hub.md section 4): the signing tool\nfetches them first with every command.\nWhat happened on the Hub that the site has not taken in yet: admission material of machines\nthat joined, machines that left, and learned public addresses (design/hub.md section 4).",
+        "tags": [
+          "site"
+        ],
+        "x-nett-risk": "low",
+        "x-nett-scope": "owner"
+      }
+    },
+    "/node/v1/connect": {
+      "get": {
+        "operationId": "connect",
+        "responses": {
+          "101": {
+            "description": "Switching to the WebSocket protocol"
+          },
+          "503": {
+            "description": "Too many node connections"
+          }
+        },
+        "summary": "The node gateway (design/protocol.md): a WebSocket carrying Noise IK and Protobuf messages.\nNodes authenticate with their identity key inside the Noise handshake, not with a token.",
+        "tags": [
+          "nodes"
+        ],
+        "x-nett-risk": "low",
+        "x-nett-scope": "node identity (Noise IK)"
+      }
+    }
+  }
+}
