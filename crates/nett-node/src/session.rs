@@ -627,10 +627,7 @@ impl Node {
         upgrading: &mut Upgrading,
     ) -> (AckResult, String) {
         let Some(upgrader) = &self.upgrader else {
-            return (
-                AckResult::Rejected,
-                "this machine does not upgrade itself".to_owned(),
-            );
+            return release_without_upgrader(manifest);
         };
         match upgrader.plan(manifest) {
             Err(e) => (AckResult::Rejected, e),
@@ -808,6 +805,25 @@ fn boot_id() -> [u8; 16] {
     b
 }
 
+/// A machine whose program nett-node does not install (a container image, a program installed by
+/// hand): the release it already runs counts as applied, and a newer one is reported for whoever
+/// maintains it to upgrade.
+fn release_without_upgrader(manifest: &[u8]) -> (AckResult, String) {
+    let released = match nett_trust::release::Manifest::parse(manifest).and_then(|m| m.version()) {
+        Ok(version) => version,
+        Err(e) => return (AckResult::Rejected, e.to_string()),
+    };
+    let running: Option<nett_trust::release::Version> = env!("CARGO_PKG_VERSION").parse().ok();
+    if running.is_some_and(|running| released <= running) {
+        (AckResult::Applied, String::new())
+    } else {
+        (
+            AckResult::Rejected,
+            format!("{released} is available; this machine does not upgrade itself"),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
@@ -816,6 +832,33 @@ mod tests {
     use nett_trust::encoding::Timestamp;
 
     use super::*;
+
+    fn manifest(version: &str) -> Vec<u8> {
+        serde_json::json!({
+            "version": version,
+            "programs": { "x86_64-unknown-linux-musl": {
+                "url": format!("https://nett.example.com/dl/nett-{version}-x86_64-unknown-linux-musl"),
+                "sha256": "ab".repeat(32),
+                "minisig": include_str!("../../nett-trust/tests/data/SHA256SUMS.minisig"),
+            }}
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[test]
+    fn a_machine_without_an_upgrader_reports_only_a_newer_release() {
+        let current = release_without_upgrader(&manifest(env!("CARGO_PKG_VERSION")));
+        assert_eq!(current, (AckResult::Applied, String::new()));
+        let newer = release_without_upgrader(&manifest("999.0.0"));
+        assert_eq!(
+            newer,
+            (
+                AckResult::Rejected,
+                "999.0.0 is available; this machine does not upgrade itself".to_owned()
+            )
+        );
+    }
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("nett-node-{name}-{}", std::process::id()));
