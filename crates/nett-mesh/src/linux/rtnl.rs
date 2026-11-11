@@ -10,6 +10,7 @@ use super::netlink::{
 };
 
 const RTM_NEWLINK: u16 = 16;
+const RTM_DELLINK: u16 = 17;
 const RTM_GETLINK: u16 = 18;
 const RTM_NEWADDR: u16 = 20;
 const RTM_DELADDR: u16 = 21;
@@ -78,6 +79,18 @@ pub(crate) fn create_wireguard(sock: &mut Socket, name: &str) -> Result<bool, Nl
     match sock.request(m) {
         Ok(_) => Ok(true),
         Err(e) if e.errno() == Some(EEXIST) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// 删除接口（连同它的地址与路由）；不存在时返回 `false`。
+pub(crate) fn del_link(sock: &mut Socket, name: &str) -> Result<bool, NlError> {
+    let mut m = Message::new(RTM_DELLINK, NLM_F_ACK);
+    m.fixed(&ifinfo(0, 0, 0));
+    m.attr_str(IFLA_IFNAME, name);
+    match sock.request(m) {
+        Ok(_) => Ok(true),
+        Err(e) if e.errno() == Some(ENODEV) => Ok(false),
         Err(e) => Err(e),
     }
 }

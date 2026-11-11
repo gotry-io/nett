@@ -1,12 +1,16 @@
 //! 关联码与接入 token 的格式（design/hub.md 第 3.1、3.5 节）：固定前缀加上 base64url 编码的 JSON。
 //!
 //! - 关联码 `nett_lnk_…`：Hub 地址、Hub 身份公钥、一次性的随机密钥，以及 Hub 自签证书时证书的指纹；
-//! - 接入 token `nett_enr_…`：已是成员的机器接入 Hub 用。只有 Hub 地址、Hub 身份公钥、节点 ID、信任锚
-//!   清单的指纹，没有秘密：机器用自己的身份密钥连接 Hub。
+//! - 接入 token `nett_enr_…`：Hub 地址、Hub 身份公钥、节点 ID、信任锚清单的指纹。已是成员的机器用的
+//!   没有秘密，机器用自己的身份密钥连接 Hub；新机器用的（入网 token，design/auth.md 第 8.1 节）多了入网
+//!   私钥与过期时间。
+
+use std::fmt;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const LINK_PREFIX: &str = "nett_lnk_";
 pub const JOIN_PREFIX: &str = "nett_enr_";
@@ -43,6 +47,34 @@ impl<'de> Deserialize<'de> for Bytes32 {
     }
 }
 
+/// 32 字节的秘密：内存中用完清零，调试输出中不显示（硬性规则 10）。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Secret32(pub Zeroizing<[u8; 32]>);
+
+impl Secret32 {
+    pub fn new(bytes: [u8; 32]) -> Self {
+        Self(Zeroizing::new(bytes))
+    }
+}
+
+impl fmt::Debug for Secret32 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Secret32(..)")
+    }
+}
+
+impl Serialize for Secret32 {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        Bytes32(*self.0).serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Secret32 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Bytes32::deserialize(d).map(|b| Self(Zeroizing::new(b.0)))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LinkCode {
@@ -63,6 +95,19 @@ pub struct JoinToken {
     pub anchors: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_fingerprint: Option<Bytes32>,
+    /// 只在入网 token 中。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enroll: Option<Enroll>,
+}
+
+/// 入网 token 的秘密部分。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Enroll {
+    /// 入网私钥：Ed25519 的 32 字节种子。
+    pub key: Secret32,
+    /// 过期时间（Unix 秒）。
+    pub expires_at: i64,
 }
 
 fn encode(prefix: &str, value: &impl Serialize) -> String {
@@ -129,8 +174,29 @@ mod tests {
             node_id: "node_01J9Z3K8Q2T7V4X6Y8A0B2C401".into(),
             anchors: "AAAAAAAAAAAAAAAAAAAAAA".into(),
             tls_fingerprint: Some(Bytes32([1; 32])),
+            enroll: None,
         };
         assert_eq!(JoinToken::decode(&format!(" {} ", join.encode())), Ok(join));
         assert!(LinkCode::decode("nett_lnk_!!!").is_err());
+    }
+
+    #[test]
+    fn the_enrollment_key_round_trips_and_stays_out_of_debug_output() {
+        let join = JoinToken {
+            url: "https://hub.example.com".into(),
+            hub_key: Bytes32([7; 32]),
+            node_id: "node_01J9Z3K8Q2T7V4X6Y8A0B2C401".into(),
+            anchors: "AAAAAAAAAAAAAAAAAAAAAA".into(),
+            tls_fingerprint: None,
+            enroll: Some(Enroll {
+                key: Secret32(Zeroizing::new([0xab; 32])),
+                expires_at: 1_800_000_000,
+            }),
+        };
+        let text = join.encode();
+        assert_eq!(JoinToken::decode(&text), Ok(join.clone()));
+        let debug = format!("{join:?}");
+        assert!(!debug.contains("171"), "{debug}");
+        assert!(debug.contains("Secret32(..)"), "{debug}");
     }
 }

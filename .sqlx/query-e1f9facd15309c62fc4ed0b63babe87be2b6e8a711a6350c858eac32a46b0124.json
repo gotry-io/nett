@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM node_updates WHERE node_id = ?1 AND enrolled IS NULL AND left_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "e1f9facd15309c62fc4ed0b63babe87be2b6e8a711a6350c858eac32a46b0124"
+}

@@ -5,7 +5,13 @@
 //! - 推送之后各成员应用，Hub 组成的期望状态与站点目录中写出的逐份相同，`nett site status` 列出全部机器；
 //! - Hub 停止时组网照常，修改推不出去；Hub 恢复之后成员重连，下一次推送补齐；
 //! - 模拟被攻破的 Hub（直接改它的数据库）：下发另一个站点签名的成员，成员拒绝这个成员、其余照常；
-//!   下发旧版本的访问规则，成员拒绝这份规则、继续使用已生效的版本，并作为问题报告，连通不受影响。
+//!   下发旧版本的访问规则，成员拒绝这份规则、继续使用已生效的版本，并作为问题报告，连通不受影响；
+//! - 退出与重新入网（H2）：一个成员退出，Hub 当场移除它、其他成员删除它，它的组网接口被拆掉；同一个名字
+//!   作为新机器经 Hub 入网（不写公网地址，由 Hub 得知），得到新的节点 ID 与地址，与其他成员连通；token
+//!   只能用一次。
+//!
+//! 入网与退出在节点的命名空间中由 `nett-lab enroll`、`nett-lab leave` 完成：它们调用 `sudo nett install
+//! <token>` 与 `sudo nett leave` 用的同一份库代码，只是不安装服务、文件放在实验目录中。
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -13,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use nett_mesh::config::DesiredMeshDoc;
+use nett_mesh::key::PrivateKey;
 use nett_node::config::HubConfig;
 use nett_proto::api::StatusResponse;
 use nett_proto::token::JoinToken;
@@ -573,6 +580,231 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         reachable.is_ok(),
         reachable.unwrap_or_else(|e| format!("{e:#}")),
     );
+
+    // 退出：先停下 b 的进程（`nett leave` 先删服务），再告诉 Hub、拆掉接口
+    let lab_bin = std::env::current_exe().context("locating nett-lab")?;
+    let ns_b = ns(&b.name)?;
+    for process in [b.name.clone(), format!("node:{}", b.name)] {
+        if let Some(i) = lab.processes.iter().position(|(n, _)| *n == process) {
+            let (_, mut child) = lab.processes.remove(i);
+            run("kill", ["-TERM", &child.id().to_string()]).ok();
+            child.wait().ok();
+        }
+    }
+    let left = run_in(
+        &ns_b,
+        &lab_bin.display().to_string(),
+        ["leave", "--out", &b.dir.to_string_lossy()],
+    );
+    report.check(
+        "leave:told-the-hub",
+        left.is_ok(),
+        left.as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    let gone = run_in(
+        &ns_b,
+        "ip",
+        ["link", "show", nett_mesh::dataplane::INTERFACE_NAME],
+    );
+    report.check(
+        "leave:interface-removed",
+        gone.is_err(),
+        gone.map_or_else(
+            |_| "no mesh interface".to_owned(),
+            |o| format!("still there: {o}"),
+        ),
+    );
+    let old_key = b.mesh_public_key.to_string();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let dropped = loop {
+        let peers = wg_peers(&ns_a)?;
+        if !peers.contains(&old_key) || Instant::now() >= deadline {
+            break peers;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    report.check(
+        "leave:dropped-by-members",
+        !dropped.contains(&old_key),
+        format!("wg peers on {}: {dropped:?}", a.name),
+    );
+    let synced = h.site_cmd(&["status"]);
+    report.check(
+        "leave:removed-from-the-site",
+        synced
+            .as_ref()
+            .is_ok_and(|o| o.contains(&format!("- {} left the site", b.name))),
+        synced
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+
+    // 同一个名字作为新机器入网：电脑上一条命令，机器上一条（这里是 nett-lab enroll）；公网地址由 Hub 得知
+    let added = h.site_cmd(&["add", &b.name, "--public", "--yes"])?;
+    report.check(
+        "join:one-line-printed",
+        added.contains(
+            "curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_",
+        ),
+        added.clone(),
+    );
+    let token = added
+        .split_whitespace()
+        .find(|w| w.starts_with("nett_enr_"))
+        .context("nett site add printed no token")?
+        .to_owned();
+    let new_dir = out.join(format!("{}-new", b.name));
+    std::fs::remove_dir_all(&new_dir).ok();
+    run(
+        &nett.display().to_string(),
+        ["keys", "--dir", &new_dir.to_string_lossy()],
+    )?;
+    let joined = run_in(
+        &ns_b,
+        &lab_bin.display().to_string(),
+        [
+            "enroll",
+            "--out",
+            &new_dir.to_string_lossy(),
+            "--token",
+            &token,
+        ],
+    );
+    report.check(
+        "join:enrolled",
+        joined.is_ok(),
+        joined
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    joined?;
+    let doc = desired(&new_dir.join("desired.json"))?;
+    report.check(
+        "join:new-node-id",
+        doc.node_id != b.node_id,
+        format!("{} -> {}", b.node_id, doc.node_id),
+    );
+    let reused = {
+        let other = out.join(format!("{}-other", b.name));
+        std::fs::remove_dir_all(&other).ok();
+        run(
+            &nett.display().to_string(),
+            ["keys", "--dir", &other.to_string_lossy()],
+        )?;
+        run_in(
+            &ns_b,
+            &lab_bin.display().to_string(),
+            [
+                "enroll",
+                "--out",
+                &other.to_string_lossy(),
+                "--token",
+                &token,
+            ],
+        )
+    };
+    report.check(
+        "join:token-used-once",
+        reused
+            .as_ref()
+            .is_err_and(|e| format!("{e:#}").contains("already joined")),
+        reused.map_or_else(|e| format!("{e:#}"), |o| format!("unexpected success: {o}")),
+    );
+    let state_now = State::from_json(&std::fs::read(site.join("state.json"))?)?;
+    let m = state_now.machine(&b.name.parse()?)?;
+    let rejoined = LabNode {
+        name: b.name.clone(),
+        node_id: doc.node_id.clone(),
+        mesh_public_key: PrivateKey::load(&new_dir.join("mesh.key"))?.public_key(),
+        mesh_ipv4: m.mesh.ipv4,
+        mesh_ipv6: m.mesh.ipv6,
+        edge_ipv4: None,
+        dir: new_dir.clone(),
+        tls: false,
+        userspace: false,
+    };
+    lab.spawn(&rejoined, nett)?;
+    let child = spawn_in(
+        &ns_b,
+        nett,
+        [
+            "node".as_ref(),
+            "--dir".as_ref(),
+            new_dir.as_os_str(),
+            "--socket".as_ref(),
+            new_dir.join("mesh.sock").as_os_str(),
+        ],
+        &new_dir.join("node.log"),
+    )?;
+    lab.processes.push((format!("node:{}", b.name), child));
+    // 新机器没有原来的规则（design/site.md 第 4 节）：放行之后才连得上
+    let allowed = h.site_cmd(&["allow", &all, &all, "--yes"]);
+    report.record("join:allow", allowed.unwrap_or_else(|e| format!("{e:#}")));
+    let current = h.wait_acked("applied", Duration::from_secs(30));
+    report.check(
+        "join:members-current",
+        current.is_ok(),
+        current.as_ref().map_or_else(
+            |e| format!("{e:#}"),
+            |s| format!("generation {}", s.generation),
+        ),
+    );
+    let reachable = ping(&ns_a, &rejoined.mesh_ipv4.to_string());
+    report.check(
+        "join:mesh-connected",
+        reachable.is_ok(),
+        reachable.unwrap_or_else(|e| format!("{e:#}")),
+    );
+    // 站点取回入网的结果与得知的地址
+    h.site_cmd(&["status"])?;
+    let state_now = State::from_json(&std::fs::read(site.join("state.json"))?)?;
+    let m = state_now.machine(&b.name.parse()?)?;
+    report.check(
+        "join:recorded-in-the-site",
+        m.keys.map(|k| k.mesh) == Some(rejoined.mesh_public_key) && m.enrollment.is_none(),
+        format!("keys {:?}", m.keys),
+    );
+    let net_b = lab.underlay.node(&b.name).context("planned node")?;
+    let expected = net_b.public_ipv4.unwrap_or(net_b.ipv4);
+    report.check(
+        "join:public-address-learned",
+        m.ipv4.is_none() && m.learned.ipv4.map(|l| l.ip) == Some(expected),
+        format!("learned {:?}, expected {expected}", m.learned),
+    );
     drop(h);
     Ok(report)
+}
+
+/// `nett-lab enroll`：在节点的命名空间中经 Hub 入网（`sudo nett install <token>` 的同一份库代码），把期望
+/// 状态与 Hub 的配置写进节点目录。
+pub fn enroll_here(dir: &Path, token: &str) -> anyhow::Result<()> {
+    let token = JoinToken::decode(token)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let enrolled = runtime.block_on(nett_node::join::enroll(dir, &token, nett_hub::now()))?;
+    std::fs::write(dir.join("desired.json"), &enrolled.desired)?;
+    enrolled.config.save(dir).map_err(anyhow::Error::msg)?;
+    println!("joined as {}", enrolled.config.node_id);
+    Ok(())
+}
+
+/// `nett-lab leave`：告诉 Hub 这台机器退出，拆掉组网接口与过滤规则（`sudo nett leave` 的同一份库代码）。
+/// 组网进程要先停下。
+pub fn leave_here(dir: &Path) -> anyhow::Result<()> {
+    let config = HubConfig::load(dir)
+        .map_err(anyhow::Error::msg)?
+        .context("no hub.json")?;
+    let identity = PrivateKey::load(&dir.join("identity.key"))?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(nett_node::session::leave(
+        &config,
+        &x25519_dalek::StaticSecret::from(*identity.as_bytes()),
+    ))?;
+    nett_mesh::linux::teardown()?;
+    println!("left");
+    Ok(())
 }

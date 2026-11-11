@@ -7,6 +7,8 @@ use crate::token::Bytes32;
 pub const LINK_PATH: &str = "/api/v1/link";
 pub const SITE_PATH: &str = "/api/v1/site";
 pub const STATUS_PATH: &str = "/api/v1/site/status";
+/// Hub 一侧的入网、退出与得知的地址（design/hub.md 第 4 节），回复是 `nett_site::updates::Updates`。
+pub const UPDATES_PATH: &str = "/api/v1/site/updates";
 pub const CONNECT_PATH: &str = "/node/v1/connect";
 
 /// `POST /api/v1/link`：关联码中的随机密钥，加上站点的信任锚清单（JSON 原样）。

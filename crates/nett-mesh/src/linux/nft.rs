@@ -140,6 +140,32 @@ pub(super) fn load_transport(m: &mut Message, offset: u32, len: u32) {
     });
 }
 
+/// 删除一张 nftables 表（连同其中的链与规则）；不存在时忽略。
+pub(super) fn delete_table(name: &str) -> Result<(), NlError> {
+    let mut del = Message::new(nft_type(NFT_MSG_DELTABLE), NLM_F_ACK);
+    del.fixed(&nfgen(NFPROTO_INET, 0));
+    del.attr_str(NFTA_TABLE_NAME, name);
+    match Socket::open(Some(NETFILTER))?.request_batch(vec![
+        batch(NFNL_MSG_BATCH_BEGIN),
+        del,
+        batch(NFNL_MSG_BATCH_END),
+    ]) {
+        Ok(()) => Ok(()),
+        Err(e) if e.errno() == Some(ENOENT) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// 组网进程建的全部 nftables 表。
+pub(super) fn tables() -> [&'static str; 4] {
+    [
+        TABLE,
+        super::filter::ACCESS_TABLE,
+        super::filter::EDGE_TABLE,
+        super::filter::INGRESS_TABLE,
+    ]
+}
+
 /// 重建探测规则（IPv4 与 IPv6）：`udp dport <port> @th,64,8 0x82-0x83 log group <group>`，以及 WireGuard 的
 /// cookie 应答 `udp dport <port> udp length 72 @th,64,8 3 log group <group>`（design/mesh.md 第 7.1 节）。
 pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {

@@ -3,6 +3,7 @@
 
 pub mod config;
 pub mod http;
+pub mod join;
 pub mod session;
 pub mod tls;
 pub mod url;

@@ -22,6 +22,7 @@ use nett_site::state::{NodeKeys, RuleId, Selector, State};
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{PortRange, Protocol};
+use nett_trust::signing::EnrollmentKeyPair;
 
 use crate::hub::SiteHub;
 use crate::layout::{key_values, table};
@@ -32,14 +33,17 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
 
   init [--origin https://<host>]       create a site: recovery key and mesh prefixes
   link <link code>                     link the site to a Hub; printed by `nett-hub init`
-  add <name> --keys \"<mesh key> <identity key>\" [--public] [--ipv4 <address>]
+  add <name> [--keys \"<mesh key> <identity key>\"] [--public] [--ipv4 <address>]
              [--ipv6 <address>] [--port <port>]
-                                       add a machine; --keys is the line printed on it by
-                                       `nett keys` or `sudo nett install`
+                                       add a machine. With a Hub it prints the one line that
+                                       joins the new machine, and the Hub learns the address
+                                       of a --public machine; without one, --keys is the line
+                                       printed on it by `nett keys` or `sudo nett install`
   set <name> [--public | --dial-only] [--ipv4 <address>|none] [--ipv6 <address>|none]
              [--port <port>|default]   change how other machines reach it
   remove <name>                        remove a machine; rules that name it go with it
-  invite <name>                        with a Hub: print the command that connects it to the Hub;
+  invite <name>                        with a Hub: print the command that connects it to the Hub
+                                       (a new token for a machine that has not joined yet);
                                        without: sign its node policy again, rewrite its desired state
   edge <name> <prefix>... | --none     the Edge containers on this machine
   routes <name> <prefix>... | --none   the routes this machine advertises
@@ -58,6 +62,8 @@ The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it 
 
 /// 一次修改：在站点状态的副本上进行。
 type Change = Box<dyn FnOnce(&mut State) -> anyhow::Result<()>>;
+/// 推送成功之后要做的事（打印新机器上要运行的一行）。
+type After<'a> = &'a dyn Fn(&State) -> anyhow::Result<()>;
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut words: Vec<String> = Vec::new();
@@ -92,6 +98,12 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     let words: Vec<&str> = words.iter().map(String::as_str).collect();
     let machine = |s: &str| -> anyhow::Result<NodeName> { Ok(s.parse()?) };
+    // 接了 Hub 时每条命令先取回 Hub 一侧发生的事（design/hub.md 第 4 节）
+    if !matches!(words.as_slice(), ["init"] | ["link", _])
+        && let Some(hub) = SiteHub::load(&dir)?
+    {
+        sync(&dir, &hub)?;
+    }
     let change: Change = match words.as_slice() {
         ["init"] => return init(&dir, origin.as_deref().unwrap_or(DEFAULT_ORIGIN)),
         ["link", code] => return crate::hub::link(&dir, code),
@@ -120,12 +132,24 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                     .context("--port")?,
                 keys: keys.as_deref().map(str::parse::<NodeKeys>).transpose()?,
             };
-            ensure!(
-                opts.keys.is_some(),
-                "--keys is needed: run `nett keys` or `sudo nett install` on the machine and pass the \
-                 line it prints"
-            );
             let id = new_node_id()?;
+            if opts.keys.is_none() {
+                // 接了 Hub：签好节点策略，新机器经 Hub 入网（design/hub.md 第 3.3、6 节）
+                let Some(hub) = SiteHub::load(&dir)? else {
+                    bail!(
+                        "--keys is needed: run `nett keys` or `sudo nett install` on the machine and \
+                         pass the line it prints; with a Hub (`nett site link`), new machines join \
+                         without it"
+                    );
+                };
+                return enroll(
+                    &dir,
+                    &hub,
+                    yes,
+                    &name.clone(),
+                    Box::new(move |s| Ok(s.add(name, opts, id)?)),
+                );
+            }
             Box::new(move |s| Ok(s.add(name, opts, id)?))
         }
         ["set", name] => {
@@ -182,7 +206,103 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
         _ => bail!(USAGE),
     };
-    modify(&dir, yes, &[], change)
+    modify(&dir, yes, &[], change, None)
+}
+
+/// 取回 Hub 一侧发生的事，记进站点目录（design/hub.md 第 4 节）：入网的机器记下公钥与准入材料，退出的机器
+/// 移除、规则随之清理并以新的版本重签（收窄），得知的公网地址记下。只有记录与收窄，不用确认。Hub 不在时
+/// 跳过：命令之后的推送会报告。
+fn sync(dir: &Path, hub: &SiteHub) -> anyhow::Result<()> {
+    let Ok(updates) = crate::hub::fetch_updates(hub) else {
+        return Ok(());
+    };
+    let site = SiteDir::open(dir)?;
+    let stored = site.load()?;
+    let mut next = stored.clone();
+    let applied = updates
+        .apply(&mut next)
+        .context("recording what happened on the Hub")?;
+    if next == stored {
+        return Ok(());
+    }
+    sign(&mut next, &site.recovery()?, Timestamp::now(), &[])?;
+    println!("From the Hub:");
+    for name in &applied.joined {
+        println!("  + {name} joined through the Hub");
+    }
+    for name in &applied.left {
+        println!("  - {name} left the site (`nett leave` on the machine)");
+    }
+    for line in describe(&stored, &next) {
+        println!("  {line}");
+    }
+    save_with_outputs(&site, &stored, &next, &outputs(&next)?)?;
+    // 送不到时下一条命令再推
+    if let Err(e) = crate::hub::push(hub, &next) {
+        println!("  (pushing this to the Hub failed: {e:#})");
+    }
+    println!();
+    Ok(())
+}
+
+/// 各台机器的期望状态；组成失败（生成的期望状态组网进程不接受）时整条命令失败。
+fn outputs(state: &State) -> anyhow::Result<Vec<(NodeName, DesiredMeshDoc)>> {
+    let mut outputs = Vec::new();
+    for name in state.machines.keys() {
+        if let Some(doc) = desired(state, name)? {
+            outputs.push((name.clone(), doc));
+        }
+    }
+    Ok(outputs)
+}
+
+/// 保存站点状态，重写各台机器的期望状态文件，删除已移除的机器的文件。返回写了文件的机器。
+fn save_with_outputs(
+    site: &SiteDir,
+    old: &State,
+    new: &State,
+    outputs: &[(NodeName, DesiredMeshDoc)],
+) -> anyhow::Result<Vec<NodeName>> {
+    let written = write_outputs(site, outputs)?;
+    for name in old
+        .machines
+        .keys()
+        .filter(|n| !new.machines.contains_key(*n))
+    {
+        site.remove_desired(name)?;
+    }
+    site.save(new)?;
+    Ok(written)
+}
+
+/// 让一台机器经 Hub 入网：`change` 之后给它一把新的入网密钥（design/hub.md 第 6 节），签名、推送，再打印
+/// 新机器上要运行的一行。入网私钥只在这一行里。
+fn enroll(
+    dir: &Path,
+    hub: &SiteHub,
+    yes: bool,
+    name: &NodeName,
+    change: Change,
+) -> anyhow::Result<()> {
+    let key = EnrollmentKeyPair::generate().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let public_key = key.public_key();
+    let expires_at = Timestamp::now().unix_seconds() + crate::hub::ENROLL_VALIDITY_SECS;
+    let target = name.clone();
+    let after = |state: &State| -> anyhow::Result<()> {
+        let token = crate::hub::enrollment_token(hub, state, name, key.seed())?;
+        crate::hub::print_enrollment(name, &token);
+        Ok(())
+    };
+    modify(
+        dir,
+        yes,
+        &[],
+        Box::new(move |s| {
+            change(s)?;
+            Ok(s.await_enrollment(&target, public_key, expires_at)?)
+        }),
+        Some(&after),
+    )
 }
 
 fn list_or_none(items: &[&str], none: bool, what: &str) -> anyhow::Result<Option<Vec<IpPrefix>>> {
@@ -199,21 +319,28 @@ fn list_or_none(items: &[&str], none: bool, what: &str) -> anyhow::Result<Option
 }
 
 /// 一条修改命令（design/site.md 第 7 节）：修改 → 签名 → 列出变化 → 确认 → 写期望状态 → 保存站点状态。
-/// `force` 中的机器即使没有变化也重签节点策略（`invite`）。
-fn modify(dir: &Path, yes: bool, force: &[NodeId], change: Change) -> anyhow::Result<()> {
+/// `force` 中的机器即使没有变化也重签节点策略（`invite`）。接了 Hub 时 `after` 在推送成功之后运行。
+fn modify(
+    dir: &Path,
+    yes: bool,
+    force: &[NodeId],
+    change: Change,
+    after: Option<After<'_>>,
+) -> anyhow::Result<()> {
     let site = SiteDir::open(dir)?;
     let old = site.load()?;
     let mut new = old.clone();
     change(&mut new)?;
+    let hub = SiteHub::load(dir)?;
+    // 不接 Hub 时没有人能告诉站点公网地址（design/site.md 第 4 节）
+    if hub.is_none()
+        && let Some(name) = new.unknown_public_addresses().first()
+    {
+        bail!("public machine `{name}` needs --ipv4 or --ipv6: other members dial it there");
+    }
     sign(&mut new, &site.recovery()?, Timestamp::now(), force)?;
     let lines = describe(&old, &new);
-    let mut outputs = Vec::new();
-    for name in new.machines.keys() {
-        if let Some(doc) = desired(&new, name)? {
-            outputs.push((name.clone(), doc));
-        }
-    }
-    let hub = SiteHub::load(dir)?;
+    let outputs = outputs(&new)?;
     if lines.is_empty() {
         // 没有要签的：只补上缺少或不一致的期望状态文件；接了 Hub 时再推一次（上一次可能没有送到，
         // 内容相同时 Hub 不换代数）
@@ -240,15 +367,7 @@ fn modify(dir: &Path, yes: bool, force: &[NodeId], change: Change) -> anyhow::Re
             "Sign?"
         },
     )?;
-    let written = write_outputs(&site, &outputs)?;
-    for name in old
-        .machines
-        .keys()
-        .filter(|n| !new.machines.contains_key(*n))
-    {
-        site.remove_desired(name)?;
-    }
-    site.save(&new)?;
+    let written = save_with_outputs(&site, &old, &new, &outputs)?;
     let Some(hub) = hub else {
         print_written(&site, &written);
         return Ok(());
@@ -268,6 +387,9 @@ fn modify(dir: &Path, yes: bool, force: &[NodeId], change: Change) -> anyhow::Re
         })
         .collect();
     print_written(&site, &offline);
+    if let Some(after) = after {
+        after(&new)?;
+    }
     ensure!(!failed, "some machines did not apply the change cleanly");
     Ok(())
 }
@@ -344,8 +466,12 @@ Next, for each machine:
 /// `nett site invite`（不接 Hub）：重签这台机器的节点策略，重写它的期望状态（design/site.md 第 3 节）。
 fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
     if let Some(hub) = SiteHub::load(dir)? {
-        // 接了 Hub：已是成员的机器用自己的身份密钥连接 Hub，从那里接收期望状态（design/hub.md 第 3.5 节）
         let state = SiteDir::open(dir)?.load()?;
+        if state.machine(name)?.keys.is_none() {
+            // 还没有入网：换一把入网密钥，原来的 token 随之作废（design/hub.md 第 3.3 节）
+            return enroll(dir, &hub, yes, name, Box::new(|_| Ok(())));
+        }
+        // 已是成员的机器用自己的身份密钥连接 Hub，从那里接收期望状态（design/hub.md 第 3.5 节）
         crate::hub::push(&hub, &state)?;
         let token = crate::hub::join_token(&hub, &state, name)?;
         println!("{name} is already a member. On {name}, run:\n  sudo nett install {token}");
@@ -355,7 +481,7 @@ fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
         let site = SiteDir::open(dir)?;
         site.load()?.machine(name)?.node_id.clone()
     };
-    modify(dir, yes, &[node], Box::new(|_| Ok(())))
+    modify(dir, yes, &[node], Box::new(|_| Ok(())), None)
 }
 
 fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<()> {
@@ -733,7 +859,16 @@ mod tests {
         assert_eq!(state.rules[&RuleId(1)].ports.len(), 2);
         assert_eq!(state.access_rules.as_ref().map(|r| r.version), Some(1));
         // 没有 --keys：不改
-        assert!(site(&dir, &["add", "nas"]).is_err());
+        // 不接 Hub 时公钥与 public 机器的地址都要写明
+        let e = site(&dir, &["add", "nas"]).expect_err("needs keys");
+        assert!(e.to_string().contains("--keys is needed"), "{e}");
+        let (_, line) = keys();
+        let e = site(
+            &dir,
+            &["add", "relay", "--public", "--keys", &line, "--yes"],
+        )
+        .expect_err("needs an address");
+        assert!(e.to_string().contains("needs --ipv4 or --ipv6"), "{e}");
         let mac_file = dir.join(NODES_DIR).join("mac").join(DESIRED_FILE);
         let bytes = std::fs::read(&mac_file).expect("written");
         assert_eq!(

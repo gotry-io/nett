@@ -5,7 +5,6 @@
 mod common;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -18,36 +17,6 @@ use nett_proto::v1::ErrorCode;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use common::*;
-
-const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
-
-fn cert_fingerprint() -> [u8; 32] {
-    use rustls::pki_types::CertificateDer;
-    use rustls::pki_types::pem::PemObject as _;
-    let der = CertificateDer::from_pem_file(Path::new(DATA).join("test-cert.pem")).expect("cert");
-    let digest = ring::digest::digest(&ring::digest::SHA256, der.as_ref());
-    digest.as_ref().try_into().expect("32 bytes")
-}
-
-/// 启动 Hub 的 HTTPS 服务，返回它的地址。
-async fn serve(hub: Arc<Hub>) -> String {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let port = listener.local_addr().expect("address").port();
-    let acceptor = nett_hub::tls::acceptor(
-        &Path::new(DATA).join("test-cert.pem"),
-        &Path::new(DATA).join("test-key.pem"),
-    )
-    .expect("tls");
-    let app = nett_hub::api::router(hub);
-    tokio::spawn(async move {
-        axum::serve(nett_hub::tls::TlsListener::new(listener, acceptor), app)
-            .await
-            .ok();
-    });
-    format!("https://127.0.0.1:{port}")
-}
 
 fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
     Node {

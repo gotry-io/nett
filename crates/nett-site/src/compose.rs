@@ -52,8 +52,8 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
     pairs
 }
 
-/// 本机到一个对端的候选路径（design/mesh.md 第 6 节）：对端是 `public` 时直连它的公网地址（有 IPv4、IPv6
-/// 时分别一条）；两端都是 `dial-only` 时打洞；本机是 `public`、对端是 `dial-only` 时没有候选，由对端连过来
+/// 本机到一个对端的候选路径（design/mesh.md 第 6 节）：对端是 `public` 时直连它的公网地址（写明的或 Hub
+/// 得知的，有 IPv4、IPv6 时分别一条）；两端都是 `dial-only` 时打洞；本机是 `public`、对端是 `dial-only` 时没有候选，由对端连过来
 /// （WireGuard 的漫游）。
 pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     match (me.reachability, peer.reachability) {
@@ -61,13 +61,16 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
             let port = peer
                 .listen_port(state.listen_port)
                 .unwrap_or(state.listen_port);
-            [peer.ipv4.map(IpAddr::V4), peer.ipv6.map(IpAddr::V6)]
-                .into_iter()
-                .flatten()
-                .map(|ip| Candidate::Direct {
-                    endpoint: SocketAddr::new(ip, port),
-                })
-                .collect()
+            [
+                peer.public_ipv4().map(IpAddr::V4),
+                peer.public_ipv6().map(IpAddr::V6),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|ip| Candidate::Direct {
+                endpoint: SocketAddr::new(ip, port),
+            })
+            .collect()
         }
         (Reachability::DialOnly, Reachability::DialOnly) => vec![Candidate::Punch],
         (Reachability::Public, Reachability::DialOnly) => Vec::new(),

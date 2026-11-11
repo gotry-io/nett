@@ -80,6 +80,13 @@ const COMMANDS: &[Command] = &[
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
+        name: "leave",
+        group: Group::Machine,
+        summary: "Leave the site: tell the Hub, remove the services and delete the keys",
+        usage: install::LEAVE_USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
         name: "keys",
         group: Group::Machine,
         summary: "Create this node's keys and print the line for the site description",
@@ -166,6 +173,8 @@ fn run() -> anyhow::Result<()> {
         "install" => install::install_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "uninstall" => install::uninstall_command(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "leave" => install::leave_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "keys" => mesh::keys(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -9,7 +9,7 @@ pub struct Envelope {
     pub reply_to: u64,
     #[prost(message, optional, tag = "3")]
     pub sent_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 20, 21, 30, 31, 40")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 40")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
@@ -28,6 +28,8 @@ pub mod envelope {
         Goodbye(super::Goodbye),
         #[prost(message, tag = "15")]
         Error(super::Error),
+        #[prost(message, tag = "16")]
+        Leave(super::Leave),
         #[prost(message, tag = "20")]
         DesiredState(super::DesiredState),
         #[prost(message, tag = "21")]
@@ -59,6 +61,9 @@ pub struct Hello {
     pub applied_generation: u64,
     #[prost(string, repeated, tag = "6")]
     pub capabilities: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+    /// 只在入网时：准入证明的 JSON（auth.md 第 8.2、10.5 节），其中的身份公钥就是握手用的那一把
+    #[prost(bytes = "vec", tag = "7")]
+    pub admission_proof: ::prost::alloc::vec::Vec<u8>,
 }
 /// Hub → node：Noise 握手的第二条消息的载荷
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -86,6 +91,10 @@ pub struct Pong {
 pub struct Goodbye {
     #[prost(string, tag = "1")]
     pub reason: ::prost::alloc::string::String,
+}
+/// node → Hub：节点自行退出（nett leave，auth.md 第 8.3 节）。Hub 随即移除这台机器
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Leave {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Error {
@@ -132,7 +141,7 @@ pub struct StateAck {
     #[prost(message, repeated, tag = "2")]
     pub partitions: ::prost::alloc::vec::Vec<PartitionAck>,
 }
-/// node → Hub：版本、平台与本机的地址
+/// node → Hub：版本、平台，以及连接 Hub 时本机用的地址（hub.md 第 5 节）
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Inventory {
     #[prost(string, tag = "1")]
@@ -168,6 +177,8 @@ pub enum ErrorCode {
     UpgradeRequired = 3,
     InvalidMessage = 4,
     RateLimited = 5,
+    /// 入网被拒绝：token 过期、机器已经入网、准入证明不对；原因在 message 中
+    EnrollmentRefused = 6,
 }
 impl ErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -182,6 +193,7 @@ impl ErrorCode {
             Self::UpgradeRequired => "UPGRADE_REQUIRED",
             Self::InvalidMessage => "INVALID_MESSAGE",
             Self::RateLimited => "RATE_LIMITED",
+            Self::EnrollmentRefused => "ENROLLMENT_REFUSED",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -193,6 +205,7 @@ impl ErrorCode {
             "UPGRADE_REQUIRED" => Some(Self::UpgradeRequired),
             "INVALID_MESSAGE" => Some(Self::InvalidMessage),
             "RATE_LIMITED" => Some(Self::RateLimited),
+            "ENROLLMENT_REFUSED" => Some(Self::EnrollmentRefused),
             _ => None,
         }
     }

@@ -1,6 +1,7 @@
-//! 签名工具与 Hub（design/hub.md 第 3、4 节）：`nett site link` 关联站点；每条修改命令签名之后把站点推给
-//! Hub，等各台机器确认；`nett site status` 显示 Hub 汇总的状态；`nett site invite` 为已有的机器生成接入
-//! token。站点目录中的 `hub.json`（`0600`）记着 Hub 的地址、身份公钥和站点的 token。
+//! 签名工具与 Hub（design/hub.md 第 3、4 节）：`nett site link` 关联站点；每条命令先取回 Hub 一侧发生的事；
+//! 每条修改命令签名之后把站点推给 Hub，等各台机器确认；`nett site status` 显示 Hub 汇总的状态；`nett site
+//! add`、`invite` 生成新机器入网和已有的机器接入用的 token。站点目录中的 `hub.json`（`0600`）记着 Hub 的
+//! 地址、身份公钥和站点的 token。
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -12,13 +13,14 @@ use nett_mesh::status::StatusDoc;
 use nett_node::http::{Target, call};
 use nett_proto::api::{
     LINK_PATH, LinkRequest, LinkResponse, MachineStatus, PushResponse, SITE_PATH, STATUS_PATH,
-    StatusResponse,
+    StatusResponse, UPDATES_PATH,
 };
-use nett_proto::token::{Bytes32, JoinToken, LinkCode};
+use nett_proto::token::{Bytes32, Enroll, JoinToken, LinkCode, Secret32};
 use nett_site::changes::path_kind;
 use nett_site::compose::connections;
 use nett_site::dir::SiteDir;
 use nett_site::state::State;
+use nett_site::updates::Updates;
 use nett_trust::anchors::TrustAnchors;
 use nett_trust::encoding::Timestamp;
 use serde::{Deserialize, Serialize};
@@ -26,6 +28,10 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{key_values, table};
 
 pub const SITE_HUB_FILE: &str = "hub.json";
+/// 新机器上安装 `nett` 的脚本（design/release.md 第 6 节）：只安装程序，不读 token。
+pub const INSTALL_SCRIPT: &str = "curl -fsSL https://nett.gotry.io/install.sh | sh";
+/// 入网 token 的有效期（design/auth.md 第 8.1 节）。
+pub const ENROLL_VALIDITY_SECS: i64 = 30 * 60;
 /// 推送之后等各台机器确认的上限（design/hub.md 第 3.2 节）。
 const WAIT_APPLIED: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(300);
@@ -142,6 +148,11 @@ pub fn push(hub: &SiteHub, state: &State) -> anyhow::Result<u64> {
         Some(serde_json::to_vec(state)?),
     )?;
     Ok(reply.generation)
+}
+
+/// Hub 一侧发生、站点还没有取回的事（design/hub.md 第 4 节）。
+pub fn fetch_updates(hub: &SiteHub) -> anyhow::Result<Updates> {
+    request(&hub.target(), "GET", UPDATES_PATH, Some(&hub.token), None)
 }
 
 fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
@@ -270,8 +281,45 @@ pub fn join_token(hub: &SiteHub, state: &State, name: &NodeName) -> anyhow::Resu
         node_id: m.node_id.to_string(),
         anchors: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(anchors.fingerprint()),
         tls_fingerprint: hub.tls_fingerprint,
+        enroll: None,
     }
     .encode())
+}
+
+/// 新机器的入网 token（design/hub.md 第 6 节）：多了入网私钥与过期时间，30 分钟内有效，只能用一次。
+pub fn enrollment_token(
+    hub: &SiteHub,
+    state: &State,
+    name: &NodeName,
+    seed: &[u8; 32],
+) -> anyhow::Result<String> {
+    let m = state.machine(name)?;
+    let pending = m
+        .enrollment
+        .as_ref()
+        .with_context(|| format!("{name} is not waiting to join"))?;
+    let anchors = TrustAnchors::from_doc(&state.trust_anchors)
+        .map_err(|e| anyhow::anyhow!("the site's trust anchors: {e}"))?;
+    use base64::Engine as _;
+    Ok(JoinToken {
+        url: hub.url.clone(),
+        hub_key: hub.hub_key,
+        node_id: m.node_id.to_string(),
+        anchors: base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(anchors.fingerprint()),
+        tls_fingerprint: hub.tls_fingerprint,
+        enroll: Some(Enroll {
+            key: Secret32::new(*seed),
+            expires_at: pending.expires_at,
+        }),
+    }
+    .encode())
+}
+
+/// 新机器上要运行的一行（design/hub.md 第 3.3 节）：所有平台相同。
+pub fn print_enrollment(name: &NodeName, token: &str) {
+    println!(
+        "On {name}, run within 30 minutes (once):\n  {INSTALL_SCRIPT} && sudo nett install {token}"
+    );
 }
 
 /// `nett site status` 接了 Hub 时（design/hub.md 第 3.4 节）。
@@ -293,13 +341,17 @@ pub fn status(
             println!("{}", serde_json::to_string_pretty(m)?);
             return Ok(());
         }
-        print!(
-            "{}",
-            key_values(&[
-                ("hub", hub_line(m, now)),
-                ("config", config_text(m, reply.generation)),
-            ])
-        );
+        let mut lines = vec![
+            ("hub", hub_line(m, now)),
+            ("config", config_text(m, reply.generation)),
+        ];
+        if let Some(public) = public_text(state, name) {
+            lines.push(("public", public));
+        }
+        if let Some(pending) = pending_text(state, name, now) {
+            lines.push(("joining", pending));
+        }
+        print!("{}", key_values(&lines));
         match m.status.clone().map(serde_json::from_value::<StatusDoc>) {
             Some(Ok(doc)) => print!("\n{}", crate::status::overview(&doc, now)),
             Some(Err(_)) => {
@@ -336,13 +388,19 @@ pub fn status(
         } else {
             "never".to_owned()
         };
+        let problems = m
+            .name
+            .parse::<NodeName>()
+            .ok()
+            .and_then(|n| pending_text(state, &n, now))
+            .unwrap_or_else(|| problems_text(m, now));
         rows.push([
             m.name.clone(),
             m.address.clone(),
             hub_state,
             m.nett_version.clone().unwrap_or_else(|| "-".into()),
             config_text(m, reply.generation),
-            problems_text(m, now),
+            problems,
         ]);
     }
     println!("\n{}", table(&rows).trim_end());
@@ -419,6 +477,53 @@ fn config_text(m: &MachineStatus, generation: u64) -> String {
         Outcome::Waiting | Outcome::Offline(_) => "behind".to_owned(),
         Outcome::NeverConnected => "-".to_owned(),
     }
+}
+
+/// 等待入网的机器：token 还有多久过期（design/hub.md 第 3.3 节）。
+fn pending_text(state: &State, name: &NodeName, now: Timestamp) -> Option<String> {
+    let pending = state.machines.get(name)?.enrollment.as_ref()?;
+    let left = pending.expires_at - now.unix_seconds();
+    Some(if left > 0 {
+        format!(
+            "waiting to join; the token expires in {} min",
+            (left + 59) / 60
+        )
+    } else {
+        format!("waiting to join; the token expired, `nett site invite {name}` prints a new one")
+    })
+}
+
+/// `public` 机器的公网地址与来源（design/hub.md 第 5 节）。
+fn public_text(state: &State, name: &NodeName) -> Option<String> {
+    let m = state.machines.get(name)?;
+    let port = m.listen_port(state.listen_port)?;
+    let one = |written: Option<String>, learned: Option<(String, String)>| {
+        written
+            .map(|ip| format!("{ip} (written in the site)"))
+            .or_else(|| learned.map(|(ip, from)| format!("{ip} ({from})")))
+    };
+    let parts: Vec<String> = [
+        one(
+            m.ipv4.map(|ip| format!("{ip}:{port}")),
+            m.learned
+                .ipv4
+                .map(|l| (format!("{}:{port}", l.ip), l.from.to_string())),
+        ),
+        one(
+            m.ipv6.map(|ip| format!("[{ip}]:{port}")),
+            m.learned
+                .ipv6
+                .map(|l| (format!("[{}]:{port}", l.ip), l.from.to_string())),
+        ),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Some(if parts.is_empty() {
+        "address not known yet; the Hub learns it when the machine connects".to_owned()
+    } else {
+        parts.join(", ")
+    })
 }
 
 fn problems_text(m: &MachineStatus, now: Timestamp) -> String {

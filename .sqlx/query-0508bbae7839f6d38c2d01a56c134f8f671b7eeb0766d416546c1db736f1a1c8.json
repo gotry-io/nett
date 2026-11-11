@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,\n                    ack_reason, status, status_at\n             FROM nodes ORDER BY node_id",
+  "query": "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,\n                    ack_reason, status, status_at, learned\n             FROM nodes ORDER BY node_id",
   "describe": {
     "columns": [
       {
@@ -101,6 +101,17 @@
             "name": "status_at"
           }
         }
+      },
+      {
+        "name": "learned",
+        "ordinal": 9,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "nodes",
+            "name": "learned"
+          }
+        }
       }
     ],
     "parameters": {
@@ -115,8 +126,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "30f3f0d9febab0bee41d68d140998e8e5fa29cc537e0f77b866410b706d79164"
+  "hash": "0508bbae7839f6d38c2d01a56c134f8f671b7eeb0766d416546c1db736f1a1c8"
 }

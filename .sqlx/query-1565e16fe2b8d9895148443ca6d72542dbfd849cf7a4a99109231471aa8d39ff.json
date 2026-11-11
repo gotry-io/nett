@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO node_updates (node_id, enrolled) VALUES (?1, ?2)\n             ON CONFLICT (node_id) DO UPDATE SET enrolled = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1565e16fe2b8d9895148443ca6d72542dbfd849cf7a4a99109231471aa8d39ff"
+}

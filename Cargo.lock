@@ -1289,6 +1289,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml",
+ "x25519-dalek 3.0.0",
 ]
 
 [[package]]
@@ -1316,6 +1317,7 @@ dependencies = [
 name = "nett-node"
 version = "0.1.5"
 dependencies = [
+ "base64 0.23.1",
  "bytes",
  "futures-util",
  "http-body-util",

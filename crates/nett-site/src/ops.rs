@@ -7,10 +7,13 @@ use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_mesh::config::Reachability;
+use nett_trust::keys::Ed25519PublicKey;
 use nett_trust::payload::{MeshAddresses, PortRange};
 
 use crate::SiteError;
-use crate::state::{Edge, Machine, NodeKeys, Part, Revoked, Rule, RuleId, Selector, State};
+use crate::state::{
+    Edge, Enrollment, Learned, Machine, NodeKeys, Part, Revoked, Rule, RuleId, Selector, State,
+};
 
 /// 加入一台机器时的选项。
 #[derive(Debug, Clone, Default)]
@@ -58,6 +61,30 @@ impl State {
 
     pub fn remove(&mut self, name: &NodeName) -> Result<(), SiteError> {
         self.attempt(|s| s.remove_in(name))
+    }
+
+    /// 让一台还没有公钥的机器等待经 Hub 入网（design/hub.md 第 6 节）：记下新的入网公钥与 token 的过期
+    /// 时间。之后签名时节点策略换成写着这把公钥的新版本，原来的 token 随之作废。
+    pub fn await_enrollment(
+        &mut self,
+        name: &NodeName,
+        public_key: Ed25519PublicKey,
+        expires_at: i64,
+    ) -> Result<(), SiteError> {
+        let m = self.machine_mut(name)?;
+        if m.keys.is_some() {
+            return Err(SiteError::invalid(format!(
+                "`{name}` is already a member; `nett site invite {name}` prints the command that \
+                 connects it to the Hub"
+            )));
+        }
+        let policy = m.enrollment.take().and_then(|e| e.policy);
+        m.enrollment = Some(Enrollment {
+            public_key,
+            expires_at,
+            policy,
+        });
+        Ok(())
     }
 
     pub fn set_edge(
@@ -116,6 +143,8 @@ impl State {
                 ipv6: opts.ipv6,
                 port: opts.port,
                 keys: opts.keys,
+                enrollment: None,
+                learned: Learned::default(),
                 mesh,
                 edge: None,
                 routes: Vec::new(),

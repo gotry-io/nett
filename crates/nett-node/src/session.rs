@@ -16,8 +16,8 @@ use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
-    AckResult, DesiredState, Envelope, ErrorCode, Hello, Inventory, LinkReport, PartitionAck,
-    PartitionKind, Ping, StateAck,
+    AckResult, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
+    PartitionAck, PartitionKind, Ping, StateAck,
 };
 use prost::Message as _;
 use tokio::net::TcpStream;
@@ -35,6 +35,8 @@ pub const STATUS_EVERY: Duration = Duration::from_secs(15);
 const PING_EVERY: Duration = Duration::from_secs(25);
 const MISSED_PINGS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// 入网时等第一份期望状态的上限。
+const ENROLL_TIMEOUT: Duration = Duration::from_secs(20);
 /// 重连的退避：起始 1 秒，上限 60 秒，带随机抖动。
 const BACKOFF_MIN: Duration = Duration::from_secs(1);
 const BACKOFF_MAX: Duration = Duration::from_secs(60);
@@ -127,104 +129,216 @@ impl Outbox {
     }
 }
 
-impl Node {
-    async fn connect(&self) -> Result<(Ws, Transport), SessionError> {
-        let fail =
-            |e: &dyn std::fmt::Display| SessionError::Connect(format!("{}: {e}", self.config.url));
-        let url = HubUrl::parse(&self.config.url).map_err(SessionError::Connect)?;
-        let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(url.authority()))
-            .await
-            .map_err(|_| fail(&"connecting timed out"))?
-            .map_err(|e| fail(&e))?;
-        tcp.set_nodelay(true).ok();
-        let server = url.server_name().map_err(SessionError::Connect)?;
-        let tls = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            connector(self.config.tls_fingerprint.map(|f| f.0))
-                .map_err(|e| fail(&e))?
-                .connect(server, tcp),
-        )
+/// 连接 Hub：TCP、TLS（按证书或固定的指纹校验，硬性规则 11）、WebSocket，再以身份密钥做 Noise IK 握手。
+/// 入网时 `admission_proof` 是准入证明的 JSON（design/hub.md 第 6 节），平时为空。返回本机这一端的地址：
+/// Hub 据此得知 `public` 机器的公网地址（第 5 节）。
+async fn connect(
+    config: &HubConfig,
+    identity: &StaticSecret,
+    admission_proof: Vec<u8>,
+) -> Result<(Ws, Transport, Option<std::net::SocketAddr>), SessionError> {
+    let fail = |e: &dyn std::fmt::Display| SessionError::Connect(format!("{}: {e}", config.url));
+    let url = HubUrl::parse(&config.url).map_err(SessionError::Connect)?;
+    let tcp = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(url.authority()))
         .await
-        .map_err(|_| fail(&"TLS handshake timed out"))?
+        .map_err(|_| fail(&"connecting timed out"))?
         .map_err(|e| fail(&e))?;
-        let ws_config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_MESSAGE))
-            .max_frame_size(Some(MAX_MESSAGE));
-        let target = format!("wss://{}{CONNECT_PATH}", url.authority());
-        let (mut ws, _) = tokio::time::timeout(
-            CONNECT_TIMEOUT,
-            tokio_tungstenite::client_async_with_config(target, tls, Some(ws_config)),
-        )
-        .await
-        .map_err(|_| fail(&"WebSocket handshake timed out"))?
-        .map_err(|e| fail(&e))?;
+    tcp.set_nodelay(true).ok();
+    let local = tcp.local_addr().ok();
+    let server = url.server_name().map_err(SessionError::Connect)?;
+    let tls = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        connector(config.tls_fingerprint.map(|f| f.0))
+            .map_err(|e| fail(&e))?
+            .connect(server, tcp),
+    )
+    .await
+    .map_err(|_| fail(&"TLS handshake timed out"))?
+    .map_err(|e| fail(&e))?;
+    let ws_config = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE))
+        .max_frame_size(Some(MAX_MESSAGE));
+    let target = format!("wss://{}{CONNECT_PATH}", url.authority());
+    let (mut ws, _) = tokio::time::timeout(
+        CONNECT_TIMEOUT,
+        tokio_tungstenite::client_async_with_config(target, tls, Some(ws_config)),
+    )
+    .await
+    .map_err(|_| fail(&"WebSocket handshake timed out"))?
+    .map_err(|e| fail(&e))?;
 
-        let mut initiator =
-            Initiator::new(&self.identity, self.config.hub_key.0).map_err(|e| fail(&e))?;
-        let boot = boot_id();
-        let hello = envelope(
-            1,
-            Body::Hello(Hello {
-                protocol_versions: vec![nett_proto::PROTOCOL_VERSION.to_owned()],
-                node_version: env!("CARGO_PKG_VERSION").to_owned(),
-                node_id: self.config.node_id.clone(),
-                boot_id: boot.to_vec(),
-                applied_generation: 0,
-                capabilities: vec!["chunked_state".to_owned()],
-            }),
-        );
-        let m1 = initiator
-            .write_message(&hello.encode_to_vec())
-            .map_err(|e| fail(&e))?;
-        ws.send(Message::Binary(m1.into()))
+    let mut initiator = Initiator::new(identity, config.hub_key.0).map_err(|e| fail(&e))?;
+    let boot = boot_id();
+    let hello = envelope(
+        1,
+        Body::Hello(Hello {
+            protocol_versions: vec![nett_proto::PROTOCOL_VERSION.to_owned()],
+            node_version: env!("CARGO_PKG_VERSION").to_owned(),
+            node_id: config.node_id.clone(),
+            boot_id: boot.to_vec(),
+            applied_generation: 0,
+            capabilities: vec!["chunked_state".to_owned()],
+            admission_proof,
+        }),
+    );
+    let m1 = initiator
+        .write_message(&hello.encode_to_vec())
+        .map_err(|e| fail(&e))?;
+    ws.send(Message::Binary(m1.into()))
+        .await
+        .map_err(|e| fail(&e))?;
+    let m2 = loop {
+        match tokio::time::timeout(CONNECT_TIMEOUT, ws.next())
             .await
-            .map_err(|e| fail(&e))?;
-        let m2 = loop {
-            match tokio::time::timeout(CONNECT_TIMEOUT, ws.next())
-                .await
-                .map_err(|_| fail(&"no handshake reply"))?
-            {
-                Some(Ok(Message::Binary(m))) => break m,
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(_)) | None => {
-                    return Err(fail(&"the Hub closed the connection during the handshake"));
-                }
-                Some(Err(e)) => return Err(fail(&e)),
+            .map_err(|_| fail(&"no handshake reply"))?
+        {
+            Some(Ok(Message::Binary(m))) => break m,
+            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+            Some(Ok(_)) | None => {
+                return Err(fail(&"the Hub closed the connection during the handshake"));
             }
+            Some(Err(e)) => return Err(fail(&e)),
+        }
+    };
+    let (payload, transport) = initiator.read_message(&m2).map_err(|e| {
+        fail(&format!(
+            "handshake: {e}; is the Hub key in hub.json right?"
+        ))
+    })?;
+    match Envelope::decode(payload.as_slice()).map(|e| e.body) {
+        Ok(Some(Body::Welcome(_))) => Ok((ws, transport, local)),
+        Ok(Some(Body::Error(e))) => Err(SessionError::Refused {
+            code: ErrorCode::try_from(e.code).unwrap_or(ErrorCode::Unspecified),
+            message: e.message,
+        }),
+        _ => Err(fail(&"the Hub's handshake reply is not a Welcome")),
+    }
+}
+
+/// 连接之后的第一条消息：版本、平台与本机这一端的地址。
+fn inventory(local: Option<std::net::SocketAddr>) -> Body {
+    Body::Inventory(Inventory {
+        nett_version: env!("CARGO_PKG_VERSION").to_owned(),
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        addresses: local.map(|a| a.ip().to_string()).into_iter().collect(),
+    })
+}
+
+/// 等 Hub 发来的下一条消息，直到 `deadline`。
+async fn next_envelope(
+    ws: &mut Ws,
+    out: &mut Outbox,
+    reassembler: &mut Reassembler,
+    deadline: tokio::time::Instant,
+) -> Result<Option<Envelope>, SessionError> {
+    loop {
+        let message = match tokio::time::timeout_at(deadline, ws.next()).await {
+            Err(_) => return Ok(None),
+            Ok(Some(Ok(m))) => m,
+            Ok(Some(Err(e))) => return Err(SessionError::Broken(e.to_string())),
+            Ok(None) => return Err(SessionError::Broken("the Hub closed the connection".into())),
         };
-        let (payload, transport) = initiator.read_message(&m2).map_err(|e| {
-            fail(&format!(
-                "handshake: {e}; is the Hub key in hub.json right?"
-            ))
-        })?;
-        match Envelope::decode(payload.as_slice()).map(|e| e.body) {
-            Ok(Some(Body::Welcome(_))) => Ok((ws, transport)),
-            Ok(Some(Body::Error(e))) => Err(SessionError::Refused {
-                code: ErrorCode::try_from(e.code).unwrap_or(ErrorCode::Unspecified),
-                message: e.message,
-            }),
-            _ => Err(fail(&"the Hub's handshake reply is not a Welcome")),
+        match message {
+            Message::Binary(ct) => {
+                let pt = out
+                    .transport
+                    .decrypt(&ct)
+                    .map_err(|e| SessionError::Broken(e.to_string()))?;
+                if let Some(env) = reassembler
+                    .push(&pt)
+                    .map_err(|e| SessionError::Broken(e.to_string()))?
+                {
+                    return Ok(Some(env));
+                }
+            }
+            Message::Close(_) => {
+                return Err(SessionError::Broken("the Hub closed the connection".into()));
+            }
+            _ => {}
         }
     }
+}
 
+/// 入网的那一次连接（design/hub.md 第 6 节）：`Hello` 带着准入证明，返回 Hub 发来的第一份期望状态的 mesh
+/// 分区。核对它是 `join::enroll` 的事。
+pub async fn enroll(
+    config: &HubConfig,
+    identity: &StaticSecret,
+    admission_proof: Vec<u8>,
+) -> Result<Vec<u8>, SessionError> {
+    let (mut ws, transport, local) = connect(config, identity, admission_proof).await?;
+    let mut out = Outbox {
+        transport,
+        next_id: 1,
+        next_stream: 0,
+    };
+    out.send(&mut ws, inventory(local)).await?;
+    let mut reassembler = Reassembler::default();
+    let deadline = tokio::time::Instant::now() + ENROLL_TIMEOUT;
+    while let Some(env) = next_envelope(&mut ws, &mut out, &mut reassembler, deadline).await? {
+        match env.body {
+            Some(Body::DesiredState(desired)) => {
+                let mesh = desired
+                    .partitions
+                    .into_iter()
+                    .find(|p| p.kind == PartitionKind::Mesh as i32)
+                    .map(|p| p.content);
+                ws.close(None).await.ok();
+                return mesh.ok_or_else(|| {
+                    SessionError::Broken("the Hub sent no desired state for this machine".into())
+                });
+            }
+            Some(Body::Error(e)) => {
+                return Err(SessionError::Refused {
+                    code: ErrorCode::try_from(e.code).unwrap_or(ErrorCode::Unspecified),
+                    message: e.message,
+                });
+            }
+            _ => {}
+        }
+    }
+    Err(SessionError::Broken(
+        "the Hub sent no desired state in time".into(),
+    ))
+}
+
+/// 告诉 Hub 这台机器退出（`nett leave`，auth.md 第 8.3 节），等 Hub 处理完关闭连接。
+pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), SessionError> {
+    let (mut ws, transport, _) = connect(config, identity, Vec::new()).await?;
+    let mut out = Outbox {
+        transport,
+        next_id: 1,
+        next_stream: 0,
+    };
+    out.send(&mut ws, Body::Leave(Leave {})).await?;
+    let mut reassembler = Reassembler::default();
+    let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+    // Hub 记下退出之后关闭连接；在那之前发来的期望状态不用理会
+    loop {
+        match next_envelope(&mut ws, &mut out, &mut reassembler, deadline).await {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                return Err(SessionError::Broken(
+                    "the Hub did not confirm in time".into(),
+                ));
+            }
+            Err(SessionError::Broken(_)) => return Ok(()),
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+impl Node {
     /// 一次连接，直到断开。
     pub async fn session(&self) -> Result<(), SessionError> {
-        let (mut ws, transport) = self.connect().await?;
+        let (mut ws, transport, local) = connect(&self.config, &self.identity, Vec::new()).await?;
         tracing::info!(url = %self.config.url, "connected to the Hub");
         let mut out = Outbox {
             transport,
             next_id: 1,
             next_stream: 0,
         };
-        out.send(
-            &mut ws,
-            Body::Inventory(Inventory {
-                nett_version: env!("CARGO_PKG_VERSION").to_owned(),
-                platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
-                addresses: Vec::new(),
-            }),
-        )
-        .await?;
+        out.send(&mut ws, inventory(local)).await?;
         let mut reassembler = Reassembler::default();
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -13,7 +13,7 @@ use nett_mesh::config::{MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_por
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Sha256Digest;
-use nett_trust::keys::X25519PublicKey;
+use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{MeshAddresses, PortRange};
 use nett_trust::signed::SignedPayload;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -63,9 +63,15 @@ pub struct Machine {
     /// `public` 机器自己的 WireGuard 端口；没有时用站点默认的端口。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<u16>,
-    /// 机器的公钥：不接 Hub 时由 `add --keys` 写明。
+    /// 机器的公钥：不接 Hub 时由 `add --keys` 写明，经 Hub 入网的机器取自它的准入证明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keys: Option<NodeKeys>,
+    /// 等待经 Hub 入网（design/hub.md 第 6 节）：入网公钥、token 的过期时间与签好的初始节点策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment: Option<Enrollment>,
+    /// Hub 得知的公网地址（design/hub.md 第 5 节）：`public` 机器没有写明地址时用它。
+    #[serde(default, skip_serializing_if = "Learned::is_empty")]
+    pub learned: Learned,
     /// 组网地址。
     pub mesh: MeshAddresses,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -93,6 +99,69 @@ impl Machine {
     /// `public` 机器的 WireGuard 端口。
     pub fn listen_port(&self, default: u16) -> Option<u16> {
         (self.reachability == Reachability::Public).then(|| self.port.unwrap_or(default))
+    }
+
+    /// 其他成员连它的地址：写明的优先，没有写明时用 Hub 得知的（每个地址族分别取）。
+    pub fn public_ipv4(&self) -> Option<Ipv4Addr> {
+        self.ipv4.or(self.learned.ipv4.map(|l| l.ip))
+    }
+
+    pub fn public_ipv6(&self) -> Option<Ipv6Addr> {
+        self.ipv6.or(self.learned.ipv6.map(|l| l.ip))
+    }
+}
+
+/// 等待入网的机器（design/hub.md 第 6 节）。入网私钥只在打印出的 token 中。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Enrollment {
+    pub public_key: Ed25519PublicKey,
+    /// token 的过期时间（Unix 秒）。
+    pub expires_at: i64,
+    /// 签名的初始节点策略：签名之后才有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SignedVersion>,
+}
+
+/// Hub 得知的公网地址与来源（design/hub.md 第 5 节）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Learned {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<LearnedIp<Ipv4Addr>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<LearnedIp<Ipv6Addr>>,
+}
+
+impl Learned {
+    pub fn is_empty(&self) -> bool {
+        self.ipv4.is_none() && self.ipv6.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LearnedIp<T> {
+    pub ip: T,
+    pub from: AddressSource,
+}
+
+/// 得知的地址从哪里来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddressSource {
+    /// 机器连接 Hub 时本机用的全局地址。
+    Machine,
+    /// Hub 看到的来源地址。
+    Hub,
+}
+
+impl fmt::Display for AddressSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Machine => "reported by the machine",
+            Self::Hub => "seen by the Hub",
+        })
     }
 }
 
@@ -289,6 +358,19 @@ impl State {
         }
     }
 
+    /// 还不知道公网地址的 `public` 机器：不接 Hub 时命令要求写明，接了 Hub 时由 Hub 得知。
+    pub fn unknown_public_addresses(&self) -> Vec<&NodeName> {
+        self.machines
+            .iter()
+            .filter(|(_, m)| {
+                m.reachability == Reachability::Public
+                    && m.public_ipv4().is_none()
+                    && m.public_ipv6().is_none()
+            })
+            .map(|(name, _)| name)
+            .collect()
+    }
+
     /// 站点内部的一致性：每条修改命令之后、读出站点状态之后检查（design/site.md 第 7 节）。
     pub fn check(&self) -> Result<(), SiteError> {
         if self.machines.len() > MAX_MEMBERS {
@@ -297,12 +379,9 @@ impl State {
             )));
         }
         for (name, m) in &self.machines {
+            // `public` 机器可以还不知道地址：接了 Hub 时由 Hub 得知；不接 Hub 时命令要求写明
+            // （unknown_public_addresses）
             match m.reachability {
-                Reachability::Public if m.ipv4.is_none() && m.ipv6.is_none() => {
-                    return Err(SiteError::invalid(format!(
-                        "public machine `{name}` needs --ipv4 or --ipv6: other members dial it there"
-                    )));
-                }
                 Reachability::DialOnly
                     if m.ipv4.is_some() || m.ipv6.is_some() || m.port.is_some() =>
                 {
@@ -319,6 +398,20 @@ impl State {
                 return Err(SiteError::invalid(format!(
                     "machine `{name}`: WireGuard port {port} is 0 or one nett itself uses on the host; \
                      pick another with --port"
+                )));
+            }
+            if m.keys.is_some() && m.enrollment.is_some() {
+                return Err(SiteError::invalid(format!(
+                    "machine `{name}` has keys and is still waiting to join"
+                )));
+            }
+            if let Some(keys) = m.keys
+                && let Some((other, _)) = self.machines.iter().find(|(o, other)| {
+                    *o != name && other.keys.is_some_and(|k| k.identity == keys.identity)
+                })
+            {
+                return Err(SiteError::invalid(format!(
+                    "`{name}` and `{other}` have the same identity key"
                 )));
             }
             if let Some(edge) = &m.edge

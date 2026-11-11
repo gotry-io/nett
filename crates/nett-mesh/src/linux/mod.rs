@@ -41,6 +41,18 @@ impl crate::clock::Clock for SystemClock {
     }
 }
 
+/// 拆掉组网进程留在系统里的东西（`nett leave`，design/auth.md 第 8.3 节）：组网进程平时退出时保留接口，重启
+/// 期间连接不断（design/mesh.md 第 4 节）。先删接口，没有了流量再删过滤规则；删接口失败时过滤规则留着，
+/// 保持拒绝（硬性规则 6）。组网进程要先停下。
+pub fn teardown() -> Result<(), DataPlaneError> {
+    let mut route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
+    rtnl::del_link(&mut route, INTERFACE_NAME).map_err(kernel("delete the mesh interface"))?;
+    for table in nft::tables() {
+        nft::delete_table(table).map_err(kernel("delete an nftables table"))?;
+    }
+    Ok(())
+}
+
 pub struct KernelWireGuard {
     route: Socket,
     generic: Socket,

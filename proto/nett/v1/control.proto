@@ -19,6 +19,7 @@ message Envelope {
     Pong pong = 13;
     Goodbye goodbye = 14;
     Error error = 15;
+    Leave leave = 16;
     DesiredState desired_state = 20;
     StateAck state_ack = 21;
     Inventory inventory = 30;
@@ -39,6 +40,8 @@ message Hello {
   // 本地已应用的期望状态代数
   uint64 applied_generation = 5;
   repeated string capabilities = 6;
+  // 只在入网时：准入证明的 JSON（auth.md 第 8.2、10.5 节），其中的身份公钥就是握手用的那一把
+  bytes admission_proof = 7;
 }
 
 // Hub → node：Noise 握手的第二条消息的载荷
@@ -60,6 +63,9 @@ message Goodbye {
   string reason = 1;
 }
 
+// node → Hub：节点自行退出（nett leave，auth.md 第 8.3 节）。Hub 随即移除这台机器
+message Leave {}
+
 enum ErrorCode {
   ERROR_CODE_UNSPECIFIED = 0;
   NODE_UNKNOWN = 1;
@@ -67,6 +73,8 @@ enum ErrorCode {
   UPGRADE_REQUIRED = 3;
   INVALID_MESSAGE = 4;
   RATE_LIMITED = 5;
+  // 入网被拒绝：token 过期、机器已经入网、准入证明不对；原因在 message 中
+  ENROLLMENT_REFUSED = 6;
 }
 
 message Error {
@@ -117,7 +125,7 @@ message StateAck {
   repeated PartitionAck partitions = 2;
 }
 
-// node → Hub：版本、平台与本机的地址
+// node → Hub：版本、平台，以及连接 Hub 时本机用的地址（hub.md 第 5 节）
 message Inventory {
   string nett_version = 1;
   string platform = 2;

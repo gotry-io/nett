@@ -11,6 +11,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use lexopt::ValueExt as _;
+use nett_mesh::key::PrivateKey;
+use nett_node::config::HubConfig;
+use nett_proto::token::JoinToken;
+use nett_trust::keys::X25519PublicKey;
 
 #[cfg(target_os = "macos")]
 use crate::service as platform;
@@ -19,16 +23,24 @@ use crate::service_linux as platform;
 
 /// 等服务管理器的命令返回的上限（硬性规则 14）。
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+/// `nett leave` 等 Hub 确认的上限：连不上时照常退出（design/hub.md 第 7 节）。
+const LEAVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const INSTALL_USAGE: &str = "usage: sudo nett install [<token>] [--config <desired-state.json>]\n\n\
 Creates this machine's keys (or keeps them), installs nett and starts the mesh service.\n\
-With a token from `nett site invite <name>`, it also connects this machine to the Hub: the\n\
-desired state then comes from the Hub, and the nett-node service runs next to the mesh service.\n\
+With a token from `nett site add <name>` or `nett site invite <name>`, it also connects this\n\
+machine to the Hub (a new machine joins the site through it): the desired state then comes\n\
+from the Hub, and the nett-node service runs next to the mesh service.\n\
 Without a Hub, the desired state comes from --config or, on macOS, from the site directory of\n\
 the user running sudo. Run it again after upgrading nett.";
 pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall\n\n\
 Stops and removes the services. Keys, the desired state and the Hub configuration stay;\n\
 `sudo nett install` brings the services back.";
+pub const LEAVE_USAGE: &str = "usage: sudo nett leave\n\n\
+Leaves the site: tells the Hub, which removes this machine from every member, stops and\n\
+removes the services, removes the mesh interface, and deletes the keys, the desired state,\n\
+the trust store and the Hub configuration. The machine can then join any site. Without a Hub,\n\
+remove it on the computer that holds the site with `nett site remove <name>`.";
 
 pub struct InstallArgs {
     pub token: Option<String>,
@@ -58,6 +70,13 @@ pub fn uninstall_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         return Err(arg.unexpected().into());
     }
     platform::uninstall()
+}
+
+pub fn leave_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+    if let Some(arg) = parser.next()? {
+        return Err(arg.unexpected().into());
+    }
+    platform::leave()
 }
 
 pub fn require_root() -> anyhow::Result<()> {
@@ -138,22 +157,148 @@ pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
     }
 }
 
-/// 有 token 时核对它、写入 Hub 的配置，报告结果；返回 Hub 的配置是否变了。
-pub fn apply_token(dir: &str, state_dir: &str, token: Option<&str>) -> anyhow::Result<bool> {
-    let Some(token) = token else {
-        return Ok(false);
+/// 有 token 时的结果。
+#[derive(Default)]
+pub struct TokenOutcome {
+    /// Hub 的配置变了：nett-node 要重启。
+    pub hub_changed: bool,
+    /// 新机器入网时 Hub 发来的第一份期望状态，由调用方写成期望状态文件。
+    pub desired: Option<Vec<u8>>,
+}
+
+/// 有 token 时核对它、写入 Hub 的配置并报告结果。入网 token（design/hub.md 第 6 节）先经 Hub 入网；接入
+/// token（第 3.5 节）只核对本机已是成员。
+pub fn apply_token(
+    dir: &str,
+    state_dir: &str,
+    token: Option<&str>,
+    mesh_public: &X25519PublicKey,
+) -> anyhow::Result<TokenOutcome> {
+    let Some(text) = token else {
+        return Ok(TokenOutcome::default());
     };
-    Ok(
-        match crate::join::join(Path::new(dir), Path::new(state_dir), token)? {
-            crate::join::Joined::New(url) => {
-                println!("Connecting this machine to the Hub at {url}.");
-                true
-            }
-            crate::join::Joined::Switched { from, to } => {
-                println!("Switching this machine from the Hub at {from} to {to}.");
-                true
-            }
-            crate::join::Joined::Unchanged => false,
-        },
-    )
+    let token = JoinToken::decode(text)?;
+    if token.enroll.is_some() {
+        return enroll(dir, state_dir, &token, mesh_public);
+    }
+    let hub_changed = match crate::join::join(Path::new(dir), Path::new(state_dir), text)? {
+        crate::join::Joined::New(url) => {
+            println!("Connecting this machine to the Hub at {url}.");
+            true
+        }
+        crate::join::Joined::Switched { from, to } => {
+            println!("Switching this machine from the Hub at {from} to {to}.");
+            true
+        }
+        crate::join::Joined::Unchanged => false,
+    };
+    Ok(TokenOutcome {
+        hub_changed,
+        desired: None,
+    })
+}
+
+/// 新机器经 Hub 入网。已是某个站点的成员时不接受，同一台机器重试同一个 token 时照常完成。
+fn enroll(
+    dir: &str,
+    state_dir: &str,
+    token: &JoinToken,
+    mesh_public: &X25519PublicKey,
+) -> anyhow::Result<TokenOutcome> {
+    let dir = Path::new(dir);
+    let member = Path::new(state_dir)
+        .join(nett_mesh::store::TRUST_FILE)
+        .exists()
+        || dir.join("desired.json").exists();
+    if member {
+        if HubConfig::load(dir)
+            .map_err(anyhow::Error::msg)?
+            .is_some_and(|c| c.node_id == token.node_id)
+        {
+            println!("This machine has already joined the site through the Hub.");
+            return Ok(TokenOutcome::default());
+        }
+        bail!(
+            "this machine is already a member of a site; `sudo nett leave` first, then run this \
+             command again"
+        );
+    }
+    println!("Joining the site through the Hub at {}.", token.url);
+    let enrolled = runtime()?.block_on(nett_node::join::enroll(dir, token, unix_now()))?;
+    crate::site::check_desired_for(&enrolled.desired, mesh_public)
+        .context("the Hub's desired state for this machine")?;
+    enrolled.config.save(dir).map_err(anyhow::Error::msg)?;
+    Ok(TokenOutcome {
+        hub_changed: true,
+        desired: Some(enrolled.desired),
+    })
+}
+
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// `nett leave` 的第一步：有 Hub 的配置时告诉 Hub。连不上时说明之后要在电脑上做什么，照常往下做。
+pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
+    let Some(config) = HubConfig::load(Path::new(dir)).map_err(anyhow::Error::msg)? else {
+        println!(
+            "This machine has no Hub. On the computer that holds the site, remove it with \
+             `nett site remove <name>`."
+        );
+        return Ok(());
+    };
+    let identity = PrivateKey::load(&Path::new(dir).join("identity.key"))?;
+    let secret = x25519_dalek::StaticSecret::from(*identity.as_bytes());
+    drop(identity);
+    let told = runtime()?.block_on(async {
+        tokio::time::timeout(LEAVE_TIMEOUT, nett_node::session::leave(&config, &secret)).await
+    });
+    match told {
+        Ok(Ok(())) => println!(
+            "Told the Hub at {}: every member drops this machine.",
+            config.url
+        ),
+        Ok(Err(e)) => println!(
+            "Could not tell the Hub at {} ({e}). On the computer that holds the site, remove this \
+             machine with `nett site remove <name>`.",
+            config.url
+        ),
+        Err(_) => println!(
+            "The Hub at {} did not answer in time. On the computer that holds the site, remove this \
+             machine with `nett site remove <name>`.",
+            config.url
+        ),
+    }
+    Ok(())
+}
+
+/// `nett leave` 的最后一步：删除密钥、期望状态、Hub 的配置与信任存储（design/auth.md 第 8.3 节）。
+pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
+    for name in [
+        "mesh.key",
+        "identity.key",
+        "desired.json",
+        nett_node::config::HUB_FILE,
+    ] {
+        let path = Path::new(dir).join(name);
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
+        }
+    }
+    match fs::remove_dir_all(state_dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {state_dir}")),
+    }
 }

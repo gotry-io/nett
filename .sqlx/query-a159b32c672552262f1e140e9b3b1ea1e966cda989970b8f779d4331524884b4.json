@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO node_updates (node_id, left_at) VALUES (?1, ?2)\n             ON CONFLICT (node_id) DO UPDATE SET left_at = ?2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "a159b32c672552262f1e140e9b3b1ea1e966cda989970b8f779d4331524884b4"
+}

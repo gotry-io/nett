@@ -30,6 +30,14 @@ pub struct HubRow {
     pub owner_token_hash: Option<Vec<u8>>,
 }
 
+/// 在 Hub 一侧发生、站点还没有取回的事。
+#[derive(Debug, Clone)]
+pub struct UpdateRow {
+    pub node_id: String,
+    pub enrolled: Option<String>,
+    pub left_at: Option<i64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     pub node_id: String,
@@ -41,6 +49,7 @@ pub struct NodeRow {
     pub ack_reason: Option<String>,
     pub status: Option<String>,
     pub status_at: Option<i64>,
+    pub learned: Option<String>,
 }
 
 impl Db {
@@ -205,11 +214,89 @@ impl Db {
         Ok(sqlx::query_as!(
             NodeRow,
             "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,
-                    ack_reason, status, status_at
+                    ack_reason, status, status_at, learned
              FROM nodes ORDER BY node_id"
         )
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    pub async fn set_learned(&self, node_id: &str, learned: &str) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE nodes SET learned = ?2 WHERE node_id = ?1",
+            node_id,
+            learned
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 一台机器入网时交来的准入材料。
+    pub async fn put_enrolled(&self, node_id: &str, material: &str) -> Result<(), DbError> {
+        sqlx::query!(
+            "INSERT INTO node_updates (node_id, enrolled) VALUES (?1, ?2)
+             ON CONFLICT (node_id) DO UPDATE SET enrolled = ?2",
+            node_id,
+            material
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// 一台机器自行退出。
+    pub async fn put_left(&self, node_id: &str, now: i64) -> Result<(), DbError> {
+        sqlx::query!(
+            "INSERT INTO node_updates (node_id, left_at) VALUES (?1, ?2)
+             ON CONFLICT (node_id) DO UPDATE SET left_at = ?2",
+            node_id,
+            now
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn updates(&self) -> Result<Vec<UpdateRow>, DbError> {
+        Ok(sqlx::query_as!(
+            UpdateRow,
+            "SELECT node_id, enrolled, left_at FROM node_updates ORDER BY node_id"
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// 站点已经有了的事：入网的准入材料（`enrolled`）、退出（`left`）。两者都没有了时删除这一行。
+    pub async fn acknowledge(
+        &self,
+        node_id: &str,
+        enrolled: bool,
+        left: bool,
+    ) -> Result<(), DbError> {
+        if enrolled {
+            sqlx::query!(
+                "UPDATE node_updates SET enrolled = NULL WHERE node_id = ?1",
+                node_id
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        if left {
+            sqlx::query!(
+                "UPDATE node_updates SET left_at = NULL WHERE node_id = ?1",
+                node_id
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        sqlx::query!(
+            "DELETE FROM node_updates WHERE node_id = ?1 AND enrolled IS NULL AND left_at IS NULL",
+            node_id
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// 不在站点中的机器不再保留（保留策略：一台机器一行）。
@@ -229,6 +316,9 @@ impl Db {
         let mut tx = self.pool.begin().await?;
         sqlx::query!("DELETE FROM site").execute(&mut *tx).await?;
         sqlx::query!("DELETE FROM nodes").execute(&mut *tx).await?;
+        sqlx::query!("DELETE FROM node_updates")
+            .execute(&mut *tx)
+            .await?;
         sqlx::query!(
             "UPDATE hub SET link_secret_hash = NULL, link_expires_at = NULL, trust_anchors = NULL,
                  owner_token_id = NULL, owner_token_hash = NULL"

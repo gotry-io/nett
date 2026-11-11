@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE node_updates SET enrolled = NULL WHERE node_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "5f03ec67b9e624d51c76583fa4f90248b270b243a68fc18679ce683123af3279"
+}

@@ -184,11 +184,13 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     ensure_dir(DIR, 0o700)?;
     ensure_dir(LOG_DIR, 0o700)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
-    let hub_changed = apply_token(
+    let token = apply_token(
         DIR,
         nett_mesh::store::DEFAULT_STATE_DIR,
         args.token.as_deref(),
+        &keys.0,
     )?;
+    let hub_changed = token.hub_changed;
     let linked = HubConfig::load(Path::new(DIR))
         .map_err(anyhow::Error::msg)?
         .is_some();
@@ -196,6 +198,8 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     // 接了 Hub 的机器上期望状态只由 nett-node 写（design/hub.md 第 5 节）
     let site = invoking_site_dir();
     let imported = match (&args.config, linked) {
+        // 新机器入网时 Hub 发来的第一份（design/hub.md 第 6 节）；之后只由 nett-node 写
+        _ if token.desired.is_some() => token.desired,
         (Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
         }
@@ -265,11 +269,9 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     if mesh_plist_changed || node_plist_changed || binary_changed {
         println!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
         if linked {
-            println!("Run `sudo nett install` again after `brew upgrade nett`.");
+            println!("Run `sudo nett install` again after upgrading nett.");
         } else {
-            println!(
-                "Run `sudo nett install` again after the site changes or `brew upgrade nett`."
-            );
+            println!("Run `sudo nett install` again after the site changes or nett is upgraded.");
         }
     }
     Ok(())
@@ -322,6 +324,28 @@ mod passwd {
 
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
+    remove_services()?;
+    println!(
+        "Removed the services. Keys, the desired state, the trust store and the Hub configuration remain in {DIR}."
+    );
+    Ok(())
+}
+
+/// `sudo nett leave`（design/hub.md 第 7 节）：告诉 Hub，删除服务，删除密钥与配置。utun 接口属于组网进程，
+/// 随它退出消失。
+pub fn leave() -> anyhow::Result<()> {
+    require_root()?;
+    crate::install::tell_hub(DIR)?;
+    remove_services()?;
+    crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
+    println!(
+        "Left the site: removed the services, deleted the keys, the desired state, the trust store \
+         and the Hub configuration."
+    );
+    Ok(())
+}
+
+fn remove_services() -> anyhow::Result<()> {
     stop(&NODE)?;
     stop(&MESH)?;
     for path in [NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
@@ -331,9 +355,6 @@ pub fn uninstall() -> anyhow::Result<()> {
             Err(e) => return Err(e).with_context(|| format!("removing {path}")),
         }
     }
-    println!(
-        "Removed the services. Keys, the desired state, the trust store and the Hub configuration remain in {DIR}."
-    );
     Ok(())
 }
 
