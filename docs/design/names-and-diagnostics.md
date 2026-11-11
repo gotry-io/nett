@@ -63,6 +63,7 @@ Runs a fixed list of checks on this machine, prints one line per check (`ok`, `w
 | TLS transport | there is a TLS candidate but the transport adapter is not running | the transport service's log |
 | Names | the responder does not answer this machine's own name, or the system resolver does not send `nett.internal` to it | per section 3 |
 | Units (Linux) | a unit in `/etc/systemd/system` overrides nett's | move it away (release.md section 5) |
+| Host firewall (Linux) | ufw is on, denies incoming connections and has no rule for `nett0`: it drops what nett's own filter lets in, in-tunnel probes included, so other members see this machine as unreachable | `sudo ufw allow in on nett0`: nett filters the interface itself (mesh.md section 12), so this opens nothing the access rules do not allow; `sudo nett install` says the same when it finds this |
 
 Network probes from outside (is my WireGuard port reachable from the internet) need another member's help and are left to the Hub view in `nett site status`.
 

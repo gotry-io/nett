@@ -178,6 +178,12 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
     }
+    if let Some(firewall) = crate::diagnose::check_host_firewall() {
+        messages.push(format!(
+            "Warning: {}.\n  → {}",
+            firewall.found, firewall.advice
+        ));
+    }
     for m in messages {
         println!("{m}");
     }
