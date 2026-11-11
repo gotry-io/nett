@@ -373,14 +373,22 @@ pub fn point_resolver(ipv4: std::net::Ipv4Addr) {
         "# Written by the nett mesh service: names under nett.internal resolve through this machine's\n\
          # mesh address.\nnameserver {ipv4}\n"
     );
-    if std::fs::read_to_string(RESOLVER_FILE).ok().as_deref() == Some(content.as_str()) {
-        return;
-    }
-    let written = std::fs::create_dir_all("/etc/resolver").and_then(|()| {
-        let tmp = format!("{RESOLVER_FILE}.new");
-        std::fs::write(&tmp, &content)?;
-        std::fs::rename(&tmp, RESOLVER_FILE)
-    });
+    let written = (|| {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Readable by everyone like the rest of /etc: the mesh process's umask keeps its own files
+        // private, and tools other than the system resolver read these as ordinary users
+        let readable = |path: &str, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        };
+        std::fs::create_dir_all("/etc/resolver")?;
+        readable("/etc/resolver", 0o755)?;
+        if std::fs::read_to_string(RESOLVER_FILE).ok().as_deref() != Some(content.as_str()) {
+            let tmp = format!("{RESOLVER_FILE}.new");
+            std::fs::write(&tmp, &content)?;
+            std::fs::rename(&tmp, RESOLVER_FILE)?;
+        }
+        readable(RESOLVER_FILE, 0o644)
+    })();
     if let Err(e) = written {
         tracing::warn!(error = %e, file = RESOLVER_FILE, "pointing the system resolver at the mesh");
     }
@@ -494,6 +502,39 @@ mod tests {
         let mut got = [0u8; 64];
         let (_, from) = listener.recv_from(&mut got).expect("delivered locally");
         assert_eq!(from, "100.88.1.2:9".parse::<SocketAddr>().expect("addr"));
+
+        // A datagram to this machine's own mesh address enters the utun (the address is
+        // point-to-point with itself); written back unchanged, it is delivered locally, which is what
+        // the data plane does (design/userspace.md section 4)
+        let own = UdpSocket::bind("100.88.255.1:0").expect("own listener");
+        own.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let own_port = own.local_addr().expect("addr").port();
+        let client = UdpSocket::bind("0.0.0.0:0").expect("client");
+        client
+            .send_to(b"self", ("100.88.255.1", own_port))
+            .expect("send to the own mesh address");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let packet = loop {
+            match tun.recv(&mut buf) {
+                Ok(n) if buf[0] >> 4 == 4 && buf[16..20] == [100, 88, 255, 1] => {
+                    let header = usize::from(buf[0] & 0x0f) * 4;
+                    if u16::from_be_bytes([buf[header + 2], buf[header + 3]]) == own_port {
+                        break buf[..n].to_vec();
+                    }
+                }
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("the datagram to the own mesh address did not enter {name}: {e}"),
+            }
+        };
+        tun.send(&packet).expect("back into utun");
+        let (n, _) = own
+            .recv_from(&mut got)
+            .expect("delivered to the own mesh address");
+        assert_eq!(&got[..n], b"self");
 
         // The underlay socket is bound to the physical interface (when there is a default route)
         let underlay = mac.bind_underlay(0).expect("underlay");
