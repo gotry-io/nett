@@ -87,6 +87,16 @@ jobs:
           done
           sudo "$nett" status | tee status.log
           grep -F 'No peers.' status.log
+          # Names (design/names-and-diagnostics.md section 3): this machine's own name, from its
+          # responder and through the system resolver
+          v4=$(sed -n 's/^mesh  *\([0-9.]*\),.*/\1/p' status.log)
+          test -n "$v4"
+          for _ in $(seq 20); do
+            [ "$(dig +short +time=1 +tries=1 @"$v4" ci.nett.internal)" = "$v4" ] && break
+            sleep 0.5
+          done
+          [ "$(dig +short +time=1 +tries=1 @"$v4" ci.nett.internal)" = "$v4" ]
+          dscacheutil -q host -a name ci.nett.internal | grep -F "$v4"
           ! "$nett" status 2> status.err
           grep -F 'run with sudo' status.err
           sudo "$nett" install | grep -F 'The services are running. Nothing changed.'

@@ -114,6 +114,7 @@ impl Runtime {
                     coordinator: worker_coordinator,
                     dns: None,
                     dns_port,
+                    names_sent: None,
                 };
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
@@ -336,6 +337,8 @@ struct Worker<D, E> {
     /// The DNS responder, once the mesh addresses are up, and the port it answers on (0: none).
     dns: Option<crate::dns::DnsServer>,
     dns_port: u16,
+    /// The names last handed to the data plane.
+    names_sent: Option<crate::dns::NameTable>,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
@@ -375,8 +378,19 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 }),
             }
         }
-        if let Some(dns) = &self.dns {
-            dns.set_names(self.engine.name_table());
+        if self.dns_port != 0 {
+            let names = self.engine.name_table();
+            if self.names_sent.as_ref() != Some(&names) {
+                match self.engine.dataplane_mut().set_names(&names) {
+                    Ok(()) => self.names_sent = Some(names.clone()),
+                    // Only this machine's own queries on userspace platforms depend on it; tried again
+                    // after the next desired state
+                    Err(e) => tracing::warn!(error = %e, "handing the names to the data plane"),
+                }
+            }
+            if let Some(dns) = &self.dns {
+                dns.set_names(names);
+            }
         }
     }
 

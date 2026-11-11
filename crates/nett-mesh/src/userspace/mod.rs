@@ -233,6 +233,11 @@ mod dataplane {
             self.worker()?.call(|r| Command::Filter(filter, r))
         }
 
+        fn set_names(&mut self, names: &crate::dns::NameTable) -> Result<(), DataPlaneError> {
+            let names = names.clone();
+            self.worker()?.call(|r| Command::SetNames(names, r))
+        }
+
         fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
             match edge {
                 None => Ok(()),

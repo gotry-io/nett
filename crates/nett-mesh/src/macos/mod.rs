@@ -536,6 +536,40 @@ mod tests {
             .expect("delivered to the own mesh address");
         assert_eq!(&got[..n], b"self");
 
+        // Over IPv6 the system leaves the UDP checksum of such a datagram unfilled; filled in, it is
+        // delivered
+        let own6 = UdpSocket::bind("[fd00:88::ff01]:0").expect("own IPv6 listener");
+        own6.set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let port6 = own6.local_addr().expect("addr").port();
+        let client6 = UdpSocket::bind("[::]:0").expect("IPv6 client");
+        client6
+            .send_to(b"self6", ("fd00:88::ff01", port6))
+            .expect("send to the own IPv6 mesh address");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut packet6 = loop {
+            match tun.recv(&mut buf) {
+                Ok(n)
+                    if buf[0] >> 4 == 6
+                        && buf[6] == crate::userspace::packet::PROTO_UDP
+                        && u16::from_be_bytes([buf[42], buf[43]]) == port6 =>
+                {
+                    break buf[..n].to_vec();
+                }
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("the datagram to the own IPv6 address did not enter {name}: {e}"),
+            }
+        };
+        crate::userspace::packet::fill_checksum(&mut packet6);
+        tun.send(&packet6).expect("back into utun");
+        let (n, _) = own6
+            .recv_from(&mut got)
+            .expect("delivered to the own IPv6 mesh address");
+        assert_eq!(&got[..n], b"self6");
+
         // The underlay socket is bound to the physical interface (when there is a default route)
         let underlay = mac.bind_underlay(0).expect("underlay");
         drop(underlay);

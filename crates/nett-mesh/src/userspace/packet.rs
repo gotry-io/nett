@@ -207,6 +207,130 @@ fn icmp(l4: &[u8], echo_request: u8, echo_reply: u8, errors: &[u8]) -> Transport
     Transport::IcmpOther
 }
 
+/// Where the TCP or UDP header starts and which it is, for a packet whose transport header follows the
+/// IP header directly: an IPv4 packet that is not a fragment, or an IPv6 packet without extension
+/// headers. Other packets return `None`.
+fn transport_at(packet: &[u8]) -> Option<(usize, u8)> {
+    match packet.first()? >> 4 {
+        4 => {
+            let header = usize::from(packet[0] & 0x0f) * 4;
+            let fragment = u16_at(packet, 6)? & 0x3fff;
+            (header >= IPV4_MIN_HEADER && fragment == 0).then_some((header, *packet.get(9)?))
+        }
+        6 => Some((IPV6_HEADER, *packet.get(6)?)),
+        _ => None,
+    }
+}
+
+/// Adds `data` as 16-bit big-endian words to `sum`; an odd last byte is padded with zero.
+fn add_words(mut sum: u32, data: &[u8]) -> u32 {
+    let (words, rest) = data.as_chunks::<2>();
+    for w in words {
+        sum += u32::from(u16::from_be_bytes(*w));
+    }
+    if let [last] = rest {
+        sum += u32::from(*last) << 8;
+    }
+    sum
+}
+
+fn fold(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !u16::try_from(sum).unwrap_or(u16::MAX)
+}
+
+/// The TCP or UDP checksum of `segment` between `src` and `dst`, computed with the checksum field
+/// treated as zero.
+fn transport_checksum(src: IpAddr, dst: IpAddr, protocol: u8, segment: &[u8], at: usize) -> u16 {
+    let mut sum = match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => add_words(add_words(0, &s.octets()), &d.octets()),
+        (IpAddr::V6(s), IpAddr::V6(d)) => add_words(add_words(0, &s.octets()), &d.octets()),
+        // Both addresses of a packet are of one family
+        _ => 0,
+    };
+    sum += u32::from(protocol) + u32::try_from(segment.len()).unwrap_or(0);
+    sum = add_words(sum, &segment[..at]);
+    sum = add_words(sum, segment.get(at + 2..).unwrap_or(&[]));
+    match fold(sum) {
+        // Zero means "no checksum" for UDP
+        0 if protocol == PROTO_UDP => 0xffff,
+        c => c,
+    }
+}
+
+/// Fills in the TCP or UDP checksum of a packet from this machine to itself: macOS leaves it unfilled
+/// for local traffic, which on the utun is then rejected on the way back in (design/userspace.md
+/// section 4). Other packets are left as they are.
+pub fn fill_checksum(packet: &mut [u8]) {
+    let Some(ip) = parse(packet) else {
+        return;
+    };
+    let Some((header, protocol)) = transport_at(packet) else {
+        return;
+    };
+    let field = match protocol {
+        PROTO_TCP => 16,
+        PROTO_UDP => 6,
+        _ => return,
+    };
+    let Some(segment) = packet.get_mut(header..ip.len) else {
+        return;
+    };
+    if segment.len() < field + 2 {
+        return;
+    }
+    let sum = transport_checksum(ip.src, ip.dst, protocol, segment, field);
+    segment[field..field + 2].copy_from_slice(&sum.to_be_bytes());
+}
+
+/// The UDP payload of a packet whose UDP header follows the IP header directly.
+pub fn udp_payload<'a>(packet: &'a [u8], ip: &Ip) -> Option<&'a [u8]> {
+    let (header, protocol) = transport_at(packet)?;
+    (protocol == PROTO_UDP).then_some(())?;
+    packet.get(header + 8..ip.len)
+}
+
+/// A UDP datagram from `src`:`sport` to `dst`:`dport` carrying `payload`, with its checksums; `None`
+/// when the addresses are of different families or it would not fit in one IP packet.
+pub fn udp(src: IpAddr, sport: u16, dst: IpAddr, dport: u16, payload: &[u8]) -> Option<Vec<u8>> {
+    let udp_len = u16::try_from(8 + payload.len()).ok()?;
+    let mut segment = Vec::with_capacity(usize::from(udp_len));
+    segment.extend_from_slice(&sport.to_be_bytes());
+    segment.extend_from_slice(&dport.to_be_bytes());
+    segment.extend_from_slice(&udp_len.to_be_bytes());
+    segment.extend_from_slice(&[0, 0]);
+    segment.extend_from_slice(payload);
+    let sum = transport_checksum(src, dst, PROTO_UDP, &segment, 6);
+    segment[6..8].copy_from_slice(&sum.to_be_bytes());
+    let mut packet = match (src, dst) {
+        (IpAddr::V4(s), IpAddr::V4(d)) => {
+            let total = u16::try_from(IPV4_MIN_HEADER + segment.len()).ok()?;
+            let mut h = vec![0x45, 0];
+            h.extend_from_slice(&total.to_be_bytes());
+            // No identification, do not fragment, time to live 64
+            h.extend_from_slice(&[0, 0, 0x40, 0, 64, PROTO_UDP, 0, 0]);
+            h.extend_from_slice(&s.octets());
+            h.extend_from_slice(&d.octets());
+            let sum = fold(add_words(0, &h));
+            h[10..12].copy_from_slice(&sum.to_be_bytes());
+            h
+        }
+        (IpAddr::V6(s), IpAddr::V6(d)) => {
+            let mut h = vec![0x60, 0, 0, 0];
+            h.extend_from_slice(&udp_len.to_be_bytes());
+            h.extend_from_slice(&[PROTO_UDP, 64]);
+            h.extend_from_slice(&s.octets());
+            h.extend_from_slice(&d.octets());
+            h
+        }
+        _ => return None,
+    };
+    packet.extend_from_slice(&segment);
+    Some(packet)
+}
+
 #[cfg(test)]
 pub(crate) mod build {
     //! Builds inner packets in tests.
@@ -305,6 +429,54 @@ mod tests {
 
     fn ip(s: &str) -> IpAddr {
         s.parse().expect(s)
+    }
+
+    /// The UDP checksum carried by `packet`.
+    fn udp_sum(packet: &[u8]) -> u16 {
+        let (at, _) = transport_at(packet).expect("udp");
+        u16::from_be_bytes([packet[at + 6], packet[at + 7]])
+    }
+
+    #[test]
+    fn builds_a_udp_datagram_with_its_checksums() {
+        // Reference checksums computed independently from the pseudo-headers of RFC 768 and RFC 8200
+        for (addr, want) in [("100.88.0.4", 0x90be), ("fd00:88::4", 0x5e5d)] {
+            let a = ip(addr);
+            let packet = udp(a, 50000, a, 53, b"nett").expect("fits");
+            let parsed = parse(&packet).expect("parses");
+            assert_eq!(
+                parsed.transport,
+                Transport::Udp {
+                    src_port: 50000,
+                    dst_port: 53
+                }
+            );
+            assert_eq!(udp_payload(&packet, &parsed), Some(&b"nett"[..]));
+            assert_eq!(udp_sum(&packet), want, "{addr}");
+            if a.is_ipv4() {
+                assert_eq!(fold(add_words(0, &packet[..20])), 0, "IPv4 header checksum");
+            }
+        }
+        assert!(udp(ip("100.88.0.4"), 1, ip("fd00:88::4"), 2, b"").is_none());
+    }
+
+    #[test]
+    fn fills_in_a_checksum_the_system_left_out() {
+        for addr in ["100.88.0.4", "fd00:88::4"] {
+            let a = ip(addr);
+            let whole = udp(a, 50000, a, 53, b"nett").expect("fits");
+            let mut unfilled = whole.clone();
+            let (at, _) = transport_at(&unfilled).expect("udp");
+            unfilled[at + 6..at + 8].copy_from_slice(&[0x12, 0x34]);
+            fill_checksum(&mut unfilled);
+            assert_eq!(unfilled, whole, "{addr}");
+        }
+        // A TCP segment gets its checksum at its own offset; the rest of the packet is unchanged
+        let mut syn = build::tcp(ip("fd00:88::4"), 40000, ip("fd00:88::4"), 22, 0x02);
+        let before = syn.clone();
+        fill_checksum(&mut syn);
+        assert_eq!(syn[..56], before[..56]);
+        assert_ne!(syn[56..58], [0, 0]);
     }
 
     #[test]
