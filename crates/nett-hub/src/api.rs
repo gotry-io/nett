@@ -13,7 +13,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nett_mesh::config::MAX_DESIRED_BYTES;
 use nett_proto::api::{
     CONNECT_PATH, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, Problem, PushResponse,
-    SITE_PATH, STATUS_PATH, StatusResponse,
+    SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
 };
 use nett_site::state::State;
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
@@ -26,6 +26,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(LINK_PATH, post(link))
         .route(SITE_PATH, put(push))
         .route(STATUS_PATH, get(status))
+        .route(UPDATES_PATH, get(updates))
         .route(CONNECT_PATH, get(crate::gateway::connect))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_DESIRED_BYTES).unwrap_or(usize::MAX),
@@ -152,6 +153,17 @@ async fn push(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap, body: Byt
             "the Hub is not linked to a site",
         ),
         Err(PushError::Db(e)) => internal(e),
+    }
+}
+
+/// Hub 一侧的入网、退出与得知的地址（design/hub.md 第 4 节）：签名工具每条命令先取回它们。
+async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
+    if let Some(r) = unauthorized(&hub, &headers).await {
+        return r;
+    }
+    match hub.updates().await {
+        Ok(updates) => Json(updates).into_response(),
+        Err(e) => internal(e),
     }
 }
 

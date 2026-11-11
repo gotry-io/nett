@@ -158,6 +158,7 @@ mod tests {
                     .fingerprint(),
             ),
             tls_fingerprint: None,
+            enroll: None,
         }
         .encode()
     }

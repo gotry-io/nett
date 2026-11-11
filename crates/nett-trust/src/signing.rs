@@ -1,8 +1,8 @@
-//! 生成签名，只用于实验工具和测试（`signing` 特性）。正式构建中的节点只验证签名：
-//! 用户的签名在用户的设备上生成，入网私钥由浏览器生成。
+//! 生成签名（`signing` 特性）：签名工具用恢复密钥签名，新机器入网时用 token 中的入网私钥签准入证明，
+//! 实验工具和测试用它们构造材料。组网进程只验证签名。
 
 use nett_core::id::PasskeyId;
-use ring::rand::SystemRandom;
+use ring::rand::{SecureRandom as _, SystemRandom};
 use ring::signature::{
     ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, Ed25519KeyPair,
     KeyPair as _,
@@ -162,28 +162,29 @@ impl PasskeyKeyPair {
     }
 }
 
-/// 入网签名密钥（Ed25519）。
+/// 入网签名密钥（Ed25519）。私钥以 32 字节的种子交给新机器（入网 token，design/auth.md 第 8.1 节）。
 pub struct EnrollmentKeyPair {
-    pkcs8: Zeroizing<Vec<u8>>,
+    seed: Zeroizing<[u8; 32]>,
     key: Ed25519KeyPair,
 }
 
 impl EnrollmentKeyPair {
     pub fn generate() -> Result<Self, SigningError> {
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new())?;
-        Self::from_pkcs8(pkcs8.as_ref())
+        let mut seed = Zeroizing::new([0u8; 32]);
+        SystemRandom::new().fill(seed.as_mut())?;
+        Self::from_seed(&seed)
     }
 
-    pub fn from_pkcs8(pkcs8: &[u8]) -> Result<Self, SigningError> {
-        let key = Ed25519KeyPair::from_pkcs8(pkcs8).map_err(|_| SigningError::KeyFormat)?;
+    pub fn from_seed(seed: &[u8; 32]) -> Result<Self, SigningError> {
+        let key = Ed25519KeyPair::from_seed_unchecked(seed).map_err(|_| SigningError::Crypto)?;
         Ok(Self {
-            pkcs8: Zeroizing::new(pkcs8.to_vec()),
+            seed: Zeroizing::new(*seed),
             key,
         })
     }
 
-    pub fn pkcs8(&self) -> &[u8] {
-        &self.pkcs8
+    pub fn seed(&self) -> &[u8; 32] {
+        &self.seed
     }
 
     pub fn public_key(&self) -> Ed25519PublicKey {

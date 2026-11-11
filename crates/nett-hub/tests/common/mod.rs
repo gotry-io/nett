@@ -181,3 +181,41 @@ pub async fn linked(name: &str, url: &str) -> (Arc<Hub>, axum::Router, String, S
         .token;
     (hub, app, token, site, state)
 }
+
+pub const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+
+pub fn cert_fingerprint() -> [u8; 32] {
+    use rustls::pki_types::CertificateDer;
+    use rustls::pki_types::pem::PemObject as _;
+    let der = CertificateDer::from_pem_file(Path::new(DATA).join("test-cert.pem")).expect("cert");
+    let digest = ring::digest::digest(&ring::digest::SHA256, der.as_ref());
+    digest.as_ref().try_into().expect("32 bytes")
+}
+
+/// 启动 Hub 的 HTTPS 服务，返回它的地址。
+pub async fn serve(hub: Arc<Hub>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let acceptor = nett_hub::tls::acceptor(
+        &Path::new(DATA).join("test-cert.pem"),
+        &Path::new(DATA).join("test-key.pem"),
+    )
+    .expect("tls");
+    let app = nett_hub::api::router(hub);
+    tokio::spawn(async move {
+        axum::serve(
+            nett_hub::tls::TlsListener::new(listener, acceptor),
+            app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
+        )
+        .await
+        .ok();
+    });
+    format!("https://127.0.0.1:{port}")
+}
+
+/// Hub 的身份公钥（`hub()` 用的私钥是 `[200; 32]`）。
+pub fn hub_key() -> nett_proto::token::Bytes32 {
+    nett_proto::token::Bytes32(PublicKey::from(&StaticSecret::from([200; 32])).to_bytes())
+}

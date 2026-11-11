@@ -29,9 +29,9 @@ use super::nft::{
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec, Match};
 use crate::dataplane::INTERFACE_NAME;
 
-const ACCESS_TABLE: &str = "nett_access";
-const EDGE_TABLE: &str = "nett_edge";
-const INGRESS_TABLE: &str = "nett_ingress";
+pub(super) const ACCESS_TABLE: &str = "nett_access";
+pub(super) const EDGE_TABLE: &str = "nett_edge";
+pub(super) const INGRESS_TABLE: &str = "nett_ingress";
 /// 源地址转换的标准优先级（`srcnat`）。
 const SRCNAT_PRIORITY: i32 = 100;
 

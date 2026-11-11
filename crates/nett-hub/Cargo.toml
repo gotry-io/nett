@@ -43,6 +43,8 @@ zeroize.workspace = true
 [dev-dependencies]
 http-body-util.workspace = true
 nett-node.workspace = true
+# 测试中的新机器签准入证明
+nett-trust = { workspace = true, features = ["signing"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }
 # axum 已经依赖 tower 的 util：用它把请求直接交给路由
 tower = { version = "0.5.3", default-features = false, features = ["util"] }

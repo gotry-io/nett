@@ -52,6 +52,13 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                         lines.push(format!("{sign} {name}.routes {}", list(&m.routes)));
                     }
                 }
+                if let (Some(a), Some(b)) = (&o.enrollment, &m.enrollment)
+                    && a.public_key != b.public_key
+                {
+                    lines.push(format!(
+                        "~ {name}: a new token to join; the earlier one stops working"
+                    ));
+                }
                 if let (Some(a), Some(b)) = (&o.policy, &m.policy)
                     && a.version != b.version
                     && a.input == b.input
@@ -123,14 +130,21 @@ fn reach(state: &State, m: &Machine) -> String {
             let port = m
                 .listen_port(state.listen_port)
                 .unwrap_or(state.listen_port);
+            let learned = |written: bool| if written { "" } else { " (learned)" };
             let addrs: Vec<String> = [
-                m.ipv4.map(|a| format!("{a}:{port}")),
-                m.ipv6.map(|a| format!("[{a}]:{port}")),
+                m.public_ipv4()
+                    .map(|a| format!("{a}:{port}{}", learned(m.ipv4.is_some()))),
+                m.public_ipv6()
+                    .map(|a| format!("[{a}]:{port}{}", learned(m.ipv6.is_some()))),
             ]
             .into_iter()
             .flatten()
             .collect();
-            format!("public, {}", addrs.join(", "))
+            if addrs.is_empty() {
+                format!("public, port {port}, address not known yet")
+            } else {
+                format!("public, {}", addrs.join(", "))
+            }
         }
     }
 }

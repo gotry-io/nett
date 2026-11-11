@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT node_id, enrolled, left_at FROM node_updates ORDER BY node_id",
+  "describe": {
+    "columns": [
+      {
+        "name": "node_id",
+        "ordinal": 0,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "node_updates",
+            "name": "node_id"
+          }
+        }
+      },
+      {
+        "name": "enrolled",
+        "ordinal": 1,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "node_updates",
+            "name": "enrolled"
+          }
+        }
+      },
+      {
+        "name": "left_at",
+        "ordinal": 2,
+        "type_info": "Integer",
+        "origin": {
+          "Table": {
+            "table": "node_updates",
+            "name": "left_at"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "adbc7861203248f9b37c92ea9c340859eabc18d6fe5198cb9989d6d554fbe500"
+}

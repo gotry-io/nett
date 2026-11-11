@@ -190,16 +190,23 @@ async fn serve(
         }
     };
     match tls {
+        // 对端地址：Hub 据此得知 `public` 机器的公网地址（design/hub.md 第 5 节）
         None => {
-            axum::serve(listener, app)
-                .with_graceful_shutdown(shutdown)
-                .await?
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?
         }
         Some((cert, key)) => {
             let acceptor = tls::acceptor(&cert, &key)?;
-            axum::serve(tls::TlsListener::new(listener, acceptor), app)
-                .with_graceful_shutdown(shutdown)
-                .await?;
+            axum::serve(
+                tls::TlsListener::new(listener, acceptor),
+                app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await?;
         }
     }
     Ok(())

@@ -424,17 +424,17 @@ fn inconsistent_machines_are_refused() {
         add(&mut state, "mac", MachineOptions::default()).is_err(),
         "duplicate name"
     );
-    assert!(
-        add(
-            &mut state,
-            "pub",
-            MachineOptions {
-                public: true,
-                ..MachineOptions::default()
-            }
-        )
-        .is_err()
-    );
+    // `public` 机器可以还不知道地址：接了 Hub 时由 Hub 得知，不接 Hub 时命令要求写明
+    add(
+        &mut state,
+        "pub",
+        MachineOptions {
+            public: true,
+            ..MachineOptions::default()
+        },
+    )
+    .expect("a public machine without an address yet");
+    assert_eq!(state.unknown_public_addresses(), vec![&name("pub")]);
     assert!(
         add(
             &mut state,
@@ -530,4 +530,226 @@ fn advertised_routes_keep_counting_after_they_are_removed() {
         .expect("routes again");
     signed(&site, &mut state);
     assert_eq!(version(&state), Some(2));
+}
+
+/// 让 `name` 等待入网，返回入网密钥。
+fn awaiting(state: &mut State, n: &str) -> nett_trust::signing::EnrollmentKeyPair {
+    let key = nett_trust::signing::EnrollmentKeyPair::generate().expect("enrollment key");
+    state
+        .await_enrollment(&name(n), key.public_key(), 1_900_000_000)
+        .expect("await");
+    key
+}
+
+/// 新机器用 token 中的入网私钥签的准入材料（design/hub.md 第 6 节）。
+fn joined(
+    state: &State,
+    n: &str,
+    key: &nett_trust::signing::EnrollmentKeyPair,
+    k: NodeKeys,
+) -> nett_trust::admission::AdmissionMaterial {
+    let m = state.machine(&name(n)).expect("machine");
+    let policy = m
+        .enrollment
+        .as_ref()
+        .and_then(|e| e.policy.as_ref())
+        .expect("signed policy");
+    nett_trust::admission::AdmissionMaterial {
+        policy: policy.signed.clone(),
+        proof: key
+            .sign_proof(&nett_trust::admission::AdmissionProofDoc {
+                v: nett_trust::admission::PROOF_V1,
+                kind: nett_trust::admission::AdmissionProofKind::AdmissionProof,
+                node_id: m.node_id.clone(),
+                identity_public_key: k.identity,
+                mesh_public_key: k.mesh,
+            })
+            .expect("proof"),
+    }
+}
+
+#[test]
+fn a_machine_waiting_to_join_gets_a_policy_with_its_enrollment_key() {
+    let dir = temp_dir("pending");
+    let (site, mut state) = site(&dir);
+    let recovery = site.recovery().expect("recovery");
+    state
+        .add(
+            name("box"),
+            MachineOptions::default(),
+            new_node_id().expect("id"),
+        )
+        .expect("add");
+    let first = awaiting(&mut state, "box");
+    sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
+    let version = |s: &State| {
+        s.machine(&name("box"))
+            .expect("box")
+            .enrollment
+            .as_ref()
+            .and_then(|e| e.policy.as_ref())
+            .map(|p| p.version)
+    };
+    assert_eq!(version(&state), Some(1));
+    // 入网之前它不是成员：没有自己的期望状态，别的成员也不配置它
+    assert!(desired(&state, &name("box")).expect("compose").is_none());
+    let mac = desired(&state, &name("mac"))
+        .expect("compose")
+        .expect("mac");
+    assert_eq!(mac.members.len(), 3);
+    // 没有变化时沿用；Edge 变了用同一把入网公钥重签；换 token 时换一把
+    let unchanged = state.clone();
+    sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
+    assert_eq!(state, unchanged);
+    state
+        .set_edge(
+            &name("box"),
+            Some(vec!["172.30.0.2/32".parse().expect("prefix")]),
+        )
+        .expect("edge");
+    sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
+    assert_eq!(version(&state), Some(2));
+    let old = state.clone();
+    let second = awaiting(&mut state, "box");
+    sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
+    assert_eq!(version(&state), Some(3));
+    assert!(
+        describe(&old, &state)
+            .iter()
+            .any(|l| l.contains("a new token to join"))
+    );
+    // 换过之后原来的入网密钥签的证明不被接受，新的可以
+    assert!(
+        crate::updates::record_enrollment(
+            &mut state.clone(),
+            &joined(&state, "box", &first, keys(7))
+        )
+        .is_err()
+    );
+    let material = joined(&state, "box", &second, keys(7));
+    assert_eq!(
+        crate::updates::record_enrollment(&mut state, &material).expect("recorded"),
+        Some(name("box"))
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
+    let dir = temp_dir("enrolled");
+    let (this_site, mut state) = site(&dir);
+    let recovery = this_site.recovery().expect("recovery");
+    state
+        .add(
+            name("box"),
+            MachineOptions::default(),
+            new_node_id().expect("id"),
+        )
+        .expect("add");
+    state
+        .allow(&["mac".into()], &["box".into()], vec![tcp(22)], None)
+        .expect("allow");
+    let key = awaiting(&mut state, "box");
+    sign(&mut state, &recovery, Timestamp::now(), &[]).expect("sign");
+    let material = joined(&state, "box", &key, keys(7));
+
+    let updates = crate::updates::Updates {
+        enrolled: vec![material.clone()],
+        ..Default::default()
+    };
+    // Hub 与站点用同一份逻辑：结果相同，第二次什么都不变
+    let (mut on_hub, mut on_site) = (state.clone(), state.clone());
+    assert_eq!(
+        updates.apply(&mut on_hub).expect("hub").joined,
+        vec![name("box")]
+    );
+    updates.apply(&mut on_site).expect("site");
+    assert_eq!(on_hub, on_site);
+    assert_eq!(
+        updates.apply(&mut on_site).expect("again"),
+        crate::updates::Applied::default()
+    );
+    let m = on_site.machine(&name("box")).expect("box").clone();
+    assert_eq!(m.keys, Some(keys(7)));
+    assert!(m.enrollment.is_none());
+    // 签名工具不用重签：准入材料就是 token 那一份
+    let before = on_site.clone();
+    sign(&mut on_site, &recovery, Timestamp::now(), &[]).expect("sign");
+    assert_eq!(on_site, before);
+    // 成员都接受它
+    let mac = desired(&on_site, &name("mac"))
+        .expect("compose")
+        .expect("mac");
+    let mac = DesiredMesh::from_doc(mac).expect("valid");
+    let mut members = MemberSet::default();
+    let own = OwnPolicy {
+        node_id: &mac.node_id,
+        now: None,
+    };
+    members.apply(&mac, &own, &mut VecSink::default());
+    assert!(members.get(&m.node_id).is_some());
+
+    // 别的站点签的材料、给别的节点的材料都不接受
+    let other_dir = temp_dir("enrolled-other");
+    let (other_site, mut other) = site(&other_dir);
+    other
+        .add(name("box"), MachineOptions::default(), m.node_id.clone())
+        .expect("add");
+    let other_key = awaiting(&mut other, "box");
+    sign(
+        &mut other,
+        &other_site.recovery().expect("recovery"),
+        Timestamp::now(),
+        &[],
+    )
+    .expect("sign");
+    let forged = joined(&other, "box", &other_key, keys(8));
+    assert!(crate::updates::record_enrollment(&mut state.clone(), &forged).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(&other_dir).ok();
+}
+
+#[test]
+fn learned_addresses_fill_in_for_public_machines_without_one() {
+    let dir = temp_dir("learned");
+    let (_site, mut state) = site(&dir);
+    state
+        .add(
+            name("vps"),
+            MachineOptions {
+                public: true,
+                keys: Some(keys(9)),
+                ..MachineOptions::default()
+            },
+            new_node_id().expect("id"),
+        )
+        .expect("add");
+    let vps = state.machine(&name("vps")).expect("vps").clone();
+    let mac = state.machine(&name("mac")).expect("mac").clone();
+    assert!(crate::compose::candidates(&state, &mac, &vps).is_empty());
+    let learned = crate::state::Learned {
+        ipv4: Some(crate::state::LearnedIp {
+            ip: "198.51.100.7".parse().expect("ip"),
+            from: crate::state::AddressSource::Hub,
+        }),
+        ipv6: None,
+    };
+    crate::updates::Updates {
+        learned: vec![crate::updates::LearnedFor {
+            node_id: vps.node_id.clone(),
+            learned,
+        }],
+        ..Default::default()
+    }
+    .apply(&mut state)
+    .expect("applied");
+    let vps = state.machine(&name("vps")).expect("vps").clone();
+    assert_eq!(
+        crate::compose::candidates(&state, &mac, &vps),
+        vec![Candidate::Direct {
+            endpoint: "198.51.100.7:41820".parse().expect("endpoint")
+        }]
+    );
+    assert!(state.unknown_public_addresses().is_empty());
+    std::fs::remove_dir_all(&dir).ok();
 }

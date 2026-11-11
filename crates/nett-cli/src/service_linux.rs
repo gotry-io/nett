@@ -82,25 +82,29 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     // 组网进程以 systemd 的专用身份运行，要能进入这个目录读期望状态；私钥文件本身是 0600
     ensure_dir(DIR, 0o755)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
-    let hub_changed = apply_token(
+    let token = apply_token(
         DIR,
         nett_mesh::store::DEFAULT_STATE_DIR,
         args.token.as_deref(),
+        &keys.0,
     )?;
+    let hub_changed = token.hub_changed;
     let linked = HubConfig::load(Path::new(DIR))
         .map_err(anyhow::Error::msg)?
         .is_some();
-    let desired_changed = match (&args.config, linked) {
-        (Some(_), true) => {
+    let desired_changed = match (token.desired, &args.config, linked) {
+        // 新机器入网时 Hub 发来的第一份（design/hub.md 第 6 节）；之后只由 nett-node 写
+        (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, 0o644)?,
+        (None, Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
         }
-        (Some(path), false) => {
+        (None, Some(path), false) => {
             let bytes = crate::site::read_desired(path)?
                 .with_context(|| format!("{} is not a regular file", path.display()))?;
             crate::site::check_desired_for(&bytes, &keys.0)?;
             replace_if_changed(Path::new(DESIRED), &bytes, 0o644)?
         }
-        (None, _) => false,
+        (None, None, _) => false,
     };
     let binary_changed = copy_self(BINARY)?;
     let mesh_unit_changed =
@@ -151,6 +155,29 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
 
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
+    remove_services()?;
+    println!(
+        "Removed the services. {BINARY}, the keys, the desired state, the trust store and the Hub \
+         configuration remain."
+    );
+    Ok(())
+}
+
+/// `sudo nett leave`（design/hub.md 第 7 节）：告诉 Hub，删除服务，拆掉组网接口与过滤规则，删除密钥与配置。
+pub fn leave() -> anyhow::Result<()> {
+    require_root()?;
+    crate::install::tell_hub(DIR)?;
+    remove_services()?;
+    nett_mesh::linux::teardown().context("removing the mesh interface and filter rules")?;
+    crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
+    println!(
+        "Left the site: removed the services and the mesh interface, deleted the keys, the desired \
+         state, the trust store and the Hub configuration. {BINARY} stays."
+    );
+    Ok(())
+}
+
+fn remove_services() -> anyhow::Result<()> {
     for unit in [&NODE, &MESH] {
         let path = unit_path(unit);
         if !Path::new(&path).exists() {
@@ -163,10 +190,6 @@ pub fn uninstall() -> anyhow::Result<()> {
         fs::remove_file(&path).with_context(|| format!("removing {path}"))?;
     }
     systemctl(&["daemon-reload"])?;
-    println!(
-        "Removed the services. {BINARY}, the keys, the desired state, the trust store and the Hub \
-         configuration remain."
-    );
     Ok(())
 }
 

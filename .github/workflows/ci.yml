@@ -36,6 +36,8 @@ jobs:
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends protobuf-compiler
           cargo run --locked -p nett-proto-gen
           git diff --exit-code crates/nett-proto/src/gen
+      # 新机器上的安装脚本（design/release.md 第 6 节）：只用 POSIX sh
+      - run: shellcheck -s sh packaging/install.sh
 
   # macOS 原生成员（design/userspace.md 第 8 节）：clippy、测试，以及需要 root 的 utun 冒烟测试
   macos:
@@ -116,6 +118,25 @@ jobs:
           ! sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json
           sudo "$nett" uninstall
           ! sudo launchctl print system/io.gotry.nett.node 2>/dev/null
+          # 退出之后，同一台 Mac 作为新机器经 Hub 入网（design/hub.md 第 3.3、6 节），再退出
+          sudo "$nett" leave | tee leave.log
+          grep -F 'Told the Hub at https://127.0.0.1:8443' leave.log
+          "$nett" site add ci-new --yes | tee add.log
+          grep -F -- '- ci left the site' add.log
+          token=$(grep -o 'nett_enr_[A-Za-z0-9_-]*' add.log)
+          sudo "$nett" install "$token" | tee enroll.log
+          grep -F 'Joining the site through the Hub at https://127.0.0.1:8443' enroll.log
+          for _ in $(seq 40); do
+            "$nett" site status --json \
+              | jq -e '.machines[] | select(.name == "ci-new") | .online and .result == "applied"' && break
+            sleep 0.5
+          done
+          "$nett" site status | tee site-status.log
+          grep -E '^ci-new +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
+          # token 只能用一次
+          ! sudo "$nett" install "$token"
+          sudo "$nett" leave
+          ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 
   # 组网实验场景（design/prototype.md 第 7 节），每次推送全部跑一遍。场景之间互不依赖，按耗时分成几组并行，
   # 每组约 4 分钟。一行一个场景：标题 | nett-lab run 的参数（本文件写定，不来自外部输入）。

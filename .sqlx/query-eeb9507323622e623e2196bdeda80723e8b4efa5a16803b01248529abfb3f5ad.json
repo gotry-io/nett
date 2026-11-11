@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE node_updates SET left_at = NULL WHERE node_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "eeb9507323622e623e2196bdeda80723e8b4efa5a16803b01248529abfb3f5ad"
+}

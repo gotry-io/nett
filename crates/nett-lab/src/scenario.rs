@@ -15,7 +15,7 @@ use crate::net::Underlay;
 use crate::topology::Topology;
 
 mod hub;
-pub use hub::hub;
+pub use hub::{enroll_here, hub, leave_here};
 
 /// 连通性检查的最长等待时间。
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
