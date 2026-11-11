@@ -7,6 +7,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - On Linux, `nett doctor` and `sudo nett install` say when ufw denies incoming connections without a rule
   for `nett0`: it drops what the mesh lets in, and other machines see this one as unreachable. The fix is
   `sudo ufw allow in on nett0`; nett filters the interface itself.
+- Container members fall back to TLS when UDP is blocked: the Compose example runs the transport adapter
+  as a third container in the mesh member's network namespace.
 ## [0.3.1] - 2026-11-11
 
 - Container members: nett-node in its own container reads the mesh process's status and asks it to reload.
