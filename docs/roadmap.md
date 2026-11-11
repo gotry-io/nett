@@ -43,7 +43,7 @@ Proceed in order: first pass the prototype gate, then replace the existing hand-
 - LAN smart gateway (subnet router + source NAT by source class); Edge address (`edge` role; Edge is the user's own reverse proxy); advertised routes denied by default
 - Node identity and the identity lookup interface (`whois`), node hostnames and aliases (`hostnames`), hostname resolution, access control
 - Phones: mobile gateway + direct-to-home dual path; device and credential model; export of standard WireGuard configurations (configuration file and QR code), and configurations for Surge, mihomo and sing-box (two outbounds placed in an automatic-fallback policy group)
-- OpenAPI (covering this phase's resources); `nett status`, `nett doctor`, `nett leave`, `nett whois` (command line in English only, architecture.md section 14.3); troubleshooting manual (bilingual)
+- OpenAPI (covering this phase's resources); `nett status`, `nett doctor`, `nett leave`, `nett whois` (command line in English only, architecture.md section 14.3); troubleshooting manual
 - First platforms: Linux, Synology DSM, macOS (native member; container member optional), Home Assistant OS (add-on)
 - Availability: at least two usable relays (on different hosts); `dial-only` nodes connect to at least two `public` nodes
 
@@ -79,7 +79,7 @@ Proceed in order: first pass the prototype gate, then replace the existing hand-
 
 ## Unscheduled
 
-- **Web console and passkeys** (ADR 0024): a graphical interface on the same API, added after site state moves to the Hub (H5 in design/hub.md section 9). View first: nodes, members and devices, access rules, and for each pair of nodes the current path, transport, latency and loss; then passkey login and signing, and change sets (design/changes.md). Bilingual (Chinese and English)
+- **Web console and passkeys** (ADR 0024): a graphical interface on the same API, added after site state moves to the Hub (H5 in design/hub.md section 9). View first: nodes, members and devices, access rules, and for each pair of nodes the current path, transport, latency and loss; then passkey login and signing, and change sets (design/changes.md)
 
 ## To be discussed
 

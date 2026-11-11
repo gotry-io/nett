@@ -100,7 +100,7 @@ Uses RFC 9457 (`application/problem+json`) with a stable `code`:
 }
 ```
 
-`code` is stable and meant for programs; `title` and `detail` are returned in Chinese or English according to the request's `Accept-Language` (or the user's `locale`).
+`code` is stable and meant for programs; `title` and `detail` are plain English for people.
 
 ### 2.7 Sensitive fields
 
@@ -161,7 +161,7 @@ For example `POST /api/v1/nodes/node_…/actions/remove`. Actions are also subje
 | Field | Description |
 |---|---|
 | `spec.display_name` | Display name |
-| `spec.locale`, `spec.timezone` | Console display preferences |
+| `spec.timezone` | Console display preference |
 | `status.initialized_at` | Time initialization completed (first passkey registered) |
 | `status.recovery_key` | Fingerprint and creation time of the recovery key |
 | `status.backup_key` | Fingerprint and creation time of the backup public key |
