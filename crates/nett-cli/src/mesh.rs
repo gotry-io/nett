@@ -338,6 +338,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             Engine::new(node_id, key, dataplane).with_trust_store(trust),
             sink,
             clock,
+            nett_mesh::dns::PORT,
         )
     } else {
         let dataplane = KernelWireGuard::open()?;
@@ -345,6 +346,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             Engine::new(node_id, key, dataplane).with_trust_store(trust),
             sink,
             clock,
+            nett_mesh::dns::PORT,
         )
     };
     #[cfg(target_os = "macos")]
@@ -352,6 +354,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?)).with_trust_store(trust),
         sink,
         clock,
+        nett_mesh::dns::PORT,
     );
     let worker = worker.context("starting the mesh worker thread")?;
     // The local interface is only for people and nett-node: if the socket cannot be created, record

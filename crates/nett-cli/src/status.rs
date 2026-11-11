@@ -97,7 +97,7 @@ fn reload_text(outcome: &ReloadOutcome, now: Timestamp) -> anyhow::Result<String
 
 /// When it cannot connect, says clearly whether the process is not running or the permissions are
 /// insufficient.
-fn explain(e: QueryError, socket: &std::path::Path) -> anyhow::Error {
+pub(crate) fn explain(e: QueryError, socket: &std::path::Path) -> anyhow::Error {
     let path = socket.display();
     match &e {
         QueryError::Connect { source, .. } => match source.kind() {
@@ -119,7 +119,7 @@ fn explain(e: QueryError, socket: &std::path::Path) -> anyhow::Error {
     }
 }
 
-fn find_peer(doc: &StatusDoc, wanted: &str) -> anyhow::Result<usize> {
+pub(crate) fn find_peer(doc: &StatusDoc, wanted: &str) -> anyhow::Result<usize> {
     if let Some(i) = doc.peers.iter().position(|p| {
         p.name.as_ref().is_some_and(|n| n.as_str() == wanted) || p.id.as_str() == wanted
     }) {
@@ -358,7 +358,7 @@ fn dash() -> String {
     "-".to_owned()
 }
 
-fn labelled(name: Option<&str>, id: &str) -> String {
+pub(crate) fn labelled(name: Option<&str>, id: &str) -> String {
     match name {
         Some(name) => format!("{name} ({id})"),
         None => id.to_owned(),
@@ -370,13 +370,13 @@ fn sort_key(p: &PeerStatus) -> &str {
     p.name.as_ref().map_or(p.id.as_str(), |n| n.as_str())
 }
 
-fn peer_label(p: &PeerStatus) -> String {
+pub(crate) fn peer_label(p: &PeerStatus) -> String {
     p.name
         .as_ref()
         .map_or_else(|| p.id.to_string(), ToString::to_string)
 }
 
-fn node_label(node: &NodeRef) -> String {
+pub(crate) fn node_label(node: &NodeRef) -> String {
     node.name
         .as_ref()
         .map_or_else(|| node.id.to_string(), ToString::to_string)
@@ -440,7 +440,7 @@ fn switch_reason(reason: &str) -> String {
     }
 }
 
-fn problem_text(p: &Problem) -> String {
+pub(crate) fn problem_text(p: &Problem) -> String {
     let reason = &p.reason;
     match p.kind {
         ProblemKind::ConfigRejected => {
@@ -456,6 +456,7 @@ fn problem_text(p: &Problem) -> String {
             )
         }
         ProblemKind::AccessRulesRejected => format!("access rules rejected: {reason}"),
+        ProblemKind::Names => format!("names under nett.internal do not resolve: {reason}"),
         ProblemKind::RoutesRejected => match &p.node {
             Some(node) => format!("routes of {} rejected: {reason}", node_label(node)),
             None => format!("routes rejected: {reason}"),
@@ -515,7 +516,7 @@ fn event_text(e: &EventRecord, names: &std::collections::HashMap<String, String>
 
 // ---- Format ----
 
-fn addresses(addrs: &[std::net::IpAddr]) -> String {
+pub(crate) fn addresses(addrs: &[std::net::IpAddr]) -> String {
     if addrs.is_empty() {
         return dash();
     }

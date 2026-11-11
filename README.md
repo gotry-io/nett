@@ -50,6 +50,8 @@ The mesh service runs as root from a copy in a root-only directory, so run `sudo
 
 - `nett help` lists every command; add `--help` to any command for its usage.
 - `sudo nett status` lists this node and every peer: whether it is connected, the path, round-trip time and loss, and any rejected configuration; `sudo nett status <peer>` shows one peer's candidate paths and recent switches ([design/status.md](docs/design/status.md)).
+- Every machine is reachable as `<name>.nett.internal`: on macOS and on Linux with systemd-resolved the system resolver sends these names to the mesh ([design/names-and-diagnostics.md](docs/design/names-and-diagnostics.md)).
+- `nett ping <peer>` probes a peer through the tunnel and, with sudo, shows the path each reply took; `sudo nett whois <address>` says which member an address belongs to; `sudo nett doctor` checks this machine and says what to fix.
 
 ## Documentation
 

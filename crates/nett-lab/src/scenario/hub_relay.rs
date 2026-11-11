@@ -384,6 +384,81 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         ),
     );
 
+    // Names and diagnostics (design/names-and-diagnostics.md): a asks its own responder for b's name,
+    // pings b through the tunnel with the path shown, and the doctor finds nothing wrong
+    let a_mesh = a.mesh_ipv4.to_string();
+    let looked_up = run_in(&ns("a")?, "nslookup", ["b.nett.internal", &a_mesh]);
+    report.check(
+        "names:resolve",
+        looked_up
+            .as_ref()
+            .is_ok_and(|o| o.contains(&b.mesh_ipv4.to_string())),
+        looked_up
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    let refused = run_in(&ns("a")?, "nslookup", ["example.com", &a_mesh]);
+    report.check(
+        "names:not-a-forwarder",
+        refused
+            .as_ref()
+            .map_or(true, |o| !o.contains("Address: ") || o.contains("REFUSED")),
+        refused.unwrap_or_else(|e| format!("{e:#}")),
+    );
+    let socket_a = a.dir.join("mesh.sock");
+    let pinged = run_in(
+        &ns("a")?,
+        &nett.display().to_string(),
+        [
+            "ping".as_ref(),
+            "b".as_ref(),
+            "-c".as_ref(),
+            "3".as_ref(),
+            "--socket".as_ref(),
+            socket_a.as_os_str(),
+        ],
+    );
+    report.check(
+        "ping:through-the-tunnel",
+        pinged
+            .as_ref()
+            .is_ok_and(|o| o.contains("3 received") && o.contains("via relay")),
+        pinged
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    let whois = run_in(
+        &ns("a")?,
+        &nett.display().to_string(),
+        [
+            "whois".as_ref(),
+            b.mesh_ipv4.to_string().as_ref(),
+            "--socket".as_ref(),
+            socket_a.as_os_str(),
+        ],
+    );
+    report.check(
+        "whois:member",
+        whois.as_ref().is_ok_and(|o| o.contains("is b (")),
+        whois
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+    let doctor = run_in(
+        &ns("a")?,
+        &nett.display().to_string(),
+        ["doctor".as_ref(), "--socket".as_ref(), socket_a.as_os_str()],
+    );
+    report.check(
+        "doctor:healthy",
+        doctor
+            .as_ref()
+            .is_ok_and(|o| o.contains("No problems found")),
+        doctor
+            .as_ref()
+            .map_or_else(|e| format!("{e:#}"), Clone::clone),
+    );
+
     // All of a's UDP blocked upstream: the pair moves to TLS
     crate::fault::block_udp_upstream(&lab.underlay, "a")?;
     let deadline = Instant::now() + FALLBACK;

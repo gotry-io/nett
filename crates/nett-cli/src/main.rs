@@ -7,6 +7,8 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+mod diagnose;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod hub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod install;
@@ -19,6 +21,8 @@ mod mesh;
 mod node;
 #[cfg(target_os = "linux")]
 mod relay;
+#[cfg(target_os = "linux")]
+mod resolver;
 #[cfg(target_os = "macos")]
 mod service;
 #[cfg(target_os = "linux")]
@@ -58,6 +62,27 @@ const COMMANDS: &[Command] = &[
         group: Group::Machine,
         summary: "Show this node and its peers",
         usage: status::USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "ping",
+        group: Group::Machine,
+        summary: "Probe a peer through the tunnel and show the path",
+        usage: diagnose::PING_USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "whois",
+        group: Group::Machine,
+        summary: "Show who a mesh address belongs to",
+        usage: diagnose::WHOIS_USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "doctor",
+        group: Group::Machine,
+        summary: "Check this machine and say what to fix",
+        usage: diagnose::DOCTOR_USAGE,
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
@@ -124,6 +149,13 @@ const COMMANDS: &[Command] = &[
     },
     #[cfg(target_os = "linux")]
     Command {
+        name: "resolver",
+        group: Group::Service,
+        summary: "Points names under nett.internal at this machine's responder",
+        usage: resolver::USAGE,
+    },
+    #[cfg(target_os = "linux")]
+    Command {
         name: "transport",
         group: Group::Service,
         summary: "The transport adapter that carries WireGuard over TLS",
@@ -178,6 +210,12 @@ fn run() -> anyhow::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "status" => status::run(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "ping" => diagnose::ping(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "whois" => diagnose::whois(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "doctor" => diagnose::doctor(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         "reload" => status::reload(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "install" => install::install_command(parser),
@@ -197,6 +235,8 @@ fn run() -> anyhow::Result<()> {
         "relay" => relay::run(parser),
         #[cfg(target_os = "linux")]
         "transport" => transport::run(parser),
+        #[cfg(target_os = "linux")]
+        "resolver" => resolver::run(parser),
         _ => unreachable!("every listed command is dispatched"),
     }
 }

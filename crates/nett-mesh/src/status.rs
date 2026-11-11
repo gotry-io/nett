@@ -284,6 +284,8 @@ pub enum ProblemKind {
     DataPlaneFailed,
     /// Reading or writing the trust store failed (design/mesh.md section 4.2).
     TrustStore,
+    /// The DNS responder could not start (design/names-and-diagnostics.md section 2).
+    Names,
     #[serde(other)]
     Other,
 }
@@ -303,6 +305,33 @@ impl EventRecord {
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
     }
+}
+
+/// Who an address belongs to, from this machine's verified admission material
+/// (design/names-and-diagnostics.md section 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Whois {
+    pub address: IpAddr,
+    /// `member` (a mesh address), `edge` (an Edge address), `route` (inside a prefix a member
+    /// advertises) or `none`.
+    pub kind: WhoisKind,
+    pub node: Option<NodeRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh: Vec<IpAddr>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub roles: Vec<nett_trust::payload::Role>,
+    /// The advertised prefix the address is in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<IpPrefix>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WhoisKind {
+    Member,
+    Edge,
+    Route,
+    None,
 }
 
 /// Result of a `reload` (design/status.md section 4.1).
@@ -356,6 +385,8 @@ struct Problems {
     data_plane: Option<(Instant, Timestamp, String)>,
     /// Stays listed until the next write succeeds.
     trust_store: Option<(Timestamp, String)>,
+    /// The DNS responder could not start.
+    names: Option<(Timestamp, String)>,
 }
 
 impl<E: EventSink> Recorder<E> {
@@ -452,6 +483,9 @@ impl<E: EventSink> Recorder<E> {
         if let Some(t) = &p.trust_store {
             push(ProblemKind::TrustStore, None, t);
         }
+        if let Some(n) = &p.names {
+            push(ProblemKind::Names, None, n);
+        }
         problems
     }
 
@@ -482,6 +516,8 @@ impl<E: EventSink> Recorder<E> {
                 self.problems.trust_store = Some((now, reason.clone()));
             }
             Event::TrustStoreSaved => self.problems.trust_store = None,
+            Event::NamesUnavailable { reason } => self.problems.names = Some((now, reason.clone())),
+            Event::NamesReady => self.problems.names = None,
             Event::PathSwitched {
                 node_id, reason, ..
             } => {
@@ -528,6 +564,15 @@ impl<E: EventSink> EventSink for Recorder<E> {
 struct Request {
     v: u32,
     query: String,
+    /// The address a `whois` asks about.
+    #[serde(default)]
+    address: Option<IpAddr>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WhoisReply {
+    v: u32,
+    whois: Whois,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -558,6 +603,8 @@ pub trait StatusSource: Send + 'static {
     fn reload(&self) -> Option<ReloadOutcome>;
     /// Takes over a `coordinate` connection from nett-node (design/status.md section 4.2).
     fn coordinate(&self, stream: UnixStream) -> std::io::Result<()>;
+    /// Who `address` belongs to; `None` when the background thread is busy.
+    fn whois(&self, address: IpAddr) -> Option<Whois>;
 }
 
 /// The thread that accepts status queries. Dropping it stops the thread and deletes the socket.
@@ -789,6 +836,23 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bo
             ),
         ));
     }
+    if request.query == "whois" {
+        let Some(address) = request.address else {
+            return done(reply_error(stream, "bad_request", "whois needs an address"));
+        };
+        let Some(whois) = source.whois(address) else {
+            return done(reply_error(
+                stream,
+                "busy",
+                "the mesh process is busy; try again",
+            ));
+        };
+        let mut bytes =
+            serde_json::to_vec(&WhoisReply { v: VERSION, whois }).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        let mut out = stream;
+        return done(out.write_all(&bytes));
+    }
     if request.query == "coordinate" {
         let mut out = stream;
         let mut accepted = crate::coord::ACCEPTED.as_bytes().to_vec();
@@ -888,6 +952,18 @@ pub fn query(path: &Path) -> Result<StatusDoc, QueryError> {
 /// (`nett status --json` outputs it as is).
 pub fn query_raw(path: &Path) -> Result<serde_json::Value, QueryError> {
     request(path, "status", QUERY_TIMEOUT)
+}
+
+/// Asks the mesh process at `path` who `address` belongs to (design/names-and-diagnostics.md section 4).
+pub fn whois(path: &Path, address: IpAddr) -> Result<Whois, QueryError> {
+    let value = send(
+        path,
+        &serde_json::json!({"v": VERSION, "query": "whois", "address": address}),
+        QUERY_TIMEOUT,
+    )?;
+    let reply: WhoisReply =
+        serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
+    Ok(reply.whois)
 }
 
 /// Asks the mesh process at `path` to re-read the desired state file and waits for it to finish applying
@@ -1027,6 +1103,17 @@ mod tests {
 
         fn coordinate(&self, _: UnixStream) -> std::io::Result<()> {
             Ok(())
+        }
+
+        fn whois(&self, address: IpAddr) -> Option<Whois> {
+            Some(Whois {
+                address,
+                kind: WhoisKind::None,
+                node: None,
+                mesh: vec![],
+                roles: vec![],
+                prefix: None,
+            })
         }
     }
 
