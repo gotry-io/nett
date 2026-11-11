@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 zeroize = { workspace = true, optional = true }
+# Sealing and opening the Hub's backups: the Hub and the signing tool
+x25519-dalek = { workspace = true, optional = true }
 
 [dev-dependencies]
 zeroize.workspace = true
@@ -27,3 +29,5 @@ zeroize.workspace = true
 [features]
 # Generating signatures: the signing tool, enrollment on new machines, lab tools and tests
 signing = ["dep:zeroize"]
+# Sealing and opening the Hub's backups (design/hub.md section 8.2)
+backup = ["dep:x25519-dalek", "dep:zeroize"]

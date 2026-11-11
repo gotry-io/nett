@@ -66,6 +66,8 @@ pub struct NodeRow {
     pub learned: Option<String>,
     pub upgrade_result: Option<String>,
     pub upgrade_reason: Option<String>,
+    pub backup_sha256: Option<Vec<u8>>,
+    pub backup_at: Option<i64>,
 }
 
 impl Db {
@@ -233,7 +235,8 @@ impl Db {
         Ok(sqlx::query_as!(
             NodeRow,
             "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,
-                    ack_reason, status, status_at, learned, upgrade_result, upgrade_reason
+                    ack_reason, status, status_at, learned, upgrade_result, upgrade_reason,
+                    backup_sha256, backup_at
              FROM nodes ORDER BY node_id"
         )
         .fetch_all(&self.pool)
@@ -287,6 +290,34 @@ impl Db {
     }
 
     /// The machine's answer to the release manifest (design/release.md section 7).
+    /// The machine holds the Hub backup with this hash (design/hub.md section 8.2).
+    pub async fn set_backup_held(
+        &self,
+        node_id: &str,
+        sha256: &[u8],
+        at: i64,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE nodes SET backup_sha256 = ?2, backup_at = ?3 WHERE node_id = ?1",
+            node_id,
+            sha256,
+            at
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// A consistent copy of the whole database in `path` (SQLite `VACUUM INTO`): the file must not
+    /// exist.
+    pub async fn snapshot(&self, path: &Path) -> Result<(), DbError> {
+        let path = path.to_string_lossy().into_owned();
+        sqlx::query!("VACUUM INTO ?1", path)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn set_upgrade(
         &self,
         node_id: &str,

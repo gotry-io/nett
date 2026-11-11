@@ -9,7 +9,7 @@ pub struct Envelope {
     pub reply_to: u64,
     #[prost(message, optional, tag = "3")]
     pub sent_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 40")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 50, 51, 40")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
@@ -40,6 +40,10 @@ pub mod envelope {
         LinkReport(super::LinkReport),
         #[prost(message, tag = "32")]
         PathSwitch(super::PathSwitch),
+        #[prost(message, tag = "50")]
+        BackupFetch(super::BackupFetch),
+        #[prost(message, tag = "51")]
+        Backup(super::Backup),
         /// An Envelope that exceeds the single-message limit is sent in fragments (protocol.md section
         /// 4.1)
         #[prost(message, tag = "40")]
@@ -175,6 +179,22 @@ pub struct PathSwitch {
     pub node_id: ::prost::alloc::string::String,
     #[prost(bytes = "vec", tag = "2")]
     pub message: ::prost::alloc::vec::Vec<u8>,
+}
+/// node → Hub: asks for the Hub's latest encrypted backup (design/hub.md section 8.2); have is the
+/// SHA-256 of the backup the node holds, empty when it has none
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct BackupFetch {
+    #[prost(bytes = "vec", tag = "1")]
+    pub have: ::prost::alloc::vec::Vec<u8>,
+}
+/// Hub → node: the encrypted backup, when the node does not hold it yet; at most 4 MiB, sent in
+/// chunks
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct Backup {
+    #[prost(bytes = "vec", tag = "1")]
+    pub sha256: ::prost::alloc::vec::Vec<u8>,
+    #[prost(bytes = "vec", tag = "2")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Chunk {

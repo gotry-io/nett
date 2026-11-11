@@ -61,6 +61,10 @@ pub struct State {
     /// 4.1); created with the first relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_key: Option<RelayKey>,
+    /// Public key the Hub seals its backups to; the private key is `backup.key` in the site
+    /// directory (design/hub.md section 8.2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_key: Option<X25519PublicKey>,
 }
 
 /// The site's relay key. `Debug` does not print it (hard rule 10).
@@ -375,6 +379,7 @@ impl State {
             revoked: Vec::new(),
             access_rules: None,
             relay_key: None,
+            backup_key: None,
         }
     }
 

@@ -20,6 +20,8 @@ use crate::state::State;
 
 pub const STATE_FILE: &str = "state.json";
 pub const RECOVERY_FILE: &str = "recovery.pk8";
+/// The private key the Hub's backups are sealed to (design/hub.md section 8.2).
+pub const BACKUP_FILE: &str = "backup.key";
 pub const NODES_DIR: &str = "nodes";
 pub const DESIRED_FILE: &str = "desired.json";
 const LOCK_FILE: &str = ".lock";
@@ -152,6 +154,32 @@ impl SiteDir {
                 .ok_or_else(|| SiteError::invalid(format!("{} does not exist", path.display())))?,
         );
         RecoveryKeyPair::from_pkcs8(&pkcs8).map_err(SiteError::sign)
+    }
+
+    /// Makes sure the site has a backup key (design/hub.md section 8.2): creates `backup.key` when there
+    /// is none, and records its public key in the site state. Returns whether it was created.
+    pub fn ensure_backup_key(&self, state: &mut State) -> Result<bool, SiteError> {
+        use nett_trust::backup::BackupKey;
+        let path = self.path.join(BACKUP_FILE);
+        let existing = read_bounded(&path, 1024)
+            .map_err(|e| SiteError::io(format!("reading {}", path.display()), e))?;
+        let (key, created) = match existing {
+            Some(bytes) => {
+                let line = zeroize::Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned());
+                let key = BackupKey::from_line(&line)
+                    .map_err(|e| SiteError::invalid(format!("{}: {e}", path.display())))?;
+                (key, false)
+            }
+            None => {
+                let key = BackupKey::generate().map_err(|e| SiteError::invalid(e.to_string()))?;
+                let mut line = key.to_line();
+                line.push('\n');
+                write_file(&self.path, BACKUP_FILE, line.as_bytes(), true)?;
+                (key, true)
+            }
+        };
+        state.backup_key = Some(key.public_key());
+        Ok(created)
     }
 
     pub fn desired_path(&self, name: &NodeName) -> PathBuf {

@@ -38,7 +38,11 @@ CREATE TABLE nodes (
     learned TEXT,
     -- The machine's answer to the release manifest (design/release.md section 7)
     upgrade_result TEXT,
-    upgrade_reason TEXT
+    upgrade_reason TEXT,
+    -- The SHA-256 of the Hub backup the machine holds, and when it said so (design/hub.md
+    -- section 8.2)
+    backup_sha256 BLOB,
+    backup_at INTEGER
 );
 
 -- Events that happen on the Hub side and are not yet in the pushed site state (design/hub.md

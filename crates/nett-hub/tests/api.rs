@@ -59,9 +59,14 @@ async fn expired_link_code_is_refused() {
     db.set_link(URL, &nett_hub::sha256(&SECRET), nett_hub::now() - 1)
         .await
         .expect("set link");
-    let hub = nett_hub::hub::Hub::load(db, x25519_dalek::StaticSecret::from([200; 32]), URL.into())
-        .await
-        .expect("hub");
+    let hub = nett_hub::hub::Hub::load(
+        db,
+        x25519_dalek::StaticSecret::from([200; 32]),
+        URL.into(),
+        None,
+    )
+    .await
+    .expect("hub");
     let app = nett_hub::api::router(hub);
     let (status, _) = call(
         &app,

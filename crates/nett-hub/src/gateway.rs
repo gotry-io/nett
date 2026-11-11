@@ -20,7 +20,7 @@ use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{MAX_MESSAGE, Responder, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
-    AckResult, DesiredState, Envelope, Error as ProtoError, ErrorCode, Hello, Partition,
+    AckResult, Backup, DesiredState, Envelope, Error as ProtoError, ErrorCode, Hello, Partition,
     PartitionKind, PathSwitch, Pong, Welcome,
 };
 use nett_site::state::{AddressSource, Learned, LearnedIp};
@@ -613,6 +613,28 @@ async fn handle(
                 tracing::debug!(node_id = %node, to = %to, "switch message not passed on");
             }
         }
+        // The node keeps the Hub's latest encrypted backup (design/hub.md section 8.2): it gets the
+        // backup when it does not hold it yet, and saying it holds it is recorded
+        Some(Body::BackupFetch(fetch)) => match hub.backup().await {
+            Ok(Some(backup)) if fetch.have == backup.sha256 => {
+                hub.db
+                    .set_backup_held(node.as_str(), &backup.sha256, now())
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(Some(backup)) => {
+                out.send(
+                    socket,
+                    Body::Backup(Backup {
+                        sha256: backup.sha256.to_vec(),
+                        data: backup.sealed.as_ref().clone(),
+                    }),
+                )
+                .await?;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "making a Hub backup"),
+        },
         Some(Body::Goodbye(_)) => return Ok(false),
         _ => {}
     }

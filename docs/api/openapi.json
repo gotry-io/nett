@@ -1,6 +1,33 @@
 {
   "components": {
     "schemas": {
+      "BackupStatus": {
+        "properties": {
+          "bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "held_by": {
+            "description": "The machines that hold this backup.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "made_at": {
+            "description": "When it was made (Unix seconds).",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "made_at",
+          "bytes",
+          "held_by"
+        ],
+        "type": "object"
+      },
       "Event": {
         "description": "One event of a machine, newest first in `GET /api/v1/site/events`.",
         "properties": {
@@ -172,6 +199,17 @@
       "StatusResponse": {
         "description": "`GET /api/v1/site/status`.",
         "properties": {
+          "backup": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/BackupStatus",
+                "description": "The Hub's latest encrypted backup (design/hub.md section 8.2); absent before the site has a\nbackup key or before any machine asked for one."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "generation": {
             "format": "int64",
             "minimum": 0,

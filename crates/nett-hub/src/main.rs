@@ -32,6 +32,9 @@ const USAGE: &str = "usage: nett-hub <command> [--data <dir>]
   init --url https://<host> [--tls-cert <cert.pem>]
                        print a one-time link code for `nett site link`, valid for an hour
   reset                forget the linked site and its machines; the Hub identity key stays
+  restore <hub-backup.enc>
+                       rebuild the Hub in an empty data directory from the encrypted backup a
+                       machine keeps; asks for the nett-backup-… line from the site directory
   openapi              print the OpenAPI document of the Hub API
 
 The data directory defaults to /var/lib/nett-hub.";
@@ -99,6 +102,7 @@ fn run() -> anyhow::Result<()> {
             print!("{}", nett_hub::openapi::json()?);
             Ok(())
         }
+        ["restore", file] => runtime.block_on(restore(&data, Path::new(file))),
         ["reset"] => runtime.block_on(async {
             let db = db::Db::open(&data.join(DB_FILE)).await?;
             db.reset().await?;
@@ -109,14 +113,86 @@ fn run() -> anyhow::Result<()> {
     }
 }
 
-/// Data directory (`0700`) and the Hub identity key (`0600`, generated if absent).
-fn prepare(data: &Path) -> anyhow::Result<PrivateKey> {
+/// Rebuilds the Hub from a backup a machine keeps (design/hub.md section 8.2): opens it with the site's
+/// backup key, then writes the Hub identity key and the database into an empty data directory.
+async fn restore(data: &Path, file: &Path) -> anyhow::Result<()> {
+    use std::io::{BufRead as _, IsTerminal as _, Write as _};
+    if data.join(KEY_FILE).exists() || data.join(DB_FILE).exists() {
+        bail!(
+            "{} already holds a Hub; restore into an empty data directory",
+            data.display()
+        );
+    }
+    let sealed = nett_mesh::config::read_bounded(file, nett_trust::MAX_BACKUP_BYTES as u64)
+        .with_context(|| format!("reading {}", file.display()))?
+        .with_context(|| format!("{} does not exist", file.display()))?;
+    if std::io::stdin().is_terminal() {
+        eprint!("Backup key (the nett-backup-… line in backup.key of the site directory): ");
+        std::io::stderr().flush().ok();
+    }
+    let mut line = zeroize::Zeroizing::new(String::new());
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .context("reading the backup key")?;
+    let key = nett_trust::backup::BackupKey::from_line(&line)?;
+    let plain = nett_trust::backup::open(&key, &sealed)?;
+    let bundle: hub::BackupBundle =
+        serde_json::from_slice(&plain).context("the backup holds no Hub")?;
+    if bundle.v != 1 {
+        bail!("backup format {} is newer than this nett-hub", bundle.v);
+    }
+    prepare_dir(data)?;
+    PrivateKey::from_bytes(bundle.hub_key).save_new(&data.join(KEY_FILE))?;
+    write_new(&data.join(DB_FILE), &bundle.db)?;
+    let db = db::Db::open(&data.join(DB_FILE)).await?;
+    let url = db.hub().await?.map(|h| h.url).unwrap_or_default();
+    let (generation, machines) = match db.site().await? {
+        Some((generation, json)) => (
+            generation,
+            nett_site::state::State::from_json(json.as_bytes())
+                .map(|s| s.machines.len())
+                .unwrap_or(0),
+        ),
+        None => (0, 0),
+    };
+    println!(
+        "Restored the Hub for {url} from a backup made at {}: {machines} machines, generation {generation}.
+         Start `nett-hub serve --data {}` and point {url} at this host; the machines connect on their own.
+         Then run any `nett site` command on the computer that holds the site: it pushes what changed since the backup.",
+        nett_trust::encoding::Timestamp::from_unix_seconds(bundle.made_at),
+        data.display()
+    );
+    Ok(())
+}
+
+fn prepare_dir(data: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(data)
-        .with_context(|| format!("creating {}", data.display()))?;
+        .with_context(|| format!("creating {}", data.display()))
+}
+
+/// A new file with mode `0600`.
+fn write_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .with_context(|| format!("creating {}", path.display()))?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .with_context(|| format!("writing {}", path.display()))
+}
+
+/// Data directory (`0700`) and the Hub identity key (`0600`, generated if absent).
+fn prepare(data: &Path) -> anyhow::Result<PrivateKey> {
+    prepare_dir(data)?;
     let path = data.join(KEY_FILE);
     if path.exists() {
         return Ok(PrivateKey::load(&path)?);
@@ -223,9 +299,14 @@ async fn serve(
         db.hub().await?.map(|h| h.url).context(
             "the Hub is not initialized; run `nett-hub init --url https://<host>` first",
         )?;
-    let hub = hub::Hub::load(db, x25519_dalek::StaticSecret::from(*key.as_bytes()), url)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let hub = hub::Hub::load(
+        db,
+        x25519_dalek::StaticSecret::from(*key.as_bytes()),
+        url,
+        Some(data.to_path_buf()),
+    )
+    .await
+    .map_err(anyhow::Error::msg)?;
     follow_releases(hub.clone(), releases.to_owned());
     let app = api::router(hub);
     let listener = tokio::net::TcpListener::bind(listen)

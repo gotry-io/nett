@@ -78,7 +78,37 @@ pub struct Hub {
     /// Node connections and handshakes in progress (protocol.md section 11).
     pub connections: Arc<tokio::sync::Semaphore>,
     pub handshakes: Arc<tokio::sync::Semaphore>,
+    /// Where the database snapshot for a backup is made; no backups without it.
+    data: Option<std::path::PathBuf>,
+    /// The latest sealed backup (design/hub.md section 8.2).
+    backup: Mutex<Option<Backup>>,
 }
+
+/// A sealed backup of the Hub (design/hub.md section 8.2).
+#[derive(Debug, Clone)]
+pub struct Backup {
+    pub sha256: [u8; 32],
+    pub sealed: Arc<Vec<u8>>,
+    /// The site's generation and backup key when it was made, and when.
+    generation: u64,
+    recipient: nett_trust::keys::X25519PublicKey,
+    pub made_at: i64,
+}
+
+/// What a backup holds, before it is sealed: the Hub identity key and a copy of the database.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackupBundle {
+    pub v: u32,
+    pub made_at: i64,
+    #[serde(with = "nett_trust::encoding::b64_fixed")]
+    pub hub_key: [u8; 32],
+    #[serde(with = "nett_trust::encoding::b64")]
+    pub db: Vec<u8>,
+}
+
+/// A backup is made again when the site changed, or after this long.
+const BACKUP_AGE_SECS: i64 = 24 * 3600;
 
 /// A machine's current connection: how to end it, and its queue of switch messages from its peers.
 struct Live {
@@ -104,7 +134,13 @@ pub enum EnrollError {
 }
 
 impl Hub {
-    pub async fn load(db: Db, key: StaticSecret, url: String) -> Result<Arc<Self>, String> {
+    /// Loads the Hub. With a data directory it makes backups there (design/hub.md section 8.2).
+    pub async fn load(
+        db: Db,
+        key: StaticSecret,
+        url: String,
+        data: Option<std::path::PathBuf>,
+    ) -> Result<Arc<Self>, String> {
         let site = match db.site().await.map_err(|e| e.to_string())? {
             Some((generation, json)) => {
                 let state = State::from_json(json.as_bytes()).map_err(|e| e.to_string())?;
@@ -126,7 +162,64 @@ impl Hub {
             release: watch::channel(None).0,
             connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES)),
+            data,
+            backup: Mutex::new(None),
         }))
+    }
+
+    /// The backup made last, without making a new one.
+    pub async fn latest_backup(&self) -> Option<Backup> {
+        self.backup.lock().await.clone()
+    }
+
+    /// The latest sealed backup, made now when the site changed since the last one or it is a day old;
+    /// `None` when the site has no backup key yet or the Hub keeps no data directory.
+    pub async fn backup(&self) -> Result<Option<Backup>, String> {
+        let (Some(site), Some(dir)) = (self.site().await, self.data.as_ref()) else {
+            return Ok(None);
+        };
+        let Some(recipient) = site.state.backup_key else {
+            return Ok(None);
+        };
+        let now = crate::now();
+        let mut cached = self.backup.lock().await;
+        if let Some(b) = cached.as_ref()
+            && b.generation == site.generation
+            && b.recipient == recipient
+            && now - b.made_at < BACKUP_AGE_SECS
+        {
+            return Ok(Some(b.clone()));
+        }
+        let tag: [u8; 8] =
+            crate::random().map_err(|_| "the system random number generator failed")?;
+        let tmp = dir.join(format!("backup-{}.db", u64::from_be_bytes(tag)));
+        let _ = tokio::fs::remove_file(&tmp).await;
+        self.db.snapshot(&tmp).await.map_err(|e| e.to_string())?;
+        let db = tokio::fs::read(&tmp).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        let db = db.map_err(|e| format!("reading the database copy: {e}"))?;
+        let bundle = zeroize::Zeroizing::new(
+            serde_json::to_vec(&BackupBundle {
+                v: 1,
+                made_at: now,
+                hub_key: self.key.to_bytes(),
+                db,
+            })
+            .map_err(|e| e.to_string())?,
+        );
+        let sealed = nett_trust::backup::seal(&recipient, &bundle).map_err(|e| e.to_string())?;
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&crate::sha256(&sealed));
+        let backup = Backup {
+            sha256,
+            sealed: Arc::new(sealed),
+            generation: site.generation,
+            recipient,
+            made_at: now,
+        };
+        tracing::info!(bytes = backup.sealed.len(), "Hub backup made");
+        *cached = Some(backup.clone());
+        Ok(Some(backup))
     }
 
     /// The latest release manifest, already checked.

@@ -13,8 +13,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nett_mesh::config::MAX_DESIRED_BYTES;
 use nett_proto::api::{
-    CONNECT_PATH, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, Problem,
-    PushResponse, SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
+    BackupStatus, CONNECT_PATH, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse,
+    MachineStatus, Problem, PushResponse, SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
 };
 use nett_site::state::State;
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
@@ -323,11 +323,25 @@ pub(crate) async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderM
             });
         }
     }
+    let backup = hub.latest_backup().await.map(|b| BackupStatus {
+        made_at: b.made_at,
+        bytes: b.sealed.len() as u64,
+        held_by: machines
+            .iter()
+            .filter(|m| {
+                rows.iter().any(|r| {
+                    r.node_id == m.node_id && r.backup_sha256.as_deref() == Some(&b.sha256[..])
+                })
+            })
+            .map(|m| m.name.clone())
+            .collect(),
+    });
     Json(StatusResponse {
         hub_version: env!("CARGO_PKG_VERSION").to_owned(),
         url: hub.url.clone(),
         generation: site.map_or(0, |s| s.generation),
         machines,
+        backup,
     })
     .into_response()
 }
