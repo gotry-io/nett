@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-11
+
 - Names: every machine answers as `<name>.nett.internal` (design/names-and-diagnostics.md). The mesh
   process answers `A` and `AAAA` for the site's machines on UDP 53 of its own mesh address and refuses
   every other name, so it never forwards. On macOS it writes `/etc/resolver/nett.internal`; on Linux the
@@ -15,6 +17,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   mesh service, the desired state, unreachable peers with their likely cause (closed WireGuard or relay
   ports), the clock, the relay, the TLS transport, the Hub connection, names, overriding units and failed
   upgrades, and exits with 1 when it finds a problem.
+- The userspace data plane (macOS, and Linux members that use it) and relays ask for a 1 MiB receive buffer
+  on their UDP sockets, which keeps short scheduling delays from dropping packets: in the lab the userspace
+  data plane carries about 2.6 Gbit/s instead of 1.9, with no receive drops.
+
 ## [0.2.0] - 2026-11-11
 
 - The Hub keeps an encrypted backup on every machine (design/hub.md section 8.2). `nett site link` creates
