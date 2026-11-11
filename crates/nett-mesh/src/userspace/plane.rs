@@ -278,6 +278,12 @@ impl<S: Sessions> Plane<S> {
         let Some(ip) = packet::parse(packet) else {
             return;
         };
+        // macOS routes this machine's own mesh address into the utun (design/userspace.md section 4):
+        // handed back, the packet is delivered locally
+        if self.local.contains(&ip.dst) {
+            out.push(Action::Tun(packet[..ip.len].to_vec()));
+            return;
+        }
         let Some(key) = self.route(ip.dst) else {
             return;
         };
@@ -459,6 +465,17 @@ mod tests {
         let mut out = Vec::new();
         n.plane.from_tun(packet, Instant::now(), &mut out);
         out
+    }
+
+    #[test]
+    fn a_packet_to_this_machines_own_address_goes_back_to_the_tun() {
+        let (mut a, _b) = pair(false);
+        let query = build::udp(a.mesh, 50000, a.mesh, 53);
+        let out = send(&mut a, &query);
+        assert!(
+            matches!(out.as_slice(), [Action::Tun(p)] if *p == query),
+            "{out:?}"
+        );
     }
 
     #[test]
