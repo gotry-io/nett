@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM events WHERE node_id = ?1 AND id NOT IN\n                 (SELECT id FROM events WHERE node_id = ?1 ORDER BY id DESC LIMIT ?2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "315618d4fbfc8bf4583c4ca78ac860012ce3fcc1cafafe3c3f1e5efd41295a37"
+}

@@ -40,6 +40,18 @@ pub struct UpdateRow {
     pub left_at: Option<i64>,
 }
 
+/// One event of a machine (design/hub.md section 8).
+#[derive(Debug, Clone)]
+pub struct EventRow {
+    pub at: i64,
+    pub kind: String,
+    pub detail: String,
+}
+
+/// Events kept per machine, and for how long.
+pub const EVENTS_PER_NODE: i64 = 100;
+pub const EVENTS_KEPT_SECS: i64 = 30 * 24 * 3600;
+
 #[derive(Debug, Clone)]
 pub struct NodeRow {
     pub node_id: String,
@@ -228,6 +240,52 @@ impl Db {
         .await?)
     }
 
+    /// Records an event of a machine and drops what the retention policy no longer keeps.
+    pub async fn add_event(
+        &self,
+        node_id: &str,
+        at: i64,
+        kind: &str,
+        detail: &str,
+    ) -> Result<(), DbError> {
+        let oldest = at - EVENTS_KEPT_SECS;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            "INSERT INTO events (node_id, at, kind, detail) VALUES (?1, ?2, ?3, ?4)",
+            node_id,
+            at,
+            kind,
+            detail
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            "DELETE FROM events WHERE node_id = ?1 AND id NOT IN
+                 (SELECT id FROM events WHERE node_id = ?1 ORDER BY id DESC LIMIT ?2)",
+            node_id,
+            EVENTS_PER_NODE
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!("DELETE FROM events WHERE at < ?1", oldest)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// A machine's most recent events, newest first.
+    pub async fn events(&self, node_id: &str, limit: i64) -> Result<Vec<EventRow>, DbError> {
+        Ok(sqlx::query_as!(
+            EventRow,
+            "SELECT at, kind, detail FROM events WHERE node_id = ?1 ORDER BY id DESC LIMIT ?2",
+            node_id,
+            limit
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     /// The machine's answer to the release manifest (design/release.md section 7).
     pub async fn set_upgrade(
         &self,
@@ -332,6 +390,9 @@ impl Db {
                 sqlx::query!("DELETE FROM nodes WHERE node_id = ?1", row.node_id)
                     .execute(&self.pool)
                     .await?;
+                sqlx::query!("DELETE FROM events WHERE node_id = ?1", row.node_id)
+                    .execute(&self.pool)
+                    .await?;
             }
         }
         Ok(())
@@ -346,6 +407,7 @@ impl Db {
         sqlx::query!("DELETE FROM node_updates")
             .execute(&mut *tx)
             .await?;
+        sqlx::query!("DELETE FROM events").execute(&mut *tx).await?;
         sqlx::query!(
             "UPDATE hub SET link_secret_hash = NULL, link_expires_at = NULL, trust_anchors = NULL,
                  owner_token_id = NULL, owner_token_hash = NULL"

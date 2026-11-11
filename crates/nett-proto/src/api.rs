@@ -11,6 +11,8 @@ pub const STATUS_PATH: &str = "/api/v1/site/status";
 /// Hub-side enrollment, leave and learned addresses (design/hub.md section 4); the reply is
 /// `nett_site::updates::Updates`.
 pub const UPDATES_PATH: &str = "/api/v1/site/updates";
+/// A machine's recent events (design/hub.md section 8): `?node=<node ID>&limit=<1..=100>`.
+pub const EVENTS_PATH: &str = "/api/v1/site/events";
 pub const CONNECT_PATH: &str = "/node/v1/connect";
 
 /// `POST /api/v1/link`: the random secret in the link code, plus the site's trust anchor list (JSON
@@ -83,5 +85,15 @@ pub struct MachineStatus {
 pub struct Problem {
     pub title: String,
     #[serde(default)]
+    pub detail: String,
+}
+
+/// One event of a machine, newest first in `GET /api/v1/site/events`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    /// Unix seconds.
+    pub at: i64,
+    /// `connected`, `disconnected`, `joined`, `left`, `config`, `upgrade`.
+    pub kind: String,
     pub detail: String,
 }

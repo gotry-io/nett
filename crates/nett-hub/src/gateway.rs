@@ -13,7 +13,7 @@ use axum::extract::connect_info::Connected;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State as AxumState};
 use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use axum::serve::IncomingStream;
 use nett_core::id::NodeId;
 use nett_proto::frame::{self, Reassembler};
@@ -42,6 +42,36 @@ const MAX_STATUS: usize = 512 * 1024;
 const MAX_ADDRESSES: usize = 8;
 /// Longest reason kept from an acknowledgement.
 const MAX_REASON: usize = 1024;
+/// Messages a node may send per second on average, and in a burst (protocol.md section 11).
+const MESSAGES_PER_SECOND: f64 = 50.0;
+const MESSAGE_BURST: f64 = 200.0;
+
+/// A token bucket over the messages of one session.
+struct Budget {
+    tokens: f64,
+    at: tokio::time::Instant,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self {
+            tokens: MESSAGE_BURST,
+            at: tokio::time::Instant::now(),
+        }
+    }
+
+    /// Takes one message's worth; `false` when the node is over its budget.
+    fn take(&mut self, now: tokio::time::Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.at).as_secs_f64();
+        self.at = now;
+        self.tokens = (self.tokens + elapsed * MESSAGES_PER_SECOND).min(MESSAGE_BURST);
+        if self.tokens < 1.0 {
+            return false;
+        }
+        self.tokens -= 1.0;
+        true
+    }
+}
 
 /// The peer address of a connection: recorded by axum when `serve` uses
 /// `into_make_service_with_connect_info::<Peer>()`.
@@ -67,12 +97,22 @@ pub async fn connect(
     AxumState(hub): AxumState<Arc<Hub>>,
 ) -> Response {
     let observed = observed(peer.map(|Extension(ConnectInfo(Peer(a)))| a), &headers);
+    // Bounded before the upgrade (protocol.md section 11): the permit lives as long as the session
+    let Ok(permit) = hub.connections.clone().try_acquire_owned() else {
+        tracing::warn!("node connection refused: too many connections");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "too many node connections",
+        )
+            .into_response();
+    };
     ws.max_message_size(MAX_MESSAGE)
         .max_frame_size(MAX_MESSAGE)
         .on_upgrade(move |socket| async move {
             if let Err(e) = session(hub, socket, observed).await {
                 tracing::debug!(error = %e, "node session ended");
             }
+            drop(permit);
         })
 }
 
@@ -209,6 +249,11 @@ async fn session(
     mut socket: WebSocket,
     observed: Option<IpAddr>,
 ) -> Result<(), String> {
+    let handshake = hub
+        .handshakes
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "too many handshakes in progress")?;
     let first = tokio::time::timeout(HANDSHAKE_TIMEOUT, socket.recv())
         .await
         .map_err(|_| "no handshake")?
@@ -258,7 +303,10 @@ async fn session(
         .send(Message::Binary(m2.into()))
         .await
         .map_err(|e| e.to_string())?;
+    drop(handshake);
     tracing::info!(node_id = %node, version = %hello.node_version, "node connected");
+    hub.event(&node, "connected", &format!("nett {}", hello.node_version))
+        .await;
     hub.db
         .seen(node.as_str(), now(), &hello.node_version)
         .await
@@ -271,6 +319,11 @@ async fn session(
         .await
         .ok();
     tracing::info!(node_id = %node, "node disconnected");
+    let why = match &result {
+        Ok(()) => "closed".to_owned(),
+        Err(e) => e.chars().take(MAX_REASON).collect(),
+    };
+    hub.event(&node, "disconnected", &why).await;
     result
 }
 
@@ -340,6 +393,7 @@ async fn serve(
     releases.mark_unchanged();
     send_desired(hub, node, socket, &mut out).await?;
     let mut reassembler = Reassembler::default();
+    let mut budget = Budget::new();
     let idle = tokio::time::sleep(IDLE);
     tokio::pin!(idle);
     loop {
@@ -349,6 +403,19 @@ async fn serve(
                 match message.map_err(|e| e.to_string())? {
                     Message::Binary(ct) => {
                         idle.as_mut().reset(tokio::time::Instant::now() + IDLE);
+                        if !budget.take(tokio::time::Instant::now()) {
+                            out.send(
+                                socket,
+                                Body::Error(ProtoError {
+                                    code: ErrorCode::RateLimited as i32,
+                                    message: "too many messages".to_owned(),
+                                    related_id: 0,
+                                }),
+                            )
+                            .await
+                            .ok();
+                            return Err("the node sent too many messages".into());
+                        }
                         let pt = out.transport.decrypt(&ct).map_err(|e| e.to_string())?;
                         if let Some(env) = reassembler.push(&pt).map_err(|e| e.to_string())?
                             && !handle(hub, node, socket, &mut out, env, observed).await?
@@ -409,6 +476,14 @@ async fn handle(
                 p.reason.chars().take(MAX_REASON).collect()
             };
             for p in &ack.partitions {
+                let detail = |what: String| {
+                    let reason = reason(p);
+                    if reason.is_empty() {
+                        what
+                    } else {
+                        format!("{what}: {reason}")
+                    }
+                };
                 if p.kind == PartitionKind::Mesh as i32 {
                     hub.db
                         .set_ack(
@@ -419,11 +494,22 @@ async fn handle(
                         )
                         .await
                         .map_err(|e| e.to_string())?;
+                    hub.event(
+                        node,
+                        "config",
+                        &detail(format!("generation {} {}", ack.generation, result(p))),
+                    )
+                    .await;
                 } else if p.kind == PartitionKind::Release as i32 {
                     hub.db
                         .set_upgrade(node.as_str(), result(p), &reason(p))
                         .await
                         .map_err(|e| e.to_string())?;
+                    // An answer that says nothing new is not an event
+                    if result(p) != "applied" {
+                        hub.event(node, "upgrade", &detail(result(p).to_owned()))
+                            .await;
+                    }
                 }
             }
         }
@@ -526,6 +612,18 @@ async fn send_release(hub: &Hub, socket: &mut WebSocket, out: &mut Outbox) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_node_gets_a_burst_and_then_its_average_rate() {
+        let mut budget = Budget::new();
+        let start = budget.at;
+        let burst = (0..1000).take_while(|_| budget.take(start)).count();
+        assert_eq!(burst, MESSAGE_BURST as usize);
+        // a second later, 50 more
+        let later = start + std::time::Duration::from_secs(1);
+        let refill = (0..1000).take_while(|_| budget.take(later)).count();
+        assert_eq!(refill, MESSAGES_PER_SECOND as usize);
+    }
 
     fn headers(xff: &[&str]) -> HeaderMap {
         let mut h = HeaderMap::new();
