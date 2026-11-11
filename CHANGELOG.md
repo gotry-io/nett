@@ -4,6 +4,40 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- The Hub keeps an encrypted backup on every machine (design/hub.md section 8.2). `nett site link` creates
+  `backup.key` in the site directory (keep a copy offline with `recovery.pk8`); the Hub seals a copy of its
+  database and its identity key to it, and every machine fetches the latest copy into `hub-backup.enc` next
+  to its configuration. When the Hub host is lost, `nett-hub restore --data <empty directory> hub-backup.enc`
+  rebuilds it from any machine's copy with the `nett-backup-…` line, the machines connect to it on their own,
+  and the next `nett site` command pushes what changed since. `nett site status` shows when the backup was
+  made and how many machines keep it.
+- Relays (design/site.md section 4.1, design/mesh.md section 5): `nett site relay <machine>` runs a relay on
+  a public Linux machine, on UDP 41822 and TLS 443 unless `--port`, `--tls <port>` or `--no-tls` say
+  otherwise, and `--off` stops it. Every connection then also goes through the relays other than its ends,
+  over UDP and over TLS, and the path layer picks among them; a machine that cannot send UDP falls back to
+  TLS. The relay creates its own certificate and the Hub learns its fingerprint; without a Hub, pass
+  `--fingerprint` from `sudo nett status` on the relay. `nett relay` and `nett transport` are part of the
+  Linux build and run as the system users `nett-relay` and `nett-transport`; nett-node starts them only
+  while they are needed.
+- When both ends of a connection are dial-only and their path breaks, they move to another relay together
+  through the Hub within seconds, instead of waiting for the next time slot; the Hub only passes on messages
+  the two members authenticate.
+- Machines behind the same NAT connect over their LAN (design/mesh.md section 6): with a Hub, each machine's
+  status lists its LAN addresses, and two connected machines on the same network get a LAN direct path.
+- On Linux, nett's systemd units now live in `/usr/local/lib/systemd/system` and nett-node rewrites them
+  when an upgrade changes them; files of the same name in `/etc/systemd/system` still override them. The
+  mesh service runs as the system user `nett` (created with systemd-sysusers), and `/etc/nett` belongs to its
+  group, so the desired state is no longer readable by every user.
+- `nett join <token> [--dir <directory>]` joins a machine that runs nett without nett's services, such as a
+  container member: it does what `sudo nett install <token>` does and writes `hub.json` and `desired.json`
+  in the directory; `nett leave --dir <directory>` undoes it. The container Compose example runs nett-node
+  as a second container next to the member.
+- The Hub limits what nodes can do to it (design/protocol.md section 11): 256 node connections, 16 handshakes
+  at a time, 50 messages per second per session with bursts of 200. It keeps each machine's recent events
+  (connections, applied and rejected changes, upgrades; 100 per machine for 30 days), and
+  `nett site status <name>` shows the last ten. The Hub API is described by a generated OpenAPI document,
+  `docs/api/openapi.json` (`nett-hub openapi`), with each operation's permission scope and risk level.
+- `nett site status --json` prints only JSON; what was fetched from the Hub goes to standard error.
 - Machines connected to a Hub upgrade themselves (design/release.md section 7). The Hub fetches
   `https://nett.gotry.io/release.json` every 6 hours (`nett-hub serve --releases <URL or file>`,
   `--releases off` to turn it off) and passes it on; nett-node downloads the program for its target,
