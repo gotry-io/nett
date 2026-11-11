@@ -187,7 +187,7 @@ Machines that were already members before joining keep the public keys registere
 - When run natively it runs as a dedicated low-privilege user, and it can also run in a container (the Hub does not need access to the host); it listens only locally and is exposed by the reverse proxy (architecture.md section 4);
 - Storage: the site model and signed artifacts, each node's identity public key and generation, each machine's latest status, recent events (100 per machine, kept for 30 days), one-time tokens (hashes only). SQLite explicitly sets cache and mmap limits;
 - Resources: stable operation ≤ 30-50 MB (hard rule 14); each node's connections, messages and queues have limits (protocol.md section 11);
-- Backup and rebuild are in H5 of section 9.
+- Backup and rebuild: section 8.2.
 
 Commands on the Hub host (command line conventions as in architecture.md section 14.3):
 
@@ -204,8 +204,16 @@ Each machine trusts the Hub's address and the Hub's identity public key (pinned 
 | Situation | Approach |
 |---|---|
 | The old Hub still works | Stop the old Hub, move its data directory (database and Hub identity private key) to the new host, and point the domain name to the new host: the Hub's identity is unchanged and each machine connects automatically. When the address must change, first add the new address to each machine's `hub_endpoints` through the old Hub (protocol.md section 6), and move it after delivery |
-| The old Hub is broken, no backup (before H5) | Run `nett-hub init` on the new host and `nett site link` on the computer: the site directory has all machines and permissions (section 4). Each machine still trusts the old Hub's identity, so run `nett site invite <name>` machine by machine, and run the printed `sudo nett install <token>` on the machine to switch over (section 7); the machine keeps its existing keys and does not enroll again |
-| After H5 | Rebuild on the new host from the encrypted backup, and each machine connects automatically (protocol.md section 6.4) |
+| The old Hub is broken | Rebuild it on the new host from the encrypted backup that every machine keeps (section 8.2), and point the domain name to the new host: the Hub's identity is restored with it and each machine connects automatically |
+| The old Hub is broken and no machine has a backup | Run `nett-hub init` on the new host and `nett site link` on the computer: the site directory has all machines and permissions (section 4). Each machine still trusts the old Hub's identity, so run `nett site invite <name>` machine by machine, and run the printed `sudo nett install <token>` on the machine to switch over (section 7); the machine keeps its existing keys and does not enroll again |
+
+### 8.2 Backup and rebuild
+
+- **Backup key**: `nett site link` creates an X25519 key pair for the site's Hub backups when the site has none: the private key stays in the site directory (`backup.key`, `0600`, one line `nett-backup-…`), and the public key is part of the site state the Hub receives with every push. The Hub can encrypt backups but never read one (auth.md section 12);
+- **What a backup holds**: a consistent copy of the Hub's database (SQLite `VACUUM INTO`) and the Hub identity private key, encrypted as a whole to the backup public key: an ephemeral X25519 key agreement, HKDF-SHA256 ("nett hub backup v1") and ChaCha20-Poly1305, at most 4 MiB. The Hub makes a new one when it is asked and the site's generation changed since the last one, or the last one is a day old;
+- **Who keeps it**: every node asks for it when it connects and every 6 hours (`BackupFetch` with the hash of the one it has, protocol.md section 5) and keeps the latest one in its configuration directory (`hub-backup.enc`, `0600`). The Hub never connects to nodes; it records when each node last took one, and `nett site status` shows how many machines hold the current backup;
+- **Rebuild**: on the new host, copy `hub-backup.enc` from any machine and run `nett-hub restore --data <directory> hub-backup.enc`, which asks for the `nett-backup-…` line from the site directory, writes the database and the Hub identity key into the empty data directory, and starts nothing. Then start `nett-hub serve` there and point the Hub's domain name to it: machines connect with the Hub identity they pinned. The next `nett site` command on the computer fetches what the Hub has and pushes the site: the site directory holds every signed artifact (section 4), so changes made after the backup are restored with it, and no machine goes back to an older version (the mesh process accepts only higher versions, mesh.md section 4.2);
+- A machine that enrolled after the backup was taken is not in the restored database; `nett site invite <name>` reconnects it (section 3.5), since the site directory has its keys.
 
 ## 9. Steps
 
