@@ -5,6 +5,24 @@ User-visible changes by version; versions follow Semantic Versioning.
 
 ## [未发布 · Unreleased]
 
+- 新机器经 Hub 入网（design/hub.md 第 9 节 H2）：接了 Hub 时 `nett site add <名字>` 不用 `--keys`，签好节点策略，
+  打印新机器上要运行的一行 `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`，
+  所有平台相同。安装脚本只安装 `nett`，按脚本中写明的哈希核对；token 中有入网私钥，30 分钟内有效、只能用一次，
+  `nett site invite <名字>` 换一个新的。`--public` 的机器可以不写公网地址，由 Hub 得知（本机连接 Hub 时用的
+  全局地址，或 Hub 看到的来源地址），`nett site status <名字>` 显示地址与来源。`sudo nett leave` 让一台机器
+  退出：告诉 Hub（其他成员随即删除它），删除服务、组网接口与本机的密钥和配置；每条 `nett site` 命令先取回
+  Hub 一侧的入网、退出与地址，记进站点目录。
+  New machines join through the Hub (design/hub.md section 9, H2): with a Hub, `nett site add <name>` needs no
+  `--keys`; it signs the node policy and prints one line to run on the new machine,
+  `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`, the same on every
+  platform. The install script only installs `nett` and checks it against the hash written in the script; the
+  token carries an enrollment key, is valid for 30 minutes and works once, and `nett site invite <name>` prints a
+  new one. A `--public` machine may leave out its public address: the Hub learns it (the global address the
+  machine uses to reach the Hub, or the source address the Hub sees), and `nett site status <name>` shows the
+  address and where it came from. `sudo nett leave` takes a machine out: it tells the Hub (every member then
+  drops it) and removes the services, the mesh interface, and the machine's keys and configuration. Every
+  `nett site` command first fetches what happened on the Hub (joins, departures, addresses) and records it in
+  the site directory.
 - 接入 Hub（design/hub.md 第 9 节 H1）：新的 `nett-hub`（`serve`、`init`、`reset`；Linux 的静态版本、
   [packaging/hub/](packaging/hub/) 中 Hub 与 Caddy 的 Compose 示例、原生运行的 systemd 单元）。`nett site link`
   把站点关联到 Hub；之后每条修改命令签名后推送，Hub 逐份按关联时固定的信任锚验证签名产物（伪造、版本倒退、
