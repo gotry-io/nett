@@ -181,11 +181,13 @@ jobs:
           git commit -m "nett $version"
           git push
 
-  # 项目网站 nett.gotry.io（design/release.md 第 6 节）：首页、填好版本与哈希的安装脚本、这个版本的压缩包
+  # 项目网站 nett.gotry.io（design/release.md 第 6 节）：首页、填好版本与哈希的安装脚本、这个版本的压缩包。
+  # 新机器首次安装信任这个网站，部署用的密钥与签名钥匙一样只在 v* 标签可用的环境中
   site:
     needs: publish
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    environment: site
     permissions:
       contents: read
     steps:
@@ -214,8 +216,8 @@ jobs:
             packaging/install.sh > site/install.sh
           ! grep -q '@[A-Z0-9_]*@' site/install.sh
           cp packaging/site/index.html site/index.html
-      - name: 部署到 Cloudflare Pages
+      - name: 部署到 Cloudflare（只有静态文件的 Worker，packaging/site/wrangler.jsonc）
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: npx --yes wrangler@4.20.0 pages deploy site --project-name nett --branch main
+        run: npx --yes wrangler@4.152.0 deploy --config packaging/site/wrangler.jsonc

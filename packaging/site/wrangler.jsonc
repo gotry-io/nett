@@ -1,0 +1,11 @@
+// 项目网站 nett.gotry.io（design/release.md 第 6 节）：只有静态文件的 Cloudflare Worker，挂在自定义域名上，
+// DNS 记录与证书由 Cloudflare 管理。发布工作流在仓库根目录生成 site/ 后用它部署：
+//   npx wrangler deploy --config packaging/site/wrangler.jsonc
+{
+  "name": "nett",
+  "compatibility_date": "2026-10-19",
+  "assets": { "directory": "../../site" },
+  "routes": [{ "pattern": "nett.gotry.io", "custom_domain": true }],
+  "workers_dev": false,
+  "preview_urls": false
+}
