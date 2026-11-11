@@ -371,9 +371,9 @@ The trust anchors for release packages are independent of the user's trust ancho
 
 - The release signing keys belong to the project and are held by the maintainers, and the release workflow signs automatically in CI; Ed25519, minisign format. Every build embeds two public keys, primary and backup (a build parameter: official builds use the project's, and people compiling themselves use their own); a node accepts a package signed by either key and uses it to verify every release package;
 - When the primary key is leaked or lost, the backup key signs a version embedding new primary and backup public keys; once a node has installed it, the node no longer accepts signatures from the old primary key;
-- At first installation, the release package is checked against the hash stated in the enrollment command; the hash is written by the signing tool after it verifies the release signature with the embedded release public key (hub.md section 3.3). The user can also check the executable against the fingerprint published on the project homepage;
+- At first installation, the install script checks the program against the hash written in the script, and the first installation trusts the project website (release.md section 6, ADR 0020). The user can also check the release signature by hand (`keys/`);
 - A node automatically accepts only release packages with a higher version number; rollback is possible only to the version last installed on this machine; installing any other lower version requires a `release_override` artifact (signed by the user);
-- Upgrades have a single path: the `release` partition of the desired state (protocol.md section 6). An upgrade that satisfies the rules above is low risk and can be pushed automatically by the Hub.
+- Upgrades have a single path: the `release` partition of the desired state (protocol.md section 6). An upgrade that satisfies the rules above is low risk and is pushed automatically by the Hub; the node downloads the program from the URL in the manifest, and the signature, not the Hub or the download location, decides whether it is installed (release.md section 7).
 
 ## 12. Safeguards
 
