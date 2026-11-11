@@ -292,6 +292,9 @@ pub fn doctor(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         )),
     }
     findings.extend(check_install());
+    if cfg!(target_os = "linux") {
+        findings.extend(check_host_firewall());
+    }
     print!("{}", report(&findings));
     if findings.iter().any(|f| f.level == Level::Problem) {
         std::process::exit(1);
@@ -523,6 +526,40 @@ fn check_install() -> Vec<Finding> {
     out
 }
 
+/// A host firewall that drops what nett's own filter lets in on the mesh interface
+/// (design/names-and-diagnostics.md section 6): ufw on, incoming denied, no rule for `nett0`.
+pub fn check_host_firewall() -> Option<Finding> {
+    let read = |path: &str| std::fs::read_to_string(path).unwrap_or_default();
+    let rules = [read("/etc/ufw/user.rules"), read("/etc/ufw/user6.rules")];
+    ufw_drops_the_mesh(
+        &read("/etc/ufw/ufw.conf"),
+        &read("/etc/default/ufw"),
+        &rules,
+    )
+    .then(|| {
+        Finding::problem(
+            "host firewall",
+            "ufw denies incoming connections and has no rule for nett0: it drops what the mesh \
+             lets in, so other machines see this one as unreachable",
+            "run `sudo ufw allow in on nett0`; nett filters nett0 itself, so this opens nothing \
+             the access rules do not allow",
+        )
+    })
+}
+
+fn ufw_drops_the_mesh(conf: &str, defaults: &str, rules: &[String]) -> bool {
+    let enabled = conf.lines().any(|l| l.trim() == "ENABLED=yes");
+    let denies = defaults
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("DEFAULT_INPUT_POLICY="))
+        .is_some_and(|v| matches!(v.trim_matches('"'), "DROP" | "REJECT"));
+    let allows_nett0 = rules
+        .iter()
+        .flat_map(|r| r.lines())
+        .any(|l| l.contains(" -i nett0 ") && l.ends_with("-j ACCEPT"));
+    enabled && denies && !allows_nett0
+}
+
 fn service_log_hint(systemd: &str, launchd: &str) -> String {
     if cfg!(target_os = "macos") && launchd != "-" {
         format!("see `sudo launchctl print system/{launchd}` and /var/log/nett/")
@@ -563,6 +600,40 @@ pub fn report(findings: &[Finding]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ufw_that_denies_incoming_drops_the_mesh_until_nett0_is_allowed() {
+        let on = "# /etc/ufw/ufw.conf\nENABLED=yes\nLOGLEVEL=low\n";
+        let deny = "IPV6=yes\nDEFAULT_INPUT_POLICY=\"DROP\"\nDEFAULT_OUTPUT_POLICY=\"ACCEPT\"\n";
+        let ssh_only =
+            "*filter\n-A ufw-user-input -p tcp --dport 22 -j ACCEPT\nCOMMIT\n".to_owned();
+        let with_nett0 = format!(
+            "{ssh_only}### tuple ### allow any any 0.0.0.0/0 any 0.0.0.0/0 in_nett0\n\
+             -A ufw-user-input -i nett0 -j ACCEPT\n"
+        );
+        assert!(ufw_drops_the_mesh(
+            on,
+            deny,
+            std::slice::from_ref(&ssh_only)
+        ));
+        assert!(!ufw_drops_the_mesh(
+            on,
+            deny,
+            &[ssh_only.clone(), with_nett0]
+        ));
+        assert!(!ufw_drops_the_mesh(
+            "ENABLED=no\n",
+            deny,
+            std::slice::from_ref(&ssh_only)
+        ));
+        assert!(!ufw_drops_the_mesh(
+            on,
+            "DEFAULT_INPUT_POLICY=\"ACCEPT\"\n",
+            std::slice::from_ref(&ssh_only)
+        ));
+        // No ufw on this machine
+        assert!(!ufw_drops_the_mesh("", "", &[String::new(), String::new()]));
+    }
 
     fn doc() -> StatusDoc {
         serde_json::from_value(serde_json::json!({
