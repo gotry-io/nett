@@ -13,8 +13,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nett_mesh::config::MAX_DESIRED_BYTES;
 use nett_proto::api::{
-    CONNECT_PATH, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, Problem, PushResponse,
-    SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
+    CONNECT_PATH, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, Problem,
+    PushResponse, SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
 };
 use nett_site::state::State;
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
@@ -28,6 +28,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(SITE_PATH, put(push))
         .route(STATUS_PATH, get(status))
         .route(UPDATES_PATH, get(updates))
+        .route(EVENTS_PATH, get(events))
         .route(CONNECT_PATH, get(crate::gateway::connect))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_DESIRED_BYTES).unwrap_or(usize::MAX),
@@ -165,6 +166,49 @@ async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Res
     }
     match hub.updates().await {
         Ok(updates) => Json(updates).into_response(),
+        Err(e) => internal(e),
+    }
+}
+
+/// A machine's recent events (design/hub.md section 8), newest first: `?node=<ID>&limit=<n>`.
+/// Node IDs need no URL decoding.
+async fn events(
+    AxumState(hub): AxumState<Arc<Hub>>,
+    headers: HeaderMap,
+    axum::extract::RawQuery(query): axum::extract::RawQuery,
+) -> Response {
+    if let Some(r) = unauthorized(&hub, &headers).await {
+        return r;
+    }
+    let query = query.unwrap_or_default();
+    let param = |name: &str| {
+        query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix(name)?.strip_prefix('='))
+            .map(str::to_owned)
+    };
+    let Some(node) = param("node").filter(|n| n.parse::<nett_core::id::NodeId>().is_ok()) else {
+        return problem(
+            StatusCode::BAD_REQUEST,
+            "Bad query",
+            "`node` must be a node ID",
+        );
+    };
+    let limit = param("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(20)
+        .clamp(1, crate::db::EVENTS_PER_NODE);
+    match hub.db.events(&node, limit).await {
+        Ok(rows) => Json(
+            rows.into_iter()
+                .map(|r| Event {
+                    at: r.at,
+                    kind: r.kind,
+                    detail: r.detail,
+                })
+                .collect::<Vec<_>>(),
+        )
+        .into_response(),
         Err(e) => internal(e),
     }
 }

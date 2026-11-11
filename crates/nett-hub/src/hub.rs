@@ -75,7 +75,15 @@ pub struct Hub {
     /// The latest release manifest (design/release.md section 7), sent to every node as the
     /// `release` partition.
     release: watch::Sender<Option<Arc<Vec<u8>>>>,
+    /// Node connections and handshakes in progress (protocol.md section 11).
+    pub connections: Arc<tokio::sync::Semaphore>,
+    pub handshakes: Arc<tokio::sync::Semaphore>,
 }
+
+/// Node connections at a time: the site's member limit (protocol.md section 11).
+pub const MAX_CONNECTIONS: usize = nett_mesh::config::MAX_MEMBERS;
+/// Handshakes in progress at a time.
+pub const MAX_HANDSHAKES: usize = 16;
 
 /// The reason an enrollment is rejected, told to that machine as is (protocol.md section 4.3).
 #[derive(Debug, thiserror::Error)]
@@ -107,6 +115,8 @@ impl Hub {
             changes: watch::channel(generation).0,
             live: Mutex::new(HashMap::new()),
             release: watch::channel(None).0,
+            connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
+            handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES)),
         }))
     }
 
@@ -381,6 +391,7 @@ impl Hub {
                 other => refuse(other.to_string()),
             })?;
         tracing::info!(node_id = %node, machine = %name, "machine joined");
+        self.event(&node, "joined", &format!("as {name}")).await;
         Ok(node)
     }
 
@@ -394,7 +405,19 @@ impl Hub {
         };
         self.apply(&updates, now).await?;
         tracing::info!(node_id = %node, "machine left");
+        self.event(node, "left", "nett leave on the machine").await;
         Ok(())
+    }
+
+    /// Records an event of a machine (design/hub.md section 8); a failure is logged, not fatal.
+    pub async fn event(&self, node: &NodeId, kind: &str, detail: &str) {
+        if let Err(e) = self
+            .db
+            .add_event(node.as_str(), crate::now(), kind, detail)
+            .await
+        {
+            tracing::warn!(node_id = %node, error = %e, "recording an event");
+        }
     }
 
     /// Records the public address learned by the Hub (design/hub.md section 5); when it changes, a

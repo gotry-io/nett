@@ -14,8 +14,8 @@ use nett_core::name::NodeName;
 use nett_mesh::status::StatusDoc;
 use nett_node::http::{Target, call};
 use nett_proto::api::{
-    LINK_PATH, LinkRequest, LinkResponse, MachineStatus, PushResponse, SITE_PATH, STATUS_PATH,
-    StatusResponse, UPDATES_PATH,
+    EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, PushResponse,
+    SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
 };
 use nett_proto::token::{Bytes32, Enroll, JoinToken, LinkCode, Secret32};
 use nett_site::changes::path_kind;
@@ -38,6 +38,8 @@ pub const ENROLL_VALIDITY_SECS: i64 = 30 * 60;
 /// Upper bound for waiting for the machines to confirm after a push (design/hub.md section 3.2).
 const WAIT_APPLIED: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(300);
+/// Events shown by `nett site status <name>`.
+const RECENT_EVENTS: usize = 10;
 
 /// The Hub a site is linked to.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +371,24 @@ pub fn status(
                 println!("\nIts status is in a format this version cannot read; see --json.")
             }
             None => println!("\nIt has not reported its status yet."),
+        }
+        let events: Vec<Event> = request(
+            &hub.target(),
+            "GET",
+            &format!("{EVENTS_PATH}?node={}&limit={RECENT_EVENTS}", m.node_id),
+            Some(&hub.token),
+            None,
+        )?;
+        if !events.is_empty() {
+            let mut rows = vec![["WHEN", "EVENT", "DETAIL"].map(String::from)];
+            rows.extend(events.iter().map(|e| {
+                [
+                    crate::status::ago(Timestamp::from_unix_seconds(e.at), now),
+                    e.kind.clone(),
+                    e.detail.clone(),
+                ]
+            }));
+            println!("\nRecent events:\n{}", table(&rows).trim_end());
         }
         return Ok(());
     }

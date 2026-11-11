@@ -49,3 +49,13 @@ CREATE TABLE node_updates (
     enrolled TEXT,
     left_at INTEGER
 );
+
+-- Each machine's recent events (design/hub.md section 8): at most 100 per machine, kept 30 days
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    detail TEXT NOT NULL
+);
+CREATE INDEX events_by_node ON events (node_id, id);

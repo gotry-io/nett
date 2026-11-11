@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM events",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "e3c1a56a920cb3e6eca74dbda2bc8e8a62f93016e1132923e9b2aff11faee2f6"
+}

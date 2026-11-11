@@ -238,6 +238,14 @@ message Task {
 | Chunk reassembly | 8 MiB per stream, reassembled in memory: the mesh process has to parse the whole desired state anyway, and the desired state file itself does not exceed 4 MiB (`mesh.md` section 17); 2 streams at the same time, released as soon as they are used |
 | Completed task records | 7 days, at most 1000 entries; entries whose `deadline` has not passed are not evicted, and when full new tasks are rejected |
 
+| Item | Hub-side limit |
+|---|---|
+| Node connections | 256 at a time, the site's member limit; more are refused with HTTP 503 before the WebSocket upgrade |
+| Handshakes in progress | 16 at a time, each within 10 seconds; more are closed without a reply |
+| Messages per session | 50 per second on average, bursts of 200; a node above that gets `RATE_LIMITED` and the session closes |
+| Acknowledgement reasons | 1024 characters kept |
+| Events | 100 per machine, kept 30 days (hub.md section 8) |
+
 M1 uses no compression; if snapshot size becomes a problem, per-message compression will be added as an optional feature flag.
 
 ## 12. Phased implementation
