@@ -84,7 +84,8 @@ impl PrivateKey {
             path: display.clone(),
             source,
         };
-        check_permissions(path).map_err(|e| match e {
+        let credentials = std::env::var_os("CREDENTIALS_DIRECTORY").map(std::path::PathBuf::from);
+        check_permissions(path, credentials.as_deref()).map_err(|e| match e {
             PermissionCheck::Io(source) => read_err(source),
             PermissionCheck::TooOpen => KeyFileError::Permissions {
                 path: display.clone(),
@@ -119,21 +120,43 @@ enum PermissionCheck {
 }
 
 #[cfg(unix)]
-fn check_permissions(path: &Path) -> Result<(), PermissionCheck> {
+/// A key file must be readable by its owner only. systemd hands the key to the mesh service as a
+/// credential (`LoadCredential=`): the file there is group-readable, and the credentials directory
+/// is what keeps everyone else out, so a key inside `credentials` (the service's
+/// `$CREDENTIALS_DIRECTORY`, which others cannot enter) is accepted.
+fn check_permissions(path: &Path, credentials: Option<&Path>) -> Result<(), PermissionCheck> {
     use std::os::unix::fs::PermissionsExt as _;
     let mode = std::fs::metadata(path)
         .map_err(PermissionCheck::Io)?
         .permissions()
         .mode();
-    if mode & 0o077 == 0 {
+    if mode & 0o077 == 0 || in_credentials(path, credentials)? {
         Ok(())
     } else {
         Err(PermissionCheck::TooOpen)
     }
 }
 
+fn in_credentials(path: &Path, credentials: Option<&Path>) -> Result<bool, PermissionCheck> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(dir) = credentials else {
+        return Ok(false);
+    };
+    let (Ok(dir), Some(parent)) = (dir.canonicalize(), path.parent()) else {
+        return Ok(false);
+    };
+    let parent = parent.canonicalize().map_err(PermissionCheck::Io)?;
+    let closed = std::fs::metadata(&dir)
+        .map_err(PermissionCheck::Io)?
+        .permissions()
+        .mode()
+        & 0o007
+        == 0;
+    Ok(parent == dir && closed)
+}
+
 #[cfg(not(unix))]
-fn check_permissions(_path: &Path) -> Result<(), PermissionCheck> {
+fn check_permissions(_path: &Path, _credentials: Option<&Path>) -> Result<(), PermissionCheck> {
     Ok(())
 }
 
@@ -175,6 +198,35 @@ mod tests {
             "PrivateKey(<redacted>)"
         );
         std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn a_group_readable_key_passes_only_in_the_services_credentials_directory() {
+        // systemd's LoadCredential= leaves the key group-readable inside a directory others
+        // cannot enter; the same file anywhere else is refused
+        let dir = std::env::temp_dir().join(format!("nett-key-cred-{}", std::process::id()));
+        let creds = dir.join("credentials");
+        std::fs::create_dir_all(&creds).expect("dir");
+        std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o750)).expect("chmod");
+        let key = STANDARD.encode([3u8; 32]);
+        let inside = write(&creds, "mesh.key", &key, 0o440);
+        let outside = write(&dir, "mesh.key", &key, 0o440);
+        assert!(check_permissions(&inside, Some(&creds)).is_ok());
+        assert!(matches!(
+            check_permissions(&inside, None),
+            Err(PermissionCheck::TooOpen)
+        ));
+        assert!(matches!(
+            check_permissions(&outside, Some(&creds)),
+            Err(PermissionCheck::TooOpen)
+        ));
+        // a directory others can enter is not a credentials directory
+        std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        assert!(matches!(
+            check_permissions(&inside, Some(&creds)),
+            Err(PermissionCheck::TooOpen)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
