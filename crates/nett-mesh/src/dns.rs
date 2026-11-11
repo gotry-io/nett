@@ -212,20 +212,59 @@ fn serve(socket: &UdpSocket, names: &Mutex<Arc<NameTable>>, stop: &AtomicBool) {
     }
 }
 
+/// A standard query with recursion desired for `name`, or `None` when a label is empty or longer
+/// than 63 bytes.
+fn encode_query(id: u16, name: &str, qtype: u16) -> Option<Vec<u8>> {
+    let mut q = id.to_be_bytes().to_vec();
+    q.extend_from_slice(&[0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0]);
+    for label in name.split('.') {
+        let len = u8::try_from(label.len())
+            .ok()
+            .filter(|l| (1..=63).contains(l))?;
+        q.push(len);
+        q.extend_from_slice(label.as_bytes());
+    }
+    q.push(0);
+    q.extend_from_slice(&qtype.to_be_bytes());
+    q.extend_from_slice(&CLASS_IN.to_be_bytes());
+    Some(q)
+}
+
+/// Asks the responder at `server` for the IPv4 address of `name`, as `nett doctor` does: the
+/// address in its answer, or `None` when it does not answer within `wait` or answers without one.
+pub fn lookup_ipv4(server: SocketAddr, name: &str, wait: Duration) -> Option<Ipv4Addr> {
+    let local: SocketAddr = if server.is_ipv4() {
+        (Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let socket = UdpSocket::bind(local).ok()?;
+    socket.set_read_timeout(Some(wait)).ok()?;
+    let id = u16::try_from(std::process::id() & 0xffff).unwrap_or(0x6e74);
+    let query = encode_query(id, name, TYPE_A)?;
+    socket.send_to(&query, server).ok()?;
+    let mut buf = [0u8; MAX_MESSAGE];
+    let (len, from) = socket.recv_from(&mut buf).ok()?;
+    let reply = &buf[..len];
+    // The same ID, a response with no error, and one answer after the echoed question
+    if from != server || reply.len() < query.len() || reply[..2] != query[..2] {
+        return None;
+    }
+    if reply[2] & 0x80 == 0 || reply[3] & 0x0f != 0 || reply[6..8] == [0, 0] {
+        return None;
+    }
+    // The answer: name pointer, type, class, time to live, length, then four bytes of address
+    let rdata = reply.get(query.len() + 12..query.len() + 16)?;
+    let rtype = reply.get(query.len() + 2..query.len() + 4)?;
+    (rtype == TYPE_A.to_be_bytes()).then(|| Ipv4Addr::new(rdata[0], rdata[1], rdata[2], rdata[3]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn query(name: &str, qtype: u16) -> Vec<u8> {
-        let mut q = vec![0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0];
-        for label in name.split('.') {
-            q.push(u8::try_from(label.len()).expect("short"));
-            q.extend_from_slice(label.as_bytes());
-        }
-        q.push(0);
-        q.extend_from_slice(&qtype.to_be_bytes());
-        q.extend_from_slice(&CLASS_IN.to_be_bytes());
-        q
+        encode_query(0x1234, name, qtype).expect("a valid name")
     }
 
     fn table() -> NameTable {
@@ -313,6 +352,13 @@ mod tests {
         let mut buf = [0u8; 512];
         let (len, _) = client.recv_from(&mut buf).expect("answered");
         assert_eq!(&buf[len - 4..len], &[100, 88, 0, 6]);
+        let at: SocketAddr = ("127.0.0.1".parse::<IpAddr>().expect("ip"), port).into();
+        let wait = Duration::from_secs(2);
+        assert_eq!(
+            lookup_ipv4(at, "nas.nett.internal", wait),
+            Some("100.88.0.6".parse().expect("ip"))
+        );
+        assert_eq!(lookup_ipv4(at, "other.nett.internal", wait), None);
         drop(server);
     }
 }
