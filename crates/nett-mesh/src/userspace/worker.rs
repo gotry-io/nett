@@ -74,6 +74,8 @@ impl Worker {
         wake.set_nonblocking(true)?;
         wake_rx.set_nonblocking(true)?;
         socket.set_nonblocking(true)?;
+        let granted = crate::sockbuf::enlarge_receive_buffer(&socket);
+        tracing::debug!(bytes = ?granted, "data plane: receive buffer");
         let mut loop_ = Loop {
             plane,
             tun,

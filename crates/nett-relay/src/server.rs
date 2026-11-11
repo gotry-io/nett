@@ -90,6 +90,8 @@ pub async fn serve(
     mut updates: Option<mpsc::Receiver<Assignment>>,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
+    let granted = nett_mesh::sockbuf::enlarge_receive_buffer(&udp);
+    tracing::debug!(bytes = ?granted, "relay receive buffer");
     if let Some(path) = &state {
         match load(path) {
             Ok(Some(saved)) => {
