@@ -1,6 +1,7 @@
 # The nett mesh service. Installed by `sudo nett install`.
-# The desired state is /etc/nett/desired.json (it holds no private keys). The mesh private key,
-# /etc/nett/mesh.key (owned by root, mode 0600), reaches the service through LoadCredential.
+# The desired state is /etc/nett/desired.json (it holds no private keys; readable by the nett group
+# only). The mesh private key, /etc/nett/mesh.key (owned by root, mode 0600), reaches the service
+# through LoadCredential.
 # After the desired state changes, `systemctl reload nett-mesh` applies it without a restart.
 [Unit]
 Description=nett mesh
@@ -17,8 +18,9 @@ RuntimeDirectoryMode=0700
 # Trust store /var/lib/nett: pinned trust anchors, revocations and applied versions survive restarts
 StateDirectory=nett
 StateDirectoryMode=0700
-# A dedicated identity with only the capabilities for WireGuard, nftables and path probes
-DynamicUser=yes
+# A dedicated system user with only the capabilities for WireGuard, nftables and path probes
+User=nett
+Group=nett
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 NoNewPrivileges=yes

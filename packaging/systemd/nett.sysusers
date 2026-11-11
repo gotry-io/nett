@@ -1,0 +1,4 @@
+# The system user the nett mesh service runs as. `sudo nett install` writes this file to
+# /etc/sysusers.d/nett.conf and runs systemd-sysusers. /etc/nett belongs to its group, so the mesh
+# service can read the desired state while other users cannot.
+u nett - "nett mesh service" /var/lib/nett
