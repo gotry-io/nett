@@ -140,26 +140,50 @@ async fn unknown_or_mismatched_machines_are_refused() {
     };
     // An identity not in the site
     assert_eq!(
-        refused(node(&url, &mac, identity(9), &dir).session(&mut None).await),
+        refused(
+            node(&url, &mac, identity(9), &dir)
+                .session(
+                    &mut None,
+                    &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
+                )
+                .await
+        ),
         ErrorCode::NodeUnknown
     );
     // mac's identity impersonates nas
     assert_eq!(
-        refused(node(&url, &nas, identity(2), &dir).session(&mut None).await),
+        refused(
+            node(&url, &nas, identity(2), &dir)
+                .session(
+                    &mut None,
+                    &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
+                )
+                .await
+        ),
         ErrorCode::NodeUnknown
     );
     // Wrong Hub public key: the handshake fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.hub_key = Bytes32([7; 32]);
     assert!(matches!(
-        wrong.session(&mut None).await,
+        wrong
+            .session(
+                &mut None,
+                &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
+            )
+            .await,
         Err(SessionError::Connect(_))
     ));
     // Wrong certificate fingerprint: TLS fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.tls_fingerprint = Some(Bytes32([1; 32]));
     assert!(matches!(
-        wrong.session(&mut None).await,
+        wrong
+            .session(
+                &mut None,
+                &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
+            )
+            .await,
         Err(SessionError::Connect(_))
     ));
     assert!(!dir.join("desired.json").exists());
@@ -233,4 +257,91 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
         .await
         .expect("the node stops")
         .expect("no panic");
+}
+
+/// A coordination with the mesh process replaced by channels the test holds: what the mesh process
+/// would send, and what it would receive.
+fn coordination() -> (
+    nett_node::coord::Coordination,
+    tokio::sync::mpsc::Sender<nett_mesh::coord::PathSwitchLine>,
+    tokio::sync::mpsc::Receiver<nett_mesh::coord::PathSwitchLine>,
+) {
+    let (hub, _) = tokio::sync::watch::channel(false);
+    let (to_mesh, received) = tokio::sync::mpsc::channel(16);
+    let (sent, from_mesh) = tokio::sync::mpsc::channel(16);
+    (
+        nett_node::coord::Coordination {
+            hub,
+            to_mesh,
+            from_mesh: tokio::sync::Mutex::new(from_mesh),
+        },
+        sent,
+        received,
+    )
+}
+
+/// Switch messages between two dial-only members pass through the Hub (design/mesh.md section 8.4),
+/// and only between members the site connects.
+#[tokio::test]
+async fn switch_messages_pass_between_connected_members() {
+    let (hub, app, token, site, mut state) = linked("gateway-switch", "https://127.0.0.1").await;
+    state
+        .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    resign(&site, &mut state);
+    let (status, _) = push(&app, &token, &state).await;
+    assert_eq!(status, StatusCode::OK);
+    let url = serve(hub.clone()).await;
+    let id = |n: &str| state.machine(&name(n)).expect("machine").node_id.clone();
+    let (mac, nas) = (id("mac"), id("nas"));
+
+    let mut ends = Vec::new();
+    for (n, key) in [("mac", 2), ("nas", 3)] {
+        let dir = temp_dir(&format!("gateway-switch-{n}"));
+        let agent = node(&url, id(n).as_str(), identity(key), &dir);
+        let (coordination, sent, received) = coordination();
+        tokio::spawn(async move { agent.session(&mut None, &coordination).await });
+        ends.push((sent, received));
+    }
+    for _ in 0..200 {
+        let online = hub.online().await;
+        if online.contains(&mac) && online.contains(&nas) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let (mac_sends, _) = &ends[0];
+    mac_sends
+        .send(nett_mesh::coord::PathSwitchLine {
+            peer: nas.clone(),
+            message: vec![1, 2, 3],
+        })
+        .await
+        .expect("queued");
+    let got = tokio::time::timeout(Duration::from_secs(5), ends[1].1.recv())
+        .await
+        .expect("delivered in time")
+        .expect("open");
+    assert_eq!(got.peer, mac, "the receiver learns who sent it");
+    assert_eq!(got.message, vec![1, 2, 3]);
+
+    // Without the rule there is no connection between the two: the Hub does not pass it on
+    state.rules.clear();
+    resign(&site, &mut state);
+    let (status, _) = push(&app, &token, &state).await;
+    assert_eq!(status, StatusCode::OK);
+    ends[0]
+        .0
+        .send(nett_mesh::coord::PathSwitchLine {
+            peer: nas.clone(),
+            message: vec![4],
+        })
+        .await
+        .expect("queued");
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), ends[1].1.recv())
+            .await
+            .is_err(),
+        "not passed on between members the site does not connect"
+    );
 }

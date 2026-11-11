@@ -12,7 +12,7 @@ use nett_site::updates::{LearnedFor, Updates};
 use nett_trust::admission::{AdmissionMaterial, AdmissionProof, AdmissionProofDoc};
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
 use nett_trust::revocation::{Revocation, Revocations};
-use tokio::sync::{Mutex, Notify, RwLock, watch};
+use tokio::sync::{Mutex, Notify, RwLock, mpsc, watch};
 use x25519_dalek::StaticSecret;
 
 use crate::db::{Db, DbError};
@@ -71,7 +71,7 @@ pub struct Hub {
     site: RwLock<Option<Arc<Site>>>,
     changes: watch::Sender<u64>,
     /// The current connection of each machine: a new connection replaces the old one.
-    live: Mutex<HashMap<NodeId, Arc<Notify>>>,
+    live: Mutex<HashMap<NodeId, Live>>,
     /// The latest release manifest (design/release.md section 7), sent to every node as the
     /// `release` partition.
     release: watch::Sender<Option<Arc<Vec<u8>>>>,
@@ -79,6 +79,15 @@ pub struct Hub {
     pub connections: Arc<tokio::sync::Semaphore>,
     pub handshakes: Arc<tokio::sync::Semaphore>,
 }
+
+/// A machine's current connection: how to end it, and its queue of switch messages from its peers.
+struct Live {
+    replaced: Arc<Notify>,
+    switches: mpsc::Sender<(NodeId, Vec<u8>)>,
+}
+
+/// Switch messages queued for one node (protocol.md section 11).
+pub const SWITCH_QUEUE: usize = 16;
 
 /// Node connections at a time: the site's member limit (protocol.md section 11).
 pub const MAX_CONNECTIONS: usize = nett_mesh::config::MAX_MEMBERS;
@@ -150,21 +159,52 @@ impl Hub {
         self.changes.subscribe()
     }
 
-    /// Registers a node connection and returns the notification for when it is replaced; the same
-    /// machine's previous connection ends with it.
-    pub async fn connected(&self, node: &NodeId) -> Arc<Notify> {
-        let notify = Arc::new(Notify::new());
-        if let Some(old) = self.live.lock().await.insert(node.clone(), notify.clone()) {
-            old.notify_one();
+    /// Registers a node connection and returns the notification for when it is replaced, and the
+    /// switch messages its peers send it; the same machine's previous connection ends with it.
+    pub async fn connected(
+        &self,
+        node: &NodeId,
+    ) -> (Arc<Notify>, mpsc::Receiver<(NodeId, Vec<u8>)>) {
+        let replaced = Arc::new(Notify::new());
+        let (switches, rx) = mpsc::channel(SWITCH_QUEUE);
+        let live = Live {
+            replaced: replaced.clone(),
+            switches,
+        };
+        if let Some(old) = self.live.lock().await.insert(node.clone(), live) {
+            old.replaced.notify_one();
         }
-        notify
+        (replaced, rx)
     }
 
     pub async fn disconnected(&self, node: &NodeId, notify: &Arc<Notify>) {
         let mut live = self.live.lock().await;
-        if live.get(node).is_some_and(|n| Arc::ptr_eq(n, notify)) {
+        if live
+            .get(node)
+            .is_some_and(|l| Arc::ptr_eq(&l.replaced, notify))
+        {
             live.remove(node);
         }
+    }
+
+    /// Passes a switch message from `from` to `to` (design/mesh.md section 8.4): only between two
+    /// members the site connects, only to a node connected now, and never queued beyond
+    /// [`SWITCH_QUEUE`]. Returns whether it was passed on.
+    pub async fn path_switch(&self, from: &NodeId, to: &NodeId, message: Vec<u8>) -> bool {
+        let Some(site) = self.site().await else {
+            return false;
+        };
+        let pair = if from < to {
+            (from.clone(), to.clone())
+        } else {
+            (to.clone(), from.clone())
+        };
+        if !nett_site::compose::connections(&site.state).contains(&pair) {
+            return false;
+        }
+        let live = self.live.lock().await;
+        live.get(to)
+            .is_some_and(|l| l.switches.try_send((from.clone(), message)).is_ok())
     }
 
     pub async fn online(&self) -> HashSet<NodeId> {

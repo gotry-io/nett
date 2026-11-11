@@ -4,6 +4,7 @@
 pub mod access;
 pub mod clock;
 pub mod config;
+pub mod coord;
 pub mod dataplane;
 pub mod engine;
 pub mod event;

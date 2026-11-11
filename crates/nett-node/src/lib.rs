@@ -3,6 +3,7 @@
 //! signing tool uses to call the Hub API.
 
 pub mod config;
+pub mod coord;
 pub mod http;
 pub mod join;
 pub mod platform;

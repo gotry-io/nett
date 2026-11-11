@@ -1,7 +1,7 @@
-# Relays through the Hub (design/hub.md section 9, H4): h runs the Hub and the site, r is a public
-# relay, and a and b are behind symmetric NATs, so hole punching between them cannot work and they
-# connect through r. Every member joins through the Hub; candidates and the relay assignment come
-# from the site, not from this file.
+# Relays through the Hub (design/hub.md section 9, H4): h runs the Hub and the site, r1 and r2 are
+# public relays, and a and b are behind symmetric NATs, so hole punching between them cannot work and
+# they connect through a relay. Every member joins through the Hub; candidates and the relay
+# assignments come from the site, not from this file.
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -12,7 +12,11 @@ name = "h"
 reachability = "public"
 
 [[node]]
-name = "r"
+name = "r1"
+reachability = "public"
+
+[[node]]
+name = "r2"
 reachability = "public"
 
 [[node]]

@@ -17,6 +17,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
+use crate::coord::{Coordinator, Inbound};
 use crate::dataplane::{DataPlane, DirectProbes, DirectSend};
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
@@ -62,6 +63,8 @@ enum Msg {
     ),
     /// The transport adapter fetches its configuration.
     Transport(SyncSender<Option<nett_core::transport::TransportConfig>>),
+    /// From nett-node over the coordination connection (design/status.md section 4.2).
+    Coordination(Inbound),
     Shutdown,
 }
 
@@ -69,6 +72,7 @@ enum Msg {
 pub struct Runtime {
     tx: SyncSender<Msg>,
     thread: Option<JoinHandle<()>>,
+    coordinator: Arc<Coordinator>,
 }
 
 impl Applier for Runtime {
@@ -88,6 +92,8 @@ impl Runtime {
     ) -> std::io::Result<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         let worker_tx = tx.clone();
+        let coordinator = Coordinator::new();
+        let worker_coordinator = Arc::clone(&coordinator);
         let thread = std::thread::Builder::new()
             .name("nett-mesh".into())
             .spawn(move || {
@@ -100,6 +106,7 @@ impl Runtime {
                     dropped: Arc::new(AtomicU64::new(0)),
                     receivers: Vec::new(),
                     started: false,
+                    coordinator: worker_coordinator,
                 };
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
@@ -182,6 +189,17 @@ impl Runtime {
                         Ok(Msg::Transport(reply)) => {
                             let _ = reply.try_send(worker.engine.transport_config());
                         }
+                        Ok(Msg::Coordination(Inbound::Hub(up))) => worker.engine.set_hub(up),
+                        Ok(Msg::Coordination(Inbound::PathSwitch { peer, message })) => {
+                            let out = worker.engine.on_hub_message(
+                                &peer,
+                                &message,
+                                Instant::now(),
+                                clock.now_ms(),
+                            );
+                            worker.send_all(out);
+                            tick_now = true;
+                        }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
                         Err(RecvTimeoutError::Timeout) => {}
                     }
@@ -205,6 +223,7 @@ impl Runtime {
         Ok(Self {
             tx,
             thread: Some(thread),
+            coordinator,
         })
     }
 
@@ -215,6 +234,7 @@ impl Runtime {
         RuntimeStatus {
             tx: self.tx.clone(),
             reloads,
+            coordinator: Arc::clone(&self.coordinator),
         }
     }
 
@@ -241,6 +261,7 @@ struct Sockets {
 pub struct RuntimeStatus {
     tx: SyncSender<Msg>,
     reloads: tokio::sync::mpsc::Sender<ReloadReply>,
+    coordinator: Arc<Coordinator>,
 }
 
 impl StatusSource for RuntimeStatus {
@@ -255,6 +276,15 @@ impl StatusSource for RuntimeStatus {
         let (reply, answer) = sync_channel(1);
         self.reloads.try_send(reply).ok()?;
         answer.recv_timeout(RELOAD_TIMEOUT).ok()
+    }
+
+    fn coordinate(&self, stream: std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        let tx = self.tx.clone();
+        // A full queue drops the line: the Hub state is sent again on change, and switch messages are
+        // resent
+        self.coordinator.attach(stream, move |inbound| {
+            let _ = tx.try_send(Msg::Coordination(inbound));
+        })
     }
 }
 
@@ -285,6 +315,8 @@ struct Worker<D, E> {
     receivers: Vec<JoinHandle<()>>,
     /// The first desired state (the read at startup) has been processed.
     started: bool,
+    /// The coordination connection with nett-node: switch messages through the Hub go out here.
+    coordinator: Arc<Coordinator>,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
@@ -377,6 +409,10 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 }
                 Outgoing::Relay { to, data } => s.relay.send_to(&data, map_v6(to)).map(drop),
                 Outgoing::Direct { to, data } => s.direct.send(to, &data),
+                Outgoing::Hub { peer, data } => {
+                    self.coordinator.send(&peer, &data);
+                    Ok(())
+                }
             };
         }
     }

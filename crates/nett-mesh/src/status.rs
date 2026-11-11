@@ -553,6 +553,8 @@ pub trait StatusSource: Send + 'static {
     /// Re-reads the desired state file and waits for it to finish applying; `None` when too many are already
     /// waiting or applying did not finish within [`RELOAD_TIMEOUT`].
     fn reload(&self) -> Option<ReloadOutcome>;
+    /// Takes over a `coordinate` connection from nett-node (design/status.md section 4.2).
+    fn coordinate(&self, stream: UnixStream) -> std::io::Result<()>;
 }
 
 /// The thread that accepts status queries. Dropping it stops the thread and deletes the socket.
@@ -707,7 +709,12 @@ pub(crate) fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 /// peer may not have read the reply yet.
 fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let result = answer(&stream, source);
+    let result = match answer(&stream, source) {
+        // The connection now belongs to the coordinator and stays open
+        Ok(true) => return Ok(()),
+        Ok(false) => Ok(()),
+        Err(e) => Err(e),
+    };
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = std::io::copy(
         &mut Deadline::new(&stream).take(MAX_DRAIN),
@@ -747,37 +754,53 @@ impl std::io::Read for Deadline<'_> {
     }
 }
 
-fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
+/// Answers one query; returns whether the connection is kept (a `coordinate` connection).
+fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bool> {
+    let done = |r: std::io::Result<()>| r.map(|()| false);
     if !peer_allowed(stream)? {
-        return reply_error(
+        return done(reply_error(
             stream,
             "permission_denied",
             "only root can query the status",
-        );
+        ));
     }
     let mut line = String::new();
     BufReader::new(Deadline::new(stream).take(MAX_REQUEST)).read_line(&mut line)?;
     let request: Request = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
-        Err(_) => return reply_error(stream, "bad_request", "the request is not valid JSON"),
+        Err(_) => {
+            return done(reply_error(
+                stream,
+                "bad_request",
+                "the request is not valid JSON",
+            ));
+        }
     };
     if request.v != VERSION {
-        return reply_error(
+        return done(reply_error(
             stream,
             "unsupported_version",
             &format!(
                 "interface version {} is not supported; this process speaks {VERSION}",
                 request.v
             ),
-        );
+        ));
+    }
+    if request.query == "coordinate" {
+        let mut out = stream;
+        let mut accepted = crate::coord::ACCEPTED.as_bytes().to_vec();
+        accepted.push(b'\n');
+        out.write_all(&accepted)?;
+        source.coordinate(stream.try_clone()?)?;
+        return Ok(true);
     }
     if request.query == "reload" {
         let Some(outcome) = source.reload() else {
-            return reply_error(
+            return done(reply_error(
                 stream,
                 "busy",
                 "the mesh process did not finish applying in time; check again with nett status",
-            );
+            ));
         };
         let mut bytes = serde_json::to_vec(&ReloadReplyDoc {
             v: VERSION,
@@ -786,26 +809,34 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()
         .map_err(std::io::Error::other)?;
         bytes.push(b'\n');
         let mut out = stream;
-        return out.write_all(&bytes);
+        return done(out.write_all(&bytes));
     }
     if request.query != "status" {
         let query: String = request.query.chars().take(32).collect();
-        return reply_error(stream, "unknown_query", &format!("unknown query `{query}`"));
+        return done(reply_error(
+            stream,
+            "unknown_query",
+            &format!("unknown query `{query}`"),
+        ));
     }
     let Some(doc) = source.snapshot() else {
-        return reply_error(stream, "busy", "the mesh process is busy; try again");
+        return done(reply_error(
+            stream,
+            "busy",
+            "the mesh process is busy; try again",
+        ));
     };
     let mut bytes = serde_json::to_vec(&doc).map_err(std::io::Error::other)?;
     if bytes.len() as u64 > MAX_REPLY {
-        return reply_error(
+        return done(reply_error(
             stream,
             "too_large",
             "the status is larger than the reply limit",
-        );
+        ));
     }
     bytes.push(b'\n');
     let mut out = stream;
-    out.write_all(&bytes)
+    done(out.write_all(&bytes))
 }
 
 pub(crate) fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std::io::Result<()> {
@@ -988,6 +1019,10 @@ mod tests {
             self.0.as_ref().map(|_| ReloadOutcome::Rejected {
                 reason: "bad json".into(),
             })
+        }
+
+        fn coordinate(&self, _: UnixStream) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

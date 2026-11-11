@@ -544,6 +544,25 @@ impl PeerPaths {
             .position(|c| matches!(c.route, Route::Relay { relay: r, .. } if r == relay))
     }
 
+    /// The relay to move to when the current path is down and the Hub relays the proposal (section 8.4):
+    /// the one with the shortest round-trip time among those whose last probe this end got a reply to,
+    /// otherwise the first other one in relay-number order.
+    pub fn best_other_relay(&self, now: Instant) -> Option<usize> {
+        let views = self.candidate_views(now);
+        let others: Vec<usize> = self
+            .relays_in_order()
+            .into_iter()
+            .filter(|&i| i != self.current)
+            .collect();
+        let rtt = |i: usize| views[i].rtt_ms.unwrap_or(f64::MAX);
+        others
+            .iter()
+            .copied()
+            .filter(|&i| views[i].state == CandidateState::Ok)
+            .min_by(|&x, &y| rtt(x).total_cmp(&rtt(y)))
+            .or_else(|| others.first().copied())
+    }
+
     /// Candidates via relays are sorted by relay number: the two ends' candidate lists may be in different
     /// orders, and after sorting they are the same (section 8.4).
     pub fn relays_in_order(&self) -> Vec<usize> {

@@ -1,13 +1,15 @@
-//! Relays through the Hub (design/hub.md section 9 H4, design/mesh.md sections 5.2 and 5.3): the
-//! site and the Hub run in h; r, a and b join through the Hub with `nett join`; `nett site relay r`
-//! makes r a relay. nett-relay and the transport adapter run in service mode and fetch their
-//! configuration from the mesh process's helper socket. Checks:
+//! Relays through the Hub (design/hub.md section 9 H4, design/mesh.md sections 5.2, 5.3 and 8.4):
+//! the site and the Hub run in h; r1, r2, a and b join through the Hub with `nett join`; `nett site
+//! relay` makes r1 and r2 relays. nett-relay and the transport adapter run in service mode and fetch
+//! their configuration from the mesh process's helper socket. Checks:
 //!
-//! - The relay fetches its assignment and reports its certificate; the Hub learns the fingerprint and
-//!   the members then get TLS candidates through r;
-//! - a and b, both behind symmetric NATs, reach each other through r over UDP;
-//! - With all of a's UDP blocked upstream, the pair moves to TLS through r and stays reachable;
-//! - `nett site relay r --off` takes r out of every connection.
+//! - Each relay fetches its assignment and reports its certificate; the Hub learns the fingerprint and
+//!   the members then get TLS candidates;
+//! - a and b, both behind symmetric NATs, reach each other through a relay over UDP;
+//! - The relay process they use is killed: the decider proposes the other relay through the Hub, both
+//!   move there together without rotating by time slot, and the pair stays reachable;
+//! - With all of a's UDP blocked upstream, the pair moves to TLS and stays reachable;
+//! - `nett site relay <relay> --off` takes the relay out of every connection.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -28,12 +30,16 @@ use crate::topology::Topology;
 const LEARN: Duration = Duration::from_secs(60);
 /// Upper bound for the pair to move to TLS after UDP is blocked.
 const FALLBACK: Duration = Duration::from_secs(30);
+/// Upper bound for both ends to move to the other relay through the Hub after theirs stops: about 3
+/// seconds to detect the outage, then one round trip through the Hub (design/mesh.md section 8.4).
+const THROUGH_HUB: Duration = Duration::from_secs(8);
+const RELAYS: [&str; 2] = ["r1", "r2"];
 
 pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
     let mut namespaces = std::collections::BTreeMap::new();
-    for name in ["h", "r", "a", "b"] {
+    for name in ["h", "r1", "r2", "a", "b"] {
         let net = underlay
             .node(name)
             .with_context(|| format!("the hub-relay scenario needs a node `{name}`"))?;
@@ -75,7 +81,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         hub_ns: ns_h.clone(),
         hub_ip,
         site_ns: ns_h.clone(),
-        members: vec!["r".into(), "a".into(), "b".into()],
+        members: vec!["r1".into(), "r2".into(), "a".into(), "b".into()],
         hub: None,
     };
     let init = run_in(
@@ -101,7 +107,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
 
     // r, a and b join through the Hub: one command on the computer, one on the machine
     let mut nodes = Vec::new();
-    for (name, public) in [("r", true), ("a", false), ("b", false)] {
+    for (name, public) in [("r1", true), ("r2", true), ("a", false), ("b", false)] {
         let mut args = vec!["add", name, "--yes"];
         if public {
             args.push("--public");
@@ -153,23 +159,18 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         lab.processes.push((format!("node:{name}"), child));
         nodes.push(node);
     }
-    let (r, a, b) = (&nodes[0], &nodes[1], &nodes[2]);
+    let (a, b) = (&nodes[2], &nodes[3]);
+    let relay_node = |name: &str| -> anyhow::Result<&LabNode> {
+        nodes.iter().find(|n| n.name == name).context("relay node")
+    };
 
     // nett-relay and the transport adapter in service mode: they fetch their configuration from the
     // helper socket next to each mesh process's status socket
-    let relay = spawn_in(
-        &ns("r")?,
-        nett,
-        [
-            "relay".as_ref(),
-            "--socket".as_ref(),
-            r.dir.join("helpers.sock").as_os_str(),
-            "--state".as_ref(),
-            r.dir.join("relay").as_os_str(),
-        ],
-        &r.dir.join("relay.log"),
-    )?;
-    lab.relays.push(("r".into(), relay));
+    for name in RELAYS {
+        let r = relay_node(name)?;
+        let relay = spawn_relay(nett, &ns(name)?, r)?;
+        lab.relays.push((name.into(), relay));
+    }
     for node in [a, b] {
         let child = spawn_in(
             &ns(&node.name)?,
@@ -184,83 +185,156 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         lab.helpers.push(child);
     }
 
-    let relayed = h.site_cmd(&["relay", "r", "--yes"]);
-    report.check(
-        "relay:listed",
-        relayed
-            .as_ref()
-            .is_ok_and(|o| o.contains("~ r runs a relay: UDP 41822, TLS 443")),
-        relayed
-            .as_ref()
-            .map_or_else(|e| format!("{e:#}"), Clone::clone),
-    );
+    for name in RELAYS {
+        let relayed = h.site_cmd(&["relay", name, "--yes"]);
+        report.check(
+            &format!("relay:{name}:listed"),
+            relayed
+                .as_ref()
+                .is_ok_and(|o| o.contains(&format!("~ {name} runs a relay: UDP 41822, TLS 443"))),
+            relayed
+                .as_ref()
+                .map_or_else(|e| format!("{e:#}"), Clone::clone),
+        );
+    }
     let allowed = h.site_cmd(&["allow", "a", "b", "--yes"]);
     report.check(
-        "allow:through-the-relay",
+        "allow:through-the-relays",
         allowed
             .as_ref()
-            .is_ok_and(|o| o.contains("+ a - b  punch, relay r (udp)")),
+            .is_ok_and(|o| o.contains("+ a - b  punch, relay r1 (udp), relay r2 (udp)")),
         allowed
             .as_ref()
             .map_or_else(|e| format!("{e:#}"), Clone::clone),
     );
 
-    // The relay fetches its assignment and reports its certificate; the Hub learns the fingerprint
-    // and the members get a TLS candidate through r
+    // The relays fetch their assignments and report their certificates; the Hub learns the
+    // fingerprints and the members get TLS candidates through both
     let deadline = Instant::now() + LEARN;
-    let tls_candidate = loop {
+    let tls_candidates = loop {
         let doc = desired(&a.dir.join("desired.json"))?;
         let found = doc
             .paths
             .iter()
             .flat_map(|p| &p.candidates)
-            .any(|c| matches!(c, Candidate::RelayTls { .. }));
-        if found || Instant::now() >= deadline {
+            .filter(|c| matches!(c, Candidate::RelayTls { .. }))
+            .count();
+        if found >= 2 || Instant::now() >= deadline {
             break found;
         }
         std::thread::sleep(Duration::from_millis(500));
     };
-    let relay_status = nett_status(nett, r)?.relay;
+    for name in RELAYS {
+        let relay_status = nett_status(nett, relay_node(name)?)?.relay;
+        report.check(
+            &format!("relay:{name}:fetched-and-reported"),
+            relay_status
+                .as_ref()
+                .is_some_and(|s| s.fetched_at.is_some() && s.fingerprint.is_some() && s.links >= 1),
+            format!("{relay_status:?}"),
+        );
+    }
     report.check(
-        "relay:fetched-and-reported",
-        relay_status
-            .as_ref()
-            .is_some_and(|s| s.fetched_at.is_some() && s.fingerprint.is_some() && s.links >= 1),
-        format!("{relay_status:?}"),
-    );
-    report.check(
-        "relay:fingerprint-learned",
-        tls_candidate,
-        "a's desired state has a TLS candidate through r",
+        "relay:fingerprints-learned",
+        tls_candidates >= 2,
+        format!("a's desired state has {tls_candidates} TLS candidates"),
     );
     let status = h.site_cmd(&["status"]).unwrap_or_else(|e| format!("{e:#}"));
     report.record("site-status", status);
 
-    // Behind symmetric NATs a and b cannot punch through: they connect through r
+    // Behind symmetric NATs a and b cannot punch through: they connect through a relay
     let reachable = ping(&ns("a")?, &b.mesh_ipv4.to_string());
     report.check(
         "relay:a-reaches-b",
         reachable.is_ok(),
         reachable.unwrap_or_else(|e| format!("{e:#}")),
     );
-    let kind = |node: &LabNode, peer: &LabNode| -> String {
+    let path = |node: &LabNode, peer: &LabNode| -> Option<nett_mesh::status::PathStatus> {
         nett_status(nett, node)
-            .ok()
-            .and_then(|s| {
-                s.peers
-                    .into_iter()
-                    .find(|p| p.id == peer.node_id)
-                    .and_then(|p| p.path)
-            })
-            .map_or_else(|| "-".to_owned(), |p| format!("{:?}", p.kind))
+            .ok()?
+            .peers
+            .into_iter()
+            .find(|p| p.id == peer.node_id)?
+            .path
+    };
+    let kind = |node: &LabNode, peer: &LabNode| -> String {
+        path(node, peer).map_or_else(|| "-".to_owned(), |p| format!("{:?}", p.kind))
+    };
+    let via = |node: &LabNode, peer: &LabNode| -> Option<String> {
+        path(node, peer)?.relay?.name.map(|n| n.to_string())
     };
     report.check(
-        "relay:path-through-r",
+        "relay:path-through-a-relay",
         kind(a, b) == "Relay",
-        format!("a -> b: {}", kind(a, b)),
+        format!("a -> b: {} via {:?}", kind(a, b), via(a, b)),
     );
 
-    // All of a's UDP blocked upstream: the pair moves to TLS through r
+    // The relay in use stops: the decider proposes the other one through the Hub, and both ends move
+    // there together without waiting for a time slot
+    let used = via(a, b).context("a's path to b names its relay")?;
+    let other = RELAYS
+        .into_iter()
+        .find(|r| *r != used)
+        .context("the other relay")?;
+    let events = |node: &LabNode| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(node.dir.join("events.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    };
+    let before = (events(a).len(), events(b).len());
+    let stopped = Instant::now();
+    if let Some((_, mut child)) = lab
+        .relays
+        .iter()
+        .position(|(n, _)| *n == used)
+        .map(|i| lab.relays.remove(i))
+    {
+        child.kill().ok();
+        child.wait().ok();
+    }
+    while (via(a, b).as_deref() != Some(other) || via(b, a).as_deref() != Some(other))
+        && stopped.elapsed() < THROUGH_HUB
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let moved = stopped.elapsed();
+    let reasons = |node: &LabNode, skip: usize| -> Vec<String> {
+        events(node)
+            .into_iter()
+            .skip(skip)
+            .filter(|e| e["event"] == "path_switched")
+            .filter_map(|e| e["reason"].as_str().map(str::to_owned))
+            .collect()
+    };
+    let (ra, rb) = (reasons(a, before.0), reasons(b, before.1));
+    let reachable = ping(&ns("a")?, &b.mesh_ipv4.to_string());
+    report.check(
+        "hub-switch:both-moved",
+        via(a, b).as_deref() == Some(other)
+            && via(b, a).as_deref() == Some(other)
+            && reachable.is_ok(),
+        format!(
+            "{used} stopped; after {} ms a -> b via {:?}, b -> a via {:?}; {}",
+            moved.as_millis(),
+            via(a, b),
+            via(b, a),
+            reachable.unwrap_or_else(|e| format!("{e:#}"))
+        ),
+    );
+    report.check(
+        "hub-switch:proposed-not-rotated",
+        !ra.iter().chain(&rb).any(|r| r == "rotation")
+            && (ra.iter().chain(&rb).any(|r| r == "proposed")),
+        format!("a switched for {ra:?}, b for {rb:?}"),
+    );
+    // Bring the stopped relay back for what follows
+    let r = relay_node(&used)?;
+    let relay = spawn_relay(nett, &ns(&used)?, r)?;
+    lab.relays.push((used.clone(), relay));
+
+    // All of a's UDP blocked upstream: the pair moves to TLS
     crate::fault::block_udp_upstream(&lab.underlay, "a")?;
     let deadline = Instant::now() + FALLBACK;
     while kind(a, b) != "RelayTls" && Instant::now() < deadline {
@@ -284,21 +358,38 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         report.record("memory:transport", memory(child.id()));
     }
 
-    // The relay stops: r leaves every connection, and the dial-only pair is back to punching only
-    let off = h.site_cmd(&["relay", "r", "--off", "--yes"]);
+    // Both relays stop: they leave every connection, and the dial-only pair is back to punching only
+    h.site_cmd(&["relay", "r2", "--off", "--yes"])?;
+    let off = h.site_cmd(&["relay", "r1", "--off", "--yes"]);
     report.check(
         "relay:off",
         off.as_ref().is_ok_and(|o| {
-            o.contains("~ r stops its relay") && o.contains("~ a - b  punch only; may not connect")
+            o.contains("~ r1 stops its relay") && o.contains("~ a - b  punch only; may not connect")
         }),
         off.as_ref().map_or_else(|e| format!("{e:#}"), Clone::clone),
     );
     let current = h.wait_acked("applied", Duration::from_secs(30));
-    let relay_gone = nett_status(nett, r).map(|s| s.relay.is_none());
+    let relay_gone = nett_status(nett, relay_node("r1")?).map(|s| s.relay.is_none());
     report.check(
         "relay:off-applied",
         current.is_ok() && relay_gone.as_ref().is_ok_and(|g| *g),
         format!("{:?}", relay_gone),
     );
     Ok(report)
+}
+
+/// nett-relay in service mode on a relay node.
+fn spawn_relay(nett: &Path, ns: &str, node: &LabNode) -> anyhow::Result<std::process::Child> {
+    spawn_in(
+        ns,
+        nett,
+        [
+            "relay".as_ref(),
+            "--socket".as_ref(),
+            node.dir.join("helpers.sock").as_os_str(),
+            "--state".as_ref(),
+            node.dir.join("relay").as_os_str(),
+        ],
+        &node.dir.join("relay.log"),
+    )
 }

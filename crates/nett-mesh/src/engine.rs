@@ -66,6 +66,8 @@ pub struct Engine<D> {
     /// time nett-relay reported when it last fetched it.
     relay: Option<RelayAssignment>,
     relay_fetched: Option<(Option<CertFingerprint>, Instant)>,
+    /// nett-node's Hub session is up, as nett-node last reported.
+    hub: bool,
     reachability: Reachability,
     prober: Option<Prober>,
     /// Peers already configured on the data plane: the side that follows through roaming sets the endpoint
@@ -125,6 +127,7 @@ impl<D: DataPlane> Engine<D> {
             transport: None,
             relay: None,
             relay_fetched: None,
+            hub: false,
             reachability: Reachability::Public,
             prober: None,
             configured: HashSet::new(),
@@ -343,10 +346,11 @@ impl<D: DataPlane> Engine<D> {
         self.apply_ingress(events);
 
         self.reachability = desired.reachability;
-        let trusted = self.clock_trusted;
+        let (trusted, hub) = (self.clock_trusted, self.hub);
         let prober = self.prober.get_or_insert_with(|| {
             let mut prober = Prober::new(&own_key);
             prober.set_clock_trusted(trusted);
+            prober.set_hub(hub);
             prober
         });
         prober.update(
@@ -550,6 +554,28 @@ impl<D: DataPlane> Engine<D> {
     /// The transport adapter fetches its configuration.
     pub fn transport_config(&self) -> Option<TransportConfig> {
         self.transport.clone()
+    }
+
+    /// nett-node reports whether its Hub session is up (design/status.md section 4.2).
+    pub fn set_hub(&mut self, up: bool) {
+        self.hub = up;
+        if let Some(prober) = self.prober.as_mut() {
+            prober.set_hub(up);
+        }
+    }
+
+    /// A switch message from a peer, relayed through the Hub (design/mesh.md section 8.4).
+    pub fn on_hub_message(
+        &mut self,
+        peer: &NodeId,
+        data: &[u8],
+        at: Instant,
+        now_ms: u64,
+    ) -> Vec<Outgoing> {
+        match self.prober.as_mut() {
+            Some(prober) => prober.on_hub_message(peer, data, at, now_ms),
+            None => Vec::new(),
+        }
     }
 
     /// TLS loopback ports that no peer is using: drops packets entering the WireGuard port from them
