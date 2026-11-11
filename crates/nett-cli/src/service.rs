@@ -62,7 +62,7 @@ fn plist(service: &Service) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- 由 nett install 生成（design/release.md 第 4 节） -->
+<!-- Written by `sudo nett install`; it rewrites this file on the next run. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -75,16 +75,16 @@ fn plist(service: &Service) -> String {
   <true/>
   <key>KeepAlive</key>
   <true/>
-  <!-- 连续崩溃时最快 5 秒重启一次 -->
+  <!-- After a crash, restart at most every 5 seconds -->
   <key>ThrottleInterval</key>
   <integer>5</integer>
-  <!-- 不合并定时器：路径层按 100 毫秒推进，切换时间取决于它 -->
+  <!-- No timer coalescing: path switching runs on a 100 ms tick -->
   <key>ProcessType</key>
   <string>Interactive</string>
-  <!-- 077：进程创建的文件只有 root 能读 -->
+  <!-- 077: files the service creates are readable by root only -->
   <key>Umask</key>
   <integer>63</integer>
-  <!-- 运行日志写进系统日志；这个文件只记录启动失败，launchd 每次启动进程时重新打开它 -->
+  <!-- Logs go to the system log; this file records only start-up failures -->
   <key>StandardErrorPath</key>
   <string>{LOG_DIR}/{log}</string>
 </dict>
@@ -98,7 +98,7 @@ fn plist(service: &Service) -> String {
 /// 启动失败记录的轮转：超过 1 MB 时轮转，保留 5 份，压缩旧的。
 fn newsyslog() -> String {
     format!(
-        "# 由 nett install 生成：服务启动失败记录的轮转（运行日志在系统日志中）\n\
+        "# Written by `sudo nett install`: rotation of the services' start-up failure logs.\n\
          # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
          {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n\
          {LOG_DIR}/node.log    root:wheel     600   5      1024      *     JN\n"

@@ -1,9 +1,12 @@
 #!/bin/sh
-# 安装 nett（design/release.md 第 6 节）：判断系统与架构，从项目网站下载这个版本的压缩包，按下面写明的
-# SHA-256 核对，放到 /usr/local/bin/nett。不读 token、不连接 Hub、不写配置：入网与服务由之后的
-# `sudo nett install` 完成。这是模板，发布工作流填入版本与哈希之后部署到 https://nett.gotry.io/install.sh。
+# Installs nett to /usr/local/bin/nett on Linux and macOS:
 #
 #   curl -fsSL https://nett.gotry.io/install.sh | sh
+#
+# It downloads the archive for this system and architecture, checks it against the SHA-256 written
+# below for this release, and installs only the nett program. It reads no token, contacts no Hub
+# and writes no configuration: `sudo nett install` does that afterwards. Each release's archives
+# and signatures are also published at https://github.com/gotry-io/nett/releases.
 set -eu
 
 VERSION="@VERSION@"

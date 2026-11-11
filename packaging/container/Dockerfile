@@ -1,5 +1,5 @@
-# 容器内成员（ADR 0016，design/local-signing.md 第 6 节）：镜像中只有一个静态链接的 nett（musl）。
-# 构建：把对应架构的正式构建放在本目录，命名为 nett，然后 `docker build -t nett .`
+# A mesh member inside a container: the image holds only the statically linked nett (musl).
+# To build: put the release build for your architecture here as `nett`, then `docker build -t nett .`
 FROM scratch
 COPY nett /nett
 ENTRYPOINT ["/nett"]

@@ -1,12 +1,13 @@
-# Hub 与 Caddy（design/hub.md 第 8 节）：Caddy 申请证书、终止 TLS，把 /api/v1/ 与节点网关 /node/v1/connect
-# 转给 Hub；Hub 只在容器网络中监听。hub.example.com 换成 Hub 的域名（Caddyfile 中也换掉），它的 A/AAAA 记录
-# 指向这台主机。
+# nett-hub behind Caddy. Caddy obtains the certificate, terminates TLS and forwards /api/v1/ and
+# the node gateway /node/v1/connect to the Hub, which listens only on the container network.
+# Replace hub.example.com with the Hub's domain here and in the Caddyfile; its A/AAAA records point
+# to this host.
 #
-# 第一次使用：
+# First use:
 #   docker compose run --rm hub init --url https://hub.example.com --data /data
 #   docker compose up -d
-# 然后在持有站点的电脑上，1 小时内运行 init 打印的 nett site link nett_lnk_…
-# nett-hub reset 作废与站点的关联：docker compose exec hub /nett-hub reset --data /data
+# Then, within an hour, run the printed `nett site link nett_lnk_…` on the computer that holds the site.
+# To unlink the site: docker compose exec hub /nett-hub reset --data /data
 services:
   hub:
     image: nett-hub
