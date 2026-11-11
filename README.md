@@ -35,7 +35,7 @@ The script installs only the `nett` program to `/usr/local/bin`, after checking 
    ```
 4. Change the site with commands such as `nett site allow`, `routes` and `edge` ([design/site.md](docs/design/site.md)). Every change lists what will be signed, is signed once you confirm, and is pushed to the Hub; nett-node on each machine hands it to the mesh process, and the command reports which machines applied it.
 
-`nett site status` lists whether each machine is online and has applied the latest change, and the path and round-trip time between each pair. Machines that were already members before the Hub connect with `nett site invite <name>`. `sudo nett leave` takes a machine out of the site, and every member drops it. While the Hub is down the mesh keeps working, and changes catch up when it is back.
+`nett site status` lists whether each machine is online and has applied the latest change, and the path and round-trip time between each pair. Machines upgrade themselves when a new release is out: each one verifies the release signature before installing it ([design/release.md](docs/design/release.md) section 7). Machines that were already members before the Hub connect with `nett site invite <name>`. `sudo nett leave` takes a machine out of the site, and every member drops it. While the Hub is down the mesh keeps working, and changes catch up when it is back.
 
 ### Without a Hub (local signing)
 

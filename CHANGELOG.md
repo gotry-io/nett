@@ -4,6 +4,16 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Machines connected to a Hub upgrade themselves (design/release.md section 7). The Hub fetches
+  `https://nett.gotry.io/release.json` every 6 hours (`nett-hub serve --releases <URL or file>`,
+  `--releases off` to turn it off) and passes it on; nett-node downloads the program for its target,
+  installs it only when the release signature verifies against the keys built into `nett` and the
+  version is higher, restarts the mesh service, and rolls back to the previous program when the mesh
+  service or the new nett-node does not come up. A version that failed is not tried again;
+  `nett site status` shows each machine's version and the last upgrade problem. Releases also
+  publish the bare program for each target. On Linux the program now lives in
+  `/usr/local/lib/nett/nett` with the link `/usr/local/bin/nett`; `sudo nett install` and the install
+  script set this up. The Hub's Compose example mounts the host's CA certificates.
 - New machines join through the Hub (design/hub.md section 9, H2): with a Hub, `nett site add <name>` needs no
   `--keys`; it signs the node policy and prints one line to run on the new machine,
   `curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…`, the same on every
