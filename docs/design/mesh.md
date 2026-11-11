@@ -110,7 +110,8 @@ A's WireGuard ◄── R:p ◄─(by mac1 / session index)─── B's WireGua
 - On a link through R, A sets B's endpoint to `R:p` and B also sets A's endpoint to `R:p`; the same relay can be the endpoint of several peers at once;
 - R records each member's actual address and passes packets to the other end;
 - **Multi-hop**: R1 does not pass the packet directly to B but to R2, and R2 likewise decides the destination from the message;
-- On a session index collision, the relay drops the colliding handshake and WireGuard automatically retries with a new index; entries age out according to the session's idle time.
+- On a session index collision, the relay drops the colliding handshake and WireGuard automatically retries with a new index; entries age out according to the session's idle time;
+- The relay's UDP socket asks for the same receive buffer as the userspace data plane (userspace.md section 4); running without privileges, it gets at most what the system limit allows (on Linux `net.core.rmem_max`; with the usual settings that is twice the default buffer).
 
 ### 5.2 Assignment and authorization
 
