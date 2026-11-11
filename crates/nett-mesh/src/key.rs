@@ -1,4 +1,5 @@
-//! 组网私钥（WireGuard）。本机生成，不离开节点；文件权限 `0600`，内存中使用 `zeroize`（硬性规则 10）。
+//! Mesh private key (WireGuard). Generated on this machine and never leaves the node; file mode `0600`,
+//! `zeroize` in memory (hard rule 10).
 
 use std::fmt;
 use std::path::Path;
@@ -27,7 +28,7 @@ pub enum KeyFileError {
     Random,
 }
 
-/// 组网私钥。`Debug` 不输出内容。
+/// Mesh private key. `Debug` does not print the contents.
 pub struct PrivateKey(Zeroizing<[u8; 32]>);
 
 impl PrivateKey {
@@ -39,7 +40,7 @@ impl PrivateKey {
         &self.0
     }
 
-    /// 用系统的随机数生成一把新的私钥（X25519）。
+    /// Generates a new private key (X25519) from the system random number generator.
     pub fn generate() -> Result<Self, KeyFileError> {
         use ring::rand::{SecureRandom as _, SystemRandom};
         let mut bytes = Zeroizing::new([0u8; 32]);
@@ -56,7 +57,8 @@ impl PrivateKey {
         )
     }
 
-    /// 写到一个新文件（权限 `0600`，与 `wg genkey` 相同的格式）。文件已存在时报错，不覆盖。
+    /// Writes to a new file (mode `0600`, same format as `wg genkey`). Fails if the file already exists;
+    /// never overwrites.
     pub fn save_new(&self, path: &Path) -> Result<(), KeyFileError> {
         use std::io::Write as _;
         let write_err = |source| KeyFileError::Write {
@@ -75,7 +77,7 @@ impl PrivateKey {
         file.write_all(text.as_bytes()).map_err(write_err)
     }
 
-    /// 读取 WireGuard 格式（标准 base64，与 `wg genkey` 相同）的私钥文件。
+    /// Reads a private key file in WireGuard format (standard base64, same as `wg genkey`).
     pub fn load(path: &Path) -> Result<Self, KeyFileError> {
         let display = path.display().to_string();
         let read_err = |source| KeyFileError::Read {

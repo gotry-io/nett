@@ -1,8 +1,11 @@
-//! macOS 上服务的安装（design/release.md 第 4 节，hub.md 第 7 节）：`sudo nett install` 在 root 专属的目录中生成
-//! 密钥、放入程序的副本，写入 launchd 与日志轮转的配置并启动组网服务；不接 Hub 时从运行 sudo 的用户的站点
-//! 目录中找到给本机的期望状态，接了 Hub 时（有 token，或已有 Hub 的配置）再启动 nett-node，期望状态由它从
-//! Hub 接收。`sudo nett uninstall` 停止服务并删除副本与配置。Homebrew 的目录普通用户可写，root 服务只运行
-//! 这份副本。
+//! Service installation on macOS (design/release.md section 4, hub.md section 7): `sudo nett
+//! install` generates the keys in a root-only directory, places a copy of the program, writes the
+//! launchd and log rotation configuration and starts the mesh service; without a Hub, it finds the
+//! desired state for this machine in the site directory of the user who ran sudo; with a Hub (a
+//! token, or an existing Hub configuration) it also starts nett-node, which receives the desired
+//! state from the Hub. `sudo nett uninstall` stops the services and deletes the copy and
+//! configuration. The Homebrew directory is writable by ordinary users, so the root service only
+//! runs this copy.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,17 +25,17 @@ const KEY: &str = "/Library/Application Support/nett/mesh.key";
 const LOG_DIR: &str = "/Library/Logs/nett";
 const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
 const LAUNCHCTL: &str = "/bin/launchctl";
-/// 等 launchctl 卸下服务的上限。
+/// Upper bound for waiting for launchctl to unload a service.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// 一个 launchd 服务。
+/// A launchd service.
 struct Service {
     label: &'static str,
     plist: &'static str,
-    /// 运行 `nett` 的哪个命令。
+    /// Which `nett` command to run.
     args: &'static [&'static str],
     log: &'static str,
-    /// 在帮助与报告中的说法。
+    /// How it is referred to in help and reports.
     what: &'static str,
 }
 
@@ -52,7 +55,8 @@ const NODE: Service = Service {
     what: "nett-node",
 };
 
-/// launchd 配置：root 运行副本，开机启动，退出后重启（design/userspace.md 第 6.3 节）。
+/// launchd configuration: root runs the copy, starts at boot, restarts after exit
+/// (design/userspace.md section 6.3).
 fn plist(service: &Service) -> String {
     let args: String = service
         .args
@@ -95,7 +99,8 @@ fn plist(service: &Service) -> String {
     )
 }
 
-/// 启动失败记录的轮转：超过 1 MB 时轮转，保留 5 份，压缩旧的。
+/// Rotation of the startup failure record: rotates above 1 MB, keeps 5 copies, compresses the old
+/// ones.
 fn newsyslog() -> String {
     format!(
         "# Written by `sudo nett install`: rotation of the services' start-up failure logs.\n\
@@ -113,8 +118,9 @@ fn loaded(service: &Service) -> anyhow::Result<bool> {
     launchctl(&["print", &format!("system/{}", service.label)])
 }
 
-/// bootout 返回时进程可能还在退出（launchctl print 显示 `SIGTERMed`）。等到 launchd 中没有这个服务，
-/// 再删副本、报告已停止；紧接着重新安装时也不会遇到还没退出的旧服务。
+/// When bootout returns, the process may still be exiting (launchctl print shows `SIGTERMed`).
+/// Waits until launchd no longer has the service, then deletes the copy and reports stopped; a
+/// reinstall right after does not meet an old service that has not exited yet.
 fn wait_unloaded(service: &Service) -> anyhow::Result<()> {
     let deadline = Instant::now() + UNLOAD_TIMEOUT;
     while loaded(service)? {
@@ -140,8 +146,10 @@ fn stop(service: &Service) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 让服务按新的配置、程序运行：没载入时载入；配置变了卸下再载入（launchd 保留的是载入时的配置，
-/// kickstart 只会按旧的参数重启）；程序或它读的配置变了时重启。返回报告的一句话，没有变化时为空。
+/// Makes the service run with the new configuration and program: loads it when not loaded; when the
+/// configuration changed, unloads and reloads (launchd keeps the configuration from load time, and
+/// kickstart would only restart with the old arguments); restarts when the program or the
+/// configuration it reads changed. Returns a one-sentence report, empty when nothing changed.
 fn ensure_running(
     service: &Service,
     plist_changed: bool,
@@ -177,8 +185,10 @@ fn ensure_running(
     Ok(Some(message))
 }
 
-/// 一个命令完成安装（design/release.md 第 4 节、hub.md 第 7 节）：密钥、程序的副本、服务配置；不接 Hub 时
-/// 导入期望状态；有期望状态时启动服务，已在运行时按变化重启或重新加载。
+/// Completes the installation in one command (design/release.md section 4, hub.md section 7): keys,
+/// program copy, service configuration; without a Hub, imports the desired state; starts the
+/// service when there is a desired state, and when it is already running, restarts or reloads
+/// according to what changed.
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
@@ -195,10 +205,12 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?
         .is_some();
 
-    // 接了 Hub 的机器上期望状态只由 nett-node 写（design/hub.md 第 5 节）
+    // On a machine linked to a Hub, the desired state is written only by nett-node (design/hub.md
+    // section 5)
     let site = invoking_site_dir();
     let imported = match (&args.config, linked) {
-        // 新机器入网时 Hub 发来的第一份（design/hub.md 第 6 节）；之后只由 nett-node 写
+        // The first one the Hub sends when a new machine joins (design/hub.md section 6);
+        // afterwards only nett-node writes it
         _ if token.desired.is_some() => token.desired,
         (Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
@@ -229,7 +241,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         linked && replace_if_changed(Path::new(NODE.plist), plist(&NODE).as_bytes(), 0o644)?;
     replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
-    // 公钥那一行只在本机还没有加进站点时需要
+    // The public key line is only needed when this machine has not been added to the site yet
     if !Path::new(DESIRED).exists() {
         crate::mesh::print_keys(Path::new(DIR), keys);
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
@@ -246,8 +258,9 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     match ensure_running(&MESH, mesh_plist_changed, binary_changed)? {
         Some(m) => messages.push(m),
         None if desired_changed => {
-            // 只有期望状态变了：经本机接口重新读取，不重启、连接不中断，并显示它是否被接受（design/status.md
-            // 第 4.1 节）
+            // Only the desired state changed: re-read through the local interface, without restart
+            // or connection interruption, and show whether it was accepted (design/status.md
+            // section 4.1)
             print!(
                 "{}",
                 crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
@@ -277,8 +290,9 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 运行 `sudo` 的用户的站点目录（design/site.md 第 8 节）。sudo 可能把 `HOME` 换成 root 的，
-/// 所以按 `SUDO_UID` 从用户数据库查家目录；不经 sudo 运行时用 `HOME`。
+/// The site directory of the user who ran `sudo` (design/site.md section 8). sudo may replace
+/// `HOME` with root's, so the home directory is looked up in the user database by `SUDO_UID`;
+/// without sudo, `HOME` is used.
 fn invoking_site_dir() -> Option<PathBuf> {
     let home = match std::env::var("SUDO_UID").ok().and_then(|u| u.parse().ok()) {
         Some(uid) => passwd::home(uid)?.into_os_string(),
@@ -287,21 +301,22 @@ fn invoking_site_dir() -> Option<PathBuf> {
     crate::site::site_dir(std::env::var_os("XDG_CONFIG_HOME"), Some(home)).ok()
 }
 
-/// 用户数据库的查询：标准库和 rustix 都没有 getpwuid_r。
+/// User database lookup: neither the standard library nor rustix has getpwuid_r.
 #[allow(unsafe_code)]
 mod passwd {
     use std::ffi::{CStr, OsStr};
     use std::os::unix::ffi::OsStrExt as _;
     use std::path::PathBuf;
 
-    /// 远大于 macOS 上一条用户记录的长度；放不下（ERANGE）时返回 `None`。
+    /// Far larger than a user record on macOS; returns `None` if it does not fit (ERANGE).
     const BUFFER: usize = 4096;
 
     pub fn home(uid: libc::uid_t) -> Option<PathBuf> {
         let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
         let mut buffer = vec![0 as libc::c_char; BUFFER];
         let mut result: *mut libc::passwd = std::ptr::null_mut();
-        // SAFETY: entry、buffer、result 都是本函数持有的有效内存，传入的是 buffer 的真实长度。
+        // SAFETY: entry, buffer and result are valid memory held by this function, and the real
+        // length of buffer is passed in.
         let rc = unsafe {
             libc::getpwuid_r(
                 uid,
@@ -314,8 +329,9 @@ mod passwd {
         if rc != 0 || result.is_null() {
             return None;
         }
-        // SAFETY: 返回 0 且 result 非空时 entry 已填好，pw_dir 是 buffer 中以 NUL 结尾的字符串，
-        // buffer 在本函数结束前一直有效；用完之前就复制出来。
+        // SAFETY: when the return value is 0 and result is non-null, entry is filled in; pw_dir is
+        // a NUL-terminated string in buffer, and buffer stays valid until this function ends; it is
+        // copied out before use ends.
         let dir = unsafe { CStr::from_ptr((*result).pw_dir) };
         let path = PathBuf::from(OsStr::from_bytes(dir.to_bytes()));
         path.is_absolute().then_some(path)
@@ -331,8 +347,9 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `sudo nett leave`（design/hub.md 第 7 节）：告诉 Hub，删除服务，删除密钥与配置。utun 接口属于组网进程，
-/// 随它退出消失。
+/// `sudo nett leave` (design/hub.md section 7): tells the Hub, deletes the services, deletes the
+/// keys and configuration. The utun interface belongs to the mesh process and disappears when it
+/// exits.
 pub fn leave() -> anyhow::Result<()> {
     require_root()?;
     crate::install::tell_hub(DIR)?;
@@ -380,7 +397,7 @@ mod tests {
     fn finds_the_home_of_a_user() {
         let home = passwd::home(rustix::process::getuid().as_raw()).expect("own entry");
         assert!(home.is_dir(), "{}", home.display());
-        // macOS 的 nobody 是 -2（uid_t::MAX - 1），取一个没有分配的 uid
+        // nobody on macOS is -2 (uid_t::MAX - 1); pick an unassigned uid
         assert!(passwd::home(3_999_999).is_none());
     }
 

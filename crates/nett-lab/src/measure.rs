@@ -1,7 +1,9 @@
-//! 测量（design/prototype.md 第 6.1 节）：隧道内探测流与长连接。
+//! Measurement (design/prototype.md section 6.1): in-tunnel probe streams and long-lived
+//! connections.
 //!
-//! 两端都是 `nett-lab` 的子命令，在节点的网络命名空间中运行，结果写成文件，由场景读取后计算指标。
-//! 所有时间都取同一台主机的系统时钟，接收端只用自己的时钟计算间隔。
+//! Both ends are `nett-lab` subcommands, run in the node's network namespace, with results written
+//! to files that the scenario reads to compute metrics. All times come from the same host's system
+//! clock, and a receiver only uses its own clock to compute intervals.
 
 use std::fs::File;
 use std::io::{BufWriter, Read as _, Write as _};
@@ -12,14 +14,15 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
-/// 探测流的发送间隔。
+/// Send interval of the probe stream.
 pub const PROBE_INTERVAL: Duration = Duration::from_millis(100);
-/// 探测包：8 字节序号，补齐到一个小包的大小。
+/// Probe packet: an 8-byte sequence number, padded to the size of a small packet.
 const PROBE_LEN: usize = 64;
-/// 长连接的写入块大小与节奏：每 10 毫秒写 16 KiB，约 13 Mbit/s，既能反映吞吐又不压垮实验网络。
+/// Write chunk size and pacing of the long-lived connection: 16 KiB every 10 milliseconds, about 13
+/// Mbit/s, enough to reflect throughput without overwhelming the lab network.
 const TCP_CHUNK: usize = 16 * 1024;
 const TCP_PACE: Duration = Duration::from_millis(10);
-/// 长连接接收端记录进度的间隔。
+/// Interval at which the long-lived connection's receiver records progress.
 const TCP_SAMPLE: Duration = Duration::from_millis(100);
 
 pub fn now_ms() -> u64 {
@@ -29,7 +32,7 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// 发送探测流，直到进程被结束。
+/// Sends the probe stream until the process is killed.
 pub fn probe_send(to: SocketAddr) -> anyhow::Result<()> {
     let bind: SocketAddr = if to.is_ipv4() {
         "0.0.0.0:0".parse()?
@@ -39,11 +42,12 @@ pub fn probe_send(to: SocketAddr) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(bind).context("binding probe sender")?;
     let mut packet = [0u8; PROBE_LEN];
     let mut next = std::time::Instant::now();
-    // 一直发到进程被结束
+    // Keeps sending until the process is killed
     let mut seq: u64 = 0;
     loop {
         packet[..8].copy_from_slice(&seq.to_be_bytes());
-        // 路径断开时发送可能失败（例如没有路由），照常继续，接收端据此看到中断
+        // Sending may fail when the path is down (for example no route); continue as usual, and the
+        // receiver sees the interruption from this
         socket.send_to(&packet, to).ok();
         seq = seq.wrapping_add(1);
         next += PROBE_INTERVAL;
@@ -51,7 +55,8 @@ pub fn probe_send(to: SocketAddr) -> anyhow::Result<()> {
     }
 }
 
-/// 接收探测流，每个包写一行 `序号 接收时间（毫秒）`，直到进程被结束。
+/// Receives the probe stream and writes one line `sequence receive-time (milliseconds)` per packet,
+/// until the process is killed.
 pub fn probe_recv(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     let socket = UdpSocket::bind(listen).context("binding probe receiver")?;
     socket.set_read_timeout(Some(Duration::from_millis(500)))?;
@@ -79,13 +84,14 @@ pub fn probe_recv(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeStats {
     pub received: usize,
-    /// 最长的一段没有收到包的时间（毫秒）：中断时间（design/prototype.md 第 6.1 节）。
+    /// The longest time without receiving a packet (milliseconds): the interruption time
+    /// (design/prototype.md section 6.1).
     pub max_gap_ms: u64,
-    /// 超过正常间隔两倍的空档：`(开始时间, 时长)`，毫秒。
+    /// Gaps longer than twice the normal interval: `(start time, duration)`, in milliseconds.
     pub gaps: Vec<(u64, u64)>,
 }
 
-/// 只统计 `[from_ms, to_ms]` 之间收到的包。
+/// Only counts packets received within `[from_ms, to_ms]`.
 pub fn probe_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<ProbeStats> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
@@ -95,7 +101,8 @@ pub fn probe_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<Prob
         .filter(|t| (from_ms..=to_ms).contains(t))
         .collect();
     times.sort_unstable();
-    // 窗口的两端也算：窗口开始后迟迟收不到包，同样是中断
+    // Both ends of the window count: if no packet arrives for a long time after the window starts,
+    // that is also an interruption
     let mut edges = vec![from_ms];
     edges.extend(&times);
     edges.push(to_ms);
@@ -116,8 +123,9 @@ pub fn probe_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<Prob
     })
 }
 
-/// 场景 18 的"陌生人"：从 41820 端口向 `to` 发送 `count` 个伪造的直连探测（首字节 0x82，其余随机）和
-/// 同样多的随机握手发起（WireGuard 类型 1），每 100 毫秒一组。它们都没有合法的校验码。
+/// The "stranger" of scenario 18: sends `count` forged direct probes (first byte 0x82, the rest
+/// random) from port 41820 to `to`, and as many random handshake initiations (WireGuard type 1),
+/// one group every 100 milliseconds. None of them has a valid MAC.
 pub fn forge(to: SocketAddr, count: u32) -> anyhow::Result<()> {
     let bind: SocketAddr = if to.is_ipv4() {
         "0.0.0.0:41820".parse()?
@@ -128,7 +136,7 @@ pub fn forge(to: SocketAddr, count: u32) -> anyhow::Result<()> {
     let mut state: u64 = 0x9e37_79b9_7f4a_7c15 ^ now_ms();
     let mut fill = |buf: &mut [u8]| {
         for b in buf.iter_mut() {
-            // xorshift：只需要看起来随机的字节
+            // xorshift: only needs bytes that look random
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
@@ -151,13 +159,17 @@ pub fn forge(to: SocketAddr, count: u32) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 洪泛预先生成的握手发起数。WireGuard 不对握手发起去重，同样的包每次都要做一次 Diffie-Hellman 才知道
-/// 解不开，所以反复发送这几个就能占满对端处理握手的能力。
+/// Number of pregenerated handshake initiations for the flood. WireGuard does not deduplicate
+/// handshake initiations: for the same packet, a Diffie-Hellman has to be done each time before it
+/// is known to be undecryptable, so sending these few repeatedly can exhaust the peer's capacity to
+/// process handshakes.
 const FLOOD_DISTINCT: usize = 64;
 
-/// 场景 20(c) 的洪泛：向 `to` 尽快发送 `mac1` 正确、其余内容随机的握手发起，持续 `secs` 秒。`public_key`
-/// 是对端的组网公钥（`mac1` 的密钥由它导出）。超过对端处理握手的能力时，它的握手队列积压、进入负载
-/// 状态，改为回 cookie。
+/// The flood of scenario 20(c): sends handshake initiations with a correct `mac1` and otherwise
+/// random content to `to` as fast as possible, for `secs` seconds. `public_key` is the peer's mesh
+/// public key (the key for `mac1` is derived from it). When the peer's capacity to process
+/// handshakes is exceeded, its handshake queue backs up, it enters the under-load state, and
+/// replies with a cookie instead.
 pub fn flood(to: SocketAddr, public_key: &[u8; 32], secs: u64) -> anyhow::Result<()> {
     let bind: SocketAddr = if to.is_ipv4() {
         "0.0.0.0:0".parse()?
@@ -196,7 +208,8 @@ pub fn flood(to: SocketAddr, public_key: &[u8; 32], secs: u64) -> anyhow::Result
     Ok(())
 }
 
-/// 访问控制的接收端：接受连接，把每个连接的来源地址写成一行，随即关闭连接。
+/// Receiver for access control: accepts connections, writes the source address of each connection
+/// as one line, and closes the connection immediately.
 pub fn accept_log(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen).context("binding the accept logger")?;
     let mut file = File::options()
@@ -212,7 +225,8 @@ pub fn accept_log(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 在 `timeout` 之内尝试建立一个 TCP 连接：连上时输出 `connected`，否则输出 `blocked <原因>`。
+/// Tries to establish a TCP connection within `timeout`: prints `connected` when connected,
+/// otherwise `blocked <reason>`.
 pub fn connect(to: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
     match TcpStream::connect_timeout(&to, timeout) {
         Ok(_) => println!("connected"),
@@ -221,7 +235,8 @@ pub fn connect(to: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 长连接的发送端：连接后持续写入，直到出错或进程被结束。出错时以非 0 退出，原因写入标准错误。
+/// Sender of the long-lived connection: keeps writing after connecting, until an error occurs or
+/// the process is killed. On error it exits non-zero and writes the reason to standard error.
 pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
     let mut stream =
         TcpStream::connect_timeout(&to, Duration::from_secs(10)).context("connecting")?;
@@ -237,8 +252,9 @@ pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
     }
 }
 
-/// 长连接的接收端：接受一个连接，每 100 毫秒写一行 `时间 累计字节数`；连接结束时写一行
-/// `end 时间 原因`（`eof` 或错误）。
+/// Receiver of the long-lived connection: accepts one connection and writes one line `time
+/// cumulative-bytes` every 100 milliseconds; when the connection ends, writes one line `end time
+/// reason` (`eof` or an error).
 pub fn tcp_sink(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen).context("binding long-connection sink")?;
     let (mut stream, _) = listener.accept().context("accepting the long connection")?;
@@ -271,12 +287,14 @@ pub fn tcp_sink(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 大块传输（场景 19）的写入块大小，以及接收端判定传输停住的时间。
+/// Write chunk size of the bulk transfer (scenario 19), and the time after which the receiver
+/// decides the transfer has stalled.
 const BULK_CHUNK: usize = 64 * 1024;
 const BULK_STALL: Duration = Duration::from_secs(30);
 
-/// 大块传输的内容：第 `offset` 个字节，取自按 8 字节一组编号的 splitmix64 序列。发送端和接收端各自
-/// 生成，不用传递种子；错位、缺失、重复都会让后面的字节对不上。
+/// Content of the bulk transfer: the byte at position `offset`, taken from a splitmix64 sequence
+/// numbered in groups of 8 bytes. The sender and the receiver each generate it, so no seed needs to
+/// be passed; misaligned, missing or duplicated data makes the following bytes mismatch.
 fn bulk_fill(offset: u64, buf: &mut [u8]) {
     let (mut at, mut i) = (offset, 0);
     while i < buf.len() {
@@ -293,7 +311,8 @@ fn bulk_fill(offset: u64, buf: &mut [u8]) {
     }
 }
 
-/// 大块传输的发送端：连接后写入 `bytes` 个字节，关闭写方向，等接收端关闭连接。
+/// Sender of the bulk transfer: after connecting, writes `bytes` bytes, closes the write direction,
+/// and waits for the receiver to close the connection.
 pub fn bulk_send(to: SocketAddr, bytes: u64) -> anyhow::Result<()> {
     let mut stream =
         TcpStream::connect_timeout(&to, Duration::from_secs(10)).context("connecting")?;
@@ -313,15 +332,15 @@ pub fn bulk_send(to: SocketAddr, bytes: u64) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 大块传输的结果。
+/// Result of the bulk transfer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BulkResult {
     pub expected: u64,
     pub received: u64,
-    /// 第一个对不上的字节的位置。
+    /// Position of the first byte that does not match.
     pub mismatch_at: Option<u64>,
     pub ms: u64,
-    /// `eof`、`stalled`（[`BULK_STALL`] 内没有收到数据）或错误。
+    /// `eof`, `stalled` (no data received within [`BULK_STALL`]) or an error.
     pub ended: String,
 }
 
@@ -335,7 +354,8 @@ impl BulkResult {
     }
 }
 
-/// 大块传输的接收端：接受一个连接，逐字节校验内容，结束时把 [`BulkResult`] 写成 JSON。
+/// Receiver of the bulk transfer: accepts one connection, checks the content byte by byte, and
+/// writes the [`BulkResult`] as JSON at the end.
 pub fn bulk_recv(listen: SocketAddr, bytes: u64, out: &Path) -> anyhow::Result<()> {
     let listener = TcpListener::bind(listen).context("binding bulk receiver")?;
     let (mut stream, _) = listener.accept().context("accepting the bulk stream")?;
@@ -383,10 +403,11 @@ pub fn bulk_recv(listen: SocketAddr, bytes: u64, out: &Path) -> anyhow::Result<(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TcpStats {
-    /// 连接被重置或出错；`None` 表示测量结束时连接仍然正常。
+    /// The connection was reset or failed; `None` means the connection was still fine when the
+    /// measurement ended.
     pub ended: Option<String>,
     pub bytes: u64,
-    /// 窗口内的平均吞吐（kbit/s）。
+    /// Average throughput within the window (kbit/s).
     pub kbps: u64,
 }
 
@@ -433,7 +454,7 @@ mod tests {
         bulk_fill(5, &mut left);
         bulk_fill(42, &mut right);
         assert_eq!([left, right].concat(), whole);
-        // 错开一个字节就对不上
+        // Off by one byte and it no longer matches
         let mut shifted = vec![0u8; 100];
         bulk_fill(6, &mut shifted);
         assert_ne!(shifted, whole);
@@ -444,7 +465,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("nett-lab-probe-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("probe.txt");
-        // 1000..1300 正常，1300..3300 中断 2 秒，之后恢复；窗口到 4000
+        // 1000..1300 normal, 1300..3300 interrupted for 2 seconds, then recovered; the window ends
+        // at 4000
         let mut lines = String::new();
         for (seq, t) in [1000u64, 1100, 1200, 1300, 3300, 3400, 3500]
             .iter()

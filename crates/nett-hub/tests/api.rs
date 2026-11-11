@@ -1,6 +1,8 @@
-//! Hub 的 HTTP 接口（design/hub.md 第 4 节、第 10 节）：临时 SQLite，经由真实的路由调用。关联码只能用一次；
-//! 没有 token、错误的 token 被拒绝；推送的签名产物按关联时固定的信任锚验证，伪造、版本倒退、同版本不同内容、
-//! 恢复已撤销的机器都整份拒绝。
+//! The Hub's HTTP interface (design/hub.md section 4, section 10): temporary SQLite, called through
+//! the real router. A link code can be used only once; requests with no token or a wrong token are
+//! rejected; pushed signed artifacts are verified against the trust anchor pinned at link time, and
+//! forgeries, version rollback, same version with different content, and restoring a revoked
+//! machine are all rejected as a whole.
 
 mod common;
 
@@ -101,7 +103,7 @@ async fn pushes_advance_and_status_lists_the_machines() {
             .generation,
         1
     );
-    // 同一份再推一次：代数不变
+    // Push the same version again: the generation does not change
     let (_, body) = push(&app, &token, &state).await;
     assert_eq!(
         serde_json::from_slice::<PushResponse>(&body)
@@ -143,7 +145,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
 
-    // 两个不同的修改各自签成同一个版本
+    // Two different modifications each signed as the same version
     let mut a = state.clone();
     a.allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
@@ -162,7 +164,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
     assert_eq!(status, StatusCode::CONFLICT, "same version, other content");
     assert!(String::from_utf8_lossy(&body).contains("access rules"));
 
-    // 回到旧的版本，或者去掉签名的访问规则
+    // Going back to an older version, or removing the signed access rules
     let mut c = a.clone();
     c.allow(&["edge-vps".into()], &["mac".into()], vec![tcp(443)], None)
         .expect("allow");
@@ -177,7 +179,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
     assert!(String::from_utf8_lossy(&body).contains("gone"));
     let a = c;
 
-    // 签名对不上
+    // The signature does not match
     let mut forged = a.clone();
     forged
         .allow(&["edge-vps".into()], &["nas".into()], vec![tcp(22)], None)
@@ -191,7 +193,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
     let (status, _) = push(&app, &token, &forged).await;
     assert_eq!(status, StatusCode::CONFLICT, "bad signature");
 
-    // 另一个站点的信任锚
+    // Another site's trust anchor
     let other = temp_dir("forged-other");
     let (_, foreign) = common::site(&other);
     let (status, body) = push(&app, &token, &foreign).await;
@@ -204,18 +206,18 @@ async fn removed_machines_stay_removed() {
     let (_hub, app, token, site, state) = linked("revoked", URL).await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
-    // 不留撤销记录就少了一台机器
+    // Dropping a machine without leaving a revocation
     let mut gone = state.clone();
     gone.machines.remove(&name("nas"));
     let (status, _) = push(&app, &token, &gone).await;
     assert_eq!(status, StatusCode::CONFLICT);
-    // 正常地移除
+    // Normal removal
     let mut removed = state.clone();
     removed.remove(&name("nas")).expect("remove");
     resign(&site, &mut removed);
     let (status, body) = push(&app, &token, &removed).await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
-    // 撤销记录不能去掉
+    // A revocation cannot be removed
     let mut back = removed.clone();
     back.revoked.clear();
     let (status, _) = push(&app, &token, &back).await;

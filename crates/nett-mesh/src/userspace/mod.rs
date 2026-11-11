@@ -1,5 +1,7 @@
-//! 用户态数据面（design/userspace.md）：WireGuard 会话、选择对端与来源校验、进程内过滤、WireGuard 端口上
-//! 的分流都在组网进程中完成，平台后端只提供 TUN 和接口配置。macOS、DSM 与旧内核的 Linux 共用。
+//! Userspace data plane (design/userspace.md): the WireGuard session, peer selection and source
+//! validation, in-process filtering, and demultiplexing on the WireGuard port are all done in the mesh
+//! process, and the platform backend provides only the TUN and interface configuration. Shared by
+//! macOS, DSM and Linux with old kernels.
 
 pub mod filter;
 pub mod packet;
@@ -30,25 +32,27 @@ mod dataplane {
     };
     use crate::key::PrivateKey;
 
-    /// 组网接口的 TUN：每次收发一个 IP 包。
+    /// The mesh interface's TUN: each send or receive carries one IP packet.
     pub trait Tun: AsFd + Send + 'static {
-        /// 非阻塞地读一个 IP 包；没有时返回 `WouldBlock`。
+        /// Reads an IP packet without blocking; returns `WouldBlock` when there is none.
         fn recv(&self, buf: &mut [u8]) -> io::Result<usize>;
         fn send(&self, packet: &[u8]) -> io::Result<()>;
     }
 
-    /// 平台后端：TUN、接口地址、路由与套接字（design/userspace.md 第 6 节）。
+    /// Platform backend: TUN, interface addresses, routes and sockets (design/userspace.md section 6).
     pub trait Platform: Send + 'static {
         type Tun: Tun;
-        /// 创建组网接口，配置地址和 MTU 并启用。
+        /// Creates the mesh interface, configures the address and MTU and brings it up.
         fn create(&mut self, spec: &InterfaceSpec) -> Result<Self::Tun, DataPlaneError>;
-        /// 修改已有组网接口的地址和 MTU。
+        /// Changes the address and MTU of an existing mesh interface.
         fn configure(&mut self, spec: &InterfaceSpec) -> Result<(), DataPlaneError>;
-        /// 发往底层网络的双栈套接字：WireGuard 端口与发往中继的探测（[`DataPlane::bind_underlay`]）。
+        /// A dual-stack socket toward the underlying network: the WireGuard port and probes to relays
+        /// ([`DataPlane::bind_underlay`]).
         fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket>;
-        /// 绑定到本机组网地址、只收发经组网接口的套接字。
+        /// A socket bound to this machine's mesh address that sends and receives only through the mesh
+        /// interface.
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket>;
-        /// 让组网接口上的路由恰好是 `routes`。
+        /// Makes the routes on the mesh interface exactly `routes`.
         fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
     }
 
@@ -57,12 +61,13 @@ mod dataplane {
         spec: InterfaceSpec,
         public_key: X25519PublicKey,
         socket: UdpSocket,
-        /// WireGuard 套接字实际绑定的端口。
+        /// The port the WireGuard socket is actually bound to.
         listen_port: u16,
         probes: Option<ProbeQueue>,
     }
 
-    /// 用户态的 [`DataPlane`]：会话与过滤在数据面线程中，平台后端只负责 TUN 和接口配置。
+    /// The userspace [`DataPlane`]: sessions and filtering are in the data plane thread, and the platform
+    /// backend is responsible only for the TUN and interface configuration.
     pub struct UserspaceDataPlane<P> {
         platform: P,
         running: Option<Running>,
@@ -76,12 +81,12 @@ mod dataplane {
             }
         }
 
-        /// WireGuard 端口的本地地址（接口就绪之后）。
+        /// Local address of the WireGuard port (after the interface is ready).
         pub fn wireguard_addr(&self) -> Option<SocketAddr> {
             self.running.as_ref()?.socket.local_addr().ok()
         }
 
-        /// 绑定 WireGuard 端口；不带端口时由系统分配（[`automatic_port`]）。
+        /// Binds the WireGuard port; when no port is given the system assigns one ([`automatic_port`]).
         fn bind_wireguard(&self, port: Option<u16>) -> Result<(UdpSocket, u16), DataPlaneError> {
             let bind = |port| {
                 let os = |source| DataPlaneError::Os {
@@ -106,14 +111,15 @@ mod dataplane {
         }
     }
 
-    /// WireGuard 端口的套接字：IPv6 通配地址上的双栈套接字，同时收发 IPv4（映射地址）与 IPv6。
+    /// The socket on the WireGuard port: a dual-stack socket on the IPv6 wildcard address, sending and
+    /// receiving both IPv4 (mapped addresses) and IPv6.
     pub fn dual_stack_udp(port: u16) -> io::Result<UdpSocket> {
         use rustix::io::{FdFlags, fcntl_setfd};
         use rustix::net::{AddressFamily, SocketType, bind, socket, sockopt::set_ipv6_v6only};
-        // macOS 没有 SOCK_CLOEXEC：建好之后再设置
+        // macOS has no SOCK_CLOEXEC: set it after creation
         let fd = socket(AddressFamily::INET6, SocketType::DGRAM, None)?;
         fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
-        // 显式关闭"只收 IPv6"：有的系统默认开启
+        // Explicitly turn off "IPv6 only": some systems enable it by default
         set_ipv6_v6only(&fd, false)?;
         bind(
             &fd,
@@ -151,7 +157,7 @@ mod dataplane {
                 if running.spec == *spec {
                     return Ok(state);
                 }
-                // 不带端口时沿用当前的端口
+                // With no port given, keep the current port
                 if spec.listen_port.is_some_and(|p| p != running.listen_port)
                     || running.spec.name != spec.name
                 {
@@ -308,7 +314,8 @@ mod dataplane {
             }
         }
 
-        /// TUN 是一对 Unix 套接字，测试持有另一端；WireGuard 端口在回环地址上。
+        /// The TUN is a pair of Unix sockets with the test holding the other end; the WireGuard port is on the
+        /// loopback address.
         #[derive(Default)]
         struct Fake {
             host: Option<UnixDatagram>,
@@ -362,14 +369,14 @@ mod dataplane {
             let state = plane.ensure_interface(&spec, &private).expect("interface");
             assert_eq!(state.public_key, private.public_key());
             let at = plane.wireguard_addr().expect("bound");
-            // 不带端口：系统分配，报告实际绑定的端口
+            // No port: the system assigns one, and the actual bound port is reported
             assert_eq!(state.listen_port, at.port());
-            // 同一份接口描述再来一次：沿用
+            // The same interface description once more: keep as is
             assert_eq!(
                 plane.ensure_interface(&spec, &private).expect("again"),
                 state
             );
-            // 期望状态写上当前的端口：沿用；换成别的端口要重启
+            // The desired state names the current port: keep it; changing to another port requires a restart
             spec.listen_port = Some(state.listen_port);
             assert_eq!(
                 plane.ensure_interface(&spec, &private).expect("same port"),
@@ -408,7 +415,7 @@ mod dataplane {
             }
         }
 
-        /// 等 `host` 端收到一个包，最多 `deadline`。
+        /// Waits for the `host` end to receive a packet, for at most `deadline`.
         fn expect_packet(host: &UnixDatagram, deadline: Duration) -> Option<Vec<u8>> {
             let start = Instant::now();
             let mut buf = vec![0u8; 2048];
@@ -432,7 +439,7 @@ mod dataplane {
             let got = expect_packet(&b.host, Duration::from_secs(5)).expect("at b's tun");
             assert_eq!(got, packet);
 
-            // 回包方向：a 没有规则，但这是它发起的 UDP 流的回包
+            // Return direction: a has no rule, but this is a return packet of a UDP flow it initiated
             let reply = build::udp(b.mesh, 53, a.mesh, 4000);
             b.host.send(&reply).expect("into b's tun");
             assert_eq!(expect_packet(&a.host, Duration::from_secs(5)), Some(reply));
@@ -441,7 +448,7 @@ mod dataplane {
             assert_eq!(stats[0].endpoint, Some(b.at));
             assert!(stats[0].last_handshake.is_some());
 
-            // 规则收窄后，b 不再接受 a 的新流
+            // After the rules are narrowed, b no longer accepts a's new flows
             b.plane
                 .apply_filter(&FilterSpec::deny_all())
                 .expect("filter");
@@ -460,7 +467,7 @@ mod dataplane {
             let probe = vec![DIRECT_PROBE; OUTER_LEN];
             probes_a.send.send(b.at, &probe).expect("send");
             let got = probes_b.recv.recv().expect("recv");
-            // 来源端口就是 a 的 WireGuard 端口
+            // The source port is a's WireGuard port
             assert_eq!(got, [(a.at, probe)]);
         }
 

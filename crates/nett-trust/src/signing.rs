@@ -1,5 +1,7 @@
-//! 生成签名（`signing` 特性）：签名工具用恢复密钥签名，新机器入网时用 token 中的入网私钥签准入证明，
-//! 实验工具和测试用它们构造材料。组网进程只验证签名。
+//! Generating signatures (`signing` feature): the signing tool signs with the recovery key, and a
+//! new machine signs the admission proof at enrollment with the enrollment private key from the
+//! token; lab tools and tests use them to construct material. The mesh process only verifies
+//! signatures.
 
 use nett_core::id::PasskeyId;
 use ring::rand::{SecureRandom as _, SystemRandom};
@@ -32,7 +34,7 @@ impl From<ring::error::Unspecified> for SigningError {
     }
 }
 
-/// 恢复密钥（ECDSA P-256），签名格式与 WebCrypto 相同（64 字节的 `r ‖ s`）。
+/// Recovery key (ECDSA P-256), with the same signature format as WebCrypto (64-byte `r ‖ s`).
 pub struct RecoveryKeyPair {
     pkcs8: Zeroizing<Vec<u8>>,
     key: EcdsaKeyPair,
@@ -84,7 +86,8 @@ enum PasskeyInner {
     EdDsa(Ed25519KeyPair),
 }
 
-/// 模拟的 passkey：按 WebAuthn 的格式生成断言，用于测试验证路径。
+/// A simulated passkey: generates assertions in the WebAuthn format, used to test the verification
+/// path.
 pub struct PasskeyKeyPair {
     id: PasskeyId,
     inner: PasskeyInner,
@@ -124,7 +127,7 @@ impl PasskeyKeyPair {
         }
     }
 
-    /// 生成一份 WebAuthn 断言，`flags` 为 `authenticatorData` 的标志字节。
+    /// Generates a WebAuthn assertion; `flags` is the flags byte of `authenticatorData`.
     pub fn sign(
         &self,
         payload: Vec<u8>,
@@ -162,7 +165,8 @@ impl PasskeyKeyPair {
     }
 }
 
-/// 入网签名密钥（Ed25519）。私钥以 32 字节的种子交给新机器（入网 token，design/auth.md 第 8.1 节）。
+/// Enrollment signing key (Ed25519). The private key is handed to the new machine as a 32-byte seed
+/// (enrollment token, design/auth.md section 8.1).
 pub struct EnrollmentKeyPair {
     seed: Zeroizing<[u8; 32]>,
     key: Ed25519KeyPair,
@@ -197,7 +201,7 @@ impl EnrollmentKeyPair {
         self.sign_bytes(doc.to_canonical()?)
     }
 
-    /// 对任意字节签名，用于构造格式错误的准入证明（测试反例）。
+    /// Signs arbitrary bytes, used to construct malformed admission proofs (negative tests).
     pub fn sign_bytes(&self, payload: Vec<u8>) -> Result<AdmissionProof, SigningError> {
         let mut signature = [0u8; 64];
         signature.copy_from_slice(self.key.sign(&payload).as_ref());

@@ -1,4 +1,4 @@
-//! 网段：组网网段、WireGuard 的 `AllowedIPs`、访问规则与 Edge 的来源。
+//! Prefixes: mesh prefixes, WireGuard `AllowedIPs`, access rules and the origin of Edge traffic.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 #[error("`{0}` is not an address/prefix-length with zero host bits")]
 pub struct PrefixError(String);
 
-/// 一个 IPv4 或 IPv6 网段，主机位必须为 0。
+/// An IPv4 or IPv6 prefix; the host bits must be 0.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct IpPrefix {
     addr: IpAddr,
@@ -23,7 +23,7 @@ impl IpPrefix {
         (len <= max && mask(addr, len) == addr).then_some(Self { addr, len })
     }
 
-    /// 包含 `addr` 的、前缀长度为 `len` 的网段（主机位清零）。
+    /// The prefix of length `len` that contains `addr` (host bits cleared).
     pub fn containing(addr: IpAddr, len: u8) -> Option<Self> {
         (len <= max_len(addr)).then(|| Self {
             addr: mask(addr, len),
@@ -31,7 +31,7 @@ impl IpPrefix {
         })
     }
 
-    /// 只含一个地址的网段（`/32` 或 `/128`）。
+    /// A prefix containing a single address (`/32` or `/128`).
     pub fn host(addr: IpAddr) -> Self {
         Self {
             addr,
@@ -55,7 +55,7 @@ impl IpPrefix {
         addr.is_ipv4() == self.addr.is_ipv4() && mask(addr, self.len) == self.addr
     }
 
-    /// `other` 整个落在本网段之内。
+    /// `other` lies entirely within this prefix.
     pub fn covers(&self, other: &IpPrefix) -> bool {
         other.len >= self.len && self.contains(other.addr)
     }
@@ -87,7 +87,7 @@ impl FromStr for IpPrefix {
         let err = || PrefixError(s.to_owned());
         let (addr, len) = s.split_once('/').ok_or_else(err)?;
         let addr: IpAddr = addr.parse().map_err(|_| err())?;
-        // 只接受规范的十进制写法，例如不接受 `/016`
+        // Only the canonical decimal form is accepted; for example `/016` is not accepted
         let len: u8 = len.parse().map_err(|_| err())?;
         if s != format!("{addr}/{len}") {
             return Err(err());

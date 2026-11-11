@@ -1,19 +1,20 @@
-//! 节点名：站点描述与 Hub 中的名字，组网中用于显示和定位（design/status.md 第 5 节、mesh.md 第 11 节）。
-//! 以后作为主机名的第一段，所以取 DNS 标签的写法。
+//! Node name: the name in the site description and the Hub, used in the mesh for display and lookup
+//! (design/status.md section 5, mesh.md section 11). It later serves as the first label of the
+//! hostname, so it takes the DNS label form.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// DNS 标签的长度上限。
+/// Upper limit on the length of a DNS label.
 pub const MAX_NAME_LEN: usize = 63;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("node name `{0}` must be 1-{MAX_NAME_LEN} lower-case letters, digits or `-`")]
 pub struct NameError(pub String);
 
-/// 小写字母、数字和 `-`，1 到 63 个字符。
+/// Lowercase letters, digits and `-`, 1 to 63 characters.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeName(String);
 
@@ -33,7 +34,8 @@ impl FromStr for NodeName {
         if valid {
             Ok(Self(s.to_owned()))
         } else {
-            // 错误信息中只放前 MAX_NAME_LEN 个字符：输入可能来自不可信的期望状态
+            // Only the first MAX_NAME_LEN characters go in the error message: the input may come
+            // from untrusted desired state
             Err(NameError(s.chars().take(MAX_NAME_LEN).collect()))
         }
     }
@@ -76,7 +78,7 @@ mod tests {
             "Mac",
             "edge_vps",
             "a.b",
-            "名字",
+            "\u{540d}\u{5b57}",
             &"x".repeat(MAX_NAME_LEN + 1),
         ] {
             assert!(bad.parse::<NodeName>().is_err(), "{bad}");

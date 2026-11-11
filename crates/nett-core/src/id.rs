@@ -1,17 +1,18 @@
-//! 对外 ID：`<前缀>_<ULID>`（design/api-resources.md 第 2.2 节）。
+//! External IDs: `<prefix>_<ULID>` (design/api-resources.md section 2.2).
 //!
-//! 只在边界处解析一次，之后以强类型传递；ULID 只接受规范形式（大写 Crockford base32），
-//! 同一个 ID 只有一种写法，签名载荷中的 ID 才能逐字节比较。
+//! Parsed only once at the boundary and passed as strong types afterwards; a ULID accepts only the
+//! canonical form (uppercase Crockford base32), so the same ID has only one spelling, and IDs in
+//! signed payloads can be compared byte by byte.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// ULID 的文本长度（128 位，Crockford base32）。
+/// Text length of a ULID (128 bits, Crockford base32).
 const ULID_LEN: usize = 26;
 
-/// Crockford base32 的字母表，不含 I、L、O、U。
+/// The Crockford base32 alphabet, which does not contain I, L, O, U.
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -22,7 +23,8 @@ pub enum IdError {
     Ulid,
 }
 
-/// ULID：48 位毫秒时间戳在前，80 位随机数在后，按 Crockford base32 写成 26 个字符（最高两位为 0）。
+/// ULID: a 48-bit millisecond timestamp first, then 80 random bits, written in Crockford base32 as
+/// 26 characters (the top two bits are 0).
 fn ulid(unix_ms: u64, random: [u8; 10]) -> String {
     let mut bits = u128::from(unix_ms & 0xffff_ffff_ffff) << 80;
     for (i, b) in random.iter().enumerate() {
@@ -40,7 +42,7 @@ fn validate(s: &str, prefix: &'static str) -> Result<(), IdError> {
         .and_then(|rest| rest.strip_prefix('_'))
         .ok_or(IdError::Prefix { expected: prefix })?;
     let bytes = ulid.as_bytes();
-    // 首字符最大为 7：26 个字符共 130 位，最高两位必须为 0
+    // The first character is at most 7: 26 characters are 130 bits, and the top two bits must be 0
     let valid =
         bytes.len() == ULID_LEN && bytes[0] <= b'7' && bytes.iter().all(|b| CROCKFORD.contains(b));
     if valid { Ok(()) } else { Err(IdError::Ulid) }
@@ -59,7 +61,8 @@ macro_rules! prefixed_id {
                 &self.0
             }
 
-            /// 由 Unix 毫秒时间戳和 80 位随机数组成的新 ID（ULID 的规范形式）。随机数由调用方提供。
+            /// A new ID made of a Unix millisecond timestamp and 80 random bits (the canonical form
+            /// of a ULID). The random bits are provided by the caller.
             pub fn from_parts(unix_ms: u64, random: [u8; 10]) -> Self {
                 Self(format!("{}_{}", $prefix, ulid(unix_ms, random)))
             }
@@ -96,17 +99,17 @@ macro_rules! prefixed_id {
 }
 
 prefixed_id!(
-    /// 节点 ID，创建入网 token 时分配。
+    /// Node ID, assigned when an enrollment token is created.
     NodeId,
     "node"
 );
 prefixed_id!(
-    /// 信任锚清单中一把 passkey 的 ID。
+    /// ID of a passkey in the trust anchor list.
     PasskeyId,
     "pk"
 );
 prefixed_id!(
-    /// 变更集 ID。
+    /// Change set ID.
     ChangeId,
     "chg"
 );
@@ -135,10 +138,10 @@ mod tests {
     #[test]
     fn rejects_non_canonical_ulid() {
         for bad in [
-            "node_01j9z3k8q2t7v4x6y8a0b2c4d6", // 小写
-            "node_01J9Z3K8Q2T7V4X6Y8A0B2C4D",  // 25 个字符
-            "node_01J9Z3K8Q2T7V4X6Y8A0B2C4DI", // 字母表之外
-            "node_81J9Z3K8Q2T7V4X6Y8A0B2C4D6", // 超过 128 位
+            "node_01j9z3k8q2t7v4x6y8a0b2c4d6", // lowercase
+            "node_01J9Z3K8Q2T7V4X6Y8A0B2C4D",  // 25 characters
+            "node_01J9Z3K8Q2T7V4X6Y8A0B2C4DI", // outside the alphabet
+            "node_81J9Z3K8Q2T7V4X6Y8A0B2C4D6", // more than 128 bits
         ] {
             assert_eq!(bad.parse::<NodeId>(), Err(IdError::Ulid), "{bad}");
         }
@@ -146,7 +149,8 @@ mod tests {
 
     #[test]
     fn generated_ids_are_canonical_and_ordered_by_time() {
-        // ULID 规范中的例子：时间戳 1469918176385、随机数全为 0 时为 01ARYZ6S41 加 16 个 0
+        // Example from the ULID specification: with timestamp 1469918176385 and all-zero random
+        // bits it is 01ARYZ6S41 followed by 16 zeros
         let id = NodeId::from_parts(1_469_918_176_385, [0; 10]);
         assert_eq!(id.as_str(), "node_01ARYZ6S410000000000000000");
         let later = NodeId::from_parts(1_469_918_176_386, [0xff; 10]);

@@ -1,4 +1,5 @@
-//! 到 TLS 中继的连接：按 IP 连接、不发送 SNI，证书按下发的指纹校验（硬性规则 11），只用 TLS 1.3。
+//! Connection to a TLS relay: connects by IP, sends no SNI, verifies the certificate by the pinned
+//! fingerprint (hard rule 11), and uses TLS 1.3 only.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,9 +16,10 @@ use tokio_rustls::client::TlsStream;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-/// 建立 TCP、TLS 与 WebSocket 连接的总时限。
+/// Overall time limit for establishing the TCP, TLS and WebSocket connections.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-/// 一个消息的上限：外层包最大约 1360 字节（design/mesh.md 第 4 节），留出余量。
+/// Upper limit of one message: outer packets are at most about 1360 bytes (design/mesh.md section
+/// 4); leave some margin.
 pub const MAX_MESSAGE: usize = 2048;
 
 pub type RelayStream = WebSocketStream<TlsStream<TcpStream>>;
@@ -44,7 +46,8 @@ pub enum ConnectError {
     Config(String),
 }
 
-/// 按指纹校验服务端证书；握手签名照常用证书中的公钥校验。
+/// Verifies the server certificate by fingerprint; the handshake signature is still verified with
+/// the public key in the certificate.
 #[derive(Debug)]
 struct PinnedCertificate {
     fingerprint: CertFingerprint,
@@ -76,7 +79,7 @@ impl ServerCertVerifier for PinnedCertificate {
         _cert: &CertificateDer<'_>,
         _dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        // 只协商 TLS 1.3
+        // Negotiate only TLS 1.3
         Err(rustls::Error::PeerIncompatible(
             rustls::PeerIncompatible::Tls12NotOffered,
         ))
@@ -96,7 +99,7 @@ impl ServerCertVerifier for PinnedCertificate {
     }
 }
 
-/// 只信任这一个指纹的 TLS 客户端。
+/// A TLS client that trusts only this one fingerprint.
 pub fn connector(fingerprint: CertFingerprint) -> Result<TlsConnector, ConnectError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let verifier = Arc::new(PinnedCertificate {
@@ -112,7 +115,7 @@ pub fn connector(fingerprint: CertFingerprint) -> Result<TlsConnector, ConnectEr
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// 连上 TLS 中继并完成 WebSocket 握手。
+/// Connects to the TLS relay and completes the WebSocket handshake.
 pub async fn connect(
     addr: SocketAddr,
     connector: &TlsConnector,
@@ -122,7 +125,7 @@ pub async fn connect(
             .await
             .map_err(|source| ConnectError::Tcp { addr, source })?;
         drop(tcp.set_nodelay(true));
-        // 按 IP 连接：rustls 不为 IP 地址发送 SNI
+        // Connect by IP: rustls does not send SNI for an IP address
         let tls = connector
             .connect(ServerName::IpAddress(addr.ip().into()), tcp)
             .await

@@ -1,8 +1,10 @@
-//! 对比对象 Tailscale（design/prototype.md 第 5.1 节）：在同一拓扑中，`nl-ctl` 运行 Headscale 和它内置的
-//! DERP 服务器（自签证书，不连接外部服务），每个节点的命名空间运行 `tailscaled`。
+//! Tailscale, the comparison target (design/prototype.md section 5.1): in the same topology,
+//! `nl-ctl` runs Headscale and its built-in DERP server (self-signed certificate, no connection to
+//! external services), and the namespace of each node runs `tailscaled`.
 //!
-//! `tailscale`、`tailscaled`、`headscale` 从 `PATH` 中查找，版本写入报告。自签证书只经 `SSL_CERT_FILE`
-//! 交给 `tailscaled`，不改动系统的信任库。
+//! `tailscale`, `tailscaled` and `headscale` are looked up in `PATH`, and the versions are written
+//! to the report. The self-signed certificate is handed to `tailscaled` only via `SSL_CERT_FILE`,
+//! and the system trust store is not modified.
 
 use std::collections::BTreeMap;
 use std::net::Ipv4Addr;
@@ -15,22 +17,22 @@ use anyhow::{Context as _, bail};
 use crate::cmd::{run, run_in, spawn_in};
 use crate::net::{INET_NETNS, add_netns, attach, netns};
 
-/// Headscale 与 DERP 所在的命名空间，接在"公网"网桥上。
+/// Namespace of Headscale and DERP, attached to the "public network" bridge.
 pub const CONTROL_NETNS: &str = "nl-ctl";
 const CONTROL_NAME: &str = "ctl";
 pub const CONTROL_IPV4: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 250);
-/// Tailscale 的地址池；与 nett 的组网网段（100.88.0.0/16）不重叠（ADR 0007）。
+/// Address pool of Tailscale; does not overlap nett's mesh prefixes (100.88.0.0/16) (ADR 0007).
 const TAILNET_V4: &str = "100.72.0.0/16";
-/// tailscaled 的 WireGuard 端口。
+/// WireGuard port of tailscaled.
 const TAILSCALED_PORT: u16 = 41641;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct TailscaleLab {
     sockets: BTreeMap<String, PathBuf>,
-    /// Headscale。
+    /// Headscale.
     control: Option<Child>,
     children: Vec<Child>,
-    /// 独立 DERP 的编号与证书目录，重启时用。
+    /// Number and certificate directory of a standalone DERP, used on restart.
     derp_args: Vec<(usize, PathBuf)>,
     derps: Vec<(usize, Child)>,
 }
@@ -60,7 +62,7 @@ fn wait_until(what: &str, mut ready: impl FnMut() -> bool) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 记录到报告中的版本。
+/// Version recorded in the report.
 pub fn versions() -> String {
     let ts = run("tailscale", ["version"]).map(|s| s.lines().next().unwrap_or_default().to_owned());
     let hs = run("headscale", ["version"]).map(|s| s.lines().next().unwrap_or_default().to_owned());
@@ -72,13 +74,15 @@ pub fn versions() -> String {
 }
 
 impl TailscaleLab {
-    /// 启动 Headscale 与内置的 DERP，再让 `nodes` 中的每个节点登录。底层网络必须已经搭好。
+    /// Starts Headscale and the built-in DERP, then logs in every node in `nodes`. The underlay
+    /// network must already be built.
     pub fn up(out: &Path, nodes: &[&str]) -> anyhow::Result<Self> {
         Self::up_with(out, nodes, 0)
     }
 
-    /// `derps` 为 0 时用 Headscale 内置的 DERP；否则另起这么多个独立的 DERP 区域（`derper`，与
-    /// Tailscale 同版本），Headscale 只做控制面，弄断某个 DERP 不影响控制面。
+    /// When `derps` is 0, the DERP built into Headscale is used; otherwise that many standalone
+    /// DERP regions are started (`derper`, the same version as Tailscale), and Headscale only acts
+    /// as the control plane, so breaking a DERP does not affect the control plane.
     pub fn up_with(out: &Path, nodes: &[&str], derps: usize) -> anyhow::Result<Self> {
         let dir = out.join("tailscale");
         std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -114,7 +118,8 @@ impl TailscaleLab {
         let key = dir.join("key.pem");
         self_signed(CONTROL_IPV4, &cert, &key)?;
 
-        // 独立的 DERP 节点：每个一个命名空间，证书按 derper 的手动模式命名为 <主机名>.crt/.key
+        // Standalone DERP nodes: one namespace each, with certificates named <host name>.crt/.key
+        // following derper's manual mode
         let mut bundle = std::fs::read(&cert).context("reading the control certificate")?;
         let mut derp_map = None;
         if derps > 0 {
@@ -196,7 +201,7 @@ impl TailscaleLab {
                 Path::new("env"),
                 [
                     format!("SSL_CERT_FILE={}", bundle_path.display()),
-                    // 不向 Tailscale 的日志服务上报
+                    // Do not report to Tailscale's logging service
                     "TS_NO_LOGS_NO_SUPPORT=true".to_owned(),
                     "tailscaled".to_owned(),
                     format!("--state={}", node_dir.join("tailscaled.state").display()),
@@ -249,7 +254,7 @@ impl TailscaleLab {
         Ok(())
     }
 
-    /// 停掉 Headscale（场景 17）。
+    /// Stops Headscale (scenario 17).
     pub fn stop_control(&mut self) {
         if let Some(mut child) = self.control.take() {
             child.kill().ok();
@@ -257,7 +262,7 @@ impl TailscaleLab {
         }
     }
 
-    /// 停掉第 `i` 个 DERP 进程（场景 17）。
+    /// Stops the `i`-th DERP process (scenario 17).
     pub fn stop_derp(&mut self, i: usize) {
         if let Some(pos) = self.derps.iter().position(|(n, _)| *n == i) {
             let (_, mut child) = self.derps.remove(pos);
@@ -266,13 +271,13 @@ impl TailscaleLab {
         }
     }
 
-    /// 重启第 `i` 个 DERP 进程（场景 3）。
+    /// Restarts the `i`-th DERP process (scenario 3).
     pub fn restart_derp(&mut self, i: usize) -> anyhow::Result<()> {
         self.stop_derp(i);
         self.start_derp(i)
     }
 
-    /// 在节点的命名空间中运行 `tailscale` 命令。
+    /// Runs a `tailscale` command in the node's namespace.
     pub fn cli(&self, name: &str, args: &[&str]) -> anyhow::Result<String> {
         let sock = self
             .sockets
@@ -291,7 +296,7 @@ impl TailscaleLab {
     }
 }
 
-/// 第 `i` 个独立 DERP 的命名空间与地址。
+/// Namespace and address of the `i`-th standalone DERP.
 pub fn derp_netns(i: usize) -> String {
     format!("nl-derp{i}")
 }
@@ -300,7 +305,7 @@ pub fn derp_ipv4(i: usize) -> Ipv4Addr {
     Ipv4Addr::new(198, 51, 100, 240 + u8::try_from(i).unwrap_or(0))
 }
 
-/// 为一个 IP 地址生成自签证书。
+/// Generates a self-signed certificate for an IP address.
 fn self_signed(ip: Ipv4Addr, cert: &Path, key: &Path) -> anyhow::Result<()> {
     run(
         "openssl",

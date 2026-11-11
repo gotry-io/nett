@@ -1,5 +1,7 @@
-# 推送到 main 和每个拉取请求时运行：格式、clippy、测试、依赖检查、实验场景（CLAUDE.md "命令"）。
-# 第三方 action 固定到提交哈希；下载的工具固定版本并校验哈希。
+# Runs on pushes to main and on every pull request: format, clippy, tests, dependency checks, lab
+# scenarios (CLAUDE.md "Commands").
+# Third-party actions are pinned to commit hashes; downloaded tools are pinned to versions and
+# hash-verified.
 
 name: CI
 
@@ -13,7 +15,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # Hub 的查询按提交的 .sqlx/ 在编译期检查：查询改了而离线数据没有更新时编译失败（CLAUDE.md "API、协议与数据库"）
+  # Hub queries are checked at compile time against the committed .sqlx/: compilation fails when a
+  # query changes and the offline data is not updated (CLAUDE.md "API, protocol and database")
   SQLX_OFFLINE: "true"
 
 jobs:
@@ -24,22 +27,24 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链
+      - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
-      # 生成的 Protobuf 类型提交在仓库中（CLAUDE.md "API、协议与数据库"）：重新生成，不能有差别
-      - name: 生成的 Protobuf 类型是最新的
+      # Generated Protobuf types are committed in the repository (CLAUDE.md "API, protocol and
+      # database"): regenerate them, and there must be no difference
+      - name: Generated Protobuf types are up to date
         run: |
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends protobuf-compiler
           cargo run --locked -p nett-proto-gen
           git diff --exit-code crates/nett-proto/src/gen
-      # 新机器上的安装脚本（design/release.md 第 6 节）：只用 POSIX sh
+      # Install script for new machines (design/release.md section 6): POSIX sh only
       - run: shellcheck -s sh packaging/install.sh
 
-  # macOS 原生成员（design/userspace.md 第 8 节）：clippy、测试，以及需要 root 的 utun 冒烟测试
+  # macOS native member (design/userspace.md section 8): clippy, tests, and the utun smoke test that
+  # needs root
   macos:
     runs-on: macos-15
     timeout-minutes: 30
@@ -47,18 +52,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链
+      - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
-      - name: utun、地址与路由（需要 root）
+      - name: utun, addresses and routes (needs root)
         run: |
           cargo test --locked -p nett-mesh --lib --no-run
           test_bin=$(cargo test --locked -p nett-mesh --lib --no-run --message-format=json \
             | jq -r 'select(.profile.test == true and .target.name == "nett_mesh") | .executable')
           sudo "$test_bin" --ignored --exact macos::tests::macos_utun_smoke --nocapture
-      # design/release.md 第 4 节：站点在默认目录中，install 不带 --config 找到给本机的期望状态
-      - name: sudo nett install 的完整流程（需要 root）
+      # design/release.md section 4: the site is in the default directory, and install without
+      # --config finds the desired state for this machine
+      - name: Full flow of sudo nett install (needs root)
         run: |
           cargo build --locked -p nett-cli
           nett="$PWD/target/debug/nett"
@@ -73,7 +79,7 @@ jobs:
             sleep 0.5
           done
           sudo launchctl print system/io.gotry.nett.mesh | grep 'state = running'
-          # 本机状态（design/status.md）：root 能读，普通用户得到提示
+          # Local status (design/status.md): readable by root, and ordinary users get a hint
           for _ in $(seq 20); do
             sudo test -S /var/run/nett/mesh.sock && break
             sleep 0.5
@@ -83,14 +89,16 @@ jobs:
           ! "$nett" status 2> status.err
           grep -F 'run with sudo' status.err
           sudo "$nett" install | grep -F 'The services are running. Nothing changed.'
-          # 期望状态变了（内容相同、字节不同）：经本机接口重新加载，并报告结果
+          # The desired state changed (same content, different bytes): reload over the local
+          # interface and report the result
           python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json
           sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
           sudo "$nett" reload | grep -F 'Reloaded the desired state.'
           sudo "$nett" uninstall
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
-      # design/hub.md 第 3.5、7 节：已有的成员接入 Hub。Hub 用测试证书在本机终止 TLS，按指纹校验
-      - name: sudo nett install <token>：接入 Hub（需要 root）
+      # design/hub.md sections 3.5, 7: an existing member joins the Hub. The Hub terminates TLS
+      # locally with a test certificate, verified by fingerprint
+      - name: sudo nett install <token> (join the Hub, needs root)
         run: |
           cargo build --locked -p nett-cli -p nett-hub
           nett="$PWD/target/debug/nett"
@@ -114,11 +122,12 @@ jobs:
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
           sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
-          # 接了 Hub 的机器上期望状态只由 nett-node 写
+          # On a machine joined to the Hub, the desired state is written only by nett-node
           ! sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json
           sudo "$nett" uninstall
           ! sudo launchctl print system/io.gotry.nett.node 2>/dev/null
-          # 退出之后，同一台 Mac 作为新机器经 Hub 入网（design/hub.md 第 3.3、6 节），再退出
+          # After leaving, the same Mac joins via the Hub as a new machine (design/hub.md sections
+          # 3.3, 6), then leaves again
           sudo "$nett" leave | tee leave.log
           grep -F 'Told the Hub at https://127.0.0.1:8443' leave.log
           "$nett" site add ci-new --yes | tee add.log
@@ -133,13 +142,15 @@ jobs:
           done
           "$nett" site status | tee site-status.log
           grep -E '^ci-new +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
-          # token 只能用一次
+          # A token can be used only once
           ! sudo "$nett" install "$token"
           sudo "$nett" leave
           ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
 
-  # 组网实验场景（design/prototype.md 第 7 节），每次推送全部跑一遍。场景之间互不依赖，按耗时分成几组并行，
-  # 每组约 4 分钟。一行一个场景：标题 | nett-lab run 的参数（本文件写定，不来自外部输入）。
+  # Mesh lab scenarios (design/prototype.md section 7), all run on every push. Scenarios do not
+  # depend on each other, and are split by duration into groups run in parallel,
+  # about 4 minutes each. One scenario per line: title | arguments for nett-lab run (fixed in this
+  # file, not from external input).
   lab:
     name: lab (${{ matrix.title }})
     runs-on: ubuntu-24.04
@@ -149,75 +160,75 @@ jobs:
       matrix:
         include:
           - group: switch
-            title: 切换与中继
+            title: Switchover and relay
             scenarios: |
-              场景 14：准入验证与直连通信 | admission --topology crates/nett-lab/topologies/direct.toml
-              经中继转发（真实的 WireGuard 握手与数据） | relay-smoke --topology crates/nett-lab/topologies/relay-only.toml
-              场景 1、8：直连失效切到中继，恢复后回到直连 | failover --topology crates/nett-lab/topologies/failover.toml
-              场景 2：当前中继失效，换到另一个中继 | relay-loss --topology crates/nett-lab/topologies/relays.toml
-              场景 3：重启当前中继，连接不中断 | relay-restart --topology crates/nett-lab/topologies/relays.toml
-              场景 7、9：UDP 全部被拦时改用 TLS，恢复后回到直连 | fallback --topology crates/nett-lab/topologies/fallback.toml
-              场景 16：双方都是 dial-only，经隧道提议后两端一起切换 | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
-              场景 17：双方都是 dial-only，当前中继失效，靠时间片汇合 | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
+              Scenario 14: admission verification and direct communication | admission --topology crates/nett-lab/topologies/direct.toml
+              Forwarding through the relay (a real WireGuard handshake and data) | relay-smoke --topology crates/nett-lab/topologies/relay-only.toml
+              Scenarios 1, 8: direct path fails and switches to the relay, then returns to direct after recovery | failover --topology crates/nett-lab/topologies/failover.toml
+              Scenario 2: the current relay fails and switches to another relay | relay-loss --topology crates/nett-lab/topologies/relays.toml
+              Scenario 3: restart the current relay without interrupting the connection | relay-restart --topology crates/nett-lab/topologies/relays.toml
+              Scenarios 7, 9: switch to TLS when all UDP is blocked, then return to direct after recovery | fallback --topology crates/nett-lab/topologies/fallback.toml
+              Scenario 16: both sides are dial-only, and after a proposal through the tunnel both ends switch together | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
+              Scenario 17: both sides are dial-only, the current relay fails, and they meet by time slice | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
           - group: nat
-            title: NAT、打洞、MTU 与访问控制
+            title: NAT, hole punching, MTU and access control
             scenarios: |
-              场景 14：一端在锥形 NAT 之后 | admission --topology crates/nett-lab/topologies/cone-nat.toml
-              场景 10：两端锥形 NAT，打洞 | punch --topology crates/nett-lab/topologies/punch-cone.toml
-              场景 11：两端 IPv6 有状态防火墙，打洞 | punch --topology crates/nett-lab/topologies/punch-ipv6.toml
-              场景 13：两端对称型 NAT，不尝试打洞 | punch --topology crates/nett-lab/topologies/punch-symmetric.toml
-              场景 19：外层路径 MTU 为 1500、1360、1300（IPv4） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu4.toml
-              场景 19：外层路径 MTU 为 1500、1360、1300（IPv6） | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
-              访问控制、Edge 专用地址与容器内成员（design/local-signing.md 第 8 节） | access --topology crates/nett-lab/topologies/access.toml
-              Hub：推送、应用、Hub 停止时组网照常、恢复后补齐、伪造的成员与旧版本的规则被拒绝（design/hub.md 第 10 节） | hub --topology crates/nett-lab/topologies/direct.toml
+              Scenario 14: one end is behind a cone NAT | admission --topology crates/nett-lab/topologies/cone-nat.toml
+              Scenario 10: cone NAT on both ends, hole punching | punch --topology crates/nett-lab/topologies/punch-cone.toml
+              Scenario 11: IPv6 stateful firewall on both ends, hole punching | punch --topology crates/nett-lab/topologies/punch-ipv6.toml
+              Scenario 13: symmetric NAT on both ends, no hole punching attempted | punch --topology crates/nett-lab/topologies/punch-symmetric.toml
+              Scenario 19: outer path MTU of 1500, 1360, 1300 (IPv4) | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu4.toml
+              Scenario 19: outer path MTU of 1500, 1360, 1300 (IPv6) | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
+              Access control, Edge address and container members (design/local-signing.md section 8) | access --topology crates/nett-lab/topologies/access.toml
+              Hub: push, apply, the mesh keeps working when the Hub stops, catch-up after recovery, forged members and old-version rules are rejected (design/hub.md section 10) | hub --topology crates/nett-lab/topologies/direct.toml
           - group: handshake
-            title: WireGuard 握手
+            title: WireGuard handshake
             scenarios: |
-              场景 20(a)(b)：删除再添加对端后的握手，丢掉第一个握手发起后的重试 | wg-rehandshake --repeat 3 --topology crates/nett-lab/topologies/relays.toml
-              场景 20(c)：对端处于负载状态时经中继的 cookie | wg-cookie --topology crates/nett-lab/topologies/relays.toml
+              Scenario 20(a)(b): handshake after removing and re-adding a peer, retry after dropping the first handshake initiation | wg-rehandshake --repeat 3 --topology crates/nett-lab/topologies/relays.toml
+              Scenario 20(c): cookie through the relay when the peer is under load | wg-cookie --topology crates/nett-lab/topologies/relays.toml
           - group: rekey
-            title: 密钥轮换与 WireGuard 端口
+            title: Key rotation and WireGuard port
             scenarios: |
-              场景 20(b)(d)：密钥轮换（短版本，完整的 30 分钟在验收中跑） | wg-rekey --duration 150 --topology crates/nett-lab/topologies/relays.toml
-              场景 18：在 WireGuard 端口上探测 | wgport --topology crates/nett-lab/topologies/wgport.toml
+              Scenario 20(b)(d): key rotation (short version, the full 30 minutes runs in acceptance) | wg-rekey --duration 150 --topology crates/nett-lab/topologies/relays.toml
+              Scenario 18: probing on the WireGuard port | wgport --topology crates/nett-lab/topologies/wgport.toml
           - group: load
-            title: 拥塞与用户态数据面
+            title: Congestion and userspace data plane
             scenarios: |
-              场景 24：拥塞（经中继，短版本，与 Tailscale 的对比在验收中跑） | congestion --duration 60 --topology crates/nett-lab/topologies/relay-only.toml
-              场景 24：拥塞（直连，短版本） | congestion --duration 60 --topology crates/nett-lab/topologies/fallback.toml
-              用户态数据面与内核 WireGuard 互通：准入与直连（design/userspace.md 第 8 节） | admission --userspace b --topology crates/nett-lab/topologies/direct.toml
-              用户态数据面：直连失效切到中继，恢复后回到直连 | failover --userspace b --topology crates/nett-lab/topologies/failover.toml
-              用户态数据面：两端锥形 NAT，打洞 | punch --userspace b --topology crates/nett-lab/topologies/punch-cone.toml
+              Scenario 24: congestion (through the relay, short version, the comparison with Tailscale runs in acceptance) | congestion --duration 60 --topology crates/nett-lab/topologies/relay-only.toml
+              Scenario 24: congestion (direct, short version) | congestion --duration 60 --topology crates/nett-lab/topologies/fallback.toml
+              Userspace data plane interoperating with kernel WireGuard: admission and direct (design/userspace.md section 8) | admission --userspace b --topology crates/nett-lab/topologies/direct.toml
+              Userspace data plane: direct path fails and switches to the relay, then returns to direct after recovery | failover --userspace b --topology crates/nett-lab/topologies/failover.toml
+              Userspace data plane: cone NAT on both ends, hole punching | punch --userspace b --topology crates/nett-lab/topologies/punch-cone.toml
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链
+      - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
-      - name: 安装实验网络用到的工具
+      - name: Install tools used by the lab network
         timeout-minutes: 10
         run: |
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends wireguard-tools nftables iperf3 tcpdump
-      - name: 确认内核 WireGuard 可用
+      - name: Check that kernel WireGuard is available
         run: |
           uname -r
           sudo modprobe wireguard
           sudo ip link add wgcheck type wireguard
           sudo ip link del wgcheck
       - run: cargo build --locked -p nett-cli -p nett-lab -p nett-hub --features nett-cli/lab
-      - name: 实验工具自检（测量与故障注入）
+      - name: Lab tool self-check (measurement and fault injection)
         run: >-
           sudo ./target/debug/nett-lab run selftest
           --topology crates/nett-lab/topologies/direct.toml
           --nett ./target/debug/nett
           --out "$RUNNER_TEMP/lab-selftest"
-      - name: 场景（${{ matrix.title }}）
+      - name: Scenario (${{ matrix.title }})
         env:
           SCENARIOS: ${{ matrix.scenarios }}
         run: |
           i=0
-          # 从 fd 3 读：场景进程读不到、也读不走后面的行
+          # Read from fd 3: the scenario process cannot read, nor consume, the lines that follow
           while IFS='|' read -r -u 3 title args; do
             [ -n "$title" ] || continue
             i=$((i + 1))
@@ -244,9 +255,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链
+      - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
-      - name: 安装 cargo-deny（固定版本，校验哈希）
+      - name: Install cargo-deny (fixed version, hash-verified)
         run: |
           name="cargo-deny-${CARGO_DENY_VERSION}-x86_64-unknown-linux-musl"
           curl --fail --silent --show-error --location --max-time 120 -o "$name.tar.gz" \

@@ -25,5 +25,6 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 
 [features]
-# 实验构建：中继分配读自本地文件（design/prototype.md 第 3 节），官方构建不开启
+# Lab build: relay allocation is read from a local file (design/prototype.md section 3); official
+# builds do not enable it
 lab = []

@@ -1,4 +1,5 @@
-# 场景 1、8：a 在锥形 NAT 之后（dial-only）与 b（public）直连，另有经 r1、r2 两个中继的候选
+# Scenarios 1 and 8: a is behind a cone NAT (dial-only) and connects directly to b (public), with
+# additional candidates via the two relays r1 and r2
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -31,7 +32,7 @@ nat = "cone"
 peers = ["a", "b"]
 candidates = ["direct", "relay:r1", "relay:r2"]
 
-# 场景在这些成员之间收发（访问默认拒绝，ADR 0023）
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
 from = ["a", "b"]
 to = ["a", "b"]

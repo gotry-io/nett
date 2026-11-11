@@ -1,8 +1,10 @@
-//! 回环端口与 TLS 连接之间的转发（design/mesh.md 第 5.3 节）。
+//! Forwarding between loopback ports and TLS connections (design/mesh.md section 5.3).
 //!
-//! 每个 TLS 中继一个任务：第一个包到达时连接中继，连上之后一直保持（每 25 秒保活，即备用连接），断开后
-//! 再有包时重连。连接上的第一条消息必须是组网进程发出的中继探测（中继据此认证），在此之前其他包先放进
-//! 有上限的队列。
+//! One task per TLS relay: it connects to the relay when the first packet arrives and stays
+//! connected afterwards (keepalive every 25 seconds, i.e. a standby connection), and reconnects
+//! when a packet arrives after a disconnect. The first message on a connection must be a relay
+//! probe sent by the mesh process (the relay authenticates it from this); before then other packets
+//! are held in a bounded queue.
 
 use std::collections::VecDeque;
 use std::future::Future;
@@ -20,16 +22,17 @@ use tokio_tungstenite::tungstenite::Message;
 
 use crate::client::{self, MAX_MESSAGE};
 
-/// WebSocket 保活的间隔（design/mesh.md 第 5.3 节）。
+/// WebSocket keepalive interval (design/mesh.md section 5.3).
 pub const KEEPALIVE: Duration = Duration::from_secs(25);
-/// 连接失败或断开后，至少隔这么久再重连。
+/// After a failed or dropped connection, wait at least this long before reconnecting.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
-/// 连接认证之前暂存的包数。
+/// Number of packets held before the connection is authenticated.
 const MAX_HELD: usize = 64;
-/// 每条连接的发送队列，以及连接交给转发任务的消息队列。
+/// Send queue of each connection, and the queue of messages a connection hands to the forwarding
+/// task.
 const CONN_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
-/// 检查配置文件是否变化的间隔。
+/// Interval for checking whether the configuration file has changed.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -43,8 +46,9 @@ pub enum ForwardError {
     Invalid(String),
 }
 
-/// 一直运行到 `shutdown` 完成。配置文件由组网进程写出（ADR 0013）；文件还不存在时等待，内容变化时
-/// 按新配置重建全部转发任务。
+/// Runs until `shutdown` completes. The configuration file is written by the mesh process (ADR
+/// 0013); when the file does not exist yet it waits, and when the content changes it rebuilds all
+/// forwarding tasks with the new configuration.
 pub async fn run(path: &Path, shutdown: impl Future<Output = ()>) -> Result<(), ForwardError> {
     tokio::pin!(shutdown);
     let mut current: Option<(Vec<u8>, Vec<JoinHandle<()>>)> = None;
@@ -117,7 +121,7 @@ enum Event {
 
 struct Link {
     tx: mpsc::Sender<Out>,
-    /// 已经在这条连接上发出过中继探测。
+    /// A relay probe has already been sent on this connection.
     authenticated: bool,
 }
 
@@ -129,7 +133,7 @@ async fn target_loop(target: TlsTarget, wireguard: SocketAddr) -> std::io::Resul
     let mut connecting = false;
     let mut next_attempt = Instant::now();
     let mut held: VecDeque<Vec<u8>> = VecDeque::new();
-    // 发出探测的组网进程端口：中继应答交还给它
+    // The mesh process port that sent the probe: relay replies go back to it
     let mut probe_source: Option<SocketAddr> = None;
     let mut buf = vec![0u8; MAX_MESSAGE];
     let mut keepalive = tokio::time::interval(KEEPALIVE);
@@ -137,7 +141,7 @@ async fn target_loop(target: TlsTarget, wireguard: SocketAddr) -> std::io::Resul
         tokio::select! {
             received = udp.recv_from(&mut buf) => {
                 let (len, from) = received?;
-                // 只转发本机发来的包
+                // Forward only packets sent by this machine
                 if !from.ip().is_loopback() || len == 0 {
                     continue;
                 }
@@ -170,7 +174,7 @@ async fn target_loop(target: TlsTarget, wireguard: SocketAddr) -> std::io::Resul
                 Event::Connected(tx) => {
                     connecting = false;
                     let mut l = Link { tx, authenticated: false };
-                    // 第一条消息是暂存的探测；其余按到达的顺序跟在后面
+                    // The first message is a held probe; the rest follow in arrival order
                     if let Some(i) = held.iter().position(|d| d.first() == Some(&RELAY_PROBE))
                         && let Some(first) = held.remove(i)
                     {
@@ -214,7 +218,8 @@ fn flush(link: &Link, held: &mut VecDeque<Vec<u8>>) {
     }
 }
 
-/// 一条到中继的连接：连上之后把收到的二进制消息交给转发任务，把转发任务的包写入连接。
+/// One connection to a relay: after connecting, hands received binary messages to the forwarding
+/// task, and writes the forwarding task's packets to the connection.
 async fn connection(addr: SocketAddr, connector: TlsConnector, events: mpsc::Sender<Event>) {
     let ws = match client::connect(addr, &connector).await {
         Ok(ws) => ws,

@@ -1,5 +1,7 @@
-//! 连接 Hub 的 TLS（硬性规则 11）：Hub 有公网证书时按系统的根证书校验；Hub 自签证书时按 Hub 配置中的证书指纹
-//! 校验（复用传输适配进程的实现）。
+//! TLS for connecting to the Hub (hard rule 11): when the Hub has a public certificate it is
+//! verified against the system root certificates; when the Hub is self-signed it is verified
+//! against the certificate fingerprint in the Hub configuration (reusing the transport adapter's
+//! implementation).
 
 use std::sync::Arc;
 
@@ -22,7 +24,7 @@ pub fn connector(fingerprint: Option<[u8; 32]>) -> Result<TlsConnector, TlsError
     let mut roots = rustls::RootCertStore::empty();
     let found = rustls_native_certs::load_native_certs();
     for cert in found.certs {
-        // 个别读不懂的证书跳过，其余照常用
+        // Skip individual certificates that cannot be parsed and use the rest as usual
         roots.add(cert).ok();
     }
     if roots.is_empty() {

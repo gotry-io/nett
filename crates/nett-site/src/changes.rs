@@ -1,5 +1,7 @@
-//! 列出一次修改的变化（design/site.md 第 7 节）：列出的就是要签名的内容，选择器展开后的地址和端口、产物的
-//! 版本变化、增减的连接与成员；放宽的以 `+` 标出，收窄的以 `-` 标出，其余的变化以 `~` 标出。
+//! Lists the changes of one modification (design/site.md section 7): what is listed is what gets
+//! signed: addresses and ports after selector expansion, artifact version changes, connections and
+//! members added or removed; widened items are marked with `+`, narrowed items with `-`, other
+//! changes with `~`.
 
 use std::collections::BTreeSet;
 
@@ -10,7 +12,7 @@ use nett_trust::payload::{PortRange, Protocol};
 use crate::compose::{Pair, connections};
 use crate::state::{Machine, Part, Rule, Selector, State};
 
-/// 两份站点状态之间的变化，每项一行；没有变化时为空。
+/// The changes between two site states, one line per item; empty when nothing changed.
 pub fn describe(old: &State, new: &State) -> Vec<String> {
     let mut lines = Vec::new();
     for (name, m) in &new.machines {
@@ -224,8 +226,8 @@ fn pair_text(state: &State, a: &NodeId, b: &NodeId) -> String {
     format!("{} - {}", names[0], names[1])
 }
 
-/// 一对机器之间的路径种类：有一端是 `public` 时直连，两端都是 `dial-only` 时只能打洞（design/site.md
-/// 第 6 节）。
+/// The kind of path between a pair of machines: direct when either end is `public`, only hole
+/// punching when both ends are `dial-only` (design/site.md section 6).
 pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> &'static str {
     let public = |id: &NodeId| {
         state
@@ -239,7 +241,7 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> &'static str {
     }
 }
 
-/// 期望状态有变化的机器（按名字）：用来告诉用户要把哪些文件拷过去。
+/// Machines whose desired state changed (by name): used to tell the user which files to copy over.
 pub fn names_of(state: &State, ids: &BTreeSet<NodeId>) -> Vec<String> {
     ids.iter()
         .filter_map(|id| state.name_of(id).map(ToString::to_string))

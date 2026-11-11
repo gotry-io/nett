@@ -1,4 +1,4 @@
-# 和具体机器相关的资料（IP、端口、盘点数据），不进入版本库
+# Material tied to specific machines (IPs, ports, inventory data), kept out of the repository
 /private/
 
 # Rust
@@ -8,6 +8,6 @@
 node_modules/
 /web/dist/
 
-# 系统和编辑器
+# System and editors
 .DS_Store
 *.swp

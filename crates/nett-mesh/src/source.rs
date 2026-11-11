@@ -1,6 +1,7 @@
-//! 从本地文件读取期望状态（design/local-signing.md 第 5 节）：启动时读一次，之后每收到一次 `SIGHUP`、
-//! 或经本机接口收到一次 `reload` 请求（design/status.md 第 4.1 节）重新读取。接入 Hub 之后，nett-node
-//! 把期望状态写进这个文件，再用 `reload` 让组网进程应用它（design/hub.md 第 5 节）。
+//! Reads the desired state from a local file (design/local-signing.md section 5): read once at startup,
+//! and re-read on every `SIGHUP`, or on every `reload` request received through the local interface
+//! (design/status.md section 4.1). Once joined to the Hub, nett-node writes the desired state into this
+//! file and then uses `reload` to make the mesh process apply it (design/hub.md section 5).
 
 use std::path::PathBuf;
 
@@ -11,12 +12,12 @@ use crate::config::{ConfigError, DesiredMesh, MAX_DESIRED_BYTES, read_bounded};
 use crate::run::{ConfigSource, Delivery};
 use crate::status::ReloadReply;
 
-/// 启动时读一次，之后每收到一次 `SIGHUP` 或 `reload` 请求重新读取。
+/// Read once at startup, then re-read on every `SIGHUP` or `reload` request.
 pub struct FileSource {
     path: PathBuf,
     started: bool,
     hangup: Signal,
-    /// 本机接口转来的 `reload` 请求；接口关闭之后只剩 `SIGHUP`。
+    /// `reload` requests forwarded by the local interface; once the interface is closed only `SIGHUP` remains.
     reloads: Option<Receiver<ReloadReply>>,
 }
 
@@ -30,7 +31,8 @@ impl FileSource {
         })
     }
 
-    /// 等下一次重新读取的触发：`SIGHUP` 时没有等结果的一方。信号流关闭时为 `None`。
+    /// Waits for the next re-read trigger: on `SIGHUP` there is no party waiting for the result. `None` when
+    /// the signal stream is closed.
     async fn trigger(&mut self) -> Option<Option<ReloadReply>> {
         loop {
             let Some(reloads) = self.reloads.as_mut() else {
@@ -88,7 +90,8 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let mut source = FileSource::new(path, rx).expect("source");
 
-        // 启动时读一次，没有等结果的一方；内容不对时交出的是拒绝的原因
+        // Read once at startup, with no party waiting for the result; when the content is wrong, what is handed
+        // out is the reason for rejection
         let first = source.next().await.expect("first read");
         assert!(first.reply.is_none());
         assert!(matches!(first.desired, Err(ConfigError::Document(_))));
@@ -102,7 +105,8 @@ mod tests {
             .expect("answer");
         assert!(answer.try_recv().is_ok());
 
-        // 本机接口关闭之后照常等 SIGHUP，不当作来源关闭
+        // After the local interface is closed, keep waiting for SIGHUP as usual and do not treat the source as
+        // closed
         drop(tx);
         assert!(
             tokio::time::timeout(Duration::from_millis(200), source.next())

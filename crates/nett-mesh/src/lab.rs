@@ -1,5 +1,6 @@
-//! 实验构建（`lab` 特性）：事件另写一份 JSON 行供 `nett-lab` 采集，模拟时钟误差，以及传输适配进程的
-//! 配置文件（design/prototype.md 第 7 节）。官方构建不含这个模块。
+//! Lab build (`lab` feature): events are also written as JSON lines for `nett-lab` to collect, simulated
+//! clock error, and the transport adapter's config file (design/prototype.md section 7). Official builds
+//! do not include this module.
 
 use std::fs::File;
 use std::io::Write as _;
@@ -8,7 +9,8 @@ use std::path::PathBuf;
 use crate::clock::Clock;
 use crate::event::{Event, EventSink, log_event};
 
-/// 每个事件写一行 JSON，同时写日志。写文件失败只记日志，不影响组网。
+/// Writes each event as one JSON line, and also writes the log. A failure to write the file is only
+/// logged and does not affect the mesh.
 pub struct JsonLinesSink {
     file: File,
 }
@@ -24,7 +26,8 @@ impl JsonLinesSink {
 impl EventSink for JsonLinesSink {
     fn emit(&mut self, event: Event) {
         log_event(&event);
-        // 每行带上发生时刻（Unix 毫秒），供 nett-lab 与底层网络的测量对齐
+        // Each line carries the time it occurred (Unix milliseconds), for nett-lab to align with its
+        // measurements of the underlying network
         let line = serde_json::to_value(&event).and_then(|mut v| {
             if let Some(obj) = v.as_object_mut() {
                 obj.insert(
@@ -47,8 +50,8 @@ impl EventSink for JsonLinesSink {
     }
 }
 
-/// 实验中模拟时钟误差（design/prototype.md 第 6.2 节场景 17）：在真实时钟上加偏移，并可指定本机
-/// 认为自己的时钟是否可信。
+/// Simulates clock error in lab scenarios (design/prototype.md section 6.2, scenario 17): adds an offset
+/// to the real clock, and can specify whether this machine considers its clock trustworthy.
 pub struct LabClock<C> {
     pub inner: C,
     pub offset_ms: i64,
@@ -65,8 +68,10 @@ impl<C: Clock> Clock for LabClock<C> {
     }
 }
 
-/// 组网进程交出传输适配进程的配置时（[`Event::TransportConfigChanged`]，在配置对端之前），写到本机文件
-/// （design/mesh.md 第 5.3 节）：原型中代替组网进程与传输适配进程之间的本机接口（ADR 0013）。
+/// When the mesh process hands out the transport adapter's configuration ([`Event::TransportConfigChanged`],
+/// before the peers are configured), it is written to a local file (design/mesh.md section 5.3): in the
+/// prototype this stands in for the local interface between the mesh process and the transport adapter
+/// (ADR 0013).
 pub struct TransportConfigWriter<E> {
     inner: E,
     path: PathBuf,
@@ -81,7 +86,7 @@ impl<E> TransportConfigWriter<E> {
 impl<E: EventSink> EventSink for TransportConfigWriter<E> {
     fn emit(&mut self, event: Event) {
         if let Event::TransportConfigChanged { config } = &event {
-            // 先写临时文件再改名：传输适配进程读到的总是一份完整的配置
+            // Write a temporary file first, then rename: the transport adapter always reads a complete configuration
             let tmp = self.path.with_extension("tmp");
             let result = serde_json::to_vec_pretty(config)
                 .map_err(std::io::Error::other)

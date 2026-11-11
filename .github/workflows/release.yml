@@ -1,6 +1,9 @@
-# 推送 v* 标签时发布（design/release.md 第 3 节，ADR 0020）：构建各平台的 nett，在 release 环境中用主钥匙
-# 签名，发布 GitHub Release，更新 gotry-io/homebrew-tap 的配方。v* 标签受规则集保护，主私钥只对它可见。
-# 第三方 action 固定到提交哈希；下载的工具固定版本并校验哈希。
+# Releases when a v* tag is pushed (design/release.md section 3, ADR 0020): builds nett for each
+# platform, signs with the primary key in the release environment,
+# publishes the GitHub Release, and updates the formula in gotry-io/homebrew-tap. v* tags are
+# protected by a ruleset, and the primary private key is visible only to them.
+# Third-party actions are pinned to commit hashes; downloaded tools are pinned to versions and
+# hash-verified.
 
 name: Release
 
@@ -12,7 +15,8 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
-  # minisign 0.12，用作者的公钥核对过（RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3）
+  # minisign 0.12, checked against the author's public key
+  # (RWQf6LRCGA9i53mlYecO4IzT51TGPpvWucNSCh1CBM0QTaLn73Y7GFO3)
   MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
   MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
 
@@ -33,11 +37,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链与目标
+      - name: Install the toolchain and targets specified by rust-toolchain.toml
         run: |
           rustup toolchain install
           rustup target add ${{ matrix.target }}
-      - name: 标签与工作区版本一致
+      - name: Tag matches the workspace version
         id: version
         run: |
           version=$(cargo metadata --no-deps --format-version 1 --locked \
@@ -47,17 +51,17 @@ jobs:
             exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-      - name: musl 工具链
+      - name: musl toolchain
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }} -p nett-cli
-      # Hub 只在 Linux 主机上运行（design/hub.md 第 8 节）
+      # The Hub runs only on Linux hosts (design/hub.md section 8)
       - if: runner.os == 'Linux'
         run: cargo build --release --locked --target ${{ matrix.target }} -p nett-hub
-      - name: 打包
+      - name: Package
         run: |
           mkdir dist
           tar -czf "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
@@ -74,7 +78,8 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  # 只接收构建产出的压缩包：不检出代码、不安装其他依赖，构建任务拿不到私钥
+  # Receives only the archives produced by the build: no checkout, no other dependencies installed,
+  # so the build job cannot get the private key
   sign:
     needs: build
     runs-on: ubuntu-24.04
@@ -87,12 +92,12 @@ jobs:
           pattern: dist-*
           merge-multiple: true
           path: dist
-      - name: 固定版本的 minisign
+      - name: Pinned-version minisign
         run: |
           curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
           echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
           tar -xzf minisign.tar.gz minisign-linux/x86_64/minisign
-      - name: 签名
+      - name: Sign
         env:
           NETT_RELEASE_PRIMARY_KEY: ${{ secrets.NETT_RELEASE_PRIMARY_KEY }}
         run: |
@@ -126,7 +131,7 @@ jobs:
         with:
           name: signed
           path: dist
-      - name: 用仓库中的公钥核对签名
+      - name: Verify the signature with the public key in the repository
         run: |
           curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
           echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
@@ -135,13 +140,13 @@ jobs:
             minisign-linux/x86_64/minisign -V -p keys/nett-release-primary.pub -m "$f"
           done
           (cd dist && sha256sum -c SHA256SUMS)
-      - name: 发布说明取 CHANGELOG.md 中这个版本的一节
+      - name: Release notes come from this version's section in CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
           awk -v v="## [$version]" 'index($0, v) == 1 { on = 1; next } /^## \[/ { on = 0 } on' \
             CHANGELOG.md > notes.md
           test -s notes.md
-      - name: 创建 GitHub Release
+      - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "nett ${GITHUB_REF_NAME#v}" --notes-file notes.md
@@ -165,7 +170,7 @@ jobs:
           repository: gotry-io/homebrew-tap
           token: ${{ secrets.TAP_PUSH_TOKEN }}
           path: tap
-      - name: 按模板生成配方并推送
+      - name: Generate the formula from the template and push it
         run: |
           version="${GITHUB_REF_NAME#v}"
           sha() { awk -v f="nett-$version-$1.tar.gz" '$2 == f { print $1 }' dist/SHA256SUMS; }
@@ -181,8 +186,10 @@ jobs:
           git commit -m "nett $version"
           git push
 
-  # 项目网站 nett.gotry.io（design/release.md 第 6 节）：首页、填好版本与哈希的安装脚本、这个版本的压缩包。
-  # 新机器首次安装信任这个网站，部署用的密钥与签名钥匙一样只在 v* 标签可用的环境中
+  # Project website nett.gotry.io (design/release.md section 6): the home page, the install script
+  # with version and hash filled in, and this version's archives.
+  # A new machine trusts this website on first install; the deployment key, like the signing key, is
+  # available only in an environment restricted to v* tags
   site:
     needs: publish
     runs-on: ubuntu-24.04
@@ -198,7 +205,7 @@ jobs:
         with:
           name: signed
           path: dist
-      - name: 按模板生成网站
+      - name: Generate the website from the template
         run: |
           version="${GITHUB_REF_NAME#v}"
           (cd dist && sha256sum -c SHA256SUMS)
@@ -216,7 +223,7 @@ jobs:
             packaging/install.sh > site/install.sh
           ! grep -q '@[A-Z0-9_]*@' site/install.sh
           cp packaging/site/index.html site/index.html
-      - name: 部署到 Cloudflare（只有静态文件的 Worker，packaging/site/wrangler.jsonc）
+      - name: Deploy to Cloudflare (static-files-only Worker, packaging/site/wrangler.jsonc)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

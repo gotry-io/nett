@@ -1,7 +1,9 @@
-//! `nett-lab`：实验工具，只用于开发和测试，不进发布包（design/prototype.md）。
+//! `nett-lab`: lab tool, used only for development and testing, not included in release packages
+//! (design/prototype.md).
 //!
-//! 它调用 `ip`、`nft`、`tc`、`wg` 等外部命令搭建实验网络，需要 root，只能在 Linux 上运行。
-//! 被测的 `nett` 用 `lab` 特性构建：`cargo build -p nett-cli --features lab`。
+//! It calls external commands such as `ip`, `nft`, `tc` and `wg` to build the lab network; it needs
+//! root and runs only on Linux. The `nett` under test is built with the `lab` feature: `cargo build
+//! -p nett-cli --features lab`.
 
 #[cfg(target_os = "linux")]
 mod cmd;
@@ -119,7 +121,8 @@ fn run() -> anyhow::Result<bool> {
             other => return Err(other.unexpected().into()),
         }
     }
-    // 指定节点改用用户态数据面：在输出目录里写一份改过的拓扑，场景读它
+    // Switch the specified nodes to the userspace data plane: write a modified topology into the
+    // output directory, which the scenario reads
     if !userspace.is_empty() {
         let (path, out) = (topology.context(USAGE)?, out.as_ref().context(USAGE)?);
         topology = Some(topology::with_userspace(&path, &userspace, out)?);

@@ -1,9 +1,10 @@
-//! 经 netlink 管理 nftables（`include/uapi/linux/netfilter/nf_tables.h`），以及经 nfnetlink_log 接收
-//! 规则拷贝出来的包。组网进程不调用 `nft` 命令（硬性规则 1）。
+//! Manages nftables through netlink (`include/uapi/linux/netfilter/nf_tables.h`), and receives packets
+//! copied by rules through nfnetlink_log. The mesh process does not call the `nft` command (hard rule 1).
 //!
-//! 这里有两条链：一条把发往 WireGuard 端口、负载首字节为直连探测类型的 UDP 包的副本交给组网进程
-//! （design/mesh.md 第 7.1 节），其他包只多一次规则匹配，不复制；`log` 只是拷贝，不影响连接跟踪。另一条
-//! 丢弃从闲置的 TLS 回环端口进入 WireGuard 端口的包（第 5.3 节）。
+//! There are two chains here: one hands the mesh process a copy of UDP packets sent to the WireGuard port
+//! whose first payload byte is a direct probe type (design/mesh.md section 7.1); other packets only incur
+//! one extra rule match and are not copied; `log` only copies and does not affect connection tracking.
+//! The other drops packets entering the WireGuard port from idle TLS loopback ports (section 5.3).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
@@ -13,7 +14,8 @@ use rustix::net::netlink::NETFILTER;
 use super::netlink::{Message, NLM_F_ACK, NLM_F_CREATE, NlError, Socket, attrs, split_message};
 use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, WG_COOKIE_LEN, WG_COOKIE_REPLY};
 
-/// 探测规则所在的表，与访问控制的规则分开，可以整表重建。
+/// The table holding the probe rules, separate from the access control rules so it can be rebuilt as a
+/// whole.
 const TABLE: &str = "nett_probe";
 const CHAIN: &str = "probe_in";
 
@@ -58,7 +60,7 @@ pub(super) const NFTA_DATA_VERDICT: u16 = 2;
 pub(super) const NFTA_VERDICT_CODE: u16 = 1;
 pub(super) const NFT_REG_VERDICT: u32 = 0;
 pub(super) const NF_DROP: u32 = 0;
-/// 网络命名空间中回环接口的编号总是 1。
+/// The loopback interface in a network namespace always has number 1.
 const LOOPBACK_IFINDEX: u32 = 1;
 const GUARD_CHAIN: &str = "tls_guard";
 const NFTA_CMP_SREG: u16 = 1;
@@ -88,9 +90,9 @@ const NFULA_CFG_QTHRESH: u16 = 4;
 const NFULNL_CFG_CMD_BIND: u8 = 1;
 const NFULNL_COPY_PACKET: u8 = 2;
 
-/// 拷贝的长度：IPv6 头 40 字节 + UDP 头 8 字节 + 探测 64 字节，留出余量。
+/// Length of the copy: IPv6 header 40 bytes + UDP header 8 bytes + probe 64 bytes, with some margin.
 const SNAPLEN: u32 = 256;
-/// 接收超时：接收线程据此定期检查是否该退出。
+/// Receive timeout: the receive thread uses it to periodically check whether it should exit.
 const RECV_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub(super) fn nfgen(family: u8, res_id: u16) -> [u8; 4] {
@@ -108,7 +110,7 @@ pub(super) fn batch(ty: u16) -> Message {
     m
 }
 
-/// 一个表达式：名称加数据（嵌套属性）。
+/// An expression: a name plus data (nested attributes).
 pub(super) fn expr(m: &mut Message, name: &str, data: impl FnOnce(&mut Message)) {
     let elem = m.begin_nested(NFTA_LIST_ELEM);
     m.attr_str(NFTA_EXPR_NAME, name);
@@ -140,7 +142,7 @@ pub(super) fn load_transport(m: &mut Message, offset: u32, len: u32) {
     });
 }
 
-/// 删除一张 nftables 表（连同其中的链与规则）；不存在时忽略。
+/// Deletes an nftables table (along with its chains and rules); ignored when it does not exist.
 pub(super) fn delete_table(name: &str) -> Result<(), NlError> {
     let mut del = Message::new(nft_type(NFT_MSG_DELTABLE), NLM_F_ACK);
     del.fixed(&nfgen(NFPROTO_INET, 0));
@@ -156,7 +158,7 @@ pub(super) fn delete_table(name: &str) -> Result<(), NlError> {
     }
 }
 
-/// 组网进程建的全部 nftables 表。
+/// All nftables tables the mesh process creates.
 pub(super) fn tables() -> [&'static str; 4] {
     [
         TABLE,
@@ -166,11 +168,12 @@ pub(super) fn tables() -> [&'static str; 4] {
     ]
 }
 
-/// 重建探测规则（IPv4 与 IPv6）：`udp dport <port> @th,64,8 0x82-0x83 log group <group>`，以及 WireGuard 的
-/// cookie 应答 `udp dport <port> udp length 72 @th,64,8 3 log group <group>`（design/mesh.md 第 7.1 节）。
+/// Rebuilds the probe rules (IPv4 and IPv6): `udp dport <port> @th,64,8 0x82-0x83 log group <group>`, and
+/// WireGuard's cookie reply `udp dport <port> udp length 72 @th,64,8 3 log group <group>` (design/mesh.md
+/// section 7.1).
 pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     let mut sock = Socket::open(Some(NETFILTER))?;
-    // 先删除旧表（不存在时忽略），再在一个事务中重建
+    // Delete the old table first (ignored when it does not exist), then rebuild in one transaction
     let mut del = Message::new(nft_type(NFT_MSG_DELTABLE), NLM_F_ACK);
     del.fixed(&nfgen(NFPROTO_INET, 0));
     del.attr_str(NFTA_TABLE_NAME, TABLE);
@@ -194,13 +197,14 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     chain.attr_str(NFTA_CHAIN_NAME, CHAIN);
     let hook = chain.begin_nested(NFTA_CHAIN_HOOK);
     chain.attr(NFTA_HOOK_HOOKNUM, &NF_INET_LOCAL_IN.to_be_bytes());
-    // 优先级取值不影响结果：log 不终结规则，包照常交给后面的链和 WireGuard
+    // The priority value does not affect the result: log does not terminate the rule, and the packet is
+    // handed to the later chains and WireGuard as usual
     chain.attr(NFTA_HOOK_PRIORITY, &(-150i32).to_be_bytes());
     chain.end_nested(hook);
     chain.attr(NFTA_CHAIN_POLICY, &NF_ACCEPT.to_be_bytes());
     chain.attr_str(NFTA_CHAIN_TYPE, "filter");
 
-    // UDP 头 8 字节之后的第一个字节是消息类型
+    // The first byte after the 8-byte UDP header is the message type
     let probes = copy_rule(port, group, |rule| {
         load_transport(rule, 8, 1);
         cmp(rule, NFT_CMP_GTE, &[DIRECT_PROBE]);
@@ -224,7 +228,8 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     ])
 }
 
-/// 发往 WireGuard 端口、再满足 `matches` 的 UDP 包，副本交给日志组 `group`。
+/// A copy of UDP packets sent to the WireGuard port that also satisfy `matches` is handed to log group
+/// `group`.
 fn copy_rule(port: u16, group: u16, matches: impl FnOnce(&mut Message)) -> Message {
     let mut rule = Message::new(
         nft_type(NFT_MSG_NEWRULE),
@@ -250,8 +255,10 @@ fn copy_rule(port: u16, group: u16, matches: impl FnOnce(&mut Message)) -> Messa
     rule
 }
 
-/// 重建 TLS 保护链（design/mesh.md 第 5.3 节）：对每个闲置的回环端口，丢弃
-/// `iif lo udp sport <端口> udp dport <WireGuard 端口>` 的包。一个事务中清空旧规则、写入新规则。
+/// Rebuilds the TLS protection chain (design/mesh.md section 5.3): for each idle loopback port, drops
+/// packets matching
+/// `iif lo udp sport <port> udp dport <WireGuard port>`. Old rules are cleared and new rules written in
+/// one transaction.
 pub(crate) fn set_tls_guard(wg_port: u16, idle: &[u16]) -> Result<(), NlError> {
     let mut sock = Socket::open(Some(NETFILTER))?;
     let mut table = Message::new(nft_type(NFT_MSG_NEWTABLE), NLM_F_ACK | NLM_F_CREATE);
@@ -269,7 +276,7 @@ pub(crate) fn set_tls_guard(wg_port: u16, idle: &[u16]) -> Result<(), NlError> {
     chain.attr(NFTA_CHAIN_POLICY, &NF_ACCEPT.to_be_bytes());
     chain.attr_str(NFTA_CHAIN_TYPE, "filter");
 
-    // 不带规则编号的删除：清空这条链
+    // Deletion without a rule number: clears this chain
     let mut flush = Message::new(nft_type(NFT_MSG_DELRULE), NLM_F_ACK);
     flush.fixed(&nfgen(NFPROTO_INET, 0));
     flush.attr_str(NFTA_RULE_TABLE, TABLE);
@@ -289,7 +296,7 @@ pub(crate) fn set_tls_guard(wg_port: u16, idle: &[u16]) -> Result<(), NlError> {
             m.attr(NFTA_META_KEY, &NFT_META_IIF.to_be_bytes());
             m.attr(NFTA_META_DREG, &NFT_REG_1.to_be_bytes());
         });
-        // 接口编号以主机字节序比较
+        // The interface number is compared in host byte order
         cmp(&mut rule, NFT_CMP_EQ, &LOOPBACK_IFINDEX.to_ne_bytes());
         expr(&mut rule, "meta", |m| {
             m.attr(NFTA_META_KEY, &NFT_META_L4PROTO.to_be_bytes());
@@ -315,7 +322,7 @@ pub(crate) fn set_tls_guard(wg_port: u16, idle: &[u16]) -> Result<(), NlError> {
     sock.request_batch(messages)
 }
 
-/// nfnetlink_log 的订阅：接收探测规则拷贝出来的包。
+/// Subscription to nfnetlink_log: receives packets copied by the probe rules.
 pub(crate) struct ProbeLog {
     sock: Socket,
     port: u16,
@@ -330,14 +337,15 @@ impl ProbeLog {
         let mut mode = SNAPLEN.to_be_bytes().to_vec();
         mode.extend_from_slice(&[NFULNL_COPY_PACKET, 0]);
         m.attr(NFULA_CFG_MODE, &mode);
-        // 每个包立即交付：默认要攒满 100 个包或等 1 秒，探测的应答会因此迟到
+        // Each packet is delivered immediately: by default it waits to accumulate 100 packets or 1 second, which
+        // would make probe replies late
         m.attr(NFULA_CFG_QTHRESH, &1u32.to_be_bytes());
         sock.request(m)?;
         sock.set_recv_timeout(RECV_TIMEOUT)?;
         Ok(Self { sock, port })
     }
 
-    /// 接收一批拷贝出来的探测：每个为（来源地址，UDP 负载）。超时返回空。
+    /// Receives a batch of copied probes: each is (source address, UDP payload). Returns empty on timeout.
     pub(crate) fn recv(&mut self) -> Result<Vec<(SocketAddr, Vec<u8>)>, NlError> {
         let port = self.port;
         let Some(mut rest) = self.sock.recv_datagram()? else {
@@ -364,7 +372,7 @@ impl ProbeLog {
     }
 }
 
-/// 从网络层头开始的包中取出来源地址和 UDP 负载。
+/// Takes the source address and UDP payload from a packet that starts at the network layer header.
 fn parse_packet(family: u8, p: &[u8], port: u16) -> Option<(SocketAddr, Vec<u8>)> {
     let (src, udp) = match family {
         AF_INET if p.len() >= 20 && p[0] >> 4 == 4 && p[9] == IPPROTO_UDP => {

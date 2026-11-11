@@ -1,17 +1,26 @@
-//! Hub 场景（design/hub.md 第 10 节，roadmap M1 验收）：用真实的命令建立站点（`nett keys`、`nett site add`、
-//! `allow`），各成员按本地签名的期望状态运行；然后在一个成员的命名空间中运行 `nett-hub`（自签证书，按指纹
-//! 校验），`nett site link` 关联，`nett site invite` 让已有的成员接入，各成员运行 `nett node`。检查：
+//! Hub scenario (design/hub.md section 10, roadmap M1 acceptance): builds a site with real
+//! commands (`nett keys`, `nett site add`, `allow`), and the members run from the locally signed
+//! desired state; then `nett-hub` runs in one member's namespace (self-signed certificate, verified
+//! by fingerprint), `nett site link` links it, `nett site invite` lets existing members attach, and
+//! each member runs `nett node`. Checks:
 //!
-//! - 推送之后各成员应用，Hub 组成的期望状态与站点目录中写出的逐份相同，`nett site status` 列出全部机器；
-//! - Hub 停止时组网照常，修改推不出去；Hub 恢复之后成员重连，下一次推送补齐；
-//! - 模拟被攻破的 Hub（直接改它的数据库）：下发另一个站点签名的成员，成员拒绝这个成员、其余照常；
-//!   下发旧版本的访问规则，成员拒绝这份规则、继续使用已生效的版本，并作为问题报告，连通不受影响；
-//! - 退出与重新入网（H2）：一个成员退出，Hub 当场移除它、其他成员删除它，它的组网接口被拆掉；同一个名字
-//!   作为新机器经 Hub 入网（不写公网地址，由 Hub 得知），得到新的节点 ID 与地址，与其他成员连通；token
-//!   只能用一次。
+//! - After a push the members apply it, the desired state the Hub composes is identical to what is
+//!   written in the site directory, file by file, and `nett site status` lists all machines;
+//! - When the Hub stops the mesh keeps working, and changes cannot be pushed; after the Hub
+//!   recovers the members reconnect and the next push catches up;
+//! - Simulating a compromised Hub (editing its database directly): it delivers a member signed by
+//!   another site, and the members reject that member while the rest continue as usual; it delivers
+//!   an older version of the access rules, and the members reject that rule set, keep using the
+//!   version in effect, and report it as a problem, without affecting connectivity;
+//! - Leaving and re-enrolling (H2): a member leaves, the Hub removes it on the spot, the other
+//!   members delete it, and its mesh interface is torn down; the same name enrolls through the Hub
+//!   as a new machine (no public address written, learned by the Hub), gets a new node ID and
+//!   address, and connects with the other members; the token can only be used once.
 //!
-//! 入网与退出在节点的命名空间中由 `nett-lab enroll`、`nett-lab leave` 完成：它们调用 `sudo nett install
-//! <token>` 与 `sudo nett leave` 用的同一份库代码，只是不安装服务、文件放在实验目录中。
+//! Enrollment and leaving run in the node's namespace through `nett-lab enroll` and
+//! `nett-lab leave`: they call the same library code as `sudo nett install <token>` and
+//! `sudo nett leave`, except that they do not install services and the files live in the lab
+//! directory.
 
 use std::path::{Path, PathBuf};
 use std::process::Child;
@@ -31,7 +40,8 @@ use crate::net::Underlay;
 use crate::topology::Topology;
 
 const HUB_PORT: u16 = 8443;
-/// 成员在 Hub 恢复之后重连的上限：nett-node 的退避最长 60 秒。
+/// Upper bound for members to reconnect after the Hub recovers: nett-node's backoff is at most 60
+/// seconds.
 const RECONNECT: Duration = Duration::from_secs(90);
 
 struct HubLab<'a> {
@@ -39,12 +49,12 @@ struct HubLab<'a> {
     hub_bin: PathBuf,
     site: PathBuf,
     hub_dir: PathBuf,
-    /// 运行 Hub 的命名空间与它的地址。
+    /// The namespace running the Hub and its address.
     hub_ns: String,
     hub_ip: std::net::Ipv4Addr,
-    /// 运行 `nett site` 的命名空间（用户的电脑）。
+    /// The namespace running `nett site` (the user's computer).
     site_ns: String,
-    /// 站点中的成员（不含模拟攻击时加进去的机器）。
+    /// The members in the site (not including machines added during the simulated attack).
     members: Vec<String>,
     hub: Option<Child>,
 }
@@ -77,7 +87,7 @@ impl HubLab<'_> {
             &self.hub_dir.join("hub.log"),
         )?;
         self.hub = Some(child);
-        // 等它开始监听：每次启动的日志从头写起
+        // Wait for it to start listening: each start writes its log from the beginning
         let log = self.hub_dir.join("hub.log");
         let deadline = Instant::now() + Duration::from_secs(10);
         while !std::fs::read_to_string(&log).is_ok_and(|t| t.contains("Hub listening")) {
@@ -101,7 +111,7 @@ impl HubLab<'_> {
         serde_json::from_str(&out).context("parsing nett site status --json")
     }
 
-    /// 等到每台机器都对当前代数给出了 `result`。
+    /// Waits until every machine has given `result` for the current generation.
     fn wait_acked(&self, result: &str, within: Duration) -> anyhow::Result<StatusResponse> {
         let deadline = Instant::now() + within;
         loop {
@@ -125,7 +135,8 @@ impl HubLab<'_> {
         }
     }
 
-    /// 模拟被攻破的 Hub：停下它，直接改写数据库中的站点（不经推送时的验证），再启动。
+    /// Simulates a compromised Hub: stops it, edits the site in the database directly (bypassing
+    /// the validation done on push), then starts it.
     fn tamper(&mut self, change: impl FnOnce(&mut State)) -> anyhow::Result<()> {
         self.stop_hub();
         let path = self.hub_dir.join("hub.db");
@@ -155,7 +166,7 @@ impl Drop for HubLab<'_> {
     }
 }
 
-/// `nett keys` 打印的 `--keys "…"` 一行中的公钥。
+/// The public keys in the `--keys "..."` line printed by `nett keys`.
 fn keys_line(out: &str) -> anyhow::Result<String> {
     let start = out.find("--keys \"").context("nett keys printed no keys")? + "--keys \"".len();
     let end = out[start..]
@@ -182,7 +193,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let site = out.join("site");
     std::fs::remove_dir_all(&site).ok();
 
-    // 站点：真实的命令，与用户在自己的电脑上做的相同
+    // Site: real commands, the same as what the user does on their own computer
     run(
         &nett.display().to_string(),
         ["site", "init", "--dir", &site.to_string_lossy()],
@@ -282,7 +293,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let net_a = lab.underlay.node(&a.name).context("planned node")?;
     let hub_ip = net_a.public_ipv4.unwrap_or(net_a.ipv4);
 
-    // Hub：在 a 的命名空间中，自签证书；用户的电脑在 b 的命名空间中
+    // Hub: in a's namespace, with a self-signed certificate; the user's computer is in b's
+    // namespace
     let hub_dir = out.join("hub");
     std::fs::remove_dir_all(&hub_dir).ok();
     std::fs::create_dir_all(&hub_dir)?;
@@ -333,7 +345,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     );
     linked?;
 
-    // 已有的成员接入：invite 打印的 token 交给各台机器（install 写入的就是这份配置），各自运行 nett node
+    // Existing members attach: the token printed by invite is given to each machine (what install
+    // writes is this configuration), and each runs nett node
     for node in &lab_nodes {
         let invite = h.site_cmd(&["invite", &node.name])?;
         let token = invite
@@ -378,7 +391,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         ),
     );
 
-    // 修改经 Hub 送达：各成员应用，Hub 组成的期望状态与站点目录中写出的相同
+    // The change is delivered through the Hub: members apply it, and the desired state the Hub
+    // composes equals what is written in the site directory
     let pushed = h.site_cmd(&["allow", &a.name, &b.name, "22/tcp", "--yes"]);
     report.check(
         "push:applied-by-all",
@@ -402,7 +416,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         "site-status",
         h.site_cmd(&["status"]).unwrap_or_else(|e| format!("{e:#}")),
     );
-    // nett-node 连上与应用之后立即报告本机状态
+    // Right after nett-node connects and applies, it reports the local status
     std::thread::sleep(Duration::from_secs(3));
     let status = h.status()?;
     report.check(
@@ -434,7 +448,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         report.record("memory:nett-hub", memory(hub.id()));
     }
 
-    // Hub 停止：组网照常，修改推不出去（签名与保存照常）
+    // Hub stops: the mesh keeps working, and changes cannot be pushed (signing and saving still
+    // work)
     h.stop_hub();
     let reachable = ping(&ns_a, &b.mesh_ipv4.to_string());
     report.check(
@@ -449,7 +464,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         refused.map_or_else(|e| format!("{e:#}"), |o| format!("unexpected success: {o}")),
     );
 
-    // Hub 恢复：成员重连，下一次推送把两次修改一起送到
+    // Hub recovers: members reconnect, and the next push delivers both changes together
     h.start_hub()?;
     let catch_up = h.site_cmd(&["allow", &b.name, &a.name, "81/tcp", "--yes"]);
     report.record(
@@ -475,7 +490,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         );
     }
 
-    // 被攻破的 Hub 下发另一个站点签名的成员：成员拒绝它，其余照常
+    // The compromised Hub delivers a member signed by another site: members reject it, the rest
+    // continue as usual
     let other = out.join("other-site");
     std::fs::remove_dir_all(&other).ok();
     run(
@@ -540,8 +556,9 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         format!("wg peers on {}: {peers:?}", a.name),
     );
 
-    // 被攻破的 Hub 下发旧版本的访问规则：成员拒绝这份规则，继续使用已生效的版本（design/mesh.md 第 4.2 节），
-    // 作为问题报告；连通不受影响
+    // The compromised Hub delivers an older version of the access rules: members reject this rule
+    // set and keep using the version in effect (design/mesh.md section 4.2), reporting it as a
+    // problem; connectivity is not affected
     let older = state.access_rules.clone();
     let older_version = older.as_ref().map_or(0, |r| r.version);
     h.tamper(|s| {
@@ -581,7 +598,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         reachable.unwrap_or_else(|e| format!("{e:#}")),
     );
 
-    // 退出：先停下 b 的进程（`nett leave` 先删服务），再告诉 Hub、拆掉接口
+    // Leave: first stop b's processes (`nett leave` deletes the services first), then tell the Hub
+    // and tear down the interface
     let lab_bin = std::env::current_exe().context("locating nett-lab")?;
     let ns_b = ns(&b.name)?;
     for process in [b.name.clone(), format!("node:{}", b.name)] {
@@ -640,7 +658,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
             .map_or_else(|e| format!("{e:#}"), Clone::clone),
     );
 
-    // 同一个名字作为新机器入网：电脑上一条命令，机器上一条（这里是 nett-lab enroll）；公网地址由 Hub 得知
+    // The same name enrolls as a new machine: one command on the computer, one on the machine (here
+    // nett-lab enroll); the public address is learned by the Hub
     let added = h.site_cmd(&["add", &b.name, "--public", "--yes"])?;
     report.check(
         "join:one-line-printed",
@@ -738,7 +757,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         &new_dir.join("node.log"),
     )?;
     lab.processes.push((format!("node:{}", b.name), child));
-    // 新机器没有原来的规则（design/site.md 第 4 节）：放行之后才连得上
+    // The new machine does not have the old rules (design/site.md section 4): it can only connect
+    // after they are allowed
     let allowed = h.site_cmd(&["allow", &all, &all, "--yes"]);
     report.record("join:allow", allowed.unwrap_or_else(|e| format!("{e:#}")));
     let current = h.wait_acked("applied", Duration::from_secs(30));
@@ -756,7 +776,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
         reachable.is_ok(),
         reachable.unwrap_or_else(|e| format!("{e:#}")),
     );
-    // 站点取回入网的结果与得知的地址
+    // The site fetches the result of the enrollment and the learned address
     h.site_cmd(&["status"])?;
     let state_now = State::from_json(&std::fs::read(site.join("state.json"))?)?;
     let m = state_now.machine(&b.name.parse()?)?;
@@ -776,8 +796,9 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     Ok(report)
 }
 
-/// `nett-lab enroll`：在节点的命名空间中经 Hub 入网（`sudo nett install <token>` 的同一份库代码），把期望
-/// 状态与 Hub 的配置写进节点目录。
+/// `nett-lab enroll`: enrolls through the Hub in the node's namespace (the same library code as
+/// `sudo nett install <token>`), and writes the desired state and the Hub configuration into the
+/// node directory.
 pub fn enroll_here(dir: &Path, token: &str) -> anyhow::Result<()> {
     let token = JoinToken::decode(token)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -790,8 +811,9 @@ pub fn enroll_here(dir: &Path, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nett-lab leave`：告诉 Hub 这台机器退出，拆掉组网接口与过滤规则（`sudo nett leave` 的同一份库代码）。
-/// 组网进程要先停下。
+/// `nett-lab leave`: tells the Hub this machine is leaving, and tears down the mesh interface and
+/// filter rules (the same library code as `sudo nett leave`). The mesh process must be stopped
+/// first.
 pub fn leave_here(dir: &Path) -> anyhow::Result<()> {
     let config = HubConfig::load(dir)
         .map_err(anyhow::Error::msg)?

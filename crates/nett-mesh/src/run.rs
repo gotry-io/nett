@@ -1,27 +1,31 @@
-//! 组网进程的主循环：从配置来源取期望状态，交给后台线程应用，直到收到退出信号。
+//! Main loop of the mesh process: takes the desired state from the configuration source, hands it to the
+//! background thread to apply, until an exit signal is received.
 //!
-//! 退出时不删除组网接口：内核中的 WireGuard 照常工作，组网进程重启期间进行中的连接不中断。
+//! On exit the mesh interface is not deleted: WireGuard in the kernel keeps working, and connections in
+//! progress are not interrupted while the mesh process restarts.
 
 use std::future::Future;
 
 use crate::config::{ConfigError, DesiredMesh};
 use crate::status::ReloadReply;
 
-/// 交付的一份期望状态。`reply` 是经本机接口请求重新读取（`nett reload`）、在等应用结果的一方
-/// （design/status.md 第 4.1 节）；启动时的读取与 `SIGHUP` 没有。
+/// A delivered desired state. `reply` is the party waiting for the apply result when a re-read was
+/// requested through the local interface (`nett reload`) (design/status.md section 4.1); the read at
+/// startup and `SIGHUP` have none.
 pub struct Delivery {
     pub desired: Result<DesiredMesh, ConfigError>,
     pub reply: Option<ReloadReply>,
 }
 
-/// 期望状态的来源。实验构建从本地文件读取；接入 Hub 之后由 nett-node 经本机接口提供
-/// （design/prototype.md 第 3 节）。
+/// Source of the desired state. Lab builds read from a local file; once joined to the Hub, nett-node
+/// provides it through the local interface (design/prototype.md section 3).
 pub trait ConfigSource {
-    /// 下一份期望状态；`None` 表示来源已关闭。
+    /// The next desired state; `None` means the source is closed.
     fn next(&mut self) -> impl Future<Output = Option<Delivery>> + Send;
 }
 
-/// 接收期望状态的一方（组网进程的后台线程）。调用可能阻塞，由 [`run`] 放到阻塞线程池中执行。
+/// The party that receives the desired state (the mesh process's background thread). A call may block and
+/// is run by [`run`] on the blocking thread pool.
 pub trait Applier: Send + 'static {
     fn apply(&mut self, delivery: Delivery);
 }
@@ -32,7 +36,8 @@ pub enum RunError {
     Panicked(String),
 }
 
-/// 把配置来源交付的期望状态逐份交给 `applier`，直到来源关闭或收到退出信号。
+/// Hands the desired states delivered by the configuration source to `applier` one by one, until the
+/// source is closed or an exit signal is received.
 pub async fn run<S, A>(
     mut source: S,
     mut applier: A,

@@ -1,4 +1,4 @@
-//! Hub 测试共用：临时目录、一个签好的站点、启动 Hub。
+//! Shared by Hub tests: temporary directory, a signed site, starting the Hub.
 
 #![allow(dead_code)]
 
@@ -36,7 +36,8 @@ pub fn name(s: &str) -> NodeName {
     s.parse().expect("valid name")
 }
 
-/// 一台机器的身份密钥：它的公钥登记在站点中，Hub 据此认出它。
+/// A machine's identity key: its public key is registered in the site, and the Hub recognizes the
+/// machine by it.
 pub fn identity(n: u8) -> StaticSecret {
     StaticSecret::from([n; 32])
 }
@@ -56,7 +57,7 @@ pub fn tcp(port: u16) -> PortRange {
     }
 }
 
-/// 站点：public 的 edge-vps（身份密钥 1）、dial-only 的 mac（2）与 nas（3），签好。
+/// The site: public edge-vps (identity key 1), dial-only mac (2) and nas (3), signed.
 pub fn site(dir: &Path) -> (SiteDir, State) {
     SiteDir::init(dir, "https://nett.invalid").expect("init");
     let site = SiteDir::open(dir).expect("open");
@@ -99,7 +100,7 @@ pub fn resign(site: &SiteDir, state: &mut State) {
     .expect("signed");
 }
 
-/// 一个初始化好、等待关联的 Hub（关联码中的随机密钥是 `SECRET`）。
+/// An initialized Hub waiting to be linked (the random secret in the link code is `SECRET`).
 pub async fn hub(dir: &Path, url: &str) -> Arc<Hub> {
     let db = Db::open(&dir.join("hub.db")).await.expect("database");
     assert!(
@@ -161,7 +162,7 @@ pub async fn push(app: &axum::Router, token: &str, state: &State) -> (StatusCode
     .await
 }
 
-/// 关联好的 Hub：返回 Hub、路由、owner token 与站点。
+/// A linked Hub: returns the Hub, router, owner token and site.
 pub async fn linked(name: &str, url: &str) -> (Arc<Hub>, axum::Router, String, SiteDir, State) {
     let dir = temp_dir(name);
     let (site, state) = site(&dir.join("site"));
@@ -192,7 +193,7 @@ pub fn cert_fingerprint() -> [u8; 32] {
     digest.as_ref().try_into().expect("32 bytes")
 }
 
-/// 启动 Hub 的 HTTPS 服务，返回它的地址。
+/// Starts the Hub's HTTPS service and returns its address.
 pub async fn serve(hub: Arc<Hub>) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -215,7 +216,7 @@ pub async fn serve(hub: Arc<Hub>) -> String {
     format!("https://127.0.0.1:{port}")
 }
 
-/// Hub 的身份公钥（`hub()` 用的私钥是 `[200; 32]`）。
+/// The Hub's identity public key (the private key used by `hub()` is `[200; 32]`).
 pub fn hub_key() -> nett_proto::token::Bytes32 {
     nett_proto::token::Bytes32(PublicKey::from(&StaticSecret::from([200; 32])).to_bytes())
 }

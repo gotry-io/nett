@@ -1,5 +1,7 @@
-//! Hub 的核心（design/hub.md 第 4 节）：保存推送的站点，按 nett-site 的同一份逻辑为每台机器组成期望状态，
-//! 站点变化时通知各条节点连接。Hub 没有能签名的钥匙：推送的签名产物逐份按关联时固定的信任锚验证。
+//! The Hub core (design/hub.md section 4): stores the pushed site, composes each machine's desired
+//! state using the same nett-site logic, and notifies node connections when the site changes. The
+//! Hub has no key that can sign: each pushed signed artifact is verified against the trust anchor
+//! pinned at link time.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -25,12 +27,13 @@ pub enum PushError {
     Db(#[from] DbError),
 }
 
-/// 当前的站点：代数、站点状态，以及组成好的各台机器的期望状态（mesh 分区的内容）。
+/// The current site: generation, site state, and the composed desired state of each machine (the
+/// content of the mesh partition).
 pub struct Site {
     pub generation: u64,
     pub state: State,
     pub desired: HashMap<NodeId, Vec<u8>>,
-    /// 机器的身份公钥 → 节点 ID：节点连接时据此认出它。
+    /// A machine's identity public key → node ID: used to recognize a node when it connects.
     pub by_identity: HashMap<[u8; 32], NodeId>,
     pub revoked: HashSet<NodeId>,
 }
@@ -67,11 +70,11 @@ pub struct Hub {
     pub url: String,
     site: RwLock<Option<Arc<Site>>>,
     changes: watch::Sender<u64>,
-    /// 每台机器当前的连接：新的连接接替旧的。
+    /// The current connection of each machine: a new connection replaces the old one.
     live: Mutex<HashMap<NodeId, Arc<Notify>>>,
 }
 
-/// 入网被拒绝的原因，原样告诉那台机器（protocol.md 第 4.3 节）。
+/// The reason an enrollment is rejected, told to that machine as is (protocol.md section 4.3).
 #[derive(Debug, thiserror::Error)]
 pub enum EnrollError {
     #[error("{0}")]
@@ -111,7 +114,8 @@ impl Hub {
         self.changes.subscribe()
     }
 
-    /// 登记一条节点连接，返回它被接替时的通知；同一台机器原来的连接随之结束。
+    /// Registers a node connection and returns the notification for when it is replaced; the same
+    /// machine's previous connection ends with it.
     pub async fn connected(&self, node: &NodeId) -> Arc<Notify> {
         let notify = Arc::new(Notify::new());
         if let Some(old) = self.live.lock().await.insert(node.clone(), notify.clone()) {
@@ -138,7 +142,8 @@ impl Hub {
             .map_err(|e| PushError::Rejected(format!("stored trust anchors: {e}")))
     }
 
-    /// 在 Hub 一侧发生、站点还没有取回的事（design/hub.md 第 4 节）。
+    /// Events that happen on the Hub side and that the site has not yet fetched (design/hub.md
+    /// section 4).
     pub async fn updates(&self) -> Result<Updates, PushError> {
         let mut updates = Updates::default();
         for row in self.db.updates().await? {
@@ -165,13 +170,15 @@ impl Hub {
         Ok(updates)
     }
 
-    /// 接收一份推送的站点状态（design/hub.md 第 4 节）：信任锚必须是关联时固定的那一份；先用上 Hub 一侧
-    /// 发生的事，再逐份验证签名产物；版本低于已保存的、或与已保存的版本相同而内容不同的整份拒绝；已撤销的
-    /// 不能恢复。
+    /// Accepts a pushed site state (design/hub.md section 4): the trust anchor must be the one
+    /// pinned at link time; first apply what happened on the Hub
+    /// side, then verify the signed artifacts one by one; a version lower than the stored one, or the
+    /// same version as the stored one with different content, is rejected as a whole; a revoked machine
+    /// cannot be restored.
     pub async fn push(&self, pushed: State, now: i64) -> Result<u64, PushError> {
         let anchors = self.anchors().await?;
         let mut current = self.site.write().await;
-        // 推送的状态中已经有了的事不再保留
+        // Events already contained in the pushed state are no longer kept
         for row in self.db.updates().await? {
             let machine = row
                 .node_id
@@ -199,7 +206,8 @@ impl Hub {
             .await?
             .apply(&mut state)
             .map_err(|e| PushError::Rejected(e.to_string()))?;
-        // 同一份站点再推一次（例如上一次推送之后没有收到回复）：不换代数，各台机器不用重新应用
+        // The same site pushed again (for example no reply was received after the last push): the
+        // generation does not change and machines do not need to apply again
         if let Some(site) = current.as_ref()
             && site.state == state
         {
@@ -210,7 +218,7 @@ impl Hub {
         self.commit(&mut current, state, now).await
     }
 
-    /// 换一个代数保存并下发。
+    /// Saves with a new generation and distributes it.
     async fn commit(
         &self,
         current: &mut Option<Arc<Site>>,
@@ -236,7 +244,8 @@ impl Hub {
         Ok(generation)
     }
 
-    /// 把 Hub 一侧的一件事用到当前的站点上；站点因此变了时换代数下发。
+    /// Applies a Hub-side event to the current site; when the site changes as a result, a new
+    /// generation is distributed.
     async fn apply(&self, updates: &Updates, now: i64) -> Result<(), PushError> {
         let anchors = self.anchors().await?;
         let mut current = self.site.write().await;
@@ -265,8 +274,10 @@ impl Hub {
         self.commit(current, state, now).await.map(|_| ())
     }
 
-    /// 一台新机器入网（design/hub.md 第 6 节）：站点中这个节点 ID 的机器正在等待入网、token 没有过期，准入
-    /// 证明能用它的节点策略中的入网公钥验证，证明中的身份公钥就是握手用的那一把。
+    /// A new machine joins (design/hub.md section 6): the machine with this node ID in the site is
+    /// waiting to join, the token has not expired, and the admission
+    /// proof verifies with the enrollment public key in its node policy, and the identity public key in
+    /// the proof is the one used for the handshake.
     pub async fn enroll(
         &self,
         node_id: &str,
@@ -284,7 +295,8 @@ impl Hub {
             PushError::Db(e) => EnrollError::Db(e),
             other => refuse(other.to_string()),
         })?;
-        // 检查与保存在同一把锁里：两台机器同时用同一个 token 时只有一台成功
+        // The check and the save are under the same lock: when two machines use the same token at
+        // once only one succeeds
         let mut current = self.site.write().await;
         let site = current
             .clone()
@@ -320,7 +332,8 @@ impl Hub {
             policy: policy.signed.clone(),
             proof,
         };
-        // 握手的身份公钥就是证明中的那一把：token 落到别人手里，也冒充不了这台机器以外的身份
+        // The handshake's identity public key is the one in the proof: even if the token falls into
+        // someone else's hands, it cannot impersonate any identity other than this machine's
         if proof_keys(&material).is_none_or(|k| k.identity.as_bytes() != identity) {
             return Err(refuse(
                 "the admission proof is not for the identity key of this connection".into(),
@@ -345,7 +358,8 @@ impl Hub {
         Ok(node)
     }
 
-    /// 一台机器自行退出（`nett leave`，auth.md 第 8.3 节）：降低权限，当场生效。
+    /// A machine leaves on its own (`nett leave`, auth.md section 8.3): lowers privileges,
+    /// effective immediately.
     pub async fn leave(&self, node: &NodeId, now: i64) -> Result<(), PushError> {
         self.db.put_left(node.as_str(), now).await?;
         let updates = Updates {
@@ -357,7 +371,8 @@ impl Hub {
         Ok(())
     }
 
-    /// 记下 Hub 得知的公网地址（design/hub.md 第 5 节）；变了时换代数下发。
+    /// Records the public address learned by the Hub (design/hub.md section 5); when it changes, a
+    /// new generation is distributed.
     pub async fn learned(
         &self,
         node: &NodeId,
@@ -386,7 +401,8 @@ impl Hub {
     }
 }
 
-/// 准入证明中的公钥（不验证签名：验证在 `record_enrollment` 中）。
+/// The public key in the admission proof (the signature is not verified: verification is in
+/// `record_enrollment`).
 fn proof_keys(material: &AdmissionMaterial) -> Option<NodeKeys> {
     let value = nett_trust::canonical::parse_canonical(&material.proof.payload).ok()?;
     let doc: AdmissionProofDoc = serde::Deserialize::deserialize(&value).ok()?;
@@ -396,7 +412,7 @@ fn proof_keys(material: &AdmissionMaterial) -> Option<NodeKeys> {
     })
 }
 
-/// 推送的站点状态能不能接受。
+/// Whether a pushed site state can be accepted.
 pub fn verify(anchors: &TrustAnchorsDoc, old: Option<&State>, new: &State) -> Result<(), String> {
     if new.trust_anchors != *anchors {
         return Err("the site's trust anchors differ from the ones linked to this Hub".into());
@@ -480,7 +496,8 @@ pub fn verify(anchors: &TrustAnchorsDoc, old: Option<&State>, new: &State) -> Re
             }
             _ => {}
         }
-        // 去掉全部宣告网段只是收窄：产物可以没有，但签过的最高版本不能变小
+        // Removing all advertised routes is only a narrowing: the artifact may be absent, but the
+        // highest signed version cannot decrease
         let highest = |m: &nett_site::state::Machine| {
             m.routes_version
                 .max(m.routes_signed.as_ref().map_or(0, |r| r.version))

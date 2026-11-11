@@ -1,7 +1,9 @@
-//! 单端口转发（design/mesh.md 第 5.1、5.2 节）：按 `mac1` 和会话索引判断去向，按握手应答更新成员地址。
-//! 成员的地址是 UDP 来源，或已认证的 TLS 连接（第 5.3 节）。
+//! Single-port forwarding (design/mesh.md sections 5.1, 5.2): decides the destination by `mac1` and
+//! session index, and updates member addresses from handshake responses. A member's address is a
+//! UDP source or an authenticated TLS connection (section 5.3).
 //!
-//! 纯逻辑：时间由调用方传入，返回要做的事；收发由 [`crate::server`] 负责。
+//! Pure logic: the caller passes in the time and gets back what to do; sending and receiving are
+//! handled by [`crate::server`].
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -12,37 +14,41 @@ use nett_trust::keys::X25519PublicKey;
 
 use crate::wg::{self, Index, Mac1Key, Message};
 
-/// 一个中继最多服务的成员数：握手发起时要逐个试算 `mac1`。
+/// The maximum number of members one relay serves: a handshake initiation requires trying `mac1`
+/// for each one.
 pub const MAX_MEMBERS: usize = 1024;
-/// 待定表项与正式表项的上限。
+/// Upper limits for pending entries and for established entries.
 const MAX_PENDING: usize = 4096;
 const MAX_SESSIONS: usize = 16 * 1024;
-/// 接收方还没有地址时，一份握手发起最多转发给几个候选地址（design/mesh.md 第 5.2 节）。
+/// When the receiver has no address yet, the maximum number of candidate addresses a handshake
+/// initiation is forwarded to (design/mesh.md section 5.2).
 const MAX_CANDIDATES: usize = 4;
-/// 待定表项的寿命：WireGuard 5 秒后会以新索引重试握手。
+/// Lifetime of a pending entry: WireGuard retries the handshake with a new index after 5 seconds.
 const PENDING_TTL: Duration = Duration::from_secs(5);
-/// 会话空闲多久后删除：WireGuard 的会话最长 180 秒（REJECT_AFTER_TIME），过后必然重新握手。
+/// How long an idle session is kept before deletion: a WireGuard session lasts at most 180 seconds
+/// (REJECT_AFTER_TIME), after which a new handshake is necessarily required.
 const SESSION_IDLE: Duration = Duration::from_secs(180);
-/// 同一个成员两次绑定变化的最短间隔。
+/// Minimum interval between two binding changes for the same member.
 const BIND_MIN_INTERVAL: Duration = Duration::from_secs(1);
-/// 新绑定后这么久收不到来自新地址的数据，恢复旧绑定。
+/// After a new binding, if no data arrives from the new address within this time, the old binding
+/// is restored.
 const BIND_CONFIRM: Duration = Duration::from_secs(10);
 
-/// 一条 TLS 连接（design/mesh.md 第 5.3 节），由收发循环编号。
+/// A TLS connection (design/mesh.md section 5.3), numbered by the receive/send loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnId(pub u64);
 
-/// 成员的地址：UDP 来源，或已认证的 TLS 连接。
+/// A member's address: a UDP source or an authenticated TLS connection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerAddr {
     Udp(SocketAddr),
     Tls(ConnId),
 }
 
-/// 保存状态的格式版本。
+/// Format version of the saved state.
 const STATE_V1: u32 = 1;
 
-/// 重启时恢复的状态（design/mesh.md 第 5.2 节）。
+/// State restored at restart (design/mesh.md section 5.2).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayState {
@@ -63,15 +69,16 @@ pub struct Binding {
 pub struct SavedSession {
     pub index: Index,
     pub owner: X25519PublicKey,
-    /// 保存时已经空闲了多久。
+    /// How long it had been idle when saved.
     pub idle_ms: u64,
 }
 
-/// 中继分配中的一个成员（design/mesh.md 第 5.2 节）。
+/// A member in the relay's allocation (design/mesh.md section 5.2).
 #[derive(Debug, Clone)]
 pub struct AssignedMember {
     pub public_key: X25519PublicKey,
-    /// `public` 成员的地址随分配下发；`dial-only` 成员的地址由握手确定。
+    /// The address of a `public` member is delivered with the allocation; the address of a
+    /// `dial-only` member is determined by the handshake.
     pub address: Option<SocketAddr>,
     pub token: [u8; 32],
 }
@@ -86,7 +93,8 @@ pub enum AssignmentError {
     UnknownMember(X25519PublicKey),
 }
 
-/// 丢弃的原因，供计数和排障；中继对被丢弃的包不作任何响应。
+/// Reason for a drop, for counting and troubleshooting; the relay sends no response to dropped
+/// packets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Drop {
     NotWireGuard,
@@ -104,11 +112,12 @@ pub enum Drop {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// 原样转发到这个地址。
+    /// Forward as is to this address.
     Forward(PeerAddr),
-    /// 接收方还没有地址：原样转发到每个候选地址（design/mesh.md 第 5.2 节）。
+    /// The receiver has no address yet: forward as is to each candidate address (design/mesh.md
+    /// section 5.2).
     ForwardEach(Vec<PeerAddr>),
-    /// 回给来源一份应答（探测）。
+    /// Send a reply (probe) back to the source.
     Reply(Vec<u8>),
     Drop(Drop),
 }
@@ -119,7 +128,8 @@ struct Member {
     key_id: KeyId,
     probe_key: ProbeKey,
     bound: Option<PeerAddr>,
-    /// 绑定变化后尚未被新地址上的数据确认：变化前的地址与变化时刻。
+    /// A binding change not yet confirmed by data on the new address: the address before the change
+    /// and the time of the change.
     unconfirmed: Option<(Option<PeerAddr>, Instant)>,
     last_change: Option<Instant>,
 }
@@ -127,7 +137,8 @@ struct Member {
 struct Pending {
     src: PeerAddr,
     receiver: usize,
-    /// 接收方还没有地址时，握手发起转发到的候选地址：应答必须来自其中之一。
+    /// When the receiver has no address yet, the candidate addresses a handshake initiation was
+    /// forwarded to: the response must come from one of them.
     candidates: Vec<PeerAddr>,
     at: Instant,
 }
@@ -191,8 +202,9 @@ impl Relay {
         })
     }
 
-    /// 处理一个来自 `from` 的负载。UDP 来源中的 IPv4 映射地址由调用方先还原为 IPv4；TLS 连接上的消息
-    /// 只在连接认证之后交给这里（[`Relay::authenticate`]）。
+    /// Handles a payload from `from`. An IPv4-mapped address in a UDP source is first restored to
+    /// IPv4 by the caller; messages on a TLS connection are passed in only after the connection is
+    /// authenticated ([`Relay::authenticate`]).
     pub fn handle(&mut self, from: PeerAddr, packet: &[u8], now: Instant, now_ms: u64) -> Outcome {
         if packet.first() == Some(&RELAY_PROBE) {
             return self.probe(from, packet, now_ms);
@@ -247,7 +259,7 @@ impl Relay {
         let Some(receiver) = self.find_by_mac1(signed, mac1) else {
             return Outcome::Drop(Drop::UnknownReceiver);
         };
-        // 会话索引冲突：丢弃，WireGuard 会以新索引重试
+        // Session index collision: drop it, WireGuard retries with a new index
         if self.index_taken(sender, from) {
             return Outcome::Drop(Drop::IndexCollision);
         }
@@ -261,7 +273,8 @@ impl Relay {
         };
         let outcome = match (bound, candidates.as_slice()) {
             (Some(dest), _) => Outcome::Forward(dest),
-            // 先留在待定表中，等另一端的握手发起把它作为候选地址
+            // Stay in the pending table first, until the other end's handshake initiation takes it
+            // as a candidate address
             (None, []) => Outcome::Drop(Drop::ReceiverUnbound),
             (None, [dest]) => Outcome::Forward(*dest),
             (None, _) => Outcome::ForwardEach(candidates.clone()),
@@ -278,8 +291,9 @@ impl Relay {
         outcome
     }
 
-    /// 还没有地址的 `receiver` 可能在哪里：它发出的握手发起的来源。它的握手发起以它的某个已分配对端为
-    /// 接收方，仍在待定表中。
+    /// Where a `receiver` that has no address yet might be: the source of the handshake initiation
+    /// it sent. Its handshake initiation took one of its allocated peers as the receiver and is
+    /// still in the pending table.
     fn candidates_for(&self, receiver: usize, from: PeerAddr) -> Vec<PeerAddr> {
         let mut out = Vec::new();
         for p in self.pending.values() {
@@ -313,7 +327,9 @@ impl Relay {
             return Outcome::Drop(Drop::NoPending);
         };
         let responder = pending.receiver;
-        // 握手应答只接受来自应答方当前绑定地址的；应答方还没有地址时，只接受来自转发过的候选地址的
+        // A handshake response is accepted only from the responder's current bound address; when
+        // the responder has no address yet, only from a candidate address the initiation was
+        // forwarded to
         let from_responder = match self.members[responder].bound {
             Some(bound) => bound == from,
             None => pending.candidates.contains(&from),
@@ -330,8 +346,9 @@ impl Relay {
         if self.sessions.len() + 2 > MAX_SESSIONS {
             return Outcome::Drop(Drop::TableFull);
         }
-        // 对端针对发起方的新地址发回了应答：更新发起方的绑定，应答方还没有地址时一起绑定
-        // （限速，之后等新地址上的数据确认）
+        // The peer sent a response to the initiator's new address: update the initiator's binding,
+        // and when the responder has no address yet, bind it as well (rate limited, then confirmed
+        // later by data on the new address)
         let new_addr = pending.src;
         if !self.may_bind(initiator, new_addr, now) || !self.may_bind(responder, from, now) {
             return Outcome::Drop(Drop::BindRateLimited);
@@ -384,7 +401,7 @@ impl Relay {
         }
     }
 
-    /// 新地址上来了数据：绑定得到确认。
+    /// Data arrived on the new address: the binding is confirmed.
     fn confirm_binding(&mut self, from: PeerAddr) {
         for m in &mut self.members {
             if m.unconfirmed.is_some() && m.bound == Some(from) {
@@ -400,9 +417,11 @@ impl Relay {
         }
     }
 
-    /// 验证一个中继探测，返回发出它的成员和应答。应答中回显这个成员绑定的 WireGuard 地址，即它的映射
-    /// 地址（design/mesh.md 第 6.1 节）：探测本身从组网进程自己的端口发出，来源不是 WireGuard 的映射。
-    /// 还没有绑定 UDP 地址时回显探测的来源；经 TLS 时没有映射地址可言。
+    /// Verifies a relay probe and returns the member that sent it and the reply. The reply echoes
+    /// the WireGuard address bound for this member, which is its mapped address (design/mesh.md
+    /// section 6.1): the probe itself is sent from the mesh process's own port, so its source is
+    /// not the WireGuard mapping. When no UDP address is bound yet, the probe's source is echoed;
+    /// over TLS there is no mapped address.
     fn verify_probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Option<(usize, Vec<u8>)> {
         let head = OuterProbe::peek(packet)?;
         let index = self.members.iter().position(|m| m.key_id == head.key_id)?;
@@ -422,8 +441,10 @@ impl Relay {
         Some((index, reply.to_vec()))
     }
 
-    /// TLS 连接上的第一条消息（design/mesh.md 第 5.3 节）：必须是带认证的中继探测，据此认出成员。
-    /// 认证通过时返回探测应答；这个成员还没有地址时，地址就是这条连接（令牌已经证明了它的身份）。
+    /// The first message on a TLS connection (design/mesh.md section 5.3): it must be an
+    /// authenticated relay probe, from which the member is identified. On success returns the probe
+    /// reply; when this member has no address yet, its address is this connection (the token
+    /// already proves its identity).
     pub fn authenticate(&mut self, conn: ConnId, packet: &[u8], now_ms: u64) -> Option<Vec<u8>> {
         if packet.first() != Some(&RELAY_PROBE) {
             return None;
@@ -436,7 +457,8 @@ impl Relay {
         Some(reply)
     }
 
-    /// TLS 连接关闭：绑定在它上面的成员没有地址了，重新连上并认证、或经握手应答时再绑定。
+    /// A TLS connection closed: the member bound to it has no address, and is bound again when it
+    /// reconnects and authenticates or via a handshake response.
     pub fn closed(&mut self, conn: ConnId) {
         let gone = Some(PeerAddr::Tls(conn));
         for m in &mut self.members {
@@ -451,7 +473,7 @@ impl Relay {
         self.pending.retain(|_, p| p.src != PeerAddr::Tls(conn));
     }
 
-    /// 定期调用：清理过期的表项，恢复未被确认的绑定。
+    /// Called periodically: removes expired entries and restores bindings that were not confirmed.
     pub fn expire(&mut self, now: Instant) {
         self.pending
             .retain(|_, p| now.saturating_duration_since(p.at) < PENDING_TTL);
@@ -467,14 +489,15 @@ impl Relay {
         }
     }
 
-    /// 要保存的状态：地址绑定与正式表项（design/mesh.md 第 5.2 节）。只有会话索引和地址，没有密钥。
+    /// The state to save: address bindings and established entries (design/mesh.md section 5.2).
+    /// Only session indexes and addresses, no keys.
     pub fn snapshot(&self, now: Instant) -> RelayState {
         RelayState {
             v: STATE_V1,
             bindings: self
                 .members
                 .iter()
-                // TLS 连接在重启后不复存在，只保存 UDP 地址
+                // TLS connections do not exist after a restart, so only UDP addresses are saved
                 .filter_map(|m| match m.bound {
                     Some(PeerAddr::Udp(addr)) => Some(Binding {
                         public_key: m.public_key,
@@ -496,7 +519,8 @@ impl Relay {
         }
     }
 
-    /// 恢复保存的状态。只恢复仍在分配中的成员，过期或冲突的表项丢弃。
+    /// Restores saved state. Only members still in the allocation are restored; expired or
+    /// conflicting entries are dropped.
     pub fn restore(&mut self, state: &RelayState, now: Instant) {
         if state.v != STATE_V1 {
             return;
@@ -550,7 +574,8 @@ mod tests {
         PeerAddr::Udp(sock(s))
     }
 
-    /// A 是 `public`（地址随分配下发），B、C 是 `dial-only`；只分配了 A–B。
+    /// A is `public` (its address is delivered with the allocation), B and C are `dial-only`; only
+    /// A-B is allocated.
     fn relay() -> Relay {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: X25519PublicKey::from_bytes(k),
@@ -592,7 +617,7 @@ mod tests {
         let mut r = relay();
         let now = Instant::now();
         handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
-        // A → B：按接收方索引 11（B 的）送到 B 刚绑定的地址
+        // A → B: delivered by receiver index 11 (B's) to the address B was just bound to
         assert_eq!(
             r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
             Outcome::Forward(addr("203.0.113.5:50000"))
@@ -611,7 +636,7 @@ mod tests {
     fn rejects_unassigned_pairs_and_unknown_receivers() {
         let mut r = relay();
         let now = Instant::now();
-        // C 与 A 没有分配：A 的应答不被接受
+        // C has no allocation with A: A's response is not accepted
         assert!(matches!(
             r.handle(addr("203.0.113.9:1"), &initiation(5, &A), now, 0),
             Outcome::Forward(_)
@@ -620,14 +645,14 @@ mod tests {
             r.handle(addr("198.51.100.1:41820"), &response(6, 5, &C), now, 0),
             Outcome::Drop(Drop::NotAssigned)
         );
-        // 接收方不是任何成员
+        // The receiver is not any member
         assert_eq!(
             r.handle(addr("203.0.113.9:1"), &initiation(7, &[9; 32]), now, 0),
             Outcome::Drop(Drop::UnknownReceiver)
         );
     }
 
-    /// D、E 都是 `dial-only`，都还没有地址。
+    /// D and E are both `dial-only` and neither has an address yet.
     fn dial_only_pair() -> Relay {
         let member = |k: [u8; 32]| AssignedMember {
             public_key: X25519PublicKey::from_bytes(k),
@@ -649,12 +674,14 @@ mod tests {
         let mut r = dial_only_pair();
         let now = Instant::now();
         let (d, e) = (addr("203.0.113.4:40000"), addr("192.0.2.5:50000"));
-        // D 先到：E 的地址未知，握手发起留在待定表中
+        // D arrives first: E's address is unknown, so the handshake initiation stays in the pending
+        // table
         assert_eq!(
             r.handle(d, &initiation(41, &E), now, 0),
             Outcome::Drop(Drop::ReceiverUnbound)
         );
-        // E 的握手发起转发给 D 可能在的地址；D 从那里应答，两端一起绑定
+        // E's handshake initiation is forwarded to the address D might be at; D replies from there
+        // and both ends are bound together
         assert_eq!(
             r.handle(e, &initiation(51, &D), now, 0),
             Outcome::Forward(d)
@@ -678,12 +705,14 @@ mod tests {
             r.handle(addr("198.51.100.66:1"), &response(42, 51, &E), now, 0),
             Outcome::Drop(Drop::ResponseFromUnbound)
         );
-        // 从未转发过的握手发起（D 的）得不到应答方的地址
+        // A handshake initiation that was never forwarded (D's) does not get the responder's
+        // address
         assert_eq!(
             r.handle(e, &response(52, 41, &D), now, 0),
             Outcome::Drop(Drop::ResponseFromUnbound)
         );
-        // 以没有分配给 D 的成员（C）为接收方的握手发起，来源不是 D 的候选地址
+        // A handshake initiation whose receiver is a member not allocated to D (C): the source is
+        // not a candidate address of D
         let mut r = dial_only_pair();
         r.handle(addr("198.51.100.3:1"), &initiation(61, &C), now, 0);
         assert_eq!(
@@ -720,7 +749,8 @@ mod tests {
         let t0 = Instant::now();
         handshake(&mut r, "203.0.113.5:50000", t0, 11, 22);
         r.handle(addr("203.0.113.5:50000"), &data(22), t0, 0);
-        // B 换了地址并重新握手；之后新地址上一直没有数据：10 秒后恢复旧绑定
+        // B changed address and handshook again; afterwards no data arrives on the new address:
+        // after 10 seconds the old binding is restored
         let t1 = t0 + Duration::from_secs(30);
         handshake(&mut r, "203.0.113.6:50001", t1, 13, 24);
         r.expire(t1 + BIND_CONFIRM);
@@ -767,7 +797,8 @@ mod tests {
         handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
         let saved = r.snapshot(now + Duration::from_secs(1));
         let text = serde_json::to_string(&saved).expect("serialize");
-        // 重启：新的中继只有分配，没有索引表；恢复后照常转发两个方向的数据
+        // Restart: the new relay has only the allocation and no index table; after restoring, data
+        // in both directions is forwarded as usual
         let mut restarted = relay();
         assert_eq!(
             restarted.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
@@ -782,7 +813,7 @@ mod tests {
             restarted.handle(addr("203.0.113.5:50000"), &data(22), now, 0),
             Outcome::Forward(addr("198.51.100.1:41820"))
         );
-        // 已经过期的表项不恢复
+        // Entries that have already expired are not restored
         let mut stale = relay();
         stale.restore(&r.snapshot(now + SESSION_IDLE), now);
         assert_eq!(stale.table_sizes(), (0, 0));
@@ -808,10 +839,10 @@ mod tests {
             (decoded.kind, decoded.seq, decoded.observed),
             (RELAY_REPLY, 4, sock("203.0.113.5:40000"))
         );
-        // 用另一个成员的令牌
+        // Use another member's token
         let wrong = probe.encode(&ProbeKey::from_token(&[3; 32]));
         assert_eq!(r.probe(from, &wrong, 1_000), Outcome::Drop(Drop::BadProbe));
-        // 过期
+        // Expired
         assert_eq!(
             r.probe(from, &probe.encode(&key), 100_000),
             Outcome::Drop(Drop::BadProbe)
@@ -830,7 +861,8 @@ mod tests {
             seq: 1,
             sent_ms: 1_000,
         };
-        // 探测从组网进程自己的端口发出；回显的是握手时绑定的 WireGuard 映射
+        // The probe is sent from the mesh process's own port; what is echoed is the WireGuard
+        // mapping bound during the handshake
         let Outcome::Reply(reply) = r.probe(addr("203.0.113.5:40999"), &probe.encode(&key), 1_000)
         else {
             panic!("expected a reply");
@@ -851,11 +883,12 @@ mod tests {
             seq: 1,
             sent_ms: 1_000,
         };
-        // 不是探测、令牌不对：都不认证
+        // Not a probe, or wrong token: neither authenticates
         assert_eq!(r.authenticate(conn, &initiation(11, &A), 1_000), None);
         let wrong = probe.encode(&ProbeKey::from_token(&[9; 32]));
         assert_eq!(r.authenticate(conn, &wrong, 1_000), None);
-        // B 认证后，连接就是 B 的地址：A 发给 B 的握手经这条连接送达
+        // After B authenticates, the connection is B's address: the handshake A sends to B is
+        // delivered over this connection
         let reply = r
             .authenticate(conn, &probe.encode(&key), 1_000)
             .expect("authenticated");
@@ -874,7 +907,8 @@ mod tests {
             r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
             Outcome::Forward(tls)
         );
-        // 连接关闭：B 没有地址了，发给它的数据丢弃；重新连上并认证后恢复
+        // Connection closed: B has no address, and data sent to it is dropped; after it reconnects
+        // and authenticates it is restored
         r.closed(conn);
         assert_eq!(
             r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
@@ -887,7 +921,7 @@ mod tests {
             r.handle(addr("198.51.100.1:41820"), &data(11), now, 0),
             Outcome::Forward(PeerAddr::Tls(again))
         );
-        // 只保存 UDP 地址
+        // Only UDP addresses are saved
         assert!(
             r.snapshot(now)
                 .bindings

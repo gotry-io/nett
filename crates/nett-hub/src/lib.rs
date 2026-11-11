@@ -1,5 +1,6 @@
-//! Hub 的服务端（design/hub.md）：数据库、站点的验证与组成、HTTP 接口、节点网关。可执行文件 `nett-hub` 在
-//! `main.rs` 中；集成测试经由同一个路由调用。
+//! The Hub server (design/hub.md): database, site verification and composition, HTTP interface,
+//! node gateway. The executable `nett-hub` is in `main.rs`; integration tests call through the same
+//! router.
 
 pub mod api;
 pub mod db;

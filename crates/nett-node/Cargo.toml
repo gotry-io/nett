@@ -7,8 +7,10 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# 每台机器上的控制代理（design/hub.md 第 5 节）：连接 Hub，把期望状态交给组网进程，上报状态。不监听端口，
-# 不执行 shell，不访问 Docker（硬性规则 1、2、9）。也提供签名工具调用 Hub API 的 HTTPS 客户端
+# The control agent on each machine (design/hub.md section 5): connects to the Hub, hands the
+# desired state to the mesh process, and reports status. It listens on no port, executes no shell
+# and does not access Docker (hard rules 1, 2, 9). It also provides the HTTPS client the signing
+# tool uses to call the Hub API
 
 [lints]
 workspace = true
@@ -25,7 +27,8 @@ nett-core.workspace = true
 nett-mesh.workspace = true
 nett-proto.workspace = true
 nett-transport.workspace = true
-# 入网时用 token 中的入网私钥签准入证明（design/hub.md 第 6 节）
+# At enrollment, signs the admission proof with the enrollment private key from the token
+# (design/hub.md section 6)
 nett-trust = { workspace = true, features = ["signing"] }
 prost.workspace = true
 prost-types.workspace = true

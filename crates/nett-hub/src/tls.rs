@@ -1,4 +1,5 @@
-//! 没有反向代理时 Hub 自己终止 TLS（design/hub.md 第 8 节）：实验拓扑、自签证书的部署与测试。
+//! The Hub terminates TLS itself when there is no reverse proxy (design/hub.md section 8): lab
+//! topologies, self-signed deployments and tests.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -32,7 +33,8 @@ pub fn acceptor(cert: &Path, key: &Path) -> Result<tokio_rustls::TlsAcceptor, Tl
     Ok(tokio_rustls::TlsAcceptor::from(Arc::new(config)))
 }
 
-/// 没有反向代理时直接终止 TLS（design/hub.md 第 8 节）。握手失败的连接只记一条调试日志。
+/// Terminates TLS directly when there is no reverse proxy (design/hub.md section 8). A connection
+/// whose handshake fails gets only a debug log line.
 pub struct TlsListener {
     tcp: tokio::net::TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,

@@ -7,8 +7,9 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# 从 proto/ 生成 nett-proto 的 Rust 类型（需要 PATH 中有 protoc）。生成的文件提交进仓库，CI 重新生成并
-# 检查没有差别；构建 nett 本身不需要 protoc
+# Generates the Rust types of nett-proto from proto/ (needs protoc in PATH). The generated file is
+# committed to the repository, and CI regenerates it and checks that there is no difference;
+# building nett itself does not need protoc
 
 [lints]
 workspace = true

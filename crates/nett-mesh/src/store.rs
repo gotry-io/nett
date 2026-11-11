@@ -1,6 +1,8 @@
-//! 本机的信任存储（design/mesh.md 第 4.2 节）：固定的节点 ID 与信任锚、撤销记录、各签名产物已生效的
-//! 版本与哈希，以及最近一次整份接受的期望状态。验证以它为基准，期望状态文件只是输入：改写文件、重启
-//! 进程，都不能换掉信任锚，也不能让旧版本的产物或被撤销的成员重新生效。
+//! This machine's trust store (design/mesh.md section 4.2): the pinned node ID and trust anchors,
+//! revocations, the version and hash in effect for each signed artifact, and the desired state most
+//! recently accepted as a whole. Verification takes it as the baseline and the desired state file is only
+//! input: rewriting the file or restarting the process cannot replace the trust anchors, nor make an
+//! artifact of an older version or a revoked member take effect again.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
@@ -16,8 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DesiredMeshDoc, MAX_DESIRED_BYTES, read_bounded};
 
-/// 信任存储的默认位置（design/mesh.md 第 4.2 节）。Linux 上由 systemd 单元的 `StateDirectory` 建立；
-/// macOS 上在 `sudo nett install` 建立的 root 专属目录中。容器镜像用 `--state` 放进挂载目录。
+/// Default location of the trust store (design/mesh.md section 4.2). On Linux it is created by the
+/// systemd unit's `StateDirectory`; on macOS it is in the root-only directory created by
+/// `sudo nett install`. Container images put it in a mounted directory with `--state`.
 #[cfg(target_os = "macos")]
 pub const DEFAULT_STATE_DIR: &str = "/Library/Application Support/nett/state";
 #[cfg(not(target_os = "macos"))]
@@ -27,7 +30,7 @@ pub const TRUST_FILE: &str = "trust.json";
 pub const ACCEPTED_FILE: &str = "accepted.json";
 const FORMAT_V1: u32 = 1;
 
-/// 保存的内容。
+/// The saved content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Saved {
@@ -58,7 +61,7 @@ impl Saved {
     }
 }
 
-/// 一份带版本号的签名产物已生效的版本与哈希。
+/// The version and hash in effect for a versioned signed artifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VersionRecord {
@@ -75,7 +78,8 @@ pub enum FloorError {
 }
 
 impl VersionRecord {
-    /// 一份产物与本机接受过的这一份相比：版本更高，或版本与内容都相同，才可以生效。
+    /// An artifact compared with the one this machine has accepted: it may take effect only if the version is
+    /// higher, or both version and content are identical.
     pub fn admits(&self, version: u64, hash: &Sha256Digest) -> Result<(), FloorError> {
         if version > self.version || (version == self.version && *hash == self.hash) {
             Ok(())
@@ -90,17 +94,19 @@ impl VersionRecord {
     }
 }
 
-/// 信任存储放在哪里：本机目录（[`DirBackend`]），或内存（[`MemoryBackend`]，测试与实验中用）。
+/// Where the trust store lives: a local directory ([`DirBackend`]), or memory ([`MemoryBackend`], used in
+/// tests and lab scenarios).
 pub trait Backend: Send {
-    /// 读一个文件；不存在时为 `Ok(None)`。
+    /// Reads a file; `Ok(None)` when it does not exist.
     fn read(&mut self, name: &str) -> std::io::Result<Option<Vec<u8>>>;
-    /// 整个替换一个文件：中途失败时原来的内容不变。
+    /// Replaces a whole file: if it fails midway the original content is unchanged.
     fn write(&mut self, name: &str, bytes: &[u8]) -> std::io::Result<()>;
-    /// 把读不懂的文件挪到 `<name>.bad`，留给人查看。
+    /// Moves an unreadable file to `<name>.bad` for a person to inspect.
     fn quarantine(&mut self, name: &str) -> std::io::Result<()>;
 }
 
-/// 本机目录：目录 `0700`，文件 `0600`，先写临时文件、落盘，再改名。
+/// Local directory: directory `0700`, files `0600`; writes a temporary file first, syncs to disk, then
+/// renames.
 pub struct DirBackend {
     dir: PathBuf,
 }
@@ -122,7 +128,8 @@ impl Backend for DirBackend {
             .mode(0o700)
             .create(&self.dir)?;
         let tmp = self.dir.join(format!(".{name}.tmp"));
-        // 临时文件名固定：只有组网进程写这个目录，不跟随符号链接
+        // The temporary file name is fixed: only the mesh process writes this directory, and symlinks are not
+        // followed
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -146,7 +153,8 @@ impl Backend for DirBackend {
     }
 }
 
-/// 内存中的信任存储。克隆共享同一份内容，测试据此模拟重启；`fail_writes` 模拟磁盘写不进。
+/// In-memory trust store. Clones share the same content, which tests use to simulate a restart;
+/// `fail_writes` simulates a disk that cannot be written.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBackend {
     files: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
@@ -196,15 +204,17 @@ impl Backend for MemoryBackend {
     }
 }
 
-/// 信任存储：打开时读出保存的内容，每次整份接受期望状态之后写入。
+/// Trust store: reads the saved content when opened, and writes after every whole desired state accepted.
 pub struct TrustStore {
     backend: Box<dyn Backend>,
     saved: Option<Saved>,
-    /// 最近一次写入的期望状态的哈希：期望状态中不签名的部分（路径、节点名）变了也要重写。
+    /// Hash of the desired state most recently written: it must be rewritten when the unsigned parts of the
+    /// desired state (paths, node names) change too.
     accepted_hash: Option<Sha256Digest>,
-    /// 上一次写入失败：内容即使没变也要重写。
+    /// The previous write failed: rewrite even if the content has not changed.
     dirty: bool,
-    /// 打开时遇到的问题。这时还没有事件出口，在第一次应用期望状态时报告。
+    /// Problems met when opening. There is no event sink yet at that point; reported when the first desired
+    /// state is applied.
     problem: Option<String>,
 }
 
@@ -245,7 +255,7 @@ impl TrustStore {
         }
     }
 
-    /// 只在内存中、不落盘的信任存储。
+    /// A trust store that is only in memory and not written to disk.
     pub fn in_memory() -> Self {
         Self::open(Box::new(MemoryBackend::default()))
     }
@@ -262,7 +272,7 @@ impl TrustStore {
         self.problem.take()
     }
 
-    /// 最近一次整份接受的期望状态。
+    /// The desired state most recently accepted as a whole.
     pub fn accepted(&mut self) -> Result<Option<DesiredMeshDoc>, String> {
         let Some(bytes) = self
             .backend
@@ -276,8 +286,10 @@ impl TrustStore {
             .map_err(|e| format!("parsing {ACCEPTED_FILE}: {e}"))
     }
 
-    /// 记下新的内容和这份整份接受的期望状态。内存中的基准总是更新；写不进磁盘时返回原因，下一次重试。
-    /// 先写期望状态再写版本记录：两者之间中断时，保存的期望状态不会落后于版本记录。
+    /// Records the new content and this whole accepted desired state. The in-memory baseline is always
+    /// updated; when it cannot be written to disk the reason is returned and it is retried next time.
+    /// The desired state is written before the version record: if interrupted between the two, the saved
+    /// desired state is never behind the version record.
     pub fn save(&mut self, saved: Saved, accepted: &DesiredMeshDoc) -> Result<(), String> {
         let accepted = serde_json::to_vec(accepted).map_err(|e| e.to_string())?;
         let hash = Sha256Digest::of(&accepted);
@@ -374,7 +386,7 @@ mod tests {
         let mesh = Mesh::new(&[1, 2]);
         let mut doc = mesh.desired(1, vec![]);
         store.save(saved(), &doc).expect("saved");
-        // 只改了不签名的部分（节点名）
+        // Only the unsigned part (node names) changed
         doc.names.clear();
         store.save(saved(), &doc).expect("saved");
         let stored: DesiredMeshDoc =
@@ -401,7 +413,7 @@ mod tests {
         let doc = mesh.desired(1, vec![]);
         backend.set_fail_writes(true);
         assert!(store.save(saved(), &doc).is_err());
-        // 内存中的基准照样更新
+        // The in-memory baseline is updated all the same
         assert_eq!(store.node_id(), Some(&node_id(1)));
         backend.set_fail_writes(false);
         store.save(saved(), &doc).expect("retried");

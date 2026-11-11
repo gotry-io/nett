@@ -1,5 +1,6 @@
-//! Linux 数据面：内核 WireGuard，经 netlink 配置接口、对端和地址（design/mesh.md 第 4 节）。
-//! 需要 `CAP_NET_ADMIN`。
+//! Linux data plane: kernel WireGuard, with the interface, peers and addresses configured through netlink
+//! (design/mesh.md section 4).
+//! Requires `CAP_NET_ADMIN`.
 
 mod filter;
 mod netlink;
@@ -28,7 +29,7 @@ use crate::dataplane::{
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
-/// 系统时钟；误差以内核报告的最大误差为准（[`sys::max_clock_error`]）。
+/// System clock; the error is the maximum error reported by the kernel ([`sys::max_clock_error`]).
 pub struct SystemClock;
 
 impl crate::clock::Clock for SystemClock {
@@ -41,9 +42,11 @@ impl crate::clock::Clock for SystemClock {
     }
 }
 
-/// 拆掉组网进程留在系统里的东西（`nett leave`，design/auth.md 第 8.3 节）：组网进程平时退出时保留接口，重启
-/// 期间连接不断（design/mesh.md 第 4 节）。先删接口，没有了流量再删过滤规则；删接口失败时过滤规则留着，
-/// 保持拒绝（硬性规则 6）。组网进程要先停下。
+/// Tears down what the mesh process leaves in the system (`nett leave`, design/auth.md section 8.3): the
+/// mesh process normally keeps the interface on exit, so connections are not interrupted during a
+/// restart (design/mesh.md section 4). Delete the interface first, and delete the filter rules once
+/// there is no traffic; if deleting the interface fails, the filter rules stay, keeping deny (hard rule
+/// 6). The mesh process must be stopped first.
 pub fn teardown() -> Result<(), DataPlaneError> {
     let mut route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
     rtnl::del_link(&mut route, INTERFACE_NAME).map_err(kernel("delete the mesh interface"))?;
@@ -75,7 +78,7 @@ fn kernel(op: &'static str) -> impl FnOnce(NlError) -> DataPlaneError {
     }
 }
 
-/// dump 期间状态变化时内核标记中断，重试一次。
+/// When the state changes during a dump the kernel marks it interrupted; retry once.
 fn retry_interrupted<T>(mut f: impl FnMut() -> Result<T, NlError>) -> Result<T, NlError> {
     match f() {
         Err(NlError::Interrupted) => f(),
@@ -100,7 +103,7 @@ impl KernelWireGuard {
     }
 }
 
-/// 让接口上的地址恰好是 `spec` 中的地址。
+/// Makes the addresses on the interface exactly the addresses in `spec`.
 fn sync_addresses(
     route: &mut Socket,
     index: u32,
@@ -128,7 +131,7 @@ fn sync_addresses(
     Ok(())
 }
 
-/// 让接口上的路由恰好是 `routes`（[`DataPlane::sync_routes`]）。
+/// Makes the routes on the interface exactly `routes` ([`DataPlane::sync_routes`]).
 fn sync_routes(
     route: &mut Socket,
     index: Option<u32>,
@@ -190,7 +193,8 @@ impl DataPlane for KernelWireGuard {
         };
         let device = match spec.listen_port {
             Some(_) => read(&mut self.generic)?,
-            // 新建的接口启用时由内核分配；分到保留端口时让内核重新分配
+            // A newly created interface is assigned a port by the kernel when enabled; if it lands on a reserved
+            // port, let the kernel reassign
             None => {
                 let mut first = true;
                 let generic = &mut self.generic;
@@ -234,7 +238,8 @@ impl DataPlane for KernelWireGuard {
             .map_err(kernel("read wireguard peers"))?;
         let current: BTreeMap<_, _> = device.peers.iter().map(|p| (p.public_key, p)).collect();
 
-        // 先删除多余的对端，再新增和更新：新对端的 AllowedIPs 不会与即将删除的对端重叠
+        // Delete extra peers first, then add and update: a new peer's AllowedIPs does not overlap with a peer
+        // about to be deleted
         let mut changes: Vec<PeerChange> = current
             .keys()
             .filter(|key| !peers.iter().any(|p| p.public_key == **key))
@@ -321,7 +326,8 @@ impl DataPlane for KernelWireGuard {
         if ingress.is_none() {
             return Ok(());
         }
-        // 转发由这个网络命名空间的设置决定（容器中用 Compose 的 sysctls 开启）；组网进程只检查，不修改
+        // Forwarding is decided by this network namespace's settings (in a container, enable it with Compose
+        // sysctls); the mesh process only checks and does not modify
         let path = "/proc/sys/net/ipv4/ip_forward";
         let on = std::fs::read_to_string(path)
             .map_err(|source| DataPlaneError::Os {
@@ -349,7 +355,8 @@ impl DataPlane for KernelWireGuard {
             op: "re-handshake",
             detail: "interface is not set up".to_owned(),
         })?;
-        // 删除对端会清掉它的会话；按新 endpoint 加回后，下一个数据包触发经新路径的握手
+        // Deleting a peer clears its session; after adding it back with the new endpoint, the next data packet
+        // triggers a handshake through the new path
         let changes = [
             PeerChange::Remove(peer.public_key),
             PeerChange::Upsert {
@@ -366,7 +373,7 @@ impl DataPlane for KernelWireGuard {
     fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
         let os = |op| move |source| DataPlaneError::Os { op, source };
         let send = WgPort::open(listen_port).map_err(os("open raw sockets for direct probes"))?;
-        // 日志组取 WireGuard 端口号：同一台主机上每个组网进程一个
+        // The log group is the WireGuard port number: one per mesh process on the same host
         nft::install_probe_copy(listen_port, listen_port)
             .map_err(kernel("install the nftables rules that copy direct probes"))?;
         let log = nft::ProbeLog::bind(listen_port, listen_port)
@@ -379,7 +386,8 @@ impl DataPlane for KernelWireGuard {
 
     fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket> {
         let socket = UdpSocket::bind(addr)?;
-        // 只在 nett0 上收发：其他接口上发往组网地址的包不交给这个套接字
+        // Send and receive only on nett0: packets to the mesh address on other interfaces are not handed to this
+        // socket
         sys::bind_to_device(socket.as_fd(), INTERFACE_NAME)?;
         Ok(socket)
     }

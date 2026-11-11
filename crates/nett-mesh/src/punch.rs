@@ -1,5 +1,6 @@
-//! 打洞（design/mesh.md 第 6.1 节）：本机的映射地址与 NAT 类型，以及一对双方都是 `dial-only` 的成员之间的
-//! 打洞过程。纯逻辑：时间由调用方传入，要发的消息和探测交给调用方。
+//! Hole punching (design/mesh.md section 6.1): this machine's mapped addresses and NAT type, and the
+//! hole punching procedure between a pair of members that are both `dial-only`. Pure logic: the caller
+//! passes in the time and takes over the messages and probes to send.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
@@ -7,32 +8,37 @@ use std::time::{Duration, Instant};
 
 use crate::probe::{NatType, PUNCH_ACK, PUNCH_PROPOSAL, PunchMessage};
 
-/// 打洞探测的间隔与持续时间。
+/// Interval and duration of hole punching probes.
 pub const PUNCH_INTERVAL: Duration = Duration::from_millis(200);
 pub const PUNCH_DURATION: Duration = Duration::from_secs(10);
-/// 隧道建立后多久开始第一次尝试；失败后的重试从 30 秒起按次数加倍，最长 1 小时。
+/// How long after the tunnel is established the first attempt starts; after a failure, retries start at
+/// 30 seconds, doubling with each attempt, up to 1 hour.
 const FIRST_ATTEMPT: Duration = Duration::from_secs(2);
 const BACKOFF_BASE: Duration = Duration::from_secs(30);
 const BACKOFF_MAX: Duration = Duration::from_secs(3600);
-/// 对方还不知道自己的任何地址时（例如刚启动、还没有 `public` 节点的应答），隔这么久再试。
+/// When the other side does not yet know any of its own addresses (for example just started, no reply
+/// from a `public` node yet), try again after this long.
 const RETRY_SOON: Duration = Duration::from_secs(5);
-/// 打通之后，多久之内不再尝试：这时由选路按第 8.2 节决定用不用它。
+/// After a successful punch, how long no further attempts are made: path selection decides per
+/// section 8.2 whether to use it.
 const AFTER_SUCCESS: Duration = Duration::from_secs(60);
-/// 提议的重发间隔与次数。
+/// Resend interval and count for proposals.
 const PROPOSAL_RETRY: Duration = Duration::from_millis(300);
 const PROPOSAL_TRIES: u32 = 7;
-/// 映射地址的观察多久之后作废：网络可能已经变了。
+/// How long an observed mapped address stays valid: the network may have changed since.
 const OBSERVATION_TTL: Duration = Duration::from_secs(600);
-/// 一次打洞最多向几个地址发探测（对方给的地址，加上从对方探测的来源得知的地址）。
+/// The maximum number of addresses one hole punching attempt sends probes to (the addresses given by
+/// the other side, plus addresses learned from the source of the other side's probes).
 const MAX_TARGETS: usize = 4;
 
-/// `public` 节点在探测应答中告诉本机的映射地址，按观察者的地址记录。
+/// Mapped addresses that `public` nodes report to this machine in probe replies, recorded by the
+/// observer's address.
 #[derive(Debug, Default)]
 pub struct Observations {
     by_observer: HashMap<IpAddr, (SocketAddr, Instant)>,
 }
 
-/// 本机的 NAT 类型与地址，写进打洞提议和确认。
+/// This machine's NAT type and addresses, written into hole punching proposals and confirmations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OwnInfo {
     pub nat: NatType,
@@ -48,8 +54,9 @@ impl Observations {
         self.by_observer.insert(observer, (observed, now));
     }
 
-    /// 两个 `public` 节点看到同一个 IPv4 映射地址是锥形，不同是对称型，不足两个是未知。对称型的映射
-    /// 地址对方用不上，不告诉对方。IPv6 地址取 IPv6 观察者看到的来源。
+    /// Two `public` nodes seeing the same IPv4 mapped address means cone; different means symmetric; fewer
+    /// than two means unknown. A symmetric mapped address is of no use to the other side, so it is not
+    /// told to the other side. The IPv6 address is the source seen by an IPv6 observer.
     pub fn own(&self, now: Instant) -> OwnInfo {
         let fresh = |(_, (_, at)): &(&IpAddr, &(SocketAddr, Instant))| {
             now.saturating_duration_since(*at) < OBSERVATION_TTL
@@ -106,14 +113,14 @@ enum Phase {
     },
 }
 
-/// 打洞过程中值得记录的事。
+/// Noteworthy events during hole punching.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PunchEvent {
     Started {
         round: u32,
         own: NatType,
         peer: NatType,
-        /// 要发探测的对方地址。
+        /// Address of the other side to send probes to.
         targets: Vec<SocketAddr>,
     },
     Succeeded {
@@ -124,14 +131,15 @@ pub enum PunchEvent {
     },
 }
 
-/// 一对成员之间的打洞状态。决定方发起，跟随方响应。
+/// Hole punching state between a pair of members. The decider initiates; the follower responds.
 #[derive(Debug, Clone)]
 pub struct Punch {
     phase: Phase,
     failures: u32,
-    /// 跟随方：最近一次接受的轮次。
+    /// Follower: the round most recently accepted.
     accepted_round: u32,
-    /// 打通的地址：决定方是收到应答的来源，跟随方是收到对方探测的来源。
+    /// The address that was punched through: for the decider, the source of the received reply; for the
+    /// follower, the source of the other side's received probe.
     punched: Option<SocketAddr>,
     events: Vec<PunchEvent>,
 }
@@ -161,8 +169,9 @@ impl Punch {
         matches!(self.phase, Phase::Punching { .. })
     }
 
-    /// 决定方：`eligible` 表示现在适合打洞（隧道通、当前不在直连上、没有别的两端一起切换在进行）。返回要
-    /// 经隧道发出的提议。`round` 只在开始新的一次时取用。
+    /// Decider: `eligible` means it is now suitable to punch (tunnel up, not currently on a direct path, no
+    /// other two-ended switchover in progress). Returns the proposal to send through the tunnel.
+    /// `round` is used only when a new attempt starts.
     pub fn decider_tick(
         &mut self,
         now: Instant,
@@ -172,7 +181,8 @@ impl Punch {
     ) -> Option<PunchMessage> {
         self.expire(now);
         if let Phase::Idle { next } = self.phase {
-            // 还没有任何观察时无从打洞：既不知道 NAT 类型，也没有地址可以告诉对方
+            // With no observation yet there is no way to punch: neither the NAT type nor an address to tell the
+            // other side is known
             let known = own.nat != NatType::Unknown || own.v4.is_some() || own.v6.is_some();
             if !(eligible && known && now >= next) {
                 return None;
@@ -206,7 +216,8 @@ impl Punch {
         Some(message(PUNCH_PROPOSAL, round, own))
     }
 
-    /// 跟随方收到提议：开始打洞，返回确认。更早的轮次丢弃；同一轮次的重发再确认一次。
+    /// Follower receives a proposal: starts punching and returns the confirmation. Earlier rounds are
+    /// dropped; a resend of the same round is confirmed again.
     pub fn on_proposal(
         &mut self,
         proposal: &PunchMessage,
@@ -223,7 +234,7 @@ impl Punch {
         Some(message(PUNCH_ACK, proposal.round, own))
     }
 
-    /// 决定方收到确认：两端都是对称型就放弃，否则开始打洞。
+    /// Decider receives a confirmation: gives up if both ends are symmetric, otherwise starts punching.
     pub fn on_ack(&mut self, ack: &PunchMessage, own: &OwnInfo, now: Instant) {
         let Phase::Proposing { round, .. } = self.phase else {
             return;
@@ -243,14 +254,16 @@ impl Punch {
             return;
         }
         if ack.nat == NatType::Unknown && ack.v4.is_none() && ack.v6.is_none() {
-            // 对方还不知道自己的任何情况（对称型一端本来就不给地址，地址从它的探测得知）：过一会儿再试
+            // The other side does not yet know anything about itself (a symmetric end never gives an address in
+            // the first place; the address is learned from its probe): try again later
             self.fail_for(now, "peer does not know its address yet", RETRY_SOON);
             return;
         }
         self.start(round, own.nat, ack, now);
     }
 
-    /// 开始向对方的地址打洞。对方给了 IPv6 地址就一律去打：本机没有 IPv6 连通时发送失败，没有坏处。
+    /// Starts punching toward the other side's addresses. If the other side gave an IPv6 address, always
+    /// punch it: when this machine has no IPv6 connectivity the send fails, which does no harm.
     fn start(&mut self, round: u32, own: NatType, peer: &PunchMessage, now: Instant) {
         let mut targets: Vec<SocketAddr> = Vec::new();
         if let Some(v4) = peer.v4 {
@@ -272,7 +285,7 @@ impl Punch {
         };
     }
 
-    /// 这一轮要发出探测的地址（每 200 毫秒一次）。
+    /// The addresses to send probes to in this round (once every 200 ms).
     pub fn probe_targets(&mut self, now: Instant) -> Vec<SocketAddr> {
         self.expire(now);
         let Phase::Punching {
@@ -290,8 +303,10 @@ impl Punch {
         targets.clone()
     }
 
-    /// 打洞期间收到对方带认证的探测：对方到本机这个方向通了，来源就是对方的地址（对称型 NAT 一端为本机
-    /// 分配的端口由此得知），以后也向它发探测。跟随方以它作为打通的地址。
+    /// During punching, a probe with authentication received from the other side: the direction from the
+    /// other side to this machine works, and the source is the other side's address (for a symmetric NAT
+    /// end, the port allocated for this machine is learned this way), so probes are also sent to it from
+    /// now on. The follower takes it as the punched-through address.
     pub fn on_probe_from(&mut self, from: SocketAddr, follower: bool) {
         let Phase::Punching { targets, .. } = &mut self.phase else {
             return;
@@ -305,7 +320,7 @@ impl Punch {
         }
     }
 
-    /// 收到自己探测的应答：两个方向都通了。
+    /// Receives the reply to its own probe: both directions work.
     pub fn on_reply_from(&mut self, from: SocketAddr, now: Instant) {
         if !matches!(self.phase, Phase::Punching { .. }) {
             return;
@@ -389,7 +404,7 @@ mod tests {
         o.record(r2, addr("198.51.100.201:61234"), now);
         let own = o.own(now);
         assert_eq!((own.nat, own.v4), (NatType::Symmetric, None));
-        // 观察过期之后重新判断
+        // Re-evaluate after the observation expires
         assert_eq!(o.own(now + OBSERVATION_TTL).nat, NatType::Unknown);
     }
 
@@ -407,7 +422,7 @@ mod tests {
         assert_eq!(b.probe_targets(t1), vec![addr("198.51.100.201:41820")]);
         a.on_ack(&ack, &own_a, t1);
         assert_eq!(a.probe_targets(t1), vec![addr("198.51.100.202:41820")]);
-        // 每 200 毫秒一次
+        // Once every 200 ms
         assert!(a.probe_targets(t1 + Duration::from_millis(100)).is_empty());
         assert_eq!(a.probe_targets(t1 + PUNCH_INTERVAL).len(), 1);
         b.on_probe_from(addr("198.51.100.201:41820"), true);
@@ -435,7 +450,7 @@ mod tests {
         };
         a.on_ack(&symmetric, &own_a, t1);
         assert!(a.probe_targets(t1).is_empty());
-        // 对称型一端的探测从一个新端口来：以后也向它发
+        // A probe from a symmetric end comes from a new port: send probes to it from now on
         a.on_probe_from(addr("198.51.100.202:61234"), false);
         assert_eq!(
             a.probe_targets(t1 + PUNCH_INTERVAL),
@@ -471,7 +486,7 @@ mod tests {
         }));
         assert_eq!(a.decider_tick(t1 + BACKOFF_BASE, true, &own, || 2), None);
 
-        // 10 秒没有应答：放弃，30 秒后再试，之后加倍
+        // No reply in 10 seconds: give up, retry in 30 seconds, doubling after that
         let own = cone("198.51.100.201:41820");
         let mut b = Punch::new(t0);
         b.decider_tick(t1, true, &own, || 1).expect("proposal");

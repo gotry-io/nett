@@ -1,5 +1,5 @@
-//! `nett transport`（实验构建）：传输适配进程，配置读自组网进程写出的本机文件（ADR 0013），收到
-//! `SIGTERM` 或 `SIGINT` 时退出。
+//! `nett transport` (lab build): the transport adapter; its configuration is read from the local
+//! file written by the mesh process (ADR 0013); exits on `SIGTERM` or `SIGINT`.
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;

@@ -1,6 +1,7 @@
-//! 故障注入（design/prototype.md 第 5.1 节）：链路质量（`tc netem`）、拦截 UDP（nftables）。
+//! Fault injection (design/prototype.md section 5.1): link quality (`tc netem`) and UDP blocking
+//! (nftables).
 //!
-//! 故障加在底层网络上，nett 和 Tailscale 遇到的是同一种故障。
+//! Faults are applied to the underlay network, so nett and Tailscale meet the same fault.
 
 use anyhow::Context as _;
 use serde_json::Value;
@@ -8,12 +9,15 @@ use serde_json::Value;
 use crate::cmd::{COMMAND_TIMEOUT, run, run_with_input};
 use crate::net::Underlay;
 
-/// 拦截规则所在的 nftables 表，与 NAT 规则分开，解除时整表删除。
+/// The nftables table holding the blocking rules, kept apart from the NAT rules and deleted as a
+/// whole when lifted.
 const FAULT_TABLE: &str = "nettlab_fault";
-// 入方向的拦截挂在 prerouting、优先级 -300：早于连接跟踪，也早于组网进程拷贝探测包的规则（input、
-// -150）。挂在 input 上时，被拦的探测仍会被拷贝给组网进程并得到应答，与"包没有到达"不符。
+// Inbound blocking hooks prerouting at priority -300: before connection tracking, and before the
+// rule with which the mesh process copies probe packets (input, -150). Hooked on input, a blocked
+// probe would still be copied to the mesh process and get a reply, which does not match "the packet
+// did not arrive".
 
-/// 一条链路的质量。各项为空时不设置。
+/// Quality of a link. Items that are empty are not set.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Netem {
     pub loss_percent: Option<f32>,
@@ -48,7 +52,8 @@ impl Netem {
     }
 }
 
-/// 链路的两端：节点（或路由器）命名空间中的 `eth0`，以及交换侧命名空间中的端口。
+/// The two ends of a link: `eth0` in the node's (or router's) namespace, and the port in the
+/// switch-side namespace.
 fn link_ends(underlay: &Underlay, name: &str) -> anyhow::Result<[(String, String); 2]> {
     let (switch_ns, port) = underlay
         .switch_port(name)
@@ -59,7 +64,7 @@ fn link_ends(underlay: &Underlay, name: &str) -> anyhow::Result<[(String, String
     ])
 }
 
-/// 设置 `name` 接入链路的质量，两个方向都生效。
+/// Sets the quality of the link `name` attaches through, effective in both directions.
 pub fn set_link(underlay: &Underlay, name: &str, netem: &Netem) -> anyhow::Result<()> {
     for (ns, dev) in link_ends(underlay, name)? {
         let mut args: Vec<String> = ["-n", &ns, "qdisc", "replace", "dev", &dev, "root", "netem"]
@@ -72,16 +77,16 @@ pub fn set_link(underlay: &Underlay, name: &str, netem: &Netem) -> anyhow::Resul
     Ok(())
 }
 
-/// 恢复链路的默认质量。
+/// Restores the default quality of the link.
 pub fn clear_link(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
     for (ns, dev) in link_ends(underlay, name)? {
-        // 没有设置过 netem 时删除会失败，忽略
+        // Deleting fails when netem was never set; ignored
         run("tc", ["-n", &ns, "qdisc", "del", "dev", &dev, "root"]).ok();
     }
     Ok(())
 }
 
-/// 拦截节点的全部出站与入站 UDP（TCP 不受影响）。
+/// Blocks all outbound and inbound UDP of the node (TCP is not affected).
 pub fn block_udp(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     let rules = format!(
@@ -99,15 +104,17 @@ pub fn block_udp(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 在节点的上游拦截它的全部 UDP（场景 7：UDP 全部被拦）：节点在 NAT 之后时拦在 NAT 路由器上，否则拦在
-/// 它接入的"公网"网桥端口上。现实中 UDP 多被上游的防火墙悄悄丢弃，本机发送时不会出错；拦在节点本机上，
-/// 发送会立即失败，一些实现据此即刻改道，测不到真实的情形。
+/// Blocks all of a node's UDP upstream of it (scenario 7: all UDP blocked): on the NAT router when
+/// the node is behind NAT, otherwise on the "public network" bridge port it attaches to. In reality
+/// UDP is mostly dropped silently by an upstream firewall, so sending on the machine itself does
+/// not fail; blocking on the node itself makes sending fail immediately, some implementations
+/// switch path right away because of that, and the real situation is not measured.
 pub fn block_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
     let (ns, port) = underlay
         .switch_port(name)
         .with_context(|| format!("no link for `{name}`"))?;
     let rules = if ns == crate::net::INET_NETNS {
-        // "公网"网桥上的包是桥接的：按网桥端口匹配
+        // Packets on the "public network" bridge are bridged: match by bridge port
         format!(
             "table bridge {FAULT_TABLE} {{\n\
              chain drop_udp {{\n\
@@ -118,7 +125,8 @@ pub fn block_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()>
              }}\n"
         )
     } else {
-        // NAT 路由器上的包是路由的，入接口是局域网网桥：按节点的局域网地址匹配（地址转换之前与还原之后）
+        // Packets on the NAT router are routed, and the incoming interface is the LAN bridge: match
+        // by the node's LAN address (before address translation and after restoration)
         let ip = underlay.node(name).context("planned node")?.ipv4;
         format!(
             "table inet {FAULT_TABLE} {{\n\
@@ -139,7 +147,7 @@ pub fn block_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 解除 [`block_udp_upstream`]。
+/// Lifts [`block_udp_upstream`].
 pub fn unblock_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
     let (ns, _) = underlay
         .switch_port(name)
@@ -165,8 +173,9 @@ pub fn unblock_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<(
     Ok(())
 }
 
-/// 拦截节点与 `peers` 之间双向的 UDP（IPv4 与 IPv6 地址都要列出）：切断两个节点之间的直连，
-/// 经其他地址的路径（例如中继）不受影响。
+/// Blocks UDP in both directions between the node and `peers` (both IPv4 and IPv6 addresses must be
+/// listed): cuts the direct connection between two nodes, while paths through other addresses (for
+/// example a relay) are not affected.
 pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     let rule = |dir: &str| -> String {
@@ -195,7 +204,7 @@ pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<
     Ok(())
 }
 
-/// 解除 [`block_udp`] 或 [`block_udp_with`]。
+/// Lifts [`block_udp`] or [`block_udp_with`].
 pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     run(
@@ -215,7 +224,8 @@ pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 节点发往 `dst` 的包加上延迟与乱序（场景 15：旧路径上迟到、乱序的包），其他流量不受影响。
+/// Adds delay and reordering to the node's packets sent to `dst` (scenario 15: late, reordered
+/// packets on the old path); other traffic is not affected.
 pub fn delay_to(
     name: &str,
     dst: std::net::Ipv4Addr,
@@ -236,9 +246,11 @@ pub fn delay_to(
     route_delay(name, dst)
 }
 
-/// 在节点的 `eth0` 上建好"按目的地址加延迟"的排队规则：四个优先级队列，平时全部流量走第一个，第四个
-/// 挂 netem；由 [`route_delay`] 决定发往哪个地址的包进入第四个。替换根排队规则会丢掉正在排队的包，
-/// 所以在开始传输之前调用（场景 5 交替变好）。
+/// Sets up the "delay by destination address" queueing discipline on the node's `eth0`: four
+/// priority queues, all traffic normally goes through the first, and netem is attached to the
+/// fourth; [`route_delay`] decides which address's packets enter the fourth. Replacing the root
+/// queueing discipline drops packets being queued, so call it before the transfer starts (scenario
+/// 5, alternating improvement).
 pub fn prepare_delay(name: &str, netem: &[String]) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     let mut root: Vec<String> = [
@@ -261,11 +273,12 @@ pub fn prepare_delay(name: &str, netem: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 让发往 `dst` 的包进入 [`prepare_delay`] 建好的延迟队列，替换之前的选择。只改过滤器，不动排队规则，
-/// 正在排队的包不受影响。
+/// Makes packets sent to `dst` enter the delay queue set up by [`prepare_delay`], replacing the
+/// earlier choice. Only the filter changes and the queueing discipline is untouched, so packets
+/// being queued are not affected.
 pub fn route_delay(name: &str, dst: std::net::Ipv4Addr) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
-    // 还没有过滤器时删除会失败，忽略
+    // Deleting fails when there is no filter yet; ignored
     run(
         "tc",
         [
@@ -300,14 +313,14 @@ pub fn route_delay(name: &str, dst: std::net::Ipv4Addr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 去掉节点 `eth0` 上的全部排队规则与过滤器。
+/// Removes all queueing disciplines and filters on the node's `eth0`.
 pub fn clear_eth0(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     run("tc", ["-n", &ns, "qdisc", "del", "dev", "eth0", "root"]).ok();
     Ok(())
 }
 
-/// 只拦截从 `src` 发来的 UDP（单方向）。
+/// Only blocks UDP coming from `src` (one direction).
 pub fn block_udp_from(name: &str, src: std::net::Ipv4Addr) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     let rules = format!(
@@ -324,7 +337,8 @@ pub fn block_udp_from(name: &str, src: std::net::Ipv4Addr) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 接口的累计收发字节数 `(rx, tx)`，用来从底层网络判断流量走哪条链路（design/prototype.md 第 6.1 节）。
+/// Cumulative received and sent bytes of an interface `(rx, tx)`, used to tell from the underlay
+/// which link the traffic takes (design/prototype.md section 6.1).
 pub fn counters(ns: &str, dev: &str) -> anyhow::Result<(u64, u64)> {
     let out = run("ip", ["-n", ns, "-s", "-j", "link", "show", "dev", dev])?;
     let v: Value = serde_json::from_str(&out).context("parsing `ip -j` output")?;

@@ -1,16 +1,20 @@
-//! 规范化 JSON：RFC 8785 的子集，数值只允许 0 到 2⁵³−1 的整数（design/auth.md 第 10.5 节）。
+//! Canonical JSON: a subset of RFC 8785, where numbers may only be integers from 0 to 2⁵³−1
+//! (design/auth.md section 10.5).
 //!
-//! 签名针对的是字节。验证方只接受恰好等于自身规范形式的字节，因此同一份内容只有一种写法：
-//! 重复的键（不同解析器取舍不同）、多余的空白、非规范的转义都不能通过。
+//! A signature covers bytes. The verifier accepts only bytes exactly equal to their own canonical
+//! form, so the same content has only one spelling: duplicate keys (different parsers handle them
+//! differently), extra whitespace and non-canonical escapes all fail.
 
 use std::io::Write as _;
 
 use serde_json::Value;
 
-/// 一份签名载荷或准入证明的最大字节数，限制解析时的内存占用。
+/// The maximum number of bytes of a signed payload or admission proof, which bounds memory use
+/// while parsing.
 pub const MAX_DOCUMENT_BYTES: usize = 64 * 1024;
 
-/// JavaScript 能精确表示的最大整数；控制台在浏览器中生成载荷，更大的整数会失真。
+/// The largest integer JavaScript can represent exactly; the console generates payloads in the
+/// browser, and larger integers would lose precision.
 const MAX_SAFE_INTEGER: u64 = (1 << 53) - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -27,14 +31,14 @@ pub enum CanonicalError {
     NotCanonical,
 }
 
-/// 生成一个 JSON 值的规范形式。
+/// Generates the canonical form of a JSON value.
 pub fn to_canonical(value: &Value) -> Result<Vec<u8>, CanonicalError> {
     let mut out = Vec::new();
     write_value(value, &mut out)?;
     Ok(out)
 }
 
-/// 解析一份文档，并确认收到的字节就是它的规范形式。
+/// Parses a document and confirms that the received bytes are its canonical form.
 pub fn parse_canonical(bytes: &[u8]) -> Result<Value, CanonicalError> {
     if bytes.len() > MAX_DOCUMENT_BYTES {
         return Err(CanonicalError::TooLarge { len: bytes.len() });
@@ -74,7 +78,8 @@ fn write_value(value: &Value, out: &mut Vec<u8>) -> Result<(), CanonicalError> {
             out.push(b']');
         }
         Value::Object(map) => {
-            // RFC 8785 按 UTF-16 码元排序键；与 UTF-8 字节序只在 BMP 之外的字符上不同
+            // RFC 8785 sorts keys by UTF-16 code unit; this differs from UTF-8 byte order only for
+            // characters outside the BMP
             let mut entries: Vec<_> = map.iter().collect();
             entries.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
             out.push(b'{');
@@ -92,7 +97,8 @@ fn write_value(value: &Value, out: &mut Vec<u8>) -> Result<(), CanonicalError> {
     Ok(())
 }
 
-/// 与 ECMAScript 的 `JSON.stringify` 相同：只转义引号、反斜杠和控制字符，其余字符原样输出。
+/// Same as ECMAScript's `JSON.stringify`: only quotes, backslashes and control characters are
+/// escaped, and other characters are output as is.
 fn write_string(s: &str, out: &mut Vec<u8>) {
     out.push(b'"');
     for c in s.chars() {
@@ -105,7 +111,7 @@ fn write_string(s: &str, out: &mut Vec<u8>) {
             '\u{0c}' => out.extend_from_slice(b"\\f"),
             '\r' => out.extend_from_slice(b"\\r"),
             c if u32::from(c) < 0x20 => {
-                // 写入 Vec 不会失败
+                // Writing to a Vec cannot fail
                 let _ = write!(out, "\\u{:04x}", u32::from(c));
             }
             c => {
@@ -137,7 +143,7 @@ mod tests {
 
     #[test]
     fn sorts_keys_by_utf16_code_units() {
-        // U+FF61 在 UTF-8 字节序中排在 U+1F600 之前，按 UTF-16 码元则排在其后
+        // U+FF61 comes before U+1F600 in UTF-8 byte order, but after it in UTF-16 code units
         let v = json!({"\u{1F600}": 1, "\u{FF61}": 2});
         assert_eq!(canon(&v), "{\"\u{1F600}\":1,\"\u{FF61}\":2}");
     }
@@ -166,11 +172,11 @@ mod tests {
     fn parse_accepts_only_canonical_bytes() {
         assert!(parse_canonical(br#"{"a":1,"b":"x"}"#).is_ok());
         for bad in [
-            &br#"{"b":"x","a":1}"#[..], // 键的顺序
-            br#"{"a": 1,"b":"x"}"#,     // 空白
-            br#"{"a":1,"a":2}"#,        // 重复的键
-            b"{\"a\":\"\\u0041\"}",     // 非规范的转义
-            br#"{"a":1.0}"#,            // 浮点
+            &br#"{"b":"x","a":1}"#[..], // key order
+            br#"{"a": 1,"b":"x"}"#,     // whitespace
+            br#"{"a":1,"a":2}"#,        // duplicate key
+            b"{\"a\":\"\\u0041\"}",     // non-canonical escape
+            br#"{"a":1.0}"#,            // floating point
             br#"{"a":1e2}"#,
             br#"{"a":-0}"#,
             b"{\"a\":1}\n",

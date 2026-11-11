@@ -1,7 +1,8 @@
-//! Linux 上服务的安装（design/hub.md 第 7 节）：`sudo nett install` 生成或沿用 `/etc/nett` 中的密钥，把正在运行的
-//! `nett` 复制到 `/usr/local/bin/nett`，写入 systemd 单元并启动。单元是 `packaging/systemd/` 中的文件，编译时
-//! 嵌入，内容只有这一个出处。不接 Hub 时期望状态由 `--config` 导入；接了 Hub 时（有 token，或已有 Hub 的
-//! 配置）只由 nett-node 写。
+//! Service installation on Linux (design/hub.md section 7): `sudo nett install` generates or reuses
+//! the keys in `/etc/nett`, copies the running `nett` to `/usr/local/bin/nett`, writes the systemd
+//! units and starts them. The units are the files in `packaging/systemd/`, embedded at compile
+//! time, so their content has a single source. Without a Hub, the desired state is imported with
+//! `--config`; with a Hub (a token, or an existing Hub configuration) only nett-node writes it.
 
 use std::fs;
 use std::path::Path;
@@ -17,7 +18,8 @@ const DIR: &str = "/etc/nett";
 const DESIRED: &str = "/etc/nett/desired.json";
 const BINARY: &str = "/usr/local/bin/nett";
 const UNIT_DIR: &str = "/etc/systemd/system";
-/// systemctl 的固定位置（硬性规则 9）：多数发行版是前者，较旧的是后者。
+/// Fixed locations of systemctl (hard rule 9): most distributions use the former, older ones the
+/// latter.
 const SYSTEMCTL: [&str; 2] = ["/usr/bin/systemctl", "/bin/systemctl"];
 
 struct Unit {
@@ -52,7 +54,8 @@ fn unit_path(unit: &Unit) -> String {
     format!("{UNIT_DIR}/{}", unit.name)
 }
 
-/// 让服务按新的单元、程序运行：没在运行时启用并启动，单元或程序变了时重启。返回报告的一句话。
+/// Makes the service run with the new units and program: enables and starts it when not running,
+/// restarts it when the unit or program changed. Returns a one-sentence report.
 fn ensure_running(unit: &Unit, restart: bool) -> anyhow::Result<Option<String>> {
     let (ok, message) = if !systemctl(&["is-active", "--quiet", unit.name])? {
         (
@@ -79,7 +82,8 @@ fn ensure_running(unit: &Unit, restart: bool) -> anyhow::Result<Option<String>> 
 
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
-    // 组网进程以 systemd 的专用身份运行，要能进入这个目录读期望状态；私钥文件本身是 0600
+    // The mesh process runs under a dedicated systemd identity and must be able to enter this
+    // directory to read the desired state; the private key file itself is 0600
     ensure_dir(DIR, 0o755)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
     let token = apply_token(
@@ -93,7 +97,8 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         .map_err(anyhow::Error::msg)?
         .is_some();
     let desired_changed = match (token.desired, &args.config, linked) {
-        // 新机器入网时 Hub 发来的第一份（design/hub.md 第 6 节）；之后只由 nett-node 写
+        // The first one the Hub sends when a new machine joins (design/hub.md section 6);
+        // afterwards only nett-node writes it
         (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, 0o644)?,
         (None, Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
@@ -163,7 +168,8 @@ pub fn uninstall() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `sudo nett leave`（design/hub.md 第 7 节）：告诉 Hub，删除服务，拆掉组网接口与过滤规则，删除密钥与配置。
+/// `sudo nett leave` (design/hub.md section 7): tells the Hub, deletes the services, tears down the
+/// mesh interface and filter rules, deletes the keys and configuration.
 pub fn leave() -> anyhow::Result<()> {
     require_root()?;
     crate::install::tell_hub(DIR)?;
@@ -183,7 +189,8 @@ fn remove_services() -> anyhow::Result<()> {
         if !Path::new(&path).exists() {
             continue;
         }
-        // 停止失败时不删单元：留着它，用户还能用 systemctl 处理
+        // If stopping fails, the unit is not deleted: it stays so the user can still handle it with
+        // systemctl
         if !systemctl(&["disable", "--now", unit.name])? {
             bail!("systemctl could not stop {}", unit.name);
         }

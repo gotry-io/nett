@@ -1,4 +1,4 @@
-//! Hub 地址：`https://<host>[:<port>]`，路径部分不用。
+//! Hub address: `https://<host>[:<port>]`; the path part is not used.
 
 use rustls::pki_types::ServerName;
 
@@ -17,7 +17,7 @@ impl HubUrl {
         if authority.is_empty() || authority.contains('@') {
             return Err(format!("{url}: not a Hub address"));
         }
-        // [IPv6]:port、host:port、host
+        // [IPv6]:port, host:port, host
         let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
             let (h, after) = v6
                 .split_once(']')
@@ -47,7 +47,7 @@ impl HubUrl {
         ServerName::try_from(self.host.clone()).map_err(|e| format!("{}: {e}", self.host))
     }
 
-    /// HTTP 的 `Host`：默认端口时省略端口。
+    /// The HTTP `Host`: the port is omitted when it is the default port.
     pub fn host_header(&self) -> String {
         if self.port == 443 {
             if self.host.contains(':') {
@@ -60,7 +60,7 @@ impl HubUrl {
         }
     }
 
-    /// `host:port`，IPv6 加方括号。
+    /// `host:port`, with IPv6 in square brackets.
     pub fn authority(&self) -> String {
         if self.host.contains(':') {
             format!("[{}]:{}", self.host, self.port)

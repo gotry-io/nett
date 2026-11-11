@@ -1,8 +1,10 @@
-//! 把已准入的成员落到数据面：本机的组网接口，以及每个其他成员一个 WireGuard 对端；按选路的结果
-//! 切换对端的 endpoint，并纠正被 WireGuard 漫游改掉的 endpoint（design/mesh.md 第 4、8 节）。
+//! Lands the admitted members on the data plane: this machine's mesh interface, and one WireGuard peer for
+//! each other member; switches peers' endpoints according to the result of path selection, and corrects
+//! endpoints changed by WireGuard roaming (design/mesh.md sections 4 and 8).
 //!
-//! 数据面操作失败时保持现状，在下一份期望状态或下一次检查时重试（"拿不准时，连接保持现状"）。访问控制是
-//! 例外：先安装过滤规则再添加对端，安装失败时拒绝（硬性规则 6）。
+//! When a data plane operation fails the current state is kept and retried on the next desired state or
+//! the next check ("when unsure, connections stay as they are"). Access control is the exception:
+//! filter rules are installed before peers are added, and installation failure rejects (hard rule 6).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
@@ -34,17 +36,20 @@ use crate::status::{
 use crate::store::{Saved, TrustStore};
 use nett_core::prefix::IpPrefix;
 
-/// `dial-only` 成员对每个对端的持久保活间隔（秒），维持 NAT 映射（design/mesh.md 第 4 节）。
+/// Persistent keepalive interval (seconds) of `dial-only` members for each peer, keeping the NAT mapping
+/// alive (design/mesh.md section 4).
 pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
-/// 读取各对端状态（流量、endpoint）的间隔：endpoint 被漫游改掉后在这个时间内纠正（第 8.3 节）。
+/// Interval for reading each peer's state (traffic, endpoint): after an endpoint is changed by roaming it
+/// is corrected within this time (section 8.3).
 const STATS_INTERVAL: Duration = Duration::from_millis(100);
 
-/// 已经就绪的组网接口。
+/// The mesh interface that is already ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Interface {
-    /// 最近一次成功应用的接口配置。
+    /// The interface configuration most recently applied successfully.
     pub spec: InterfaceSpec,
-    /// WireGuard 实际监听的端口：期望状态不带端口时由系统分配（design/mesh.md 第 5.5 节）。
+    /// The port WireGuard actually listens on: when the desired state has no port, the system assigns one
+    /// (design/mesh.md section 5.5).
     pub listen_port: u16,
 }
 
@@ -54,38 +59,46 @@ pub struct Engine<D> {
     dataplane: D,
     members: MemberSet,
     interface: Option<Interface>,
-    /// 最近一次交给传输适配进程的配置。
+    /// The configuration most recently handed to the transport adapter.
     transport: Option<TransportConfig>,
     reachability: Reachability,
     prober: Option<Prober>,
-    /// 已经配置到数据面的对端：经漫游跟随的一方只在新增对端时设置 endpoint，之后交给 WireGuard 的漫游。
+    /// Peers already configured on the data plane: the side that follows through roaming sets the endpoint
+    /// only when adding a peer, and afterwards leaves it to WireGuard's roaming.
     configured: HashSet<X25519PublicKey>,
     traffic: HashMap<X25519PublicKey, Traffic>,
-    /// 最近一次重新握手执行的时刻（Unix 毫秒）：WireGuard 报告的握手时间不早于它，才是这次握手完成
-    /// （第 8.4 节）。决定与执行之间读到的仍是旧对端的握手时间。
+    /// The time of the most recent re-handshake execution (Unix milliseconds): a handshake time reported by
+    /// WireGuard that is not earlier than it is the completion of this handshake (section 8.4). Between
+    /// deciding and executing, what is read is still the old peer's handshake time.
     rehandshaked_at: HashMap<X25519PublicKey, u64>,
     last_stats: Option<Instant>,
     clock_trusted: bool,
-    /// TLS 中继在传输适配进程上的回环端点，以及最近一次设置的闲置端口（design/mesh.md 第 5.3 节）。
+    /// Loopback endpoints of TLS relays on the transport adapter, and the idle ports most recently set
+    /// (design/mesh.md section 5.3).
     tls_endpoints: BTreeSet<SocketAddr>,
     tls_guarded: Option<Vec<u16>>,
     access: AccessRules,
     routes: Routes,
-    /// 已经安装到数据面的过滤规则、Edge 设置、智能入口的转发规则与其他成员网段的路由。
+    /// Filter rules, Edge settings, smart gateway forwarding rules, and routes for other members' prefixes
+    /// already installed on the data plane.
     filter: Option<FilterSpec>,
     edge: Option<Option<EdgeSpec>>,
     ingress: Option<Option<IngressSpec>>,
     installed_routes: Option<Vec<IpPrefix>>,
-    /// 最近一次接受的期望状态中的节点名，以及接受的时刻（本机状态，design/status.md 第 5、6 节）。
+    /// Node names in the most recently accepted desired state, and the time of acceptance (local status,
+    /// design/status.md sections 5 and 6).
     names: BTreeMap<NodeId, NodeName>,
     applied_at: Option<Instant>,
-    /// TLS 中继在传输适配进程上的回环端口 → 中继的 TLS 地址：本机状态中显示后者。
+    /// Loopback ports of TLS relays on the transport adapter -> the relay's TLS address: local status shows
+    /// the latter.
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
-    /// 本机的信任存储：固定的信任锚与各产物已生效的版本（design/mesh.md 第 4.2 节）。
+    /// This machine's trust store: the pinned trust anchors and the versions in effect for each artifact
+    /// (design/mesh.md section 4.2).
     trust: TrustStore,
 }
 
-/// 从数据面读到的一个对端的流量，以及收发字节数最近一次变化的时刻。
+/// The traffic of a peer as read from the data plane, and the time its sent and received byte counts last
+/// changed.
 #[derive(Debug, Clone, Default)]
 struct Traffic {
     rx_bytes: u64,
@@ -127,7 +140,8 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 以这份信任存储为验证的基准：恢复撤销记录与各产物此前接受过的版本。
+    /// Takes this trust store as the verification baseline: restores revocations and the versions previously
+    /// accepted for each artifact.
     pub fn with_trust_store(mut self, trust: TrustStore) -> Self {
         if let Some(saved) = trust.saved() {
             self.members.restore(&saved.revoked, &saved.members);
@@ -142,7 +156,7 @@ impl<D: DataPlane> Engine<D> {
         &self.node_id
     }
 
-    /// 最近一次接受的期望状态中的节点名。
+    /// Node names in the most recently accepted desired state.
     pub fn names(&self) -> &BTreeMap<NodeId, NodeName> {
         &self.names
     }
@@ -151,18 +165,20 @@ impl<D: DataPlane> Engine<D> {
         &self.members
     }
 
-    /// 运行时经数据面打开探测用的套接字（[`DataPlane::direct_probes`]、[`DataPlane::bind_tunnel`]）。
+    /// Opens the sockets used for probing through the data plane at runtime ([`DataPlane::direct_probes`],
+    /// [`DataPlane::bind_tunnel`]).
     pub fn dataplane_mut(&mut self) -> &mut D {
         &mut self.dataplane
     }
 
-    /// 组网接口已经就绪（探测套接字可以绑定到组网地址上）。
+    /// The mesh interface is ready (probe sockets can bind to the mesh address).
     pub fn interface(&self) -> Option<&Interface> {
         self.interface.as_ref()
     }
 
-    /// 应用一份期望状态。整份被拒绝时（不是给本机的、信任锚与本机固定的不同）返回原因，继续使用已生效的
-    /// 状态；整份接受之后写入信任存储。
+    /// Applies a desired state. When the whole is rejected (not meant for this machine, or the trust anchors
+    /// differ from the ones pinned on this machine) returns the reason and keeps using the state already
+    /// in effect; after the whole is accepted it is written to the trust store.
     pub fn apply(
         &mut self,
         desired: &DesiredMesh,
@@ -195,14 +211,16 @@ impl<D: DataPlane> Engine<D> {
             });
             return Err(reason);
         }
-        // 信任存储刚建立时（第一份期望状态）不检查本机节点策略的过期时间（design/mesh.md 第 4.2 节）
+        // When the trust store has just been created (the first desired state), the expiry of this machine's
+        // node policy is not checked (design/mesh.md section 4.2)
         let now = self.trust.saved().is_some().then(Timestamp::now);
         self.apply_accepted(desired, now, events);
         self.save_trust(desired, events);
         Ok(())
     }
 
-    /// 启动时期望状态文件整份被拒绝：改用信任存储中最近一次整份接受的期望状态。没有时返回 `false`。
+    /// The whole desired state file was rejected at startup: uses the last whole desired state accepted in the
+    /// trust store instead. Returns `false` when there is none.
     pub fn apply_saved(&mut self, events: &mut impl EventSink) -> bool {
         let doc = match self.trust.accepted() {
             Ok(Some(doc)) => doc,
@@ -265,7 +283,7 @@ impl<D: DataPlane> Engine<D> {
             events.emit(Event::SelfNotAdmitted {
                 node_id: self.node_id.clone(),
             });
-            // 本机已被撤销：不再与任何对端通信
+            // This machine has been revoked: no communication with any peer
             if self.interface.is_some() {
                 self.sync_peers(Vec::new(), events);
                 self.sync_routes(Vec::new(), events);
@@ -310,7 +328,7 @@ impl<D: DataPlane> Engine<D> {
         let edge = EdgeSpec::of(me);
         self.update_transport(desired, events);
         if !self.apply_access(desired, edge, events) {
-            // 访问控制装不上：不与任何对端通信
+            // Access control cannot be installed: no communication with any peer
             self.sync_peers(Vec::new(), events);
             return;
         }
@@ -338,7 +356,8 @@ impl<D: DataPlane> Engine<D> {
             .values()
             .filter(|m| m.node_id != self.node_id)
             .map(|m| {
-                // 有选路状态的一方总是写入期望的 endpoint；经漫游跟随的一方只在新增对端时写入
+                // The side with path selection state always writes the intended endpoint; the side that follows through
+                // roaming writes it only when adding a peer
                 let endpoint = prober.desired_endpoint(&m.node_id).or_else(|| {
                     (!self.configured.contains(&m.mesh_public_key))
                         .then(|| prober.endpoint(&m.node_id))
@@ -358,7 +377,8 @@ impl<D: DataPlane> Engine<D> {
         self.guard_idle_tls(events);
     }
 
-    /// 本机宣告了网段时，安装智能入口的转发规则（design/mesh.md 第 10 节）。失败时下一份期望状态重试。
+    /// When this machine advertises prefixes, installs the smart gateway forwarding rules (design/mesh.md
+    /// section 10). On failure, retried on the next desired state.
     fn apply_ingress(&mut self, events: &mut impl EventSink) {
         let ingress = IngressSpec::of(self.routes.of(&self.node_id), self.members.members());
         if self.ingress.as_ref() == Some(&ingress) {
@@ -375,7 +395,8 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 其他成员宣告的网段：在组网接口上加路由。失败时下一份期望状态重试。
+    /// Prefixes advertised by other members: adds routes on the mesh interface. On failure, retried on the
+    /// next desired state.
     fn sync_routes(&mut self, routes: Vec<IpPrefix>, events: &mut impl EventSink) {
         if self.installed_routes.as_ref() == Some(&routes) {
             return;
@@ -391,9 +412,10 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 验证规则集，安装本机的过滤规则和 Edge 设置（design/mesh.md 第 12 节，ADR 0015）。规则无法展开或
-    /// 安装失败时改装拒绝全部新建入方向连接的规则；连它也装不上、或 Edge 设置失败时返回 `false`，调用方
-    /// 不添加任何对端。
+    /// Verifies the rule set and installs this machine's filter rules and Edge settings (design/mesh.md
+    /// section 12, ADR 0015). When the rules cannot be expanded or fail to install, installs rules that
+    /// reject all new inbound connections instead; returns `false` when even that cannot be installed or
+    /// the Edge settings fail, and the caller adds no peers.
     fn apply_access(
         &mut self,
         desired: &DesiredMesh,
@@ -450,8 +472,9 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 传输适配进程的配置（design/mesh.md 第 5.3 节）：TLS 目标与 WireGuard 的实际端口，变化时交出。在配置
-    /// 对端之前调用：WireGuard 发往回环端口的包到达时，传输适配进程已经在监听。
+    /// Configuration of the transport adapter (design/mesh.md section 5.3): TLS targets and the actual
+    /// WireGuard port, handed out when changed. Called before peers are configured: when packets that
+    /// WireGuard sends to the loopback port arrive, the transport adapter is already listening.
     fn update_transport(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
         let Some(interface) = &self.interface else {
             return;
@@ -465,8 +488,10 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 没有对端在用的 TLS 回环端口：丢弃从它们进入 WireGuard 端口的包（design/mesh.md 第 5.3 节）。
-    /// 在执行切换之前调用：切到 TLS 的端口先放开，切走的端口再挡住。设置失败时下一次推进重试。
+    /// TLS loopback ports that no peer is using: drops packets entering the WireGuard port from them
+    /// (design/mesh.md section 5.3). Called before performing switches: the port switched to TLS is opened
+    /// first, and the port switched away from is blocked afterwards. On failure, retried on the next
+    /// advance.
     fn guard_idle_tls(&mut self, events: &mut impl EventSink) {
         let (Some(prober), Some(interface)) = (self.prober.as_ref(), self.interface.as_ref())
         else {
@@ -509,15 +534,17 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 有对端在高频探测刚因故障切走的更优路径（design/mesh.md 第 7 节），或在等待重新握手完成
-    /// （第 8.4 节）：运行时要推进得比 [`crate::path::FAST_RECOVERY_INTERVAL`] 更密。
+    /// A peer is probing at high frequency the better path it just switched away from because of a failure
+    /// (design/mesh.md section 7), or is waiting for a re-handshake to complete (section 8.4): the runtime
+    /// must advance more densely than [`crate::path::FAST_RECOVERY_INTERVAL`].
     pub fn needs_fine_ticks(&self, now: Instant) -> bool {
         self.prober
             .as_ref()
             .is_some_and(|p| p.needs_fine_ticks(now))
     }
 
-    /// 本机时钟误差是否在 2 秒以内（design/mesh.md 第 8.4 节），由运行时定期更新。
+    /// Whether the local clock error is within 2 seconds (design/mesh.md section 8.4), updated periodically
+    /// by the runtime.
     pub fn set_clock_trusted(&mut self, trusted: bool) {
         self.clock_trusted = trusted;
         if let Some(prober) = self.prober.as_mut() {
@@ -525,7 +552,8 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 定期调用（约 100 毫秒一次）：读取对端状态、纠正 endpoint、推进选路，返回要发出的探测。
+    /// Called periodically (about every 100 ms): reads peer state, corrects endpoints, advances path
+    /// selection, and returns the probes to send.
     pub fn tick(
         &mut self,
         now: Instant,
@@ -535,7 +563,8 @@ impl<D: DataPlane> Engine<D> {
         if self.interface.is_none() {
             return Vec::new();
         }
-        // 重新握手的确认到期时也读一次：按刚读到的握手状态决定是否再握手
+        // Also read when a re-handshake's confirmation is due: decide whether to re-handshake again based on
+        // the handshake state just read
         let handshake_due = self.prober.as_ref().is_some_and(|p| p.handshake_due(now));
         if handshake_due
             || self
@@ -590,8 +619,8 @@ impl<D: DataPlane> Engine<D> {
         out
     }
 
-    /// 读取各对端的流量与 endpoint：有流量的对端按第 7 节的频率探测；决定方发现 endpoint 被漫游
-    /// 改掉就改回（第 8.3 节）。
+    /// Reads each peer's traffic and endpoint: peers with traffic are probed at the frequency of section 7;
+    /// when the decider finds the endpoint changed by roaming it changes it back (section 8.3).
     fn check_peers(&mut self, now: Instant, events: &mut impl EventSink) {
         let Some(prober) = self.prober.as_mut() else {
             return;
@@ -663,8 +692,9 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 本机状态的快照（design/status.md 第 6 节）。`now` 与 `wall` 是同一时刻。问题、最近的事件和切换的
-    /// 时间与原因由 [`crate::status::Recorder::fill`] 填入。
+    /// Snapshot of local status (design/status.md section 6). `now` and `wall` are the same moment. Problems,
+    /// recent events, and the time and reason of switches are filled in by
+    /// [`crate::status::Recorder::fill`].
     pub fn status(&self, now: Instant, wall: SystemTime, started_at: Timestamp) -> StatusDoc {
         let relays: HashMap<KeyId, &NodeId> = self
             .members
@@ -760,7 +790,8 @@ impl<D: DataPlane> Engine<D> {
                     .find(|c| c.state == CandidateState::Current)
                 {
                     Some(c) => Some(path_status(c.route, c.kind, c.punched)),
-                    // 经漫游跟随：WireGuard 当前的 endpoint 是本机候选中的哪一条，不在其中时是直连
+                    // Following through roaming: which of this machine's candidates WireGuard's current endpoint is; when
+                    // it is not among them, it is direct
                     None => traffic.and_then(|t| t.endpoint).map(|endpoint| {
                         let (route, kind) = view
                             .as_ref()
@@ -826,7 +857,8 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 本机状态中显示的地址：TLS 中继显示它的 TLS 地址，而不是传输适配进程的回环端口。
+    /// The address shown in local status: a TLS relay shows its TLS address, not the transport adapter's
+    /// loopback port.
     fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
         let endpoint = route.endpoint();
         match kind {
@@ -835,7 +867,7 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// 处理收到的探测消息，返回要发出的应答。
+    /// Handles a received probe message and returns the reply to send.
     pub fn on_packet(
         &mut self,
         kind: Incoming,
@@ -896,8 +928,9 @@ fn interface_spec(me: &Member, desired: &DesiredMesh) -> InterfaceSpec {
     }
 }
 
-/// 最近一次重新握手（`rehandshaked_ms`，Unix 毫秒）之后完成过握手。没有重新握手过就无从确认；
-/// 早于重新握手的握手时间是旧对端的（决定与执行之间读到的状态）。
+/// Whether a handshake has completed since the most recent re-handshake (`rehandshaked_ms`, Unix
+/// milliseconds). With no re-handshake there is nothing to confirm; a handshake time earlier than the
+/// re-handshake belongs to the old peer (state read between deciding and executing).
 fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u64>) -> bool {
     let done_ms = last_handshake.map(|t| {
         t.duration_since(UNIX_EPOCH)
@@ -912,7 +945,8 @@ fn peer_spec(
     own: Reachability,
     endpoint: Option<SocketAddr>,
 ) -> PeerSpec {
-    // 组网地址，有 `edge` 角色时的 Edge 专用地址，以及它宣告的网段（design/mesh.md 第 4 节）
+    // The mesh address, the Edge address when there is an `edge` role, and the prefixes it advertises
+    // (design/mesh.md section 4)
     let edge = member.edge.iter().map(|e| e.addresses);
     PeerSpec {
         public_key: member.mesh_public_key,
@@ -1022,14 +1056,14 @@ mod tests {
         assert!(events.0.contains(&Event::InterfaceReady {
             listen_port: FAKE_AUTO_PORT
         }));
-        // 传输适配进程拿到的是实际的端口，而且在配置对端之前
+        // The transport adapter gets the actual port, and before the peers are configured
         let at = |pred: &dyn Fn(&Event) -> bool| events.0.iter().position(pred);
         let transport = at(
             &|e| matches!(e, Event::TransportConfigChanged { config } if config.wireguard_port == FAKE_AUTO_PORT),
         );
         let peers = at(&|e| matches!(e, Event::PeersApplied { .. }));
         assert!(transport.expect("transport config") < peers.expect("peers"));
-        // 没有变化时不再报告
+        // No further report when nothing has changed
         let mut again = VecSink::default();
         e.apply(&validated(doc), &mut again).expect("accepted");
         assert!(!again.0.iter().any(|e| matches!(
@@ -1055,10 +1089,11 @@ mod tests {
                 "sync_routes"
             ]
         );
-        // 成员 2 发往本机隧道内探测端口的包放行（IPv4、IPv6），没有别的规则
+        // Packets from member 2 to this machine's in-tunnel probe port are allowed (IPv4, IPv6), with no other
+        // rules
         assert_eq!(e.dataplane.filter.as_ref().map(|f| f.rules.len()), Some(2));
         assert_eq!(e.dataplane.edge, None);
-        // 没有变化时不重装
+        // No reinstall when nothing has changed
         e.apply(&validated(doc), &mut VecSink::default())
             .expect("accepted");
         assert_eq!(
@@ -1141,7 +1176,8 @@ mod tests {
                 "fd00:88::1:1/128"
             ]
         );
-        // 来源是 Edge 专用地址、又没有规则放行时拒绝：只有隧道内探测放行，而它们的来源是组网地址
+        // A source that is an Edge address with no rule allowing it is rejected: only in-tunnel probes are
+        // allowed, and their source is the mesh address
         let edge_source: IpPrefix = "100.88.1.1/32".parse().expect("prefix");
         let filter = other.dataplane.filter.as_ref().expect("filter");
         assert!(!filter.rules.iter().any(|r| {
@@ -1166,7 +1202,7 @@ mod tests {
             validated(d)
         };
         let route: IpPrefix = "192.0.2.10/32".parse().expect("prefix");
-        // 其他成员：对端的 AllowedIPs 和组网接口上的路由都有这个网段
+        // Other members: the peer's AllowedIPs and the routes on the mesh interface both have this prefix
         let mut edge = engine(1);
         edge.apply(&with_routes(1), &mut VecSink::default())
             .expect("accepted");
@@ -1180,7 +1216,8 @@ mod tests {
         assert_eq!(edge.dataplane.routes, [route]);
         assert_eq!(edge.dataplane.ingress, None);
 
-        // 智能入口本身：转发 Edge 的流量，宣告的网段没有规则时拒绝，自己的网段不加路由
+        // The smart gateway itself: forwards the Edge's traffic, rejects when the advertised prefixes have no
+        // rules, and adds no route for its own prefixes
         let mut router = engine(2);
         router
             .apply(&with_routes(2), &mut VecSink::default())
@@ -1219,7 +1256,8 @@ mod tests {
         let mut e = engine(1);
         let mut events = VecSink::default();
 
-        // 3：准入证明中的组网公钥与签名不符；4：地址在组网网段之外；5：节点策略没有 mesh 模块
+        // 3: the mesh public key in the admission proof does not match the signature; 4: the address is outside
+        // the mesh prefixes; 5: the node policy has no mesh module
         let mut bad_proof = mesh.material(3, 1);
         bad_proof.proof.signature[0] ^= 1;
         let mut outside = mesh.policy(4, 1);
@@ -1256,13 +1294,13 @@ mod tests {
             .expect("accepted");
         assert_eq!(peer_keys(&e), [2, 3]);
 
-        // 快照中缺少 3：不删除
+        // Missing from the snapshot: 3 is not deleted
         let without_3 = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
         e.apply(&validated(without_3), &mut VecSink::default())
             .expect("accepted");
         assert_eq!(peer_keys(&e), [2, 3]);
 
-        // 撤销 3：删除；之后更高版本的签名材料也不能恢复
+        // Revoke 3: it is deleted; signed material of a higher version afterwards cannot restore it either
         let mut revoke = mesh.desired(1, vec![]);
         revoke.revocations = vec![Revocation::Node {
             node_id: node_id(3),
@@ -1305,7 +1343,7 @@ mod tests {
         let peers = e.dataplane.peers.as_ref().expect("peers");
         assert_eq!(peers[0].allowed_ips[0].to_string(), "100.88.0.2/32");
 
-        // 同一份期望状态中带着同一节点的两个版本：采用高的，低的被拒绝
+        // Two versions of the same node in one desired state: the higher is adopted and the lower is rejected
         let mut e = engine(1);
         let mut events = VecSink::default();
         let both = vec![
@@ -1399,9 +1437,9 @@ mod tests {
     #[test]
     fn only_a_handshake_after_the_rehandshake_confirms_it() {
         let at = |ms: u64| Some(UNIX_EPOCH + Duration::from_millis(ms));
-        // 重新加入之后还没有握手
+        // No handshake yet after re-joining
         assert!(!handshake_since(None, Some(1_000)));
-        // 决定之后、执行之前读到的旧对端的握手
+        // The old peer's handshake read after the decision and before the execution
         assert!(!handshake_since(at(900), Some(1_000)));
         assert!(!handshake_since(at(900), None));
         assert!(handshake_since(at(1_000), Some(1_000)));
@@ -1425,7 +1463,7 @@ mod tests {
         let direct = Candidate::Direct {
             endpoint: "192.0.2.2:41820".parse().expect("addr"),
         };
-        // 当前路径是直连：TLS 端口闲置，挡住
+        // The current path is direct: the TLS port is idle, block it
         doc.paths = vec![PathDoc {
             peer: node_id(2),
             peer_reachability: Reachability::Public,
@@ -1437,20 +1475,20 @@ mod tests {
             e.dataplane.tls_guards,
             vec![vec![crate::config::TLS_LOOPBACK_BASE]]
         );
-        // 只剩 TLS 候选：它就是当前路径，放开
+        // Only TLS candidates remain: it is the current path, open it
         doc.paths[0].candidates = vec![tls];
         e.apply(&validated(doc.clone()), &mut events)
             .expect("accepted");
         assert_eq!(e.dataplane.tls_guards.last(), Some(&vec![]));
-        // 没有 TLS 候选的节点不设置
+        // Nodes without TLS candidates set nothing
         let mut plain = engine(1);
         doc.paths[0].candidates = vec![direct];
         plain.apply(&validated(doc), &mut events).expect("accepted");
         assert!(plain.dataplane.tls_guards.is_empty());
     }
 
-    /// 本机状态的快照（design/status.md 第 6 节）：节点名、对端状态随流量变化、TLS 中继显示真实地址、
-    /// 回复中没有私钥与探测令牌。
+    /// Snapshot of local status (design/status.md section 6): node names; peer state changes with traffic; TLS
+    /// relays show their real addresses; the reply contains no private key or probe token.
     #[test]
     fn status_reports_peers_paths_and_no_secrets() {
         use crate::config::{Candidate, PathDoc, ProbeToken};
@@ -1487,7 +1525,7 @@ mod tests {
                 }],
             },
         ];
-        // 节点 4 没有路径
+        // Node 4 has no path
         e.apply(&validated(doc), &mut events).expect("accepted");
         let t0 = Instant::now();
         let wall = SystemTime::now();
@@ -1506,11 +1544,12 @@ mod tests {
                 .expect("peer")
         };
         assert_eq!(st.peers.len(), 3);
-        // 还没有流量：有路径的对端无从判断，没有路径的写明
+        // No traffic yet: peers with a path cannot be judged, and peers without a path are stated as such
         assert_eq!(peer(&st, 2).state, PeerState::Idle);
         assert_eq!(peer(&st, 4).state, PeerState::NoPath);
         assert_eq!(peer(&st, 4).role, None);
-        // 本机是 dial-only：对 public 对端决定路径；TLS 中继显示它的 TLS 地址和名字
+        // This machine is dial-only: decides the path for the public peer; the TLS relay shows its TLS address
+        // and name
         let p2 = peer(&st, 2);
         assert_eq!(p2.role, Some(PeerRole::Decider));
         let path = p2.path.expect("path");
@@ -1525,7 +1564,7 @@ mod tests {
         );
         assert_eq!(p2.candidates.len(), 2);
 
-        // 两个方向都有包：连通；只发不收、从未收到过：正在连接
+        // Packets in both directions: connected; only sent and never received: connecting
         e.dataplane.traffic.insert(mesh_key(2), (100, 100));
         e.dataplane.traffic.insert(mesh_key(3), (0, 100));
         let t1 = t0 + Duration::from_secs(1);
@@ -1535,7 +1574,7 @@ mod tests {
         assert_eq!(peer(&st, 2).rx_bytes, 100);
         assert_eq!(peer(&st, 3).state, PeerState::Connecting);
 
-        // 之后只发不收超过 30 秒：不通
+        // After that, only sent and not received for more than 30 seconds: not working
         let t2 = t1 + Duration::from_secs(31);
         e.dataplane.traffic.insert(mesh_key(2), (100, 200));
         e.tick(t2, 32_000, &mut events);
@@ -1543,7 +1582,7 @@ mod tests {
             e.status(t2, wall, Timestamp::now()).peers[0].state,
             PeerState::Unreachable
         );
-        // 两个方向都没有包超过 30 秒：空闲
+        // No packets in either direction for more than 30 seconds: idle
         let t3 = t2 + Duration::from_secs(31);
         e.tick(t3, 63_000, &mut events);
         assert_eq!(
@@ -1558,7 +1597,8 @@ mod tests {
         }
     }
 
-    /// 本机是 public、对端是 dial-only：本机跟随，路径按 WireGuard 当前的 endpoint 判断，没有测量。
+    /// This machine is public and the peer is dial-only: this machine follows, the path is judged from
+    /// WireGuard's current endpoint, and there is no measurement.
     #[test]
     fn a_follower_reports_the_endpoint_without_measurements() {
         use crate::config::PathDoc;
@@ -1574,7 +1614,7 @@ mod tests {
             candidates: vec![],
         }];
         e.apply(&validated(doc), &mut events).expect("accepted");
-        // 对端连进来以后，WireGuard 记下它的地址
+        // After the peer connects in, WireGuard records its address
         let roamed: SocketAddr = "203.0.113.7:53557".parse().expect("addr");
         e.dataplane.peers.as_mut().expect("peers")[0].endpoint = Some(roamed);
         let now = Instant::now();
@@ -1592,7 +1632,8 @@ mod tests {
         assert!(st.node.nat.is_none());
     }
 
-    /// 与 `backend` 共享信任存储的引擎：重新构造一个，相当于组网进程重启。
+    /// An engine that shares the trust store with `backend`: constructing a new one is equivalent to a mesh
+    /// process restart.
     fn engine_with(me: u8, backend: &MemoryBackend) -> Engine<FakeDataPlane> {
         engine(me).with_trust_store(TrustStore::open(Box::new(backend.clone())))
     }
@@ -1611,7 +1652,7 @@ mod tests {
             &mut VecSink::default(),
         )
         .expect("accepted");
-        // 改写过的期望状态：另一把恢复密钥签名，带上攻击者的成员 3
+        // A rewritten desired state: signed by a different recovery key, with an attacker's member 3 added
         let attacker = Mesh::new(&[1, 2, 3]);
         let forged = attacker.desired(
             1,
@@ -1627,7 +1668,7 @@ mod tests {
         assert!(reason.contains("pinned"), "{reason}");
         assert_eq!(peer_keys(&e), vec![2]);
         assert_eq!(version_of(&e, 2), Some(1));
-        // 重启之后同样拒绝
+        // Also rejected after a restart
         engine_with(1, &backend)
             .apply(&validated(forged), &mut VecSink::default())
             .expect_err("still pinned after a restart");
@@ -1656,7 +1697,8 @@ mod tests {
             .expect("accepted");
         assert_eq!(peer_keys(&e), vec![2]);
 
-        // 重启之后拿到旧的期望状态：被撤销的 3、旧版本的 2 都不接受
+        // After a restart, an old desired state is received: the revoked 3 and the old version of 2 are both not
+        // accepted
         let mut restarted = engine_with(1, &backend);
         let mut events = VecSink::default();
         restarted
@@ -1698,14 +1740,14 @@ mod tests {
         let past = Timestamp::from_unix_seconds(1_000_000_000);
         let expired = |n, v| mesh.material_expiring(mesh.policy(n, v), mesh_key(n), past);
         let mut e = engine(1);
-        // 信任存储刚建立（已经在运行的成员升级之后）：不检查过期时间
+        // The trust store has just been created (after a member already running upgrades): expiry is not checked
         e.apply(
             &validated(mesh.desired(1, vec![expired(1, 1), mesh.material(2, 1)])),
             &mut VecSink::default(),
         )
         .expect("accepted");
         assert_eq!(version_of(&e, 1), Some(1));
-        // 之后出现的新版本已经过期：不接受，继续使用版本 1
+        // A new version that appears later has already expired: not accepted, version 1 continues to be used
         let mut events = VecSink::default();
         e.apply(
             &validated(mesh.desired(1, vec![expired(1, 2), mesh.material(2, 1)])),
@@ -1714,7 +1756,7 @@ mod tests {
         .expect("accepted as a whole");
         assert_eq!(rejected(&events), [Some(node_id(1))]);
         assert_eq!(version_of(&e, 1), Some(1));
-        // 没有过期的新版本照常接受；其他成员的过期时间不检查
+        // A new version that has not expired is accepted as usual; other members' expiry is not checked
         e.apply(
             &validated(mesh.desired(1, vec![mesh.material(1, 3), expired(2, 2)])),
             &mut VecSink::default(),
@@ -1740,7 +1782,7 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Event::TrustStoreFailed { .. }))
         );
-        // 组网照常
+        // Mesh keeps working as usual
         assert_eq!(peer_keys(&e), vec![2]);
         backend.set_fail_writes(false);
         let mut events = VecSink::default();

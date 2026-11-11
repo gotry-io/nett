@@ -1,5 +1,6 @@
-//! 每台机器上的控制代理 nett-node（design/hub.md 第 5 节）：连接 Hub，把期望状态交给组网进程，上报状态。
-//! 也提供签名工具调用 Hub API 的客户端。
+//! The control agent nett-node on each machine (design/hub.md section 5): connects to the Hub,
+//! hands the desired state to the mesh process, and reports status. It also provides the client the
+//! signing tool uses to call the Hub API.
 
 pub mod config;
 pub mod http;

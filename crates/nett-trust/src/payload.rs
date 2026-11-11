@@ -1,4 +1,4 @@
-//! 签名载荷与其中的产物（design/auth.md 第 10.1、10.5 节）。
+//! Signed payloads and the artifacts in them (design/auth.md sections 10.1, 10.5).
 
 use std::net::{Ipv4Addr, Ipv6Addr};
 
@@ -9,19 +9,21 @@ use nett_core::id::{ChangeId, NodeId};
 use nett_core::prefix::IpPrefix;
 use serde::{Deserialize, Serialize};
 
-/// 载荷格式的版本。
+/// Version of the payload format.
 pub const PAYLOAD_V1: u64 = 1;
 
-/// 一份访问规则集最多的规则数，以及每条规则中网段和端口范围的上限（硬性规则 14）。
+/// The maximum number of rules in an access rule set, and the upper limits on prefixes and port
+/// ranges in each rule (hard rule 14).
 pub const MAX_ACCESS_RULES: usize = 1024;
 pub const MAX_RULE_PREFIXES: usize = 256;
 pub const MAX_RULE_PORTS: usize = 64;
-/// Edge 所在容器的网段数的上限。
+/// Upper limit on the number of container prefixes where Edge runs.
 pub const MAX_EDGE_CONTAINERS: usize = 16;
-/// 一个节点宣告的网段数的上限。
+/// Upper limit on the number of prefixes a node advertises.
 pub const MAX_ADVERTISED_ROUTES: usize = 64;
 
-/// 签名载荷的文档形式。控制台（以及实验工具）按它生成，验证方按它解析。
+/// The document form of a signed payload. The console (and lab tools) generate it, and the verifier
+/// parses it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PayloadDoc {
@@ -39,7 +41,7 @@ pub enum PayloadDoc {
     },
 }
 
-/// 需要下发给节点、由节点独立验证的产物。
+/// Artifacts that need to be sent to nodes and verified independently by them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Artifact {
@@ -48,7 +50,8 @@ pub enum Artifact {
     AdvertisedRoutes(AdvertisedRoutes),
 }
 
-/// 节点策略，字段与 `node-policies` 资源一致（design/api-resources.md 第 5.2 节）。
+/// Node policy, with fields matching the `node-policies` resource (design/api-resources.md section
+/// 5.2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodePolicy {
@@ -56,7 +59,7 @@ pub struct NodePolicy {
     pub policy_version: u64,
     pub modules: Vec<Module>,
     pub roles: Vec<Role>,
-    /// 有 `edge` 角色时，怎样识别 Edge 发出的流量（ADR 0015）。
+    /// With the `edge` role, how to identify traffic sent by Edge (ADR 0015).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<EdgeSources>,
     pub addresses: NodeAddresses,
@@ -74,11 +77,11 @@ pub enum Module {
 pub enum Role {
     Relay,
     Edge,
-    /// 智能入口：宣告网段并转发（design/mesh.md 第 10 节）。
+    /// Smart gateway: advertises routes and forwards (design/mesh.md section 10).
     SubnetRouter,
 }
 
-/// Edge 发出的流量从哪里来：Edge 所在容器的网段。
+/// Where Edge traffic comes from: the container prefixes where Edge runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeSources {
@@ -89,13 +92,14 @@ pub struct EdgeSources {
 #[serde(deny_unknown_fields)]
 pub struct NodeAddresses {
     pub mesh: MeshAddresses,
-    /// Edge 专用地址，只在有 `edge` 角色时出现。
+    /// Edge address, present only with the `edge` role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<MeshAddresses>,
 }
 
-/// 一个智能入口宣告的网段（design/mesh.md 第 10 节），版本号只增不减。只有节点策略中有 `subnet_router`
-/// 角色的节点，它的宣告才被接受。
+/// The routes a smart gateway advertises (design/mesh.md section 10); the version number only
+/// increases. Its advertisement is accepted only for a node whose node policy has the
+/// `subnet_router` role.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdvertisedRoutes {
@@ -104,7 +108,8 @@ pub struct AdvertisedRoutes {
     pub routes: Vec<IpPrefix>,
 }
 
-/// 访问规则集（design/mesh.md 第 12 节）：选择器展开后的网段和端口，按数组顺序匹配。
+/// Access rule set (design/mesh.md section 12): the prefixes and ports after selector expansion,
+/// matched in array order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccessRuleSet {
@@ -118,7 +123,7 @@ pub struct AccessRule {
     pub action: RuleAction,
     pub from: Vec<IpPrefix>,
     pub to: Vec<IpPrefix>,
-    /// 为空表示所有协议和端口。
+    /// Empty means all protocols and ports.
     pub ports: Vec<PortRange>,
 }
 
@@ -182,7 +187,7 @@ pub enum PayloadError {
     DuplicateRoutes(NodeId),
 }
 
-/// 已解析、已校验格式的签名载荷（签名由 [`crate::signed`] 验证）。
+/// A parsed payload with a validated format (the signature is verified by [`crate::signed`]).
 #[derive(Debug, Clone)]
 pub struct Payload {
     doc: PayloadDoc,
@@ -191,12 +196,14 @@ pub struct Payload {
 }
 
 impl Payload {
-    /// 从签名覆盖的字节解析。字节必须是规范形式；不认识的字段、种类和产物整份拒绝。
+    /// Parses from the bytes covered by the signature. The bytes must be in canonical form; unknown
+    /// fields, kinds and artifacts are rejected as a whole.
     pub fn parse(bytes: &[u8]) -> Result<Self, PayloadError> {
         let value = parse_canonical(bytes)?;
         let doc =
             PayloadDoc::deserialize(&value).map_err(|e| PayloadError::Document(e.to_string()))?;
-        // 序列化回去必须得到同一份文档：地址、键等字段因此只有一种文本形式
+        // Serializing back must yield the same document: so fields such as addresses and keys have
+        // only one text form
         let round_trip =
             serde_json::to_value(&doc).map_err(|e| PayloadError::Document(e.to_string()))?;
         if round_trip != value {
@@ -253,7 +260,7 @@ impl Payload {
         &self.doc
     }
 
-    /// 载荷字节的 SHA-256，即 WebAuthn 的 challenge。
+    /// SHA-256 of the payload bytes, which is the WebAuthn challenge.
     pub fn hash(&self) -> &Sha256Digest {
         &self.hash
     }
@@ -265,7 +272,8 @@ impl Payload {
         }
     }
 
-    /// 载荷中的产物及其哈希（产物对象规范形式的 SHA-256）。
+    /// The artifacts in the payload and their hashes (the SHA-256 of the artifact object's
+    /// canonical form).
     pub fn artifacts(&self) -> impl Iterator<Item = (&Sha256Digest, &Artifact)> {
         self.artifact_hashes.iter().zip(self.doc.artifacts())
     }
@@ -286,7 +294,7 @@ impl Payload {
             })
     }
 
-    /// 载荷中的全部宣告网段产物。
+    /// All advertised-route artifacts in the payload.
     pub fn advertised_routes(&self) -> impl Iterator<Item = (&Sha256Digest, &AdvertisedRoutes)> {
         self.artifacts()
             .filter_map(|(hash, artifact)| match artifact {
@@ -304,7 +312,7 @@ impl PayloadDoc {
         }
     }
 
-    /// 规范形式的字节，即要签名的内容。
+    /// The canonical-form bytes, i.e. what is to be signed.
     pub fn to_canonical(&self) -> Result<Vec<u8>, PayloadError> {
         let value =
             serde_json::to_value(self).map_err(|e| PayloadError::Document(e.to_string()))?;
@@ -369,7 +377,8 @@ impl AdvertisedRoutes {
             return err("needs between 1 and 64 prefixes");
         }
         for route in &self.routes {
-            // 默认路由会把对端的全部流量引进组网；回环、组播、链路本地地址不是可以宣告的网段
+            // A default route would pull all of a peer's traffic into the mesh; loopback, multicast
+            // and link-local addresses are not advertisable prefixes
             let special = match route.addr() {
                 std::net::IpAddr::V4(a) => {
                     a.is_loopback() || a.is_multicast() || a.is_link_local() || a.is_unspecified()
@@ -424,7 +433,8 @@ fn has_duplicates<T: Ord + Copy>(items: &[T]) -> bool {
     sorted.windows(2).any(|w| w[0] == w[1])
 }
 
-/// 产物哈希：产物对象规范形式的 SHA-256（design/auth.md 第 10.5 节）。
+/// Artifact hash: the SHA-256 of the artifact object's canonical form (design/auth.md section
+/// 10.5).
 pub fn artifact_hash(artifact: &Artifact) -> Result<Sha256Digest, PayloadError> {
     let value =
         serde_json::to_value(artifact).map_err(|e| PayloadError::Document(e.to_string()))?;

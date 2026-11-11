@@ -1,4 +1,5 @@
-# 两个 public 节点经"公网"直连（场景 14：准入验证；两节点直连通信）
+# Two public nodes connect directly over the "public network" (scenario 14: admission verification;
+# the two nodes communicate over a direct connection)
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -16,7 +17,7 @@ reachability = "public"
 peers = ["a", "b"]
 candidates = ["direct"]
 
-# 场景在这些成员之间收发（访问默认拒绝，ADR 0023）
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
 from = ["a", "b"]
 to = ["a", "b"]

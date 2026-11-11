@@ -1,4 +1,5 @@
-//! 公钥与签名验证（design/auth.md 第 10.5 节）。只验证，不签名：签名在用户的设备上完成。
+//! Public keys and signature verification (design/auth.md section 10.5). Verification only, no
+//! signing: signing is done on the user's device.
 
 use std::fmt;
 
@@ -9,10 +10,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::encoding::{EncodingError, decode_b64, decode_b64_fixed, encode_b64};
 
-/// 未压缩 SEC1 点的长度：`0x04 ‖ X ‖ Y`。
+/// Length of an uncompressed SEC1 point: `0x04 ‖ X ‖ Y`.
 const P256_POINT_LEN: usize = 65;
 
-/// passkey 允许的算法（design/auth.md 第 10.2 节）。
+/// Algorithms allowed for passkeys (design/auth.md section 10.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Algorithm {
     #[serde(rename = "ES256")]
@@ -37,7 +38,7 @@ pub enum KeyError {
     RecoveryAlgorithm,
 }
 
-/// 信任锚中的一把公钥：passkey 或恢复密钥。
+/// A public key in the trust anchors: a passkey or a recovery key.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AnchorKey {
     alg: Algorithm,
@@ -75,7 +76,7 @@ impl AnchorKey {
         &self.bytes
     }
 
-    /// 验证 WebAuthn 断言的签名：ES256 为 ASN.1 DER，EdDSA 为 64 字节。
+    /// Verifies the signature of a WebAuthn assertion: ES256 is ASN.1 DER, EdDSA is 64 bytes.
     pub(crate) fn verify_webauthn(&self, message: &[u8], signature: &[u8]) -> bool {
         let alg: &dyn ring::signature::VerificationAlgorithm = match self.alg {
             Algorithm::Es256 => &ECDSA_P256_SHA256_ASN1,
@@ -86,7 +87,8 @@ impl AnchorKey {
             .is_ok()
     }
 
-    /// 验证恢复密钥的签名：ECDSA P-256 与 SHA-256，64 字节的 `r ‖ s`（WebCrypto 的输出）。
+    /// Verifies a recovery key's signature: ECDSA P-256 with SHA-256, 64-byte `r ‖ s` (the
+    /// WebCrypto output).
     pub(crate) fn verify_recovery(&self, message: &[u8], signature: &[u8; 64]) -> bool {
         self.alg == Algorithm::Es256
             && UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, &self.bytes)
@@ -101,7 +103,7 @@ impl fmt::Debug for AnchorKey {
     }
 }
 
-/// 入网公钥（Ed25519，浏览器生成）。
+/// Enrollment public key (Ed25519, generated in the browser).
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Ed25519PublicKey([u8; 32]);
 
@@ -121,7 +123,7 @@ impl Ed25519PublicKey {
     }
 }
 
-/// X25519 公钥：组网公钥（WireGuard）或节点身份公钥（Noise）。
+/// X25519 public key: a mesh public key (WireGuard) or a node identity public key (Noise).
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct X25519PublicKey([u8; 32]);
 

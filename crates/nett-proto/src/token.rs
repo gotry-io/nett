@@ -1,9 +1,13 @@
-//! 关联码与接入 token 的格式（design/hub.md 第 3.1、3.5 节）：固定前缀加上 base64url 编码的 JSON。
+//! Formats of the link code and the join token (design/hub.md sections 3.1, 3.5): a fixed prefix
+//! followed by base64url-encoded JSON.
 //!
-//! - 关联码 `nett_lnk_…`：Hub 地址、Hub 身份公钥、一次性的随机密钥，以及 Hub 自签证书时证书的指纹；
-//! - 接入 token `nett_enr_…`：Hub 地址、Hub 身份公钥、节点 ID、信任锚清单的指纹。已是成员的机器用的
-//!   没有秘密，机器用自己的身份密钥连接 Hub；新机器用的（入网 token，design/auth.md 第 8.1 节）多了入网
-//!   私钥与过期时间。
+//! - Link code `nett_lnk_…`: the Hub address, the Hub identity public key, a one-time random
+//!   secret, and, when the Hub is self-signed, the certificate fingerprint;
+//! - Join token `nett_enr_…`: the Hub address, the Hub identity public key, the node ID, and the
+//!   fingerprint of the trust anchor list. The one used by a machine that is already a member holds
+//!   no secrets, and the machine connects to the Hub with its own identity key; the one used by a
+//!   new machine (enrollment token, design/auth.md section 8.1) additionally has the enrollment
+//!   private key and an expiry time.
 
 use std::fmt;
 
@@ -14,7 +18,8 @@ use zeroize::Zeroizing;
 
 pub const LINK_PREFIX: &str = "nett_lnk_";
 pub const JOIN_PREFIX: &str = "nett_enr_";
-/// token 文本的上限：远大于这些字段，防止把别的东西当成 token 解析。
+/// Upper limit on token text: far larger than these fields, which prevents parsing something else
+/// as a token.
 const MAX_TOKEN: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -25,7 +30,7 @@ pub enum TokenError {
     Damaged(String),
 }
 
-/// 32 字节的值，文本形式为 base64url。
+/// A 32-byte value whose text form is base64url.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bytes32(pub [u8; 32]);
 
@@ -47,7 +52,7 @@ impl<'de> Deserialize<'de> for Bytes32 {
     }
 }
 
-/// 32 字节的秘密：内存中用完清零，调试输出中不显示（硬性规则 10）。
+/// A 32-byte secret: zeroed in memory after use and not shown in debug output (hard rule 10).
 #[derive(Clone, PartialEq, Eq)]
 pub struct Secret32(pub Zeroizing<[u8; 32]>);
 
@@ -91,22 +96,22 @@ pub struct JoinToken {
     pub url: String,
     pub hub_key: Bytes32,
     pub node_id: String,
-    /// 信任锚清单的 128 位指纹（auth.md 第 10.5 节），base64url。
+    /// 128-bit fingerprint of the trust anchor list (auth.md section 10.5), base64url.
     pub anchors: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_fingerprint: Option<Bytes32>,
-    /// 只在入网 token 中。
+    /// Only in the enrollment token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enroll: Option<Enroll>,
 }
 
-/// 入网 token 的秘密部分。
+/// The secret part of the enrollment token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Enroll {
-    /// 入网私钥：Ed25519 的 32 字节种子。
+    /// Enrollment private key: a 32-byte Ed25519 seed.
     pub key: Secret32,
-    /// 过期时间（Unix 秒）。
+    /// Expiry time (Unix seconds).
     pub expires_at: i64,
 }
 

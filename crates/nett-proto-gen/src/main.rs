@@ -1,4 +1,5 @@
-//! `cargo run -p nett-proto-gen`：从 `proto/nett/v1/*.proto` 生成 `crates/nett-proto/src/gen/nett.v1.rs`。
+//! `cargo run -p nett-proto-gen`: generates `crates/nett-proto/src/gen/nett.v1.rs` from
+//! `proto/nett/v1/*.proto`.
 
 use std::path::Path;
 

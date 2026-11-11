@@ -1,6 +1,8 @@
-//! 新机器经 Hub 入网（design/hub.md 第 6 节）：用 token 中的入网私钥签准入证明，以本机的身份密钥连接 Hub，
-//! 收到第一份期望状态之后核对它属于 token 所说的站点和节点。`sudo nett install <token>` 与实验工具都调用
-//! 这里；写文件、安装服务由调用方完成。
+//! A new machine joins via the Hub (design/hub.md section 6): signs the admission proof with the
+//! enrollment private key from the token, connects to the Hub with this machine's identity key, and
+//! after receiving the first desired state checks that it belongs to the site and node the token
+//! names. `sudo nett install <token>` and the lab tools both call this; writing files and
+//! installing the service are done by the caller.
 
 use std::path::Path;
 
@@ -36,14 +38,16 @@ pub enum EnrollError {
     Mismatch(String),
 }
 
-/// 入网的结果：Hub 的配置与第一份期望状态（组网进程的期望状态文件的内容）。
+/// The result of enrollment: the Hub's configuration and the first desired state (the content of
+/// the mesh process's desired state file).
 #[derive(Debug)]
 pub struct Enrolled {
     pub config: HubConfig,
     pub desired: Vec<u8>,
 }
 
-/// 用 `dir` 中已有的身份密钥与组网密钥入网。重试时用同一对密钥：Hub 已经记下这台机器时按身份认出它。
+/// Enrolls using the identity key and mesh key already in `dir`. Retries use the same key pair:
+/// when the Hub has already recorded this machine it recognizes it by identity.
 pub async fn enroll(dir: &Path, token: &JoinToken, now: i64) -> Result<Enrolled, EnrollError> {
     let secret = token.enroll.as_ref().ok_or(EnrollError::NotEnrollment)?;
     if now > secret.expires_at {
@@ -80,8 +84,9 @@ pub async fn enroll(dir: &Path, token: &JoinToken, now: i64) -> Result<Enrolled,
     Ok(Enrolled { config, desired })
 }
 
-/// 期望状态是给这个节点的，信任锚清单的指纹与 token 中的相同（auth.md 第 8.2 节）：Hub 换不了这台机器
-/// 认的站点。其余内容由组网进程用这份信任锚验证。
+/// The desired state is for this node, and the fingerprint of its trust anchor list equals the one
+/// in the token (auth.md section 8.2): the Hub cannot change the site this machine trusts. The rest
+/// of the content is verified by the mesh process using this trust anchor.
 fn check(desired: &[u8], node_id: &NodeId, anchors: &str) -> Result<(), EnrollError> {
     let doc: DesiredMeshDoc = serde_json::from_slice(desired)
         .map_err(|e| EnrollError::Mismatch(format!("is not valid: {e}")))?;

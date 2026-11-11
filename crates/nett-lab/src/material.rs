@@ -1,6 +1,9 @@
-//! 生成实验材料：钥匙、签名的节点策略、准入证明、各节点的期望状态（design/prototype.md 第 4 节）。
+//! Generates lab material: keys, signed node policies, admission proofs, and each node's desired
+//! state (design/prototype.md section 4).
 //!
-//! 实验中这些钥匙由 `nett-lab` 集中生成，只用于实验。组网进程照常逐项验证，不因为来源是本地文件而跳过检查。
+//! In lab runs these keys are generated centrally by `nett-lab` and used only for lab runs. The
+//! mesh process verifies every item as usual and does not skip checks because the source is a local
+//! file.
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -35,12 +38,13 @@ use crate::cmd;
 use crate::net::Underlay;
 use crate::topology::{Topology, parse_ports};
 
-/// 生成配置时用到的地址：实验 A 取自本机的网络规划（[`Underlay`]），实验 B 取自拓扑中写明的真实
-/// 地址（[`Topology`]，design/prototype.md 第 5.2 节）。
+/// Addresses used when generating the configuration: lab A takes them from this machine's network
+/// plan ([`Underlay`]), lab B from the real addresses written in the topology ([`Topology`],
+/// design/prototype.md section 5.2).
 pub trait Addresses {
-    /// 节点的公网 IPv4 地址；`dial-only` 的节点没有。
+    /// The node's public IPv4 address; `dial-only` nodes have none.
     fn public_ipv4(&self, name: &str) -> Option<Ipv4Addr>;
-    /// 节点的全局 IPv6 地址。
+    /// The node's global IPv6 address.
     fn ipv6(&self, name: &str) -> Option<Ipv6Addr>;
 }
 
@@ -67,14 +71,15 @@ impl Addresses for Topology {
     }
 }
 
-/// `public` 节点的 WireGuard 端口（design/mesh.md 第 5.5 节的默认值）。
+/// WireGuard port of `public` nodes (the default in design/mesh.md section 5.5).
 pub const LISTEN_PORT: u16 = 41820;
-/// 实验中 nett-relay 的中继端口。
+/// Relay port of nett-relay in lab runs.
 pub const RELAY_PORT: u16 = 41900;
-/// nett-relay 的 TLS 入口（design/mesh.md 第 5.3 节）。
+/// TLS entry of nett-relay (design/mesh.md section 5.3).
 pub const RELAY_TLS_PORT: u16 = 443;
 
-/// 候选 `relay:<中继>` 与 `relay-tls:<中继>`：中继的名称，以及是否经 TLS。
+/// Candidates `relay:<relay>` and `relay-tls:<relay>`: the relay's name, and whether it goes
+/// through TLS.
 pub fn relay_of(candidate: &str) -> Option<(&str, bool)> {
     candidate
         .strip_prefix("relay:")
@@ -82,7 +87,7 @@ pub fn relay_of(candidate: &str) -> Option<(&str, bool)> {
         .or_else(|| candidate.strip_prefix("relay-tls:").map(|r| (r, true)))
 }
 
-/// 实验材料中记录的节点信息，供场景检查使用。
+/// Node information recorded in the lab material, for scenario checks.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct LabNode {
     pub name: String,
@@ -90,43 +95,46 @@ pub struct LabNode {
     pub mesh_public_key: X25519PublicKey,
     pub mesh_ipv4: Ipv4Addr,
     pub mesh_ipv6: Ipv6Addr,
-    /// 运行 Edge 的节点的 Edge 专用地址（IPv4）。
+    /// Edge address (IPv4) of a node running Edge.
     #[serde(default)]
     pub edge_ipv4: Option<Ipv4Addr>,
     pub dir: PathBuf,
-    /// 有经 TLS 的候选：需要传输适配进程。
+    /// Has a candidate through TLS: needs a transport adapter.
     #[serde(default)]
     pub tls: bool,
-    /// 用户态数据面：没有内核 WireGuard 接口，`wg show` 读不到它。
+    /// Userspace data plane: there is no kernel WireGuard interface, so `wg show` cannot read it.
     #[serde(default)]
     pub userspace: bool,
 }
 
-/// 场景 14 的反例（design/prototype.md 第 4 节第 5 项），加入第一个节点的期望状态。
+/// Negative case of scenario 14 (design/prototype.md section 4, item 5), added to the first node's
+/// desired state.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Negative {
     pub case: String,
-    /// 期望被拒绝的节点；格式错误到读不出节点 ID 时为空。
+    /// The node expected to be rejected; empty when the format is so broken that the node ID cannot
+    /// be read.
     pub node_id: Option<NodeId>,
 }
 
 pub struct Generated {
     pub nodes: Vec<LabNode>,
     pub negatives: Vec<Negative>,
-    /// 第一个节点的期望状态（反例都加在这里），场景中改写后用 `SIGHUP` 重新加载。
+    /// The first node's desired state (the negative cases are all added here); rewritten in the
+    /// scenario and reloaded with `SIGHUP`.
     pub first_desired: DesiredMeshDoc,
     pub materials: BTreeMap<String, AdmissionMaterial>,
     pub lower_version_of_second: Option<AdmissionMaterial>,
 }
 
 fn lab_node_id(index: u32) -> NodeId {
-    // 实验用的 ID 固定可复现：全为数字的 ULID 也是合法的规范形式
+    // Lab IDs are fixed and reproducible: an all-digit ULID is also a valid canonical form
     format!("node_{index:026}")
         .parse()
         .expect("digits are valid Crockford base32")
 }
 
-/// 节点 `i` 的组网地址：组网网段中的第 `i` 个地址。
+/// Mesh address of node `i`: the `i`-th address in the mesh prefixes.
 fn mesh_addresses(topo: &Topology, index: u8) -> anyhow::Result<MeshAddresses> {
     let (std::net::IpAddr::V4(v4), std::net::IpAddr::V6(v6)) =
         (topo.mesh.ipv4.addr(), topo.mesh.ipv6.addr())
@@ -139,8 +147,8 @@ fn mesh_addresses(topo: &Topology, index: u8) -> anyhow::Result<MeshAddresses> {
     })
 }
 
-/// 运行 Edge 的节点的 Edge 专用地址：组网地址之后第 256 个（IPv4）、第 65536 个（IPv6），
-/// 例如 `100.88.1.<序号>`、`fd00:88::1:<序号>`。
+/// Edge address of a node running Edge: the 256th (IPv4) or 65536th (IPv6) after the mesh address,
+/// for example `100.88.1.<index>`, `fd00:88::1:<index>`.
 fn edge_addresses(topo: &Topology, index: u8) -> anyhow::Result<MeshAddresses> {
     let mesh = mesh_addresses(topo, index)?;
     let edge = MeshAddresses {
@@ -165,7 +173,7 @@ fn write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
     std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
 }
 
-/// WireGuard 钥匙对：`wg genkey` / `wg pubkey`。
+/// WireGuard key pair: `wg genkey` / `wg pubkey`.
 fn wireguard_keypair() -> anyhow::Result<(String, X25519PublicKey)> {
     let private = cmd::run("wg", ["genkey"])?;
     let public = cmd::run_with_input(
@@ -200,7 +208,8 @@ impl Signer<'_> {
         let payload = PayloadDoc::EnrollmentPolicy {
             v: 1,
             artifacts: vec![Artifact::NodePolicy(policy.clone())],
-            // 准入验证不检查过期时间；实验中的批准一律视为早已过期，正好覆盖这一点
+            // Admission verification does not check the expiry time; approvals in lab runs are all
+            // treated as long expired, which covers exactly this
             expires_at: Timestamp::from_unix_seconds(0),
         }
         .to_canonical()?;
@@ -210,14 +219,15 @@ impl Signer<'_> {
                 v: 1,
                 kind: AdmissionProofKind::AdmissionProof,
                 node_id: policy.node_id.clone(),
-                // 实验中没有 nett-node，身份公钥只需要是一个合法的 X25519 公钥
+                // There is no nett-node in lab runs; the identity public key only needs to be a
+                // valid X25519 public key
                 identity_public_key: mesh_key,
                 mesh_public_key: mesh_key,
             })?,
         })
     }
 
-    /// 一个节点宣告的网段（auth.md 第 10.5 节）。
+    /// The routes a node advertises (auth.md section 10.5).
     fn routes(&self, node_id: &NodeId, routes: &[IpPrefix]) -> anyhow::Result<SignedPayload> {
         let payload = PayloadDoc::EnrollmentPolicy {
             v: 1,
@@ -232,7 +242,8 @@ impl Signer<'_> {
         Ok(self.recovery.sign(payload)?)
     }
 
-    /// 拓扑中的 `[[allow]]` 展开成一份签名的访问规则集（design/mesh.md 第 12 节）；没有规则时为空。
+    /// The `[[allow]]` entries in the topology expand into one signed access rule set
+    /// (design/mesh.md section 12); empty when there are no rules.
     fn access_rules(
         &self,
         topo: &Topology,
@@ -292,7 +303,8 @@ impl Signer<'_> {
     }
 }
 
-/// 节点策略；`edge` 是 Edge 专用地址与 Edge 所在容器的网段，有它时加上 `edge` 角色。
+/// Node policy; `edge` is the Edge address and the prefix of the container Edge runs in, and when
+/// present the `edge` role is added.
 fn policy(
     node_id: NodeId,
     version: u64,
@@ -371,10 +383,11 @@ pub fn generate(
             edges.insert(node.name.clone(), edge);
         }
         let node_id = lab_node_id(u32::from(index));
-        // 有反例时第二个节点用版本 2，同时附上一份版本 1 的材料作为"低于已生效版本"的反例
+        // With negative cases, the second node uses version 2, and a version 1 material is attached
+        // as the "below the version in effect" negative case
         let version = if negatives && i == 1 { 2 } else { 1 };
         let edge_policy = edge.zip(node.edge.as_ref().map(|e| e.containers.as_slice()));
-        // 宣告网段的节点带 subnet_router 角色（design/mesh.md 第 10 节）
+        // A node advertising routes carries the subnet_router role (design/mesh.md section 10)
         let mut roles = node.roles.clone();
         if !node.routes.is_empty() {
             roles.push("subnet_router".to_owned());
@@ -400,7 +413,7 @@ pub fn generate(
             );
             lower_version_of_second = Some(signer.material(&older, &enrollment, public)?);
         }
-        // 只有 dial-only 成员经 TLS 传输（design/mesh.md 第 5.3 节）
+        // Only dial-only members use the TLS transport (design/mesh.md section 5.3)
         let tls = node.reachability == nett_mesh::config::Reachability::DialOnly
             && topo.links.iter().any(|l| {
                 l.peers.contains(&node.name)
@@ -438,7 +451,7 @@ pub fn generate(
         (vec![], vec![], vec![])
     };
 
-    // 每个（成员，中继）一个探测令牌（design/mesh.md 第 5.2 节）
+    // One probe token per (member, relay) (design/mesh.md section 5.2)
     let mut tokens: BTreeMap<(String, String), [u8; 32]> = BTreeMap::new();
     for link in &topo.links {
         for (relay, _) in link.candidates.iter().filter_map(|c| relay_of(c)) {
@@ -449,7 +462,8 @@ pub fn generate(
             }
         }
     }
-    // 有 TLS 入口的中继：自签证书，指纹随候选下发（design/mesh.md 第 5.3 节）
+    // Relays with a TLS entry: self-signed certificate, with the fingerprint delivered along with
+    // the candidate (design/mesh.md section 5.3)
     let mut fingerprints: BTreeMap<String, CertFingerprint> = BTreeMap::new();
     for (relay, _) in topo
         .links
@@ -501,7 +515,7 @@ pub fn generate(
                     .candidates
                     .iter()
                     .filter_map(|c| match relay_of(c) {
-                        // 经中继：中继端口在中继节点的公网地址上
+                        // Via relay: the relay port is on the relay node's public address
                         Some((relay, false)) => Some(Candidate::Relay {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             endpoint: SocketAddr::new(
@@ -510,7 +524,8 @@ pub fn generate(
                             ),
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
-                        // 经中继的 TLS 传输：TLS 入口与证书指纹，令牌与 UDP 中继相同
+                        // TLS transport via relay: TLS entry and certificate fingerprint; the token
+                        // is the same as for the UDP relay
                         Some((relay, true)) => Some(Candidate::RelayTls {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             address: SocketAddr::new(
@@ -521,8 +536,10 @@ pub fn generate(
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
                         None if c == "punch" => Some(Candidate::Punch),
-                        // 直连候选：对端在"公网"上时就是它的公网地址；`direct6` 为它的 IPv6 地址。
-                        // 只指向 public 节点：dial-only 节点的端口由系统分配，由它主动连过来
+                        // Direct candidate: when the peer is on the "public network" it is its
+                        // public address; `direct6` is its IPv6 address. Only points to public
+                        // nodes: the port of a dial-only node is assigned by the system, and it
+                        // connects in by itself
                         None if c == "direct6" => {
                             let public = topo.node(other)?.reachability == Reachability::Public;
                             public.then_some(Candidate::Direct {
@@ -550,7 +567,8 @@ pub fn generate(
         let doc = DesiredMeshDoc {
             node_id: nodes[i].node_id.clone(),
             reachability: node.reachability,
-            // 与站点工具相同：public 节点用固定端口，dial-only 节点由系统分配（design/mesh.md 第 5.5 节）
+            // Same as the site tool: public nodes use a fixed port, dial-only nodes are assigned by
+            // the system (design/mesh.md section 5.5)
             listen_port: (node.reachability == Reachability::Public).then_some(LISTEN_PORT),
             prefixes: MeshPrefixes {
                 ipv4: topo.mesh.ipv4,
@@ -580,8 +598,9 @@ pub fn generate(
     })
 }
 
-/// 反例：签名错误、信任锚不认识、缺少准入证明、准入证明与组网公钥不符、节点 ID 已被撤销。
-/// 每个反例是一个只存在于期望状态中的成员，使用组网网段中靠后的地址。
+/// Negative cases: wrong signature, unknown trust anchor, missing admission proof, admission proof
+/// that does not match the mesh public key, node ID that has been revoked. Each negative case is a
+/// member that exists only in the desired state, using a later address in the mesh prefixes.
 fn negative_examples(
     topo: &Topology,
     signer: &Signer<'_>,
@@ -631,7 +650,7 @@ fn negative_examples(
                 expected = None;
             }
             "proof-mismatch" => {
-                // 准入证明签名之后换掉其中的组网公钥
+                // After the admission proof is signed, swap the mesh public key in it
                 let original = mesh_key.to_string();
                 let replaced = X25519PublicKey::from_bytes([index ^ 0xff; 32]).to_string();
                 let text =
@@ -659,7 +678,8 @@ fn random_token() -> [u8; 32] {
     token
 }
 
-/// 每个中继节点一份中继分配：经它的连接两端的组网公钥、`public` 一端的地址、各成员的令牌。
+/// One relay assignment per relay node: the mesh public keys of both ends of the connections
+/// through it, the address of the `public` end, and each member's token.
 fn write_relay_configs(
     topo: &Topology,
     addresses: &dyn Addresses,
@@ -730,8 +750,10 @@ fn write_relay_configs(
 const TLS_CERT: &str = "tls-cert.pem";
 const TLS_KEY: &str = "tls-key.pem";
 
-/// 中继的自签证书（只用于实验；正式部署中由中继节点自己生成，私钥不离开节点）。返回叶证书 DER 的
-/// SHA-256。
+/// Self-signed certificate of the relay (used only in lab runs; in a real deployment the relay node
+/// generates it itself, and the private key never leaves the node). Returns the DER of the leaf
+/// certificate
+/// SHA-256.
 pub(crate) fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFingerprint> {
     let (cert, key) = (dir.join(TLS_CERT), dir.join(TLS_KEY));
     cmd::run(
@@ -777,13 +799,13 @@ pub(crate) fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFinger
     Ok(CertFingerprint(fp))
 }
 
-/// WireGuard 工具使用的公钥文本（标准 base64）。
+/// Public key text used by the WireGuard tools (standard base64).
 pub fn wg_text(key: &X25519PublicKey) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
 }
 
-/// 从文件读回 WireGuard 公钥文本（用于核对 `wg show` 的输出）。
+/// Reads a WireGuard public key text back from a file (to check the output of `wg show`).
 pub fn key_from_wg_text(text: &str) -> anyhow::Result<X25519PublicKey> {
     use base64::Engine as _;
     let bytes = base64::engine::general_purpose::STANDARD
@@ -794,9 +816,10 @@ pub fn key_from_wg_text(text: &str) -> anyhow::Result<X25519PublicKey> {
     Ok(X25519PublicKey::from_bytes(bytes))
 }
 
-/// 实验 B（design/prototype.md 第 5.2 节）：按拓扑中写明的真实地址生成各节点的配置，分发到各自的机器上
-/// 运行。每个节点都要有 SSH 主机名，`public` 节点要有公网地址；中继的 TLS 入口不在这里生成（配置中
-/// 的证书路径是本机路径）。
+/// Lab B (design/prototype.md section 5.2): generates each node's configuration from the real
+/// addresses written in the topology and distributes it to the respective machines to run. Every
+/// node needs an SSH host name, and `public` nodes need a public address; the relay's TLS entry is
+/// not generated here (the certificate path in the configuration is a path on the local machine).
 pub fn generate_remote(topo: &Topology, out: &Path) -> anyhow::Result<Generated> {
     for node in &topo.nodes {
         ensure!(

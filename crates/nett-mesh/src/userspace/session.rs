@@ -1,8 +1,10 @@
-//! WireGuard 会话层（design/userspace.md 第 3 节）：多个对端的握手、加解密与定时，不做 I/O。数据面的其他
-//! 部分只经 [`Sessions`] 使用它；实现是 gotatun 的 noise 层，换实现只改这个模块。
+//! WireGuard session layer (design/userspace.md section 3): handshakes, encryption/decryption and timers
+//! for multiple peers, doing no I/O. The rest of the data plane uses it only through [`Sessions`]; the
+//! implementation is gotatun's noise layer, and changing the implementation only changes this module.
 //!
-//! 对端之间的分发在这里完成：发起握手的一方按握手消息中的静态公钥认出，其他消息按本端的会话索引认出。
-//! 不认识的公钥一律丢弃，不为它创建会话。
+//! Dispatch among peers is done here: the side that initiates a handshake is recognized by the static
+//! public key in the handshake message, and other messages are recognized by this end's session index.
+//! An unknown public key is always dropped, and no session is created for it.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -22,28 +24,32 @@ use nett_trust::keys::X25519PublicKey;
 use crate::dataplane::MESH_MTU;
 use crate::key::PrivateKey;
 
-/// 推进定时器的间隔（gotatun 的定时器按这个粒度工作）。
+/// Interval for advancing timers (gotatun's timers work at this granularity).
 pub const TIMER_TICK: Duration = Duration::from_millis(250);
 
-/// 每秒接受的握手发起数，超过时要求对方带 cookie 重试（WireGuard 的负载保护）。
+/// Number of handshake initiations accepted per second; beyond it the peer is required to retry with a
+/// cookie (WireGuard's load protection).
 const HANDSHAKE_RATE_LIMIT: u64 = 100;
 
-/// 会话层要求数据面执行的动作。
+/// Actions the session layer asks the data plane to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Output {
-    /// 回给包的来源：握手应答、负载时的 cookie 应答，以及握手完成后排队的包。
+    /// Returned to the packet's source: handshake replies, cookie replies under load, and packets queued
+    /// after the handshake completes.
     SendTo { to: SocketAddr, datagram: Vec<u8> },
-    /// 发往对端当前的 endpoint：数据、发起握手、保活。
+    /// Sent to the peer's current endpoint: data, handshake initiation, keepalive.
     SendToPeer {
         peer: X25519PublicKey,
         datagram: Vec<u8>,
     },
-    /// 来自 `from` 的包通过了认证：数据面据此更新这个对端的 endpoint（与内核 WireGuard 相同）。
+    /// A packet from `from` passed authentication: the data plane updates this peer's endpoint accordingly
+    /// (the same as kernel WireGuard).
     Authenticated {
         peer: X25519PublicKey,
         from: SocketAddr,
     },
-    /// 解密出的内层包，可能带有补齐到 16 字节的填充。保活是空包，不产生这一项。
+    /// A decrypted inner packet, possibly with padding up to 16 bytes. A keepalive is an empty packet and
+    /// produces no such item.
     Deliver {
         peer: X25519PublicKey,
         packet: Vec<u8>,
@@ -51,17 +57,21 @@ pub enum Output {
 }
 
 pub trait Sessions {
-    /// 让会话层中的对端恰好是 `peers`（公钥与持久保活间隔，秒）。已有且保活间隔不变的对端保留会话。
+    /// Makes the peers in the session layer exactly `peers` (public key and persistent keepalive interval, in
+    /// seconds). An existing peer whose keepalive interval is unchanged keeps its session.
     fn sync(&mut self, peers: &[(X25519PublicKey, Option<u16>)]);
-    /// 丢弃一个对端的会话：下一个发往它的包触发新的握手（design/mesh.md 第 8.4 节）。
+    /// Discards a peer's session: the next packet to it triggers a new handshake (design/mesh.md section
+    /// 8.4).
     fn reset(&mut self, peer: &X25519PublicKey);
-    /// 加密一个发往 `peer` 的内层包；还没有会话时排队并发起握手。
+    /// Encrypts an inner packet addressed to `peer`; when there is no session yet, queues it and initiates a
+    /// handshake.
     fn send(&mut self, peer: &X25519PublicKey, packet: &[u8], out: &mut Vec<Output>);
-    /// 处理从 `from` 收到的一个 WireGuard 消息（类型 1–4）。
+    /// Handles a WireGuard message (types 1-4) received from `from`.
     fn receive(&mut self, from: SocketAddr, datagram: &[u8], out: &mut Vec<Output>);
-    /// 推进定时器（重新握手、保活、会话过期），每 [`TIMER_TICK`] 调用一次。
+    /// Advances timers (re-handshake, keepalive, session expiry), called once every [`TIMER_TICK`].
     fn tick(&mut self, out: &mut Vec<Output>);
-    /// 距最近一次完成握手的时间；对端加入或 [`Sessions::reset`] 以来还没有完成过时为空。
+    /// Time since the most recent completed handshake; empty when none has completed since the peer joined or
+    /// since [`Sessions::reset`].
     fn since_handshake(&self, peer: &X25519PublicKey) -> Option<Duration>;
 }
 
@@ -70,15 +80,15 @@ struct Peer {
     keepalive: Option<u16>,
 }
 
-/// gotatun 的 noise 层上的 [`Sessions`]。
+/// [`Sessions`] on gotatun's noise layer.
 pub struct Gotatun {
     private: x25519::StaticSecret,
     public: x25519::PublicKey,
     rate_limiter: Arc<RateLimiter>,
     index_table: IndexTable,
     peers: HashMap<X25519PublicKey, Peer>,
-    /// 本端的会话索引 → 对端：发出握手消息时登记，索引不再使用时删除。条数受对端数 × 每个对端的会话数
-    /// 限制。
+    /// This end's session index -> peer: registered when a handshake message is sent, and deleted when the
+    /// index is no longer used. The count is bounded by the number of peers x sessions per peer.
     by_index: HashMap<u32, X25519PublicKey>,
     mtu: MtuWatcher,
 }
@@ -109,7 +119,7 @@ impl Gotatun {
         )
     }
 
-    /// 发出的握手消息中的本端索引，指向这个对端。
+    /// The local index in a sent handshake message, pointing to this peer.
     fn register(&mut self, packet: &WgKind, peer: X25519PublicKey) {
         let index = match packet {
             WgKind::HandshakeInit(p) => p.sender_idx.get(),
@@ -181,7 +191,7 @@ impl Sessions for Gotatun {
         let packet = Packet::from_bytes(BytesMut::from(datagram));
         let parsed = match self.rate_limiter.verify_packet(from, packet) {
             Ok(parsed) => parsed,
-            // 负载时要求对方带 cookie 重试；这条应答不计入任何对端
+            // Under load, require the other side to retry with a cookie; this reply is not counted for any peer
             Err(TunnResult::WriteToNetwork(reply)) => {
                 out.push(Output::SendTo {
                     to: from,
@@ -219,7 +229,7 @@ impl Sessions for Gotatun {
                     });
                 }
             }
-            // 认证失败、重放、没有会话等：丢弃，不作响应
+            // Authentication failure, replay, no session and so on: drop, with no response
             TunnResult::Done | TunnResult::Err(_) => {}
         }
     }
@@ -230,7 +240,8 @@ impl Sessions for Gotatun {
         self.by_index.retain(|index, _| table.in_use(*index));
         let mut sent = Vec::new();
         for (key, peer) in &mut self.peers {
-            // 会话过期等错误由定时器自己处理，下一个包会发起新的握手
+            // Errors such as session expiry are handled by the timer itself, and the next packet initiates a new
+            // handshake
             if let Ok(Some(packet)) = peer.tunn.update_timers() {
                 sent.push((*key, packet));
             }
@@ -282,7 +293,7 @@ mod tests {
         (a, b)
     }
 
-    /// 一个 IPv4/UDP 包，总长 48 字节（16 的倍数，填充不改变它）。
+    /// An IPv4/UDP packet, 48 bytes in total (a multiple of 16, so padding does not change it).
     fn ip_packet(tag: u8) -> Vec<u8> {
         let mut p = vec![0u8; 48];
         p[0] = 0x45;
@@ -305,7 +316,7 @@ mod tests {
             .collect()
     }
 
-    /// 把 `from` 发出的包交给 `to`，返回 `to` 的输出。
+    /// Hands the packet sent by `from` to `to`, and returns `to`'s output.
     fn deliver(from: &Side, to: &mut Side, sent: &[Output]) -> Vec<Output> {
         let mut out = Vec::new();
         for d in datagrams(sent) {
@@ -318,7 +329,7 @@ mod tests {
     fn handshake_then_data_with_queued_first_packet() {
         let (mut a, mut b) = pair();
         let mut out = Vec::new();
-        // 还没有会话：第一个包排队，发出握手发起
+        // No session yet: the first packet is queued, and a handshake initiation is sent
         a.sessions.send(&b.key, &ip_packet(1), &mut out);
         assert_eq!(datagrams(&out).len(), 1);
         assert_eq!(datagrams(&out)[0][0], 1);
@@ -329,7 +340,7 @@ mod tests {
             from: a.addr
         }));
         let at_a = deliver(&b, &mut a, &at_b);
-        // 握手应答之后：保活与排队的包
+        // After the handshake reply: keepalive and queued packets
         assert!(at_a.contains(&Output::Authenticated {
             peer: b.key,
             from: b.addr
@@ -343,7 +354,7 @@ mod tests {
         assert!(a.sessions.since_handshake(&b.key).is_some());
         assert!(b.sessions.since_handshake(&a.key).is_some());
 
-        // 会话建立之后直接加密
+        // After the session is established, encrypt directly
         let mut out = Vec::new();
         b.sessions.send(&a.key, &ip_packet(2), &mut out);
         let at_a = deliver(&b, &mut a, &out);
@@ -361,7 +372,7 @@ mod tests {
         s.sync(&[(a.key, None)]);
         let mut out = Vec::new();
         s.send(&a.key, &ip_packet(1), &mut out);
-        // a 不认识这个公钥：不应答
+        // a does not know this public key: no reply
         let mut at_a = Vec::new();
         for d in datagrams(&out) {
             a.sessions.receive(stranger.addr, &d, &mut at_a);
@@ -388,7 +399,7 @@ mod tests {
         a.sessions.send(&b.key, &ip_packet(2), &mut out);
         assert_eq!(datagrams(&out)[0][0], 1, "a new handshake initiation");
 
-        // b 删掉 a 之后，a 的握手不再得到应答
+        // After b deletes a, a's handshake no longer gets a reply
         b.sessions.sync(&[]);
         assert!(deliver(&a, &mut b, &out).is_empty());
     }

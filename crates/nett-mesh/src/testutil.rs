@@ -1,4 +1,4 @@
-//! 测试用的期望状态与替身数据面。
+//! Desired state and stand-in data plane for tests.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -28,14 +28,14 @@ pub fn node_id(n: u8) -> NodeId {
         .expect("valid node id")
 }
 
-/// 测试材料的过期时间：2100-01-01。
+/// Expiry time of test material: 2100-01-01.
 pub const FAR_FUTURE: Timestamp = Timestamp::from_unix_seconds(4_102_444_800);
 
 pub fn mesh_key(n: u8) -> X25519PublicKey {
     X25519PublicKey::from_bytes([n; 32])
 }
 
-/// 一组节点的签名材料。节点 `n` 的组网地址为 `100.88.0.n` 与 `fd00:88::n`。
+/// Signed material for a set of nodes. The mesh address of node `n` is `100.88.0.n` and `fd00:88::n`.
 pub struct Mesh {
     pub recovery: RecoveryKeyPair,
     pub enrollment: BTreeMap<u8, EnrollmentKeyPair>,
@@ -74,7 +74,7 @@ impl Mesh {
         self.material_expiring(policy, mesh, FAR_FUTURE)
     }
 
-    /// 节点策略载荷在 `expires_at` 过期的准入材料。
+    /// Admission material whose node policy payload expires at `expires_at`.
     pub fn material_expiring(
         &self,
         policy: NodePolicy,
@@ -112,7 +112,8 @@ impl Mesh {
         self.material_for(self.policy(n, version), mesh_key(n))
     }
 
-    /// 带 `edge` 角色的节点：Edge 专用地址为 `100.88.1.n` 与 `fd00:88::1:n`，Edge 容器在 `172.17.0.0/16`。
+    /// A node with the `edge` role: the Edge address is `100.88.1.n` and `fd00:88::1:n`, and the Edge
+    /// containers are in `172.17.0.0/16`.
     pub fn edge_policy(&self, n: u8, version: u64) -> NodePolicy {
         let mut policy = self.policy(n, version);
         policy.roles.push(Role::Edge);
@@ -130,14 +131,14 @@ impl Mesh {
         self.material_for(self.edge_policy(n, version), mesh_key(n))
     }
 
-    /// 带 `subnet_router` 角色的节点（智能入口）。
+    /// A node with the `subnet_router` role (smart gateway).
     pub fn router_material(&self, n: u8, version: u64) -> AdmissionMaterial {
         let mut policy = self.policy(n, version);
         policy.roles.push(Role::SubnetRouter);
         self.material_for(policy, mesh_key(n))
     }
 
-    /// 节点 `n` 宣告网段的载荷。
+    /// The payload of the prefixes advertised by node `n`.
     pub fn routes_doc(&self, n: u8, version: u64, routes: &[&str]) -> PayloadDoc {
         PayloadDoc::EnrollmentPolicy {
             v: 1,
@@ -152,7 +153,7 @@ impl Mesh {
         }
     }
 
-    /// 用这组节点的恢复密钥签一份载荷。
+    /// Signs a payload with this set of nodes' recovery key.
     pub fn sign(&self, doc: &PayloadDoc) -> SignedPayload {
         self.recovery
             .sign(doc.to_canonical().expect("canonical"))
@@ -205,7 +206,8 @@ pub fn validated(doc: DesiredMeshDoc) -> DesiredMesh {
     DesiredMesh::from_doc(doc).expect("valid desired state")
 }
 
-/// 应用成员时不检查本机节点策略的过期时间（相当于信任存储刚建立）。
+/// When applying members, the expiry of this machine's node policy is not checked (equivalent to a newly
+/// created trust store).
 pub fn no_expiry(desired: &DesiredMesh) -> crate::members::OwnPolicy<'_> {
     crate::members::OwnPolicy {
         node_id: &desired.node_id,
@@ -213,30 +215,34 @@ pub fn no_expiry(desired: &DesiredMesh) -> crate::members::OwnPolicy<'_> {
     }
 }
 
-/// 替身数据面在期望状态不带端口时"分配"的端口。
+/// The port the stand-in data plane "assigns" when the desired state carries no port.
 pub const FAKE_AUTO_PORT: u16 = 50_000;
 
-/// 替身数据面：记录调用，`ensure_interface` 返回预设的公钥（相当于内核由私钥算出的公钥）。
+/// Stand-in data plane: records calls, and `ensure_interface` returns a preset public key (equivalent to
+/// the public key the kernel derives from the private key).
 pub struct FakeDataPlane {
     pub public_key: X25519PublicKey,
     pub interfaces: Vec<InterfaceSpec>,
-    /// 接口当前的 WireGuard 端口：不带端口时沿用，第一次是 [`FAKE_AUTO_PORT`]。
+    /// The interface's current WireGuard port: kept when no port is given, and [`FAKE_AUTO_PORT`] the first
+    /// time.
     pub listen_port: Option<u16>,
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
     pub rehandshakes: Vec<PeerSpec>,
-    /// 每次设置的闲置 TLS 端口。
+    /// The idle TLS ports set on each call.
     pub tls_guards: Vec<Vec<u16>>,
-    /// 当前安装的过滤规则与 Edge 设置。
+    /// The filter rules and Edge settings currently installed.
     pub filter: Option<FilterSpec>,
     pub edge: Option<EdgeSpec>,
     pub ingress: Option<IngressSpec>,
     pub routes: Vec<IpPrefix>,
-    /// 安装过滤规则失败：`Some(true)` 所有安装都失败，`Some(false)` 只有拒绝全部的规则能装上。
+    /// Installing filter rules fails: `Some(true)` makes all installs fail, `Some(false)` lets only the
+    /// deny-all rules install.
     pub fail_filter: Option<bool>,
-    /// 按顺序记下的数据面调用，用来检查"先装过滤规则，再添加对端"。
+    /// Data plane calls recorded in order, used to check "install filter rules first, then add peers".
     pub calls: Vec<&'static str>,
-    /// 各对端的收发字节数与最近一次握手，`peer_stats` 照此报告（没有的为 0 与空）。
+    /// Byte counts and most recent handshake of each peer, which `peer_stats` reports (0 and empty when
+    /// absent).
     pub traffic: std::collections::HashMap<X25519PublicKey, (u64, u64)>,
     pub handshakes: std::collections::HashMap<X25519PublicKey, std::time::SystemTime>,
 }

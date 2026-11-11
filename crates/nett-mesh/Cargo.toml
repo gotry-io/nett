@@ -39,6 +39,7 @@ tokio = { workspace = true, features = ["rt", "macros", "time"] }
 nett-trust = { workspace = true, features = ["signing"] }
 
 [features]
-# 实验构建：事件的 JSON 行文件、模拟时钟误差、传输适配进程的配置文件（design/prototype.md 第 7 节），
-# 官方构建不开启
+# Lab build: JSON-lines event file, simulated clock error, transport adapter config file
+# (design/prototype.md section 7),
+# not enabled in official builds
 lab = []

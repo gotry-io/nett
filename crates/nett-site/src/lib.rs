@@ -1,5 +1,6 @@
-//! 站点（design/site.md）：用命令维护的机器、权限与访问规则，签名，以及按站点组成各台机器的期望状态。
-//! 签名工具 `nett site` 与 Hub 共用这一份逻辑（design/hub.md 第 4 节）。
+//! Site (design/site.md): machines, permissions and access rules maintained by commands, signing,
+//! and composing each machine's desired state from the site. The signing tool `nett site` and the
+//! Hub share this logic (design/hub.md section 4).
 
 pub mod changes;
 pub mod compose;

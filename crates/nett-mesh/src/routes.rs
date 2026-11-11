@@ -1,7 +1,9 @@
-//! 智能入口宣告的网段（design/mesh.md 第 10 节）：验证签名，只接受有 `subnet_router` 角色的成员的宣告，
-//! 版本号只增不减；网段不能与组网网段或其他成员宣告的网段重叠（WireGuard 不允许对端的 `AllowedIPs`
-//! 重叠）。成员被移除、或它的节点策略不再有 `subnet_router` 角色时，它宣告的网段随之作废。重启之后以
-//! 信任存储中的版本为基准（design/mesh.md 第 4.2 节）。
+//! Prefixes advertised by smart gateways (design/mesh.md section 10): verifies the signature, accepts
+//! advertisements only from members with the `subnet_router` role, and versions only increase; a prefix
+//! must not overlap the mesh prefixes or prefixes advertised by other members (WireGuard does not allow
+//! peers' `AllowedIPs` to overlap). When a member is removed, or its node policy no longer has the
+//! `subnet_router` role, the prefixes it advertised are void. After a restart, the version in the trust
+//! store is the baseline (design/mesh.md section 4.2).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -22,11 +24,12 @@ struct Applied {
     routes: Vec<IpPrefix>,
 }
 
-/// 各成员已生效的宣告。期望状态中缺少某个成员的宣告不视为撤销。
+/// The advertisements of each member currently in effect. A member's advertisement missing from the
+/// desired state is not treated as revoked.
 #[derive(Debug, Default)]
 pub struct Routes {
     applied: BTreeMap<NodeId, Applied>,
-    /// 本机此前接受过的各成员的版本。
+    /// The versions of each member previously accepted by this machine.
     floor: BTreeMap<NodeId, VersionRecord>,
 }
 
@@ -35,7 +38,8 @@ impl Routes {
         self.floor = floor.clone();
     }
 
-    /// 保存进信任存储的版本：此前接受过的，加上这次生效的；被撤销的成员不再保存。
+    /// Versions saved into the trust store: those previously accepted, plus those that took effect this
+    /// time; revoked members are no longer saved.
     pub fn saved_versions(&self, revoked: &BTreeSet<NodeId>) -> BTreeMap<NodeId, VersionRecord> {
         let mut out = self.floor.clone();
         out.extend(self.applied.iter().map(|(id, a)| {
@@ -51,7 +55,7 @@ impl Routes {
         out
     }
 
-    /// 某个成员宣告的网段。
+    /// Prefixes advertised by a member.
     pub fn of(&self, node: &NodeId) -> &[IpPrefix] {
         self.applied.get(node).map_or(&[], |a| a.routes.as_slice())
     }
@@ -60,7 +64,7 @@ impl Routes {
         self.applied.get(node).map(|a| a.version)
     }
 
-    /// 应用期望状态中的宣告；`members` 是已准入的成员。
+    /// Applies the advertisements in the desired state; `members` are the admitted members.
     pub fn apply(
         &mut self,
         desired: &DesiredMesh,
@@ -154,7 +158,8 @@ impl Routes {
         }
     }
 
-    /// 本机之外的成员宣告的网段：本机经组网接口到达它们。
+    /// Prefixes advertised by members other than this machine: this machine reaches them through the mesh
+    /// interface.
     pub fn of_others<'a>(&'a self, own: &'a NodeId) -> impl Iterator<Item = IpPrefix> + 'a {
         self.applied
             .iter()
@@ -235,7 +240,7 @@ mod tests {
         members.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
         routes.apply(&desired, members.members(), &mut VecSink::default());
         assert_eq!(routes.of(&node_id(2)).len(), 1);
-        // 新版本的节点策略去掉了 subnet_router 角色
+        // The new version of the node policy removed the subnet_router role
         d.members = vec![mesh.material(1, 1), mesh.material(2, 2)];
         let desired = validated(d);
         members.apply(&desired, &no_expiry(&desired), &mut VecSink::default());
@@ -251,13 +256,13 @@ mod tests {
             &mesh,
             vec![
                 mesh.sign(&mesh.routes_doc(2, 2, &["192.0.2.0/24"])),
-                // 与 2 的网段重叠
+                // overlaps the prefix of 2
                 mesh.sign(&mesh.routes_doc(3, 1, &["192.0.2.10/32"])),
-                // 与组网网段重叠
+                // overlaps the mesh prefixes
                 mesh.sign(&mesh.routes_doc(3, 1, &["100.88.5.0/24"])),
-                // 不是信任锚签的
+                // not signed by a trust anchor
                 stranger.sign(&mesh.routes_doc(3, 1, &["203.0.113.0/24"])),
-                // 低于已生效的版本
+                // lower than the version in effect
                 mesh.sign(&mesh.routes_doc(2, 1, &["198.51.100.0/24"])),
             ],
         );

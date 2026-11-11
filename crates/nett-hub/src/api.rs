@@ -1,4 +1,5 @@
-//! Hub 的 HTTP 接口（design/hub.md 第 4 节）：关联、接收站点、状态；`/node/v1/connect` 是节点网关。
+//! The Hub's HTTP interface (design/hub.md section 4): link, receive site, status;
+//! `/node/v1/connect` is the node gateway.
 
 use std::sync::Arc;
 
@@ -56,12 +57,12 @@ fn internal(e: impl std::fmt::Display) -> Response {
     )
 }
 
-/// 两个字节串在常量时间内比较（硬性规则 10）。
+/// Compares two byte strings in constant time (hard rule 10).
 fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-/// 请求没有带着站点的 owner token 时，返回拒绝它的回复。
+/// Returns the reply that rejects a request when it does not carry the site's owner token.
 async fn unauthorized(hub: &Hub, headers: &HeaderMap) -> Option<Response> {
     let Some(token) = headers
         .get(header::AUTHORIZATION)
@@ -156,7 +157,8 @@ async fn push(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap, body: Byt
     }
 }
 
-/// Hub 一侧的入网、退出与得知的地址（design/hub.md 第 4 节）：签名工具每条命令先取回它们。
+/// Hub-side enrollment, leave and learned addresses (design/hub.md section 4): the signing tool
+/// fetches them first with every command.
 async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Response {
     if let Some(r) = unauthorized(&hub, &headers).await {
         return r;

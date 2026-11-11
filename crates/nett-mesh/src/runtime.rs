@@ -1,8 +1,12 @@
-//! 组网进程的运行时：一个后台线程持有引擎，推进选路、执行切换；每个套接字一个接收线程，把收到的
-//! 探测消息交给后台线程。队列有上限，满了丢弃测量消息（只影响一次测量）。
+//! Runtime of the mesh process: one background thread owns the engine, advances path selection and
+//! performs switchovers; each socket has a receive thread that hands received probe messages to the
+//! background thread. The queue is bounded; when full, measurement messages are dropped (affecting only
+//! one measurement).
 //!
-//! 套接字：组网地址上的探测端口（只收发经组网接口的包）；发往中继的探测从组网进程自己的端口发出；直连
-//! 探测以 WireGuard 端口为源端口收发，由数据面提供（[`DataPlane::direct_probes`]）。
+//! Sockets: the probe port on the mesh address (sends and receives only packets that pass through the
+//! mesh interface); probes to relays are sent from the mesh process's own port; direct probes are sent
+//! and received with the WireGuard port as the source port, provided by the data plane
+//! ([`DataPlane::direct_probes`]).
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -24,21 +28,23 @@ use crate::status::{
     QUERY_TIMEOUT, RELOAD_TIMEOUT, Recorder, ReloadOutcome, ReloadReply, StatusDoc, StatusSource,
 };
 
-/// 推进的间隔：endpoint 被漫游改掉后在这个时间内纠正（design/mesh.md 第 8.3 节），也细于疑似故障时
-/// 200 毫秒的加探间隔（第 8.2 节）。有候选在高频探测时（第 7 节）、等待重新握手完成时（第 8.4 节）改为
-/// [`FAST_RECOVERY_INTERVAL`] 的一半：收到探测消息时的立即推进会打乱定时，推进得更密，到期的探测和
-/// 确认才能及时进行。
+/// Advance interval: after an endpoint is changed by roaming it is corrected within this time
+/// (design/mesh.md section 8.3), and it is finer than the 200 ms extra-probe interval when a failure is
+/// suspected (section 8.2). While a candidate is being probed at high frequency (section 7) or while
+/// waiting for a re-handshake to complete (section 8.4), it is set to half of
+/// [`FAST_RECOVERY_INTERVAL`]: advancing immediately on receipt of a probe message disturbs the timing,
+/// so advancing more densely lets due probes and confirmations proceed in time.
 const TICK: Duration = Duration::from_millis(100);
-/// 检查本机时钟误差的间隔（design/mesh.md 第 8.4 节）。
+/// Interval for checking the local clock error (design/mesh.md section 8.4).
 const CLOCK_CHECK: Duration = Duration::from_secs(10);
-/// 后台线程的消息队列上限。
+/// Upper limit of the background thread's message queue.
 const QUEUE: usize = 1024;
-/// 接收线程的读超时：据此定期检查是否该退出。
+/// Read timeout of the receive thread: used to periodically check whether it should exit.
 const RECV_TIMEOUT: Duration = Duration::from_millis(500);
 const MAX_DATAGRAM: usize = 2048;
 
 enum Msg {
-    /// 一份期望状态，以及在等应用结果的一方（design/status.md 第 4.1 节）。
+    /// A desired state, plus the party waiting for the apply result (design/status.md section 4.1).
     Desired(Box<Result<DesiredMesh, ConfigError>>, Option<ReloadReply>),
     Packet {
         kind: Incoming,
@@ -46,12 +52,13 @@ enum Msg {
         data: Vec<u8>,
         at: Instant,
     },
-    /// 本机状态的查询（design/status.md 第 8 节）：后台线程生成快照，经这个通道交回。
+    /// Local status query (design/status.md section 8): the background thread builds a snapshot and returns
+    /// it through this channel.
     Status(SyncSender<StatusDoc>),
     Shutdown,
 }
 
-/// 后台线程的句柄。
+/// Handle of the background thread.
 pub struct Runtime {
     tx: SyncSender<Msg>,
     thread: Option<JoinHandle<()>>,
@@ -59,7 +66,7 @@ pub struct Runtime {
 
 impl Applier for Runtime {
     fn apply(&mut self, delivery: Delivery) {
-        // 后台线程退出时（只在 bug 时发生）发送失败，由 shutdown 报告
+        // If sending fails when the background thread exits (only on a bug), shutdown reports it
         let _ = self
             .tx
             .send(Msg::Desired(Box::new(delivery.desired), delivery.reply));
@@ -95,7 +102,8 @@ impl Runtime {
                     } else {
                         TICK
                     };
-                    // 收到探测消息后立即推进：高频探测时应答一到就处理，不等下一次定时推进
+                    // Advance immediately after receiving a probe message: during high-frequency probing, handle each reply
+                    // as it arrives instead of waiting for the next timed advance
                     let mut tick_now = false;
                     match rx.recv_timeout(interval.saturating_sub(last_tick.elapsed())) {
                         Ok(Msg::Desired(desired, reply)) => {
@@ -112,8 +120,9 @@ impl Runtime {
                                     Err(reason)
                                 }
                             };
-                            // 启动时期望状态文件整份被拒绝：改用信任存储中最近一次整份接受的那一份
-                            // （design/mesh.md 第 4.2 节）；运行中被拒绝时继续使用已生效的状态
+                            // If the whole desired state file is rejected at startup, use the last whole desired state accepted
+                            // in the trust store (design/mesh.md section 4.2); if rejected while running, keep using the state
+                            // already in effect
                             if !worker.started && applied.is_err() {
                                 worker.engine.apply_saved(&mut worker.events);
                             }
@@ -129,7 +138,7 @@ impl Runtime {
                                 },
                                 Err(reason) => ReloadOutcome::Rejected { reason },
                             };
-                            // 等结果的一方已经超时离开时丢弃
+                            // Drop when the party waiting for the result has already timed out and left
                             if let Some(reply) = reply {
                                 let _ = reply.try_send(outcome);
                             }
@@ -155,7 +164,7 @@ impl Runtime {
                                 worker.events.started_at(),
                             );
                             worker.events.fill(&mut doc, worker.engine.names(), now);
-                            // 查询的一方已经超时离开时丢弃
+                            // Drop when the querying party has already timed out and left
                             let _ = reply.try_send(doc);
                         }
                         Ok(Msg::Shutdown) | Err(RecvTimeoutError::Disconnected) => break,
@@ -184,8 +193,9 @@ impl Runtime {
         })
     }
 
-    /// 本机接口背后的一方，交给 [`crate::status::StatusServer`]。`reloads` 通往读取期望状态的一方
-    /// （[`crate::source::FileSource`]），`reload` 请求经它触发重新读取。
+    /// The party behind the local interface, handed to [`crate::status::StatusServer`]. `reloads` leads to
+    /// the party that reads the desired state ([`crate::source::FileSource`]); a `reload` request triggers
+    /// a re-read through it.
     pub fn status_source(&self, reloads: tokio::sync::mpsc::Sender<ReloadReply>) -> RuntimeStatus {
         RuntimeStatus {
             tx: self.tx.clone(),
@@ -193,7 +203,8 @@ impl Runtime {
         }
     }
 
-    /// 通知后台线程退出并等它结束。组网接口保持不变（[`crate::run`]）。
+    /// Tells the background thread to exit and waits for it to finish. The mesh interface is left as is
+    /// ([`crate::run`]).
     pub fn shutdown(mut self) -> Result<(), String> {
         let _ = self.tx.send(Msg::Shutdown);
         match self.thread.take().map(JoinHandle::join) {
@@ -210,7 +221,8 @@ struct Sockets {
     direct: Box<dyn DirectSend>,
 }
 
-/// 经后台线程的队列查询本机状态，经读取期望状态的一方触发重新读取。
+/// Queries local status through the background thread's queue, and triggers a re-read through the party
+/// that reads the desired state.
 pub struct RuntimeStatus {
     tx: SyncSender<Msg>,
     reloads: tokio::sync::mpsc::Sender<ReloadReply>,
@@ -219,7 +231,7 @@ pub struct RuntimeStatus {
 impl StatusSource for RuntimeStatus {
     fn snapshot(&self) -> Option<StatusDoc> {
         let (reply, answer) = sync_channel(1);
-        // 队列满时不等：查询让位给探测与期望状态
+        // When the queue is full, do not wait: queries yield to probes and the desired state
         self.tx.try_send(Msg::Status(reply)).ok()?;
         answer.recv_timeout(QUERY_TIMEOUT).ok()
     }
@@ -239,12 +251,12 @@ struct Worker<D, E> {
     stop: Arc<AtomicBool>,
     dropped: Arc<AtomicU64>,
     receivers: Vec<JoinHandle<()>>,
-    /// 已经处理过第一份期望状态（启动时的读取）。
+    /// The first desired state (the read at startup) has been processed.
     started: bool,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
-    /// 组网接口就绪后创建探测用的套接字和接收线程（只创建一次）。
+    /// Creates the probe sockets and receive threads once the mesh interface is ready (only once).
     fn ensure_sockets(&mut self) {
         if self.sockets.is_some() {
             return;
@@ -320,7 +332,8 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
             return;
         };
         for o in out {
-            // 发送失败（例如没有路由）只影响这一次测量，由状态机按丢失处理
+            // A send failure (for example no route) affects only this one measurement; the state machine treats it
+            // as lost
             let _ = match o {
                 Outgoing::Tunnel { to, data } => {
                     let socket = if to.is_ipv4() {
@@ -355,7 +368,7 @@ fn forward(
     }
 }
 
-/// 双栈套接字收到的 IPv4 来源是映射地址，还原为 IPv4。
+/// An IPv4 source received on a dual-stack socket is a mapped address; restores it to IPv4.
 fn unmap(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V6(a) => match a.ip().to_ipv4_mapped() {
@@ -366,7 +379,7 @@ fn unmap(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-/// 双栈套接字发往 IPv4 地址时用映射地址。
+/// Uses the mapped address when sending to an IPv4 address from a dual-stack socket.
 fn map_v6(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V4(a) => SocketAddr::new(IpAddr::V6(a.ip().to_ipv6_mapped()), a.port()),

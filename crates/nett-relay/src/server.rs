@@ -1,6 +1,8 @@
-//! 中继的收发循环（design/mesh.md 第 5.1–5.3 节）：一个 tokio 单线程任务持有 [`Relay`]，收 UDP 包和
-//! TLS（WebSocket）连接上的消息，按结果转发或应答。每条 TLS 连接一个任务，与主循环之间只经有上限的通道
-//! 传递消息；队列满时丢包（WireGuard 自己会重传），不阻塞主循环。
+//! The relay's receive/send loop (design/mesh.md sections 5.1-5.3): one single-threaded tokio task
+//! owns the [`Relay`] and receives UDP packets and messages on TLS (WebSocket) connections, then
+//! forwards or answers according to the result. Each TLS connection has its own task, which
+//! exchanges messages with the main loop only over bounded channels; when a queue is full the
+//! packet is dropped (WireGuard retransmits on its own) and the main loop never blocks.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,21 +21,23 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use crate::relay::{ConnId, Outcome, PeerAddr, Relay, RelayState};
 
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(1);
-/// 外层包最大约 1360 字节（design/mesh.md 第 4 节），留出余量。
+/// Outer packets are at most about 1360 bytes (design/mesh.md section 4); leave some margin.
 const MAX_DATAGRAM: usize = 2048;
-/// 保存状态的间隔（design/mesh.md 第 5.2 节）。
+/// Interval for saving state (design/mesh.md section 5.2).
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
-/// TLS 连接数的上限，以及其中等待认证的连接数的上限。
+/// Upper limit on TLS connections, and on those among them that are waiting for authentication.
 const MAX_TLS_CONNECTIONS: usize = 1024;
 const MAX_UNAUTHENTICATED: usize = 64;
-/// TLS 与 WebSocket 握手的时限；连接建立后多久内必须收到带认证的探测（design/mesh.md 第 5.3 节）。
+/// Time limit for the TLS and WebSocket handshakes; how long after a connection is established an
+/// authenticated probe must arrive (design/mesh.md section 5.3).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// 每条 TLS 连接的发送队列，以及各连接交给主循环的消息队列。
+/// Send queue of each TLS connection, and the queue of messages each connection hands to the main
+/// loop.
 const CONN_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 4096;
 
-/// 在 `addr` 上监听 TLS 入口。
+/// Listens for the TLS entry point on `addr`.
 pub fn tls_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     let socket = if addr.is_ipv4() {
         tokio::net::TcpSocket::new_v4()?
@@ -45,7 +49,7 @@ pub fn tls_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     socket.listen(1024)
 }
 
-/// 中继端口上的 TLS 入口。
+/// The TLS entry point on the relay port.
 pub struct TlsIngress {
     pub listener: TcpListener,
     pub acceptor: TlsAcceptor,
@@ -63,8 +67,9 @@ struct Conn {
     authenticated: bool,
 }
 
-/// 一直运行到 `shutdown` 完成。`udp` 是双栈的中继端口。`state` 为保存索引表的文件：启动时恢复，每秒
-/// 一次、以及退出之前写入，重启时经它的连接不中断。
+/// Runs until `shutdown` completes. `udp` is the dual-stack relay port. `state` is the file holding
+/// the index table: restored at startup, and written once per second and again before exit, so
+/// connections through the relay survive a restart.
 pub async fn serve(
     udp: UdpSocket,
     tls: Option<TlsIngress>,
@@ -80,7 +85,8 @@ pub async fn serve(
                 tracing::info!(sessions, "relay state restored");
             }
             Ok(None) => {}
-            // 状态文件损坏只影响恢复：经它的连接按 design/mesh.md 第 8.4 节重新握手
+            // A corrupt state file only affects restoration: connections through the relay
+            // handshake again per design/mesh.md section 8.4
             Err(error) => tracing::warn!(%error, "relay state not restored"),
         }
     }
@@ -90,8 +96,10 @@ pub async fn serve(
     let mut buf = vec![0u8; MAX_DATAGRAM];
     let mut tick = tokio::time::interval(EXPIRE_INTERVAL);
     let mut last_save = Instant::now();
-    // 写盘可能因磁盘忙卡住几百毫秒（例如 ext4 每 5 秒提交日志时），放在阻塞线程里，不挡住转发；
-    // 同一时间只有一次保存，上一次还没写完时跳过，下一秒保存最新的
+    // Writing to disk can stall for a few hundred milliseconds when the disk is busy (for example
+    // when ext4 commits its journal every 5 seconds), so it runs on a blocking thread and does not
+    // hold up forwarding; only one save runs at a time: if the previous one has not finished, skip
+    // it and save the latest state the next second
     let mut saving: Option<tokio::task::JoinHandle<()>> = None;
     let mut dropped: u64 = 0;
     tokio::pin!(shutdown);
@@ -132,7 +140,8 @@ pub async fn serve(
                         tracing::info!(conn = id.0, "TLS connection authenticated");
                         drop(conn.tx.try_send(reply));
                     } else {
-                        // 第一条消息不是带认证的探测：关闭连接，不作任何应答
+                        // The first message is not an authenticated probe: close the connection and
+                        // send no reply
                         conns.remove(&id);
                     }
                 }
@@ -146,7 +155,8 @@ pub async fn serve(
             _ = tick.tick() => {
                 let now = Instant::now();
                 relay.expire(now);
-                // 迟迟没有认证的连接：丢掉发送端，连接任务随之结束
+                // A connection that has not authenticated in time: drop the sender, and the
+                // connection task ends with it
                 conns.retain(|_, c| c.authenticated || now.saturating_duration_since(c.opened) < AUTH_TIMEOUT);
                 if let Some(path) = &state
                     && now.saturating_duration_since(last_save) >= SAVE_INTERVAL
@@ -174,7 +184,8 @@ async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketA
     }
 }
 
-/// 执行 [`Relay::handle`] 的结果。发送失败（例如对方暂时没有路由、连接的队列已满）只丢这一个包。
+/// The result of running [`Relay::handle`]. A send failure (for example the peer has no route yet
+/// or the connection's queue is full) drops only that one packet.
 fn dispatch(
     udp: &UdpSocket,
     conns: &HashMap<ConnId, Conn>,
@@ -206,7 +217,8 @@ fn dispatch(
     }
 }
 
-/// 一条 TLS 连接：TLS 与 WebSocket 握手，之后每个二进制消息是一个 WireGuard 包或中继探测。
+/// One TLS connection: TLS and WebSocket handshakes, after which each binary message is a WireGuard
+/// packet or a relay probe.
 async fn connection(
     id: ConnId,
     stream: TcpStream,
@@ -240,7 +252,7 @@ async fn connection(
                         break;
                     }
                 }
-                // 保活由 WebSocket 库自动应答
+                // Keepalives are answered automatically by the WebSocket library
                 Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                 _ => break,
             },
@@ -250,7 +262,8 @@ async fn connection(
                         break;
                     }
                 }
-                // 主循环不再需要这条连接（认证失败或超时）
+                // The main loop no longer needs this connection (authentication failed or timed
+                // out)
                 None => break,
             },
         }
@@ -274,7 +287,7 @@ fn save_in_background(path: &Path, snapshot: RelayState) -> tokio::task::JoinHan
     tokio::task::spawn_blocking(move || save_or_warn(&path, &snapshot))
 }
 
-/// 先写临时文件再改名：重启时读到的总是一份完整的状态。
+/// Write a temporary file first, then rename: what is read at restart is always a complete state.
 fn save(path: &Path, snapshot: &RelayState) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
@@ -320,14 +333,15 @@ fn map_v6(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-/// 从 PEM 文件建立 TLS 入口的服务端配置：只用 TLS 1.3，加密后端为 ring。
+/// Builds the server configuration for the TLS entry point from PEM files: TLS 1.3 only, with ring
+/// as the crypto backend.
 pub fn tls_acceptor(cert: &Path, key: &Path) -> Result<TlsAcceptor, TlsSetupError> {
     use rustls::pki_types::pem::PemObject as _;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
     let chain = CertificateDer::pem_file_iter(cert)
         .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
         .map_err(|e| TlsSetupError::Certificate(e.to_string()))?;
-    // 错误信息不包含私钥内容（硬性规则 10）
+    // The error message does not contain private key material (hard rule 10)
     let key = PrivateKeyDer::from_pem_file(key).map_err(|_| TlsSetupError::Key)?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
@@ -356,13 +370,15 @@ mod tests {
     use nett_mesh::probe::{KeyId, OuterProbe, OuterReply, ProbeKey, RELAY_PROBE};
     use nett_trust::keys::X25519PublicKey;
 
-    /// 保存状态的写入卡住时（这里用一个没有读者的命名管道代替忙碌的磁盘），中继照常应答和转发。
+    /// When the state write stalls (a named pipe with no reader stands in for a busy disk here),
+    /// the relay keeps answering and forwarding.
     #[test]
     fn a_stuck_state_write_does_not_hold_up_forwarding() {
         let dir = std::env::temp_dir().join(format!("nett-relay-save-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let state = dir.join("relay-state.json");
-        // 保存时先写的临时文件是一个管道：打开它写入会一直等到有人来读
+        // The temporary file written first when saving is a pipe: opening it for writing blocks
+        // until someone reads
         let fifo = state.with_extension("tmp");
         let made = std::process::Command::new("mkfifo")
             .arg(&fifo)
@@ -388,14 +404,14 @@ mod tests {
         )
         .expect("assignment");
 
-        // 中继端口是双栈的：应答按 IPv6 映射地址发出
+        // The relay port is dual-stack: replies are sent to the IPv6-mapped address
         let socket = std::net::UdpSocket::bind("[::]:0").expect("relay socket");
         socket.set_nonblocking(true).expect("nonblocking");
         let relay_addr =
             SocketAddr::from(([127, 0, 0, 1], socket.local_addr().expect("addr").port()));
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let server_state = state.clone();
-        // 与 `nett relay` 一样跑在单线程运行时上
+        // Runs on a single-threaded runtime, like `nett relay`
         let server = std::thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -410,7 +426,8 @@ mod tests {
             })
         });
 
-        // 第一次保存在启动约 1 秒后，此后它一直卡在管道上
+        // The first save happens about 1 second after startup; after that it stays stuck on the
+        // pipe
         std::thread::sleep(SAVE_INTERVAL + Duration::from_millis(1_500));
         let client = std::net::UdpSocket::bind("127.0.0.1:0").expect("client socket");
         client
@@ -431,7 +448,7 @@ mod tests {
             .recv_from(&mut buf)
             .map(|(len, _)| OuterReply::verify(&buf[..len], &key).is_some());
 
-        // 放开卡住的写入，中继退出前的保存才能完成
+        // Release the stalled write so the save before the relay exits can finish
         let reader = std::thread::spawn(move || std::fs::read(&fifo));
         stop.send(()).expect("relay still running");
         server.join().expect("server thread").expect("serve");

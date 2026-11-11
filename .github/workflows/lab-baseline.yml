@@ -1,7 +1,11 @@
-# 与对比对象 Tailscale 的验收对比（design/prototype.md 第 5.1、6、7 节）：手动触发，不在每次推送时运行。
-# 每个场景一个任务并行运行：中断与恢复类各 20 次；波动类（含拥塞）每种 5 分钟、各 3 次；场景 17 的时钟误差
-# 分 1.5 秒（按时间片）与 5 秒（随机间隔重试）两组；场景 19–21 只对 nett（第 6.3 节）。
-# 下载的工具固定版本并校验哈希；第三方 action 固定到提交哈希。手动触发时可以只选一个场景。
+# Acceptance comparison against Tailscale (design/prototype.md sections 5.1, 6, 7): triggered
+# manually, not run on every push.
+# One job per scenario, run in parallel: 20 runs each for interruption and recovery scenarios; 5
+# minutes and 3 runs each for fluctuation scenarios (including congestion); scenario 17's clock skew
+# is split into two groups, 1.5 seconds (by time slice) and 5 seconds (random-interval retries);
+# scenarios 19-21 apply to nett only (section 6.3).
+# Downloaded tools are pinned to versions and hash-verified; third-party actions are pinned to
+# commit hashes. A manual trigger can select just one scenario.
 
 name: Lab baseline
 
@@ -9,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       scenario:
-        description: 只跑这一个场景（矩阵中的名称，例如 2-relay-loss）；留空跑全部
+        description: Run only this one scenario (the name in the matrix, for example 2-relay-loss); leave empty to run all
         required: false
         default: ""
 
@@ -22,7 +26,7 @@ env:
   TAILSCALE_SHA256: "720cbbccbfc03d8b55df72afc19e5a72e31b0f65934700aa6fa38074d4ad7bf7"
   HEADSCALE_VERSION: "0.29.7"
   HEADSCALE_SHA256: "e827fc9b12d958bc95b081c4401dd63f8e0471d025b45b508535a920532150a8"
-  # derper 与 Tailscale 同版本，从源码构建
+  # derper has the same version as Tailscale and is built from source
   GO_VERSION: "1.27.3"
   GO_SHA256: "65efbc80fdc1fa2cd2631cad5b481777a68e8725f34e89f50fc6ac714e379b40"
 
@@ -88,7 +92,8 @@ jobs:
             run: wg-cookie --topology crates/nett-lab/topologies/relays.toml
           - name: 20bd-wg-rekey
             run: wg-rekey --duration 1800 --topology crates/nett-lab/topologies/relays.toml
-          # 资源预算针对发布构建：release，静态链接 musl（硬性规则 14，architecture.md 第 13.1 节）
+          # The resource budget applies to release builds: release, statically linked musl (hard
+          # rule 14, architecture.md section 13.1)
           - name: 21-resources
             run: resources --duration 600 --topology crates/nett-lab/topologies/fallback.toml
             musl: true
@@ -100,16 +105,16 @@ jobs:
         if: env.SELECTED == 'true'
         with:
           persist-credentials: false
-      - name: 安装 rust-toolchain.toml 指定的工具链
+      - name: Install the toolchain specified by rust-toolchain.toml
         if: env.SELECTED == 'true'
         run: rustup toolchain install
-      - name: 安装实验网络用到的工具
+      - name: Install tools used by the lab network
         if: env.SELECTED == 'true'
         timeout-minutes: 10
         run: |
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends wireguard-tools nftables iperf3 openssl tcpdump
-      - name: 安装 Tailscale、Headscale 与 derper（固定版本，校验哈希）
+      - name: Install Tailscale, Headscale and derper (pinned versions, hash-verified)
         if: env.SELECTED == 'true'
         run: |
           bin="$RUNNER_TEMP/baseline-bin"
@@ -130,14 +135,14 @@ jobs:
           tar -xzf "$go" -C "$RUNNER_TEMP"
           GOBIN="$bin" "$RUNNER_TEMP/go/bin/go" install "tailscale.com/cmd/derper@v${TAILSCALE_VERSION}"
           echo "$bin" >> "$GITHUB_PATH"
-      - name: 确认内核 WireGuard 可用
+      - name: Check that kernel WireGuard is available
         if: env.SELECTED == 'true'
         run: |
           sudo modprobe wireguard
           sudo modprobe tun
       - run: cargo build --locked -p nett-cli -p nett-lab --features nett-cli/lab
         if: env.SELECTED == 'true'
-      - name: 发布构建的 nett（release，静态链接 musl）
+      - name: Release build of nett (release, statically linked musl)
         if: env.SELECTED == 'true' && matrix.musl
         run: |
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools

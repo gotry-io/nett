@@ -1,9 +1,12 @@
-//! 签名（design/site.md 第 7 节）：内容变化的产物版本加一并重新签名，不变的沿用原来的签名；已签的节点策略
-//! 离过期不到 7 天的，换一个新版本重签。收窄同样以更高的版本签名：节点按版本只增不减拒绝旧的版本
-//! （design/mesh.md 第 4.2 节），重发旧的签名产物恢复不了被收窄的权限。
+//! Signing (design/site.md section 7): an artifact whose content changed gets its version
+//! incremented and is re-signed; an unchanged one keeps its signature; a signed node policy less
+//! than 7 days from expiry is re-signed with a new version. Narrowing is also signed with a higher
+//! version: nodes reject older versions because versions only increase (design/mesh.md section
+//! 4.2), so replaying an old signed artifact cannot restore a narrowed permission.
 //!
-//! 输入的哈希与这个工具接手的站点相同（节点策略输入的字段与顺序、访问规则的展开方式都没有变），已有的
-//! 站点换过来之后不需要重签。
+//! The hash of the inputs equals that of the sites this tool took over (the fields and order of the
+//! node policy inputs and the way access rules are expanded are unchanged), so an existing site
+//! does not need to be re-signed after switching over.
 
 use nett_core::id::NodeId;
 use nett_core::prefix::IpPrefix;
@@ -22,12 +25,13 @@ use serde::Serialize;
 use crate::SiteError;
 use crate::state::{Machine, NodeKeys, Part, SignedPolicy, SignedVersion, State};
 
-/// 签名载荷的过期时间：生成之后 30 天（design/local-signing.md 第 5 节）。
+/// Expiry time of a signed payload: 30 days after generation (design/local-signing.md section 5).
 pub const PAYLOAD_VALIDITY_SECS: i64 = 30 * 24 * 3600;
-/// 已签的节点策略离过期不到这么久时换一个新版本重签。
+/// A signed node policy closer to expiry than this is re-signed with a new version.
 pub const RESIGN_BEFORE_SECS: i64 = 7 * 24 * 3600;
 
-/// 生成节点策略和准入证明的输入；它的哈希不变时沿用原来的签名。
+/// Inputs that generate the node policy and admission proof; when their hash is unchanged, the
+/// existing signature is reused.
 #[derive(Serialize)]
 struct PolicyInput {
     mesh_key: X25519PublicKey,
@@ -38,8 +42,9 @@ struct PolicyInput {
     edge: Option<MeshAddresses>,
 }
 
-/// 等待经 Hub 入网的机器的节点策略输入（design/hub.md 第 6 节）：公钥要等入网时由机器交来，策略中写的是
-/// 入网公钥。
+/// Node policy inputs of a machine waiting to join through the Hub (design/hub.md section 6): the
+/// public key is handed over by the machine when it joins, and the policy carries the enrollment
+/// public key.
 #[derive(Serialize)]
 struct PendingInput {
     enrollment_key: Ed25519PublicKey,
@@ -49,8 +54,9 @@ struct PendingInput {
     edge: Option<MeshAddresses>,
 }
 
-/// 签名站点中变化了的产物。`force` 中的机器即使没有变化、也没有接近过期，也换一个新版本重签节点策略
-/// （`nett site invite`：拷过去之前已经过期的那一份）。
+/// Signs the artifacts in the site that changed. Machines in `force` get a new version of the node
+/// policy even if nothing changed and expiry is not near (`nett site invite`: the copy that had
+/// already expired before it was copied over).
 pub fn sign(
     state: &mut State,
     recovery: &RecoveryKeyPair,
@@ -80,7 +86,8 @@ pub fn sign(
                 });
             }
         } else if let Some(e) = &m.enrollment {
-            // 等待入网：策略中写入网公钥，准入证明由机器入网时签（design/hub.md 第 6 节）
+            // Waiting to join: the policy carries the enrollment public key, and the admission
+            // proof is signed by the machine when it joins (design/hub.md section 6)
             let input = PendingInput {
                 enrollment_key: e.public_key,
                 roles: roles(m),
@@ -162,7 +169,9 @@ fn policy_input(m: &Machine) -> Option<PolicyInput> {
     })
 }
 
-/// 签名会换新版本的产物：输入变了的节点策略、宣告网段与访问规则集。迁移已有的站点之后据此确认不需要重签。
+/// Artifacts whose signing would change the version: node policies whose inputs changed, advertised
+/// routes and the access rule set. After migrating an existing site, this confirms no re-signing is
+/// needed.
 pub fn outdated(state: &State) -> Result<Vec<String>, SiteError> {
     let mut out = Vec::new();
     for (name, m) in &state.machines {
@@ -185,7 +194,8 @@ pub fn outdated(state: &State) -> Result<Vec<String>, SiteError> {
     Ok(out)
 }
 
-/// 节点策略中的角色：有 Edge 时 `edge`，有宣告的网段时 `subnet_router`。
+/// Roles in the node policy: `edge` when there is an Edge, `subnet_router` when there are
+/// advertised routes.
 fn roles(m: &Machine) -> Vec<Role> {
     m.edge
         .iter()
@@ -199,8 +209,10 @@ fn hash_of(value: &impl Serialize) -> Result<Sha256Digest, SiteError> {
     Ok(Sha256Digest::of(json.as_bytes()))
 }
 
-/// 经 Hub 入网的机器交来准入证明之后，它的节点策略输入的哈希：与签名工具自己签的机器用同一种输入，
-/// 内容取自验证过的准入材料。之后站点没有变化时沿用这份材料。
+/// Hash of the node policy inputs after a machine that joined through the Hub delivers its
+/// admission proof: uses the same kind of inputs as machines signed by the signing tool itself,
+/// with content taken from the verified admission material. Afterwards, when the site has no
+/// changes, this material is reused.
 pub(crate) fn enrolled_input(keys: NodeKeys, member: &Member) -> Result<Sha256Digest, SiteError> {
     hash_of(&PolicyInput {
         mesh_key: keys.mesh,
@@ -214,7 +226,7 @@ pub(crate) fn enrolled_input(keys: NodeKeys, member: &Member) -> Result<Sha256Di
     })
 }
 
-/// 节点策略的载荷。
+/// Payload of the node policy.
 #[allow(clippy::too_many_arguments)]
 fn node_policy_payload(
     node_id: &NodeId,
@@ -243,7 +255,8 @@ fn node_policy_payload(
     .map_err(SiteError::sign)
 }
 
-/// 用恢复密钥签节点策略，用一把只用这一次的入网密钥签准入证明（design/local-signing.md 第 3 节）。
+/// Signs the node policy with the recovery key and the admission proof with an enrollment key used
+/// only once (design/local-signing.md section 3).
 fn sign_node(
     recovery: &RecoveryKeyPair,
     node_id: &NodeId,
@@ -276,7 +289,7 @@ fn sign_node(
     })
 }
 
-/// 已签的节点策略在 `within` 秒内过期（或读不出过期时间）。
+/// The signed node policy expires within `within` seconds (or its expiry time cannot be read).
 pub fn expiring(material: &AdmissionMaterial, now: Timestamp, within: i64) -> bool {
     expiring_payload(&material.policy, now, within)
 }
@@ -287,8 +300,9 @@ fn expiring_payload(signed: &SignedPayload, now: Timestamp, within: i64) -> bool
     })
 }
 
-/// 宣告的网段：变了就换一个新版本重签；没有网段时不签（节点策略同时去掉 `subnet_router` 角色，成员随之
-/// 作废它已生效的宣告）。
+/// Advertised routes: re-signed with a new version when changed; not signed when there are no
+/// routes (the node policy drops the `subnet_router` role at the same time, and members invalidate
+/// the advertisement that had taken effect).
 fn sign_routes(
     recovery: &RecoveryKeyPair,
     node_id: &NodeId,
@@ -325,8 +339,9 @@ fn sign_routes(
     }))
 }
 
-/// 访问规则展开成网段（design/mesh.md 第 12 节），按编号排列：机器是它的组网地址，`<机器>.edge` 是它的
-/// Edge 专用地址，`<机器>.routes` 是它宣告的网段。
+/// Access rules expanded into prefixes (design/mesh.md section 12), ordered by number: a machine is
+/// its mesh address, `<machine>.edge` is its Edge address, and `<machine>.routes` is the routes it
+/// advertises.
 pub fn expand_rules(state: &State) -> Result<Vec<AccessRule>, SiteError> {
     let host =
         |a: MeshAddresses| vec![IpPrefix::host(a.ipv4.into()), IpPrefix::host(a.ipv6.into())];

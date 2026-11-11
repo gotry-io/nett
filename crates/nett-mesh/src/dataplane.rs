@@ -1,5 +1,6 @@
-//! 数据面接口：WireGuard 接口、对端、地址与路由由各平台的后端实现（ADR 0018）。
-//! 核心逻辑只通过这个接口操作数据面，测试中使用替身。
+//! Data plane interface: the WireGuard interface, peers, addresses and routes are implemented by each
+//! platform's backend (ADR 0018).
+//! The core logic operates on the data plane only through this interface; tests use a stand-in.
 
 use std::net::{SocketAddr, UdpSocket};
 use std::time::SystemTime;
@@ -10,18 +11,21 @@ use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
-/// `nett0` 的 MTU 固定为 1280（design/mesh.md 第 4 节）。
+/// The MTU of `nett0` is fixed at 1280 (design/mesh.md section 4).
 pub const MESH_MTU: u32 = 1280;
 
-/// 组网接口的名称。
+/// Name of the mesh interface.
 pub const INTERFACE_NAME: &str = "nett0";
 
-/// 系统分配的端口是保留端口（[`crate::config::is_reserved_port`]）时，最多重新分配几次。
+/// When a system-assigned port is a reserved port ([`crate::config::is_reserved_port`]), the maximum
+/// number of reassignments.
 const PORT_ATTEMPTS: usize = 8;
 
-/// 期望状态不带端口时由系统分配 WireGuard 端口（design/mesh.md 第 5.5 节）。`assign` 取得一个端口与持有
-/// 它的句柄；分到组网进程自己用的端口（Linux 的临时端口范围包含它们）时再取一次。分到保留端口的句柄留到
-/// 选定之后再释放，系统不会把同一个端口再分一次。
+/// When the desired state carries no port, the system assigns the WireGuard port (design/mesh.md section
+/// 5.5). `assign` obtains a port and the handle that holds it; when it lands on a port the mesh process
+/// uses itself (the Linux ephemeral port range includes them), it takes another. Handles that landed on
+/// reserved ports are kept until a port is chosen and then released, so the system does not hand out the
+/// same port again.
 pub(crate) fn automatic_port<T>(
     mut assign: impl FnMut() -> Result<(T, u16), DataPlaneError>,
 ) -> Result<(T, u16), DataPlaneError> {
@@ -45,14 +49,16 @@ pub(crate) fn automatic_port<T>(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InterfaceSpec {
     pub name: String,
-    /// WireGuard 端口。为空时沿用接口当前的端口，新建的接口由系统分配（design/mesh.md 第 5.5 节）。
+    /// WireGuard port. When empty, the interface's current port is kept; a newly created interface gets one
+    /// from the system (design/mesh.md section 5.5).
     pub listen_port: Option<u16>,
     pub mtu: u32,
-    /// 本机的组网地址，前缀长度取组网网段的长度：发往整个组网网段的流量都进入这个接口。
+    /// This machine's mesh address, with the prefix length of the mesh prefixes: all traffic to the whole
+    /// mesh prefixes enters this interface.
     pub addresses: Vec<InterfaceAddress>,
 }
 
-/// 接口上的一个地址及其前缀长度。
+/// An address on the interface and its prefix length.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterfaceAddress {
     pub addr: std::net::IpAddr,
@@ -64,7 +70,8 @@ pub struct PeerSpec {
     pub public_key: X25519PublicKey,
     pub allowed_ips: Vec<IpPrefix>,
     pub endpoint: Option<SocketAddr>,
-    /// 持久保活间隔（秒）；`dial-only` 成员设为 25 秒，维持 NAT 映射。
+    /// Persistent keepalive interval (seconds); set to 25 seconds for `dial-only` members to keep the NAT
+    /// mapping alive.
     pub persistent_keepalive: Option<u16>,
 }
 
@@ -90,36 +97,39 @@ pub enum DataPlaneError {
     Worker(&'static str),
 }
 
-/// 以 WireGuard 端口为源端口发出直连探测（design/mesh.md 第 7.1 节），走的就是 WireGuard 自己的 NAT 映射。
+/// Sends direct probes with the WireGuard port as the source port (design/mesh.md section 7.1), going
+/// through WireGuard's own NAT mapping.
 pub trait DirectSend: Send {
     fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()>;
 }
 
-/// WireGuard 端口上收到的直连探测与 cookie 应答的副本。
+/// Copies of direct probes and cookie replies received on the WireGuard port.
 pub trait DirectRecv: Send {
-    /// 一批（来源地址，UDP 负载）。最多等待半秒，超时返回空：调用方据此定期检查是否该退出。
+    /// A batch of (source address, UDP payload). Waits at most half a second and returns empty on timeout:
+    /// the caller uses this to periodically check whether it should exit.
     fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>>;
 }
 
-/// WireGuard 端口上的直连探测：发送的一端交给引擎所在的线程，接收的一端交给接收线程。
+/// Direct probes on the WireGuard port: the sending end goes to the thread that hosts the engine, the
+/// receiving end goes to the receive thread.
 pub struct DirectProbes {
     pub send: Box<dyn DirectSend>,
     pub recv: Box<dyn DirectRecv>,
 }
 
-/// 接口上一个对端的当前状态。
+/// Current state of a peer on the interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PeerStat {
     pub public_key: X25519PublicKey,
     pub endpoint: Option<SocketAddr>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
-    /// 最近一次完成握手的时刻（墙上时钟）。对端加入以来、以及 [`DataPlane::rehandshake`] 重新加入以来
-    /// 还没有完成握手时为空。
+    /// Time of the most recent completed handshake (wall clock). Empty when no handshake has completed since
+    /// the peer was added, or since it was re-added by [`DataPlane::rehandshake`].
     pub last_handshake: Option<SystemTime>,
 }
 
-/// 接口就绪后实际使用的公钥与 WireGuard 端口。
+/// The public key and WireGuard port actually in use once the interface is ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct InterfaceState {
     pub public_key: X25519PublicKey,
@@ -127,60 +137,70 @@ pub struct InterfaceState {
 }
 
 pub trait DataPlane: Send {
-    /// 内核还是用户态的 WireGuard（本机状态中显示，design/status.md 第 6 节）。
+    /// Kernel or userspace WireGuard (shown in local status, design/status.md section 6).
     fn kind(&self) -> crate::status::DataPlaneKind;
 
-    /// 创建或沿用组网接口，设置私钥、监听端口、MTU 和地址并启用。已有的对端保持不变：组网进程重启时，
-    /// 进行中的连接不中断。
+    /// Creates or reuses the mesh interface, sets the private key, listen port, MTU and address, and enables
+    /// it. Existing peers are kept unchanged: when the mesh process restarts, connections in progress are
+    /// not interrupted.
     fn ensure_interface(
         &mut self,
         spec: &InterfaceSpec,
         private_key: &PrivateKey,
     ) -> Result<InterfaceState, DataPlaneError>;
 
-    /// 让接口上的对端恰好是 `peers`：增加缺少的、更新变化的、删除多余的。`endpoint` 为空的对端保留
-    /// 内核当前的 endpoint。
+    /// Makes the peers on the interface exactly `peers`: adds missing ones, updates changed ones, removes
+    /// extra ones. A peer with an empty `endpoint` keeps the kernel's current endpoint.
     fn sync_peers(&mut self, peers: &[PeerSpec]) -> Result<(), DataPlaneError>;
 
-    /// 各对端的 endpoint 与收发字节数。
+    /// Endpoint and byte counts of each peer.
     fn peer_stats(&mut self) -> Result<Vec<PeerStat>, DataPlaneError>;
 
-    /// 只修改一个对端的 endpoint，会话不受影响（design/mesh.md 第 4 节）。
+    /// Changes only one peer's endpoint; the session is not affected (design/mesh.md section 4).
     fn set_endpoint(
         &mut self,
         public_key: &X25519PublicKey,
         endpoint: SocketAddr,
     ) -> Result<(), DataPlaneError>;
 
-    /// 删除对端再按 `peer` 加回：下一个数据包触发新的握手，让新中继建立索引（design/mesh.md 第 8.4 节）。
-    /// 之后这个对端的 [`PeerStat::last_handshake`] 为空，直到新的握手完成。
+    /// Removes the peer and adds it back as `peer`: the next data packet triggers a new handshake, so the new
+    /// relay establishes its index (design/mesh.md section 8.4).
+    /// After that this peer's [`PeerStat::last_handshake`] is empty until the new handshake completes.
     fn rehandshake(&mut self, peer: &PeerSpec) -> Result<(), DataPlaneError>;
 
-    /// 丢弃从这些闲置的 TLS 回环端口进入 WireGuard 端口的包（design/mesh.md 第 5.3 节），替换之前的设置。
+    /// Drops packets that enter the WireGuard port from these idle TLS loopback ports (design/mesh.md section
+    /// 5.3), replacing the previous setting.
     fn guard_tls_ports(&mut self, wg_port: u16, idle: &[u16]) -> Result<(), DataPlaneError>;
 
-    /// 安装组网接口入方向的过滤规则（design/mesh.md 第 12 节），整体替换之前的规则：替换要么完整生效，
-    /// 要么保持原状，中间不出现没有过滤的时刻。
+    /// Installs the filter rules for inbound traffic on the mesh interface (design/mesh.md section 12),
+    /// replacing the previous rules as a whole: the replacement either takes full effect or leaves things
+    /// as they were, and there is never a moment without filtering.
     fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError>;
 
-    /// 设置或清除本机 Edge 的源地址转换与防冒用规则（ADR 0015），整体替换之前的设置。
+    /// Sets or clears this machine's Edge source NAT and anti-spoofing rules (ADR 0015), replacing the
+    /// previous setting as a whole.
     fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError>;
 
-    /// 设置或清除本机作为智能入口的转发规则（design/mesh.md 第 10 节），整体替换之前的设置。本机宣告了网段
-    /// 而转发没有开启时返回错误（规则照常安装）。
+    /// Sets or clears the forwarding rules for this machine as a smart gateway (design/mesh.md section 10),
+    /// replacing the previous setting as a whole. Returns an error when this machine advertises prefixes
+    /// but forwarding is not enabled (the rules are installed as usual).
     fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError>;
 
-    /// 让组网接口上的路由恰好是 `routes`：其他成员宣告的网段（design/mesh.md 第 10 节）。
+    /// Makes the routes on the mesh interface exactly `routes`: the prefixes advertised by other members
+    /// (design/mesh.md section 10).
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
 
-    /// 打开 WireGuard 端口上的直连探测收发。接口就绪之后调用一次。
+    /// Opens sending and receiving of direct probes on the WireGuard port. Called once after the interface is
+    /// ready.
     fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError>;
 
-    /// 绑定到本机组网地址、只收发经组网接口的套接字（隧道内探测，design/mesh.md 第 7 节）。
+    /// A socket bound to this machine's mesh address that sends and receives only through the mesh interface
+    /// (in-tunnel probes, design/mesh.md section 7).
     fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket>;
 
-    /// 发往底层网络的双栈套接字（发往中继的探测）。macOS 上绑定承载默认路由的物理接口，不经过代理应用的
-    /// TUN（design/userspace.md 第 6.2 节）。
+    /// A dual-stack socket toward the underlying network (probes to relays). On macOS it binds the physical
+    /// interface carrying the default route and does not go through the proxy app's TUN (design/userspace.md
+    /// section 6.2).
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
 }
 

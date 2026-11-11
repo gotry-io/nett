@@ -1,12 +1,17 @@
-//! 访问控制与 Edge 的 nftables 规则（design/mesh.md 第 12 节，ADR 0015），经 netlink 安装（硬性规则 1）。
+//! nftables rules for access control and the Edge (design/mesh.md section 12, ADR 0015), installed through
+//! netlink (hard rule 1).
 //!
-//! 两张表，各自在一个事务中整表替换，替换要么完整生效、要么保持原状：
-//! - `nett_access`：从组网接口进入、新建连接的过滤。挂在 `prerouting`，优先级在 Docker 的目的地址转换
-//!   （-100）之前，发往本机、发往 Docker 发布端口和需要转发的流量都经过它；
-//! - `nett_edge`：Edge 的源地址转换挂在 `postrouting`，优先级在 Docker 的源地址伪装（100）之前；本机输出与
-//!   转发两个方向上丢弃使用 Edge 专用地址、但不是来自 Edge 的包；
-//! - `nett_ingress`：本机作为智能入口时，从组网接口进来、转发出去的连接只放行 Edge 来源，来源换成出接口
-//!   上的地址；其他来源的转发丢弃（design/mesh.md 第 10 节）。
+//! Two tables, each replaced as a whole in one transaction; the replacement either takes full effect or
+//! leaves things as they were:
+//! - `nett_access`: filtering of new connections entering from the mesh interface. Hooked at
+//!   `prerouting`, with priority before Docker's destination NAT (-100); traffic to this machine, to
+//!   Docker published ports, and traffic that needs forwarding all pass through it;
+//! - `nett_edge`: the Edge's source NAT is hooked at `postrouting`, with priority before Docker's source
+//!   masquerading (100); in both the local output and forwarding directions it drops packets that use
+//!   the Edge address but do not come from the Edge;
+//! - `nett_ingress`: when this machine is a smart gateway, connections coming in from the mesh interface
+//!   and forwarded out allow only Edge sources, with the source replaced by the address on the outgoing
+//!   interface; forwarding from other sources is dropped (design/mesh.md section 10).
 
 use std::net::IpAddr;
 
@@ -32,16 +37,17 @@ use crate::dataplane::INTERFACE_NAME;
 pub(super) const ACCESS_TABLE: &str = "nett_access";
 pub(super) const EDGE_TABLE: &str = "nett_edge";
 pub(super) const INGRESS_TABLE: &str = "nett_ingress";
-/// 源地址转换的标准优先级（`srcnat`）。
+/// Standard priority of source NAT (`srcnat`).
 const SRCNAT_PRIORITY: i32 = 100;
 
 const NF_INET_PRE_ROUTING: u32 = 0;
 const NF_INET_FORWARD: u32 = 2;
 const NF_INET_LOCAL_OUT: u32 = 3;
 const NF_INET_POST_ROUTING: u32 = 4;
-/// 在连接跟踪（-200）之后、Docker 的目的地址转换（-100）之前。
+/// After connection tracking (-200) and before Docker's destination NAT (-100).
 const ACCESS_PRIORITY: i32 = -150;
-/// 在 Docker 的源地址伪装（`srcnat`，100）之前：先换成 Edge 专用地址，Docker 的规则不再处理这条连接。
+/// Before Docker's source masquerading (`srcnat`, 100): first replace with the Edge address, so Docker's
+/// rules no longer handle this connection.
 const EDGE_SNAT_PRIORITY: i32 = 90;
 
 const NFT_CMP_NEQ: u32 = 1;
@@ -54,7 +60,7 @@ const NFT_PAYLOAD_NETWORK_HEADER: u32 = 1;
 const NFTA_CT_DREG: u16 = 1;
 const NFTA_CT_KEY: u16 = 2;
 const NFT_CT_STATE: u32 = 0;
-/// `ct state established,related`：`NF_CT_STATE_BIT(IP_CT_ESTABLISHED) | NF_CT_STATE_BIT(IP_CT_RELATED)`。
+/// `ct state established,related`: `NF_CT_STATE_BIT(IP_CT_ESTABLISHED) | NF_CT_STATE_BIT(IP_CT_RELATED)`.
 const CT_ESTABLISHED_OR_RELATED: u32 = (1 << 1) | (1 << 2);
 const NFTA_BITWISE_SREG: u16 = 1;
 const NFTA_BITWISE_DREG: u16 = 2;
@@ -69,8 +75,9 @@ const IFNAMSIZ: usize = 16;
 const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 
-/// 整表替换 `nett_access`：不是从组网接口进入的、已建立的连接和与它相关的包放行，之后按 `filter` 的顺序
-/// 匹配，都不匹配时丢弃（ADR 0023）。
+/// Replaces `nett_access` as a whole: established connections not entering from the mesh interface, and
+/// related packets, are allowed; after that, matched in the order of `filter`, and dropped when none
+/// match (ADR 0023).
 pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
     let mut messages = replace_table(ACCESS_TABLE);
     messages.push(base_chain(
@@ -89,7 +96,7 @@ pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
             m.attr(NFTA_CT_KEY, &NFT_CT_STATE.to_be_bytes());
             m.attr(NFTA_CT_DREG, &NFT_REG_1.to_be_bytes());
         });
-        // 连接跟踪的状态以主机字节序保存
+        // The connection tracking state is stored in host byte order
         bitwise(m, &CT_ESTABLISHED_OR_RELATED.to_ne_bytes());
         cmp(m, NFT_CMP_NEQ, &[0; 4]);
         verdict(m, NF_ACCEPT);
@@ -113,7 +120,8 @@ pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
             verdict(m, if r.accept { NF_ACCEPT } else { NF_DROP });
         }));
     }
-    // 链的默认策略是放行（其他接口的流量不归这张表管），组网接口上没有规则放行的新建连接在这里丢弃
+    // The chain's default policy is accept (traffic on other interfaces is not this table's business); new
+    // connections on the mesh interface that no rule allows are dropped here
     messages.push(rule(ACCESS_TABLE, "in", |m| {
         ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
         verdict(m, NF_DROP);
@@ -122,11 +130,12 @@ pub(crate) fn install_access(filter: &FilterSpec) -> Result<(), NlError> {
     Socket::open(Some(NETFILTER))?.request_batch(messages)
 }
 
-/// 整表替换 `nett_edge`；`edge` 为空时删除这张表。
+/// Replaces `nett_edge` as a whole; when `edge` is empty, deletes this table.
 pub(crate) fn install_edge(edge: Option<&EdgeSpec>) -> Result<(), NlError> {
     let mut messages = replace_table(EDGE_TABLE);
     let Some(edge) = edge else {
-        // `replace_table` 先建后删，表不存在时也不会报错；不再重建
+        // `replace_table` creates before deleting and does not error when the table does not exist; no
+        // rebuild
         let end = messages.len() - 1;
         messages.truncate(end);
         messages.push(batch(NFNL_MSG_BATCH_END));
@@ -174,7 +183,7 @@ pub(crate) fn install_edge(edge: Option<&EdgeSpec>) -> Result<(), NlError> {
     Socket::open(Some(NETFILTER))?.request_batch(messages)
 }
 
-/// 整表替换 `nett_ingress`；`ingress` 为空时删除这张表。
+/// Replaces `nett_ingress` as a whole; when `ingress` is empty, deletes this table.
 pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlError> {
     let mut messages = replace_table(INGRESS_TABLE);
     let Some(ingress) = ingress else {
@@ -222,7 +231,8 @@ pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlErr
     Socket::open(Some(NETFILTER))?.request_batch(messages)
 }
 
-/// 一个事务的开头：建表（已有时不报错）、删表、再建表。之后追加链和规则，最后是事务的结尾。
+/// The start of a transaction: create the table (no error if it exists), delete the table, then create it
+/// again. After that chains and rules are appended, and finally the end of the transaction.
 fn replace_table(table: &str) -> Vec<Message> {
     let new_table = || {
         let mut m = Message::new(nft_type(NFT_MSG_NEWTABLE), NLM_F_ACK | NLM_F_CREATE);
@@ -271,7 +281,8 @@ fn meta(m: &mut Message, key: u32) {
     });
 }
 
-/// 进入（`iifname`）或发出（`oifname`）的接口是否为组网接口。接口名按 16 字节、以 0 补齐比较。
+/// Whether the incoming (`iifname`) or outgoing (`oifname`) interface is the mesh interface. The
+/// interface name is compared as 16 bytes, padded with 0.
 fn ifname(m: &mut Message, key: u32, op: u32) {
     meta(m, key);
     let mut name = [0u8; IFNAMSIZ];
@@ -303,7 +314,8 @@ fn bitwise(m: &mut Message, mask: &[u8]) {
     });
 }
 
-/// 来源或目标地址落在网段内：IPv4 头的第 12、16 字节，IPv6 头的第 8、24 字节。
+/// The source or destination address falls within the prefix: bytes 12 and 16 of the IPv4 header, bytes 8
+/// and 24 of the IPv6 header.
 fn address(m: &mut Message, prefix: IpPrefix, source: bool) {
     let (offset, bytes): (u32, Vec<u8>) = match (prefix.addr(), source) {
         (IpAddr::V4(a), true) => (12, a.octets().to_vec()),
@@ -361,7 +373,8 @@ fn verdict(m: &mut Message, code: u32) {
     });
 }
 
-/// 把来源换成 `to`：地址先装进寄存器，再交给 `nat` 表达式。
+/// Replaces the source with `to`: the address is first loaded into a register, then handed to the `nat`
+/// expression.
 fn snat(m: &mut Message, to: IpAddr) {
     let (family, bytes) = match to {
         IpAddr::V4(a) => (NFPROTO_IPV4, a.octets().to_vec()),

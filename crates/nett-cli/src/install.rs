@@ -1,6 +1,7 @@
-//! `sudo nett install [<token>]` 与 `sudo nett uninstall`（design/hub.md 第 7 节，release.md 第 4 节）：两个平台
-//! 做同样的事，服务管理器不同（macOS 上 launchd，Linux 上 systemd）。这里是命令行与两个平台共用的文件和
-//! 子进程操作；各平台的步骤在 `service`（macOS）与 `service_linux` 中。
+//! `sudo nett install [<token>]` and `sudo nett uninstall` (design/hub.md section 7, release.md
+//! section 4): both platforms do the same things with different service managers (launchd on macOS,
+//! systemd on Linux). This module holds the command line and the file and subprocess operations
+//! shared by both platforms; the per-platform steps are in `service` (macOS) and `service_linux`.
 
 use std::fs;
 use std::io::Write as _;
@@ -21,9 +22,10 @@ use crate::service as platform;
 #[cfg(target_os = "linux")]
 use crate::service_linux as platform;
 
-/// 等服务管理器的命令返回的上限（硬性规则 14）。
+/// Upper bound for waiting on service manager commands to return (hard rule 14).
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
-/// `nett leave` 等 Hub 确认的上限：连不上时照常退出（design/hub.md 第 7 节）。
+/// Upper bound for `nett leave` waiting for the Hub to confirm: if the Hub is unreachable, it exits
+/// as usual (design/hub.md section 7).
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const INSTALL_USAGE: &str = "usage: sudo nett install [<token>] [--config <desired-state.json>]\n\n\
@@ -86,7 +88,8 @@ pub fn require_root() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 写到同一目录的临时文件再改名：读的一方不会看到写了一半的文件。
+/// Writes a temporary file in the same directory and renames it: a reader never sees a half-written
+/// file.
 pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<()> {
     let tmp = path.with_extension("tmp");
     fs::remove_file(&tmp).ok();
@@ -105,7 +108,8 @@ pub fn write_atomic(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<()
     fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))
 }
 
-/// 写入 `path`，内容与现有的相同时不动；返回是否写了。
+/// Writes `path`; leaves it untouched when the content equals the existing content; returns whether
+/// it wrote.
 pub fn replace_if_changed(path: &Path, content: &[u8], mode: u32) -> anyhow::Result<bool> {
     if fs::read(path).is_ok_and(|old| old == content) {
         return Ok(false);
@@ -120,7 +124,8 @@ pub fn ensure_dir(path: &str, mode: u32) -> anyhow::Result<()> {
         .with_context(|| format!("setting permissions of {path}"))
 }
 
-/// 把正在运行的 `nett` 复制到 `target`；从那里运行时不复制。返回是否换了。
+/// Copies the running `nett` to `target`; no copy when already running from there. Returns whether
+/// it replaced the file.
 pub fn copy_self(target: &str) -> anyhow::Result<bool> {
     let exe = std::env::current_exe().context("locating the running nett")?;
     let exe = fs::canonicalize(&exe).unwrap_or(exe);
@@ -131,7 +136,8 @@ pub fn copy_self(target: &str) -> anyhow::Result<bool> {
     replace_if_changed(Path::new(target), &bytes, 0o755)
 }
 
-/// 以参数数组运行服务管理器的命令（硬性规则 9：程序是固定的绝对路径，不经 shell），带超时；返回它是否成功。
+/// Runs a service manager command with an argument array (hard rule 9: the program is a fixed
+/// absolute path, no shell), with a timeout; returns whether it succeeded.
 pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
     let mut child = Command::new(program)
         .args(args)
@@ -157,17 +163,19 @@ pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
     }
 }
 
-/// 有 token 时的结果。
+/// Result when there is a token.
 #[derive(Default)]
 pub struct TokenOutcome {
-    /// Hub 的配置变了：nett-node 要重启。
+    /// The Hub configuration changed: nett-node must restart.
     pub hub_changed: bool,
-    /// 新机器入网时 Hub 发来的第一份期望状态，由调用方写成期望状态文件。
+    /// The first desired state the Hub sends when a new machine joins; the caller writes it as the
+    /// desired state file.
     pub desired: Option<Vec<u8>>,
 }
 
-/// 有 token 时核对它、写入 Hub 的配置并报告结果。入网 token（design/hub.md 第 6 节）先经 Hub 入网；接入
-/// token（第 3.5 节）只核对本机已是成员。
+/// Checks the token when there is one, writes the Hub configuration and reports the result. An
+/// enrollment token (design/hub.md section 6) enrolls through the Hub first; a join token (section
+/// 3.5) only checks that this machine is already a member.
 pub fn apply_token(
     dir: &str,
     state_dir: &str,
@@ -198,7 +206,8 @@ pub fn apply_token(
     })
 }
 
-/// 新机器经 Hub 入网。已是某个站点的成员时不接受，同一台机器重试同一个 token 时照常完成。
+/// A new machine joins through the Hub. Refused if it is already a member of a site; when the same
+/// machine retries the same token, it completes as usual.
 fn enroll(
     dir: &str,
     state_dir: &str,
@@ -247,7 +256,8 @@ fn unix_now() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
-/// `nett leave` 的第一步：有 Hub 的配置时告诉 Hub。连不上时说明之后要在电脑上做什么，照常往下做。
+/// First step of `nett leave`: tells the Hub when there is a Hub configuration. If the Hub is
+/// unreachable, explains what to do on the computer afterwards and continues as usual.
 pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
     let Some(config) = HubConfig::load(Path::new(dir)).map_err(anyhow::Error::msg)? else {
         println!(
@@ -281,7 +291,8 @@ pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nett leave` 的最后一步：删除密钥、期望状态、Hub 的配置与信任存储（design/auth.md 第 8.3 节）。
+/// Last step of `nett leave`: deletes the keys, the desired state, the Hub configuration and the
+/// trust store (design/auth.md section 8.3).
 pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
     for name in [
         "mesh.key",

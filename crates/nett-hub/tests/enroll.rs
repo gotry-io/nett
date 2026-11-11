@@ -1,6 +1,9 @@
-//! 新机器经 Hub 入网、机器自行退出、Hub 得知的公网地址（design/hub.md 第 4、5、6 节）：Hub 在 127.0.0.1 上
-//! 自己终止 TLS，真实的 nett-node 入网与退出会话连上来。token 只能用一次、过期了不能用，伪造的准入证明和
-//! 别人的身份都入不了网；还没有取回这些事的推送不会把它们抹掉，站点取回之后两边一致。
+//! A new machine joins via the Hub, a machine leaves on its own, and the public address learned by
+//! the Hub (design/hub.md sections 4, 5, 6): the Hub terminates TLS itself on 127.0.0.1, and real
+//! nett-node enrollment and leave sessions connect to it. A token can be used only once and cannot
+//! be used after it expires; forged admission proofs and other machines' identities cannot enroll;
+//! a push that has not yet fetched these events does not erase them, and after the site fetches
+//! them both sides agree.
 
 mod common;
 
@@ -28,7 +31,7 @@ use x25519_dalek::StaticSecret;
 
 use common::*;
 
-/// 新机器本机的两把密钥，写在 `dir` 中（`sudo nett install` 先做的那一步）。
+/// The new machine's two local keys, written in `dir` (the step `sudo nett install` does first).
 fn machine_keys(dir: &Path) -> NodeKeys {
     let (mesh, identity) = (
         PrivateKey::generate().expect("mesh key"),
@@ -50,7 +53,7 @@ fn anchors(state: &State) -> String {
     )
 }
 
-/// 站点中加一台等待入网的机器 `box`，返回它的节点 ID 与入网密钥。
+/// Adds a machine `box` waiting to join to the site, and returns its node ID and enrollment key.
 fn pending(
     site: &nett_site::dir::SiteDir,
     state: &mut State,
@@ -107,7 +110,8 @@ async fn a_new_machine_joins_through_the_hub_once() {
     let url = serve(hub.clone()).await;
     let join = token(&url, &state, &box_id, &key, expires);
 
-    // 新机器入网：拿到的第一份期望状态是给它的，其中有它自己的准入材料
+    // The new machine enrolls: the first desired state it gets is for it, and contains its own
+    // admission material
     let dir = temp_dir("enroll-box");
     let mine = machine_keys(&dir);
     let enrolled = nett_node::join::enroll(&dir, &join, nett_hub::now())
@@ -118,7 +122,7 @@ async fn a_new_machine_joins_through_the_hub_once() {
     assert_eq!(doc.members.len(), 4);
     assert_eq!(enrolled.config.node_id, box_id.as_str());
 
-    // Hub 记下了它的公钥，其他成员的期望状态中有了它
+    // The Hub recorded its public key, and other members' desired state now contains it
     let current = hub.site().await.expect("site");
     assert_eq!(
         current.state.machine(&name("box")).expect("box").keys,
@@ -135,7 +139,7 @@ async fn a_new_machine_joins_through_the_hub_once() {
     assert_eq!(mac_doc.members.len(), 4);
     let generation = current.generation;
 
-    // 同一个 token 换一台机器：拒绝
+    // The same token with a different machine: rejected
     let other = temp_dir("enroll-other");
     machine_keys(&other);
     let e = nett_node::join::enroll(&other, &join, nett_hub::now())
@@ -145,12 +149,13 @@ async fn a_new_machine_joins_through_the_hub_once() {
         refused(&e).is_some_and(|m| m.contains("already joined")),
         "{e}"
     );
-    // 同一台机器重试：按身份认出，照常拿到期望状态
+    // The same machine retries: recognized by identity, and gets the desired state as usual
     nett_node::join::enroll(&dir, &join, nett_hub::now())
         .await
         .expect("the same machine again");
 
-    // 还没有取回入网的站点再推一次：Hub 保留入网的结果，不换代数
+    // Push again a site that has not yet fetched the enrollment: the Hub keeps the enrollment
+    // result and does not change the generation
     assert_eq!(push(&app, &owner, &state).await.0, StatusCode::OK);
     let current = hub.site().await.expect("site");
     assert_eq!(current.generation, generation);
@@ -159,7 +164,8 @@ async fn a_new_machine_joins_through_the_hub_once() {
         Some(mine)
     );
 
-    // 站点取回、自己验证后记下；再推一次之后 Hub 不再保留这件事
+    // The site fetches it, verifies it itself and records it; after one more push the Hub no longer
+    // keeps it
     let (status, body) = call(&app, "GET", "/api/v1/site/updates", Some(&owner), vec![]).await;
     assert_eq!(status, StatusCode::OK);
     let updates: Updates = serde_json::from_slice(&body).expect("updates");
@@ -225,7 +231,8 @@ async fn expired_forged_and_borrowed_enrollments_are_refused() {
         }
     };
 
-    // 过期：本机先拒绝，绕过本机的检查时 Hub 也拒绝
+    // Expired: this machine rejects it first, and the Hub also rejects it when this machine's check
+    // is bypassed
     let join = token(&url, &state, &box_id, &key, expired);
     let dir = temp_dir("enroll-expired");
     machine_keys(&dir);
@@ -239,7 +246,8 @@ async fn expired_forged_and_borrowed_enrollments_are_refused() {
             .contains("expired")
     );
 
-    // 没过期之后：别的入网密钥签的证明、为另一把身份公钥签的证明都拒绝
+    // Once not expired: a proof signed by another enrollment key, and a proof signed for another
+    // identity public key, are both rejected
     state
         .await_enrollment(&name("box"), key.public_key(), nett_hub::now() + 1800)
         .expect("await");
@@ -287,7 +295,8 @@ async fn a_machine_that_leaves_is_removed_from_every_member() {
         .await
         .expect("left");
 
-    // Hub 当场移除它：其他成员不再有它，撤销记录先到
+    // The Hub removes it on the spot: other members no longer have it, and the revocation arrives
+    // first
     let current = hub.site().await.expect("site");
     assert!(current.state.by_id(&nas).is_none());
     assert!(current.state.revoked.iter().any(|r| r.node_id == nas));
@@ -304,16 +313,16 @@ async fn a_machine_that_leaves_is_removed_from_every_member() {
     let mac_doc: DesiredMeshDoc = serde_json::from_slice(&current.desired[&mac]).expect("desired");
     assert_eq!(mac_doc.members.len(), 2, "edge-vps and mac");
     assert_eq!(mac_doc.revocations.len(), 1);
-    // 它再也连不上
+    // It can no longer connect
     let e = nett_node::session::leave(&config, &identity(3))
         .await
         .expect_err("refused");
     assert!(matches!(e, SessionError::Refused { .. }), "{e}");
 
-    // 还没有取回的站点推送：仍然没有它
+    // A site push that has not yet been fetched: still without it
     assert_eq!(push(&app, &owner, &state).await.0, StatusCode::OK);
     assert!(hub.site().await.expect("site").state.by_id(&nas).is_none());
-    // 站点取回之后移除它、以新的版本重签访问规则（收窄）
+    // After the site fetches it, remove it and re-sign the access rules with a new version (narrow)
     let (_, body) = call(&app, "GET", "/api/v1/site/updates", Some(&owner), vec![]).await;
     let updates: Updates = serde_json::from_slice(&body).expect("updates");
     assert_eq!(updates.left, vec![nas.clone()]);
@@ -331,7 +340,7 @@ async fn a_machine_that_leaves_is_removed_from_every_member() {
 #[tokio::test]
 async fn learned_public_addresses_reach_the_other_members() {
     let (hub, app, owner, site, mut state) = linked("learned", URL).await;
-    // 一台没有写明地址的 public 机器
+    // A public machine with no address written
     state
         .add(
             name("vps"),
@@ -364,7 +373,7 @@ async fn learned_public_addresses_reach_the_other_members() {
         }),
         ipv6: None,
     };
-    // 地址在机器连上时得知
+    // The address is learned when the machine connects
     hub.db
         .seen(vps.as_str(), nett_hub::now(), "0.0.0")
         .await
@@ -379,13 +388,13 @@ async fn learned_public_addresses_reach_the_other_members() {
             endpoint: "198.51.100.7:41820".parse().expect("endpoint")
         }]
     );
-    // 同样的地址不换代数
+    // The same address does not change the generation
     let generation = current.generation;
     hub.learned(&vps, learned, nett_hub::now())
         .await
         .expect("again");
     assert_eq!(hub.site().await.expect("site").generation, generation);
-    // 站点取回之后记下；写明的地址优先
+    // After the site fetches it, it is recorded; an explicitly written address takes precedence
     let (_, body) = call(&app, "GET", "/api/v1/site/updates", Some(&owner), vec![]).await;
     let updates: Updates = serde_json::from_slice(&body).expect("updates");
     updates.apply(&mut state).expect("applied");

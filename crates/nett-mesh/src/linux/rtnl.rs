@@ -1,4 +1,5 @@
-//! rtnetlink：创建 WireGuard 接口、查询接口、设置 MTU 与启用、同步地址和路由（`include/uapi/linux/rtnetlink.h`）。
+//! rtnetlink: creates the WireGuard interface, queries interfaces, sets the MTU and brings it up, and
+//! syncs addresses and routes (`include/uapi/linux/rtnetlink.h`).
 
 use std::net::IpAddr;
 
@@ -22,7 +23,8 @@ const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
 const RTA_TABLE: u16 = 15;
 const RT_TABLE_MAIN: u8 = 254;
-/// nett 在组网接口上加的路由用这个协议号标记，与内核按地址自动加的路由（`kernel`）区分开。
+/// Routes that nett adds on the mesh interface are marked with this protocol number, to tell them apart
+/// from routes the kernel adds automatically per address (`kernel`).
 const RTPROT_STATIC: u8 = 4;
 const RT_SCOPE_LINK: u8 = 253;
 const RTN_UNICAST: u8 = 1;
@@ -36,7 +38,8 @@ const IFLA_INFO_KIND: u16 = 1;
 const IFA_ADDRESS: u16 = 1;
 const IFA_LOCAL: u16 = 2;
 const IFA_FLAGS: u16 = 8;
-/// 不做重复地址检测：组网接口上的地址由 Hub 分配，不与其他主机争用，DAD 只会让地址晚一秒可用。
+/// No duplicate address detection: addresses on the mesh interface are allocated by the Hub and do not
+/// compete with other hosts, so DAD would only make the address available a second later.
 const IFA_F_NODAD: u32 = 0x02;
 
 const IFF_UP: u32 = 0x1;
@@ -48,9 +51,9 @@ const RT_SCOPE_UNIVERSE: u8 = 0;
 const ENODEV: i32 = 19;
 const EEXIST: i32 = 17;
 
-/// `ifinfomsg` 的长度。
+/// Length of `ifinfomsg`.
 const IFINFO_LEN: usize = 16;
-/// `ifaddrmsg` 的长度。
+/// Length of `ifaddrmsg`.
 const IFADDR_LEN: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +71,7 @@ fn ifinfo(index: u32, flags: u32, change: u32) -> [u8; IFINFO_LEN] {
     b
 }
 
-/// 创建 WireGuard 接口；已存在时返回 `false`。
+/// Creates a WireGuard interface; returns `false` if it already exists.
 pub(crate) fn create_wireguard(sock: &mut Socket, name: &str) -> Result<bool, NlError> {
     let mut m = Message::new(RTM_NEWLINK, NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL);
     m.fixed(&ifinfo(0, 0, 0));
@@ -83,7 +86,7 @@ pub(crate) fn create_wireguard(sock: &mut Socket, name: &str) -> Result<bool, Nl
     }
 }
 
-/// 删除接口（连同它的地址与路由）；不存在时返回 `false`。
+/// Deletes an interface (along with its addresses and routes); returns `false` if it does not exist.
 pub(crate) fn del_link(sock: &mut Socket, name: &str) -> Result<bool, NlError> {
     let mut m = Message::new(RTM_DELLINK, NLM_F_ACK);
     m.fixed(&ifinfo(0, 0, 0));
@@ -95,7 +98,7 @@ pub(crate) fn del_link(sock: &mut Socket, name: &str) -> Result<bool, NlError> {
     }
 }
 
-/// 按名称查询接口；不存在时返回 `None`。
+/// Queries an interface by name; returns `None` if it does not exist.
 pub(crate) fn get_link(sock: &mut Socket, name: &str) -> Result<Option<Link>, NlError> {
     let mut m = Message::new(RTM_GETLINK, NLM_F_ACK);
     m.fixed(&ifinfo(0, 0, 0));
@@ -127,7 +130,7 @@ pub(crate) fn get_link(sock: &mut Socket, name: &str) -> Result<Option<Link>, Nl
     Ok(Some(Link { index, kind }))
 }
 
-/// 设置 MTU 并启用接口。
+/// Sets the MTU and brings up the interface.
 pub(crate) fn set_mtu_up(sock: &mut Socket, index: u32, mtu: u32) -> Result<(), NlError> {
     let mut m = Message::new(RTM_NEWLINK, NLM_F_ACK);
     m.fixed(&ifinfo(index, IFF_UP, IFF_UP));
@@ -151,7 +154,7 @@ fn addr_bytes(addr: IpAddr) -> (u8, Vec<u8>) {
     }
 }
 
-/// 接口上现有的地址及前缀长度。
+/// Existing addresses on the interface and their prefix lengths.
 pub(crate) fn get_addresses(sock: &mut Socket, index: u32) -> Result<Vec<(IpAddr, u8)>, NlError> {
     let mut m = Message::new(RTM_GETADDR, NLM_F_DUMP);
     m.fixed(&ifaddr(AF_UNSPEC, 0, 0));
@@ -166,7 +169,8 @@ pub(crate) fn get_addresses(sock: &mut Socket, index: u32) -> Result<Vec<(IpAddr
         }
         for attr in attrs(&reply[IFADDR_LEN..]) {
             let (ty, payload) = attr?;
-            // 点对点接口上 IFA_ADDRESS 是对端地址，本机地址在 IFA_LOCAL；IPv6 只有 IFA_ADDRESS
+            // On a point-to-point interface IFA_ADDRESS is the peer address and the local address is in IFA_LOCAL;
+            // IPv6 has only IFA_ADDRESS
             let wanted = match family {
                 AF_INET => ty == IFA_LOCAL,
                 AF_INET6 => ty == IFA_ADDRESS,
@@ -231,7 +235,8 @@ fn rtmsg(family: u8, dst_len: u8) -> [u8; RTMSG_LEN] {
     b
 }
 
-/// 经接口 `index` 到达 `prefix` 的路由（主路由表，`static`）。已存在时替换。
+/// A route to `prefix` via interface `index` (main routing table, `static`). Replaces it if it already
+/// exists.
 pub(crate) fn add_route(sock: &mut Socket, index: u32, prefix: IpPrefix) -> Result<(), NlError> {
     let (family, bytes) = addr_bytes(prefix.addr());
     let mut m = Message::new(RTM_NEWROUTE, NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE);
@@ -250,7 +255,8 @@ pub(crate) fn del_route(sock: &mut Socket, index: u32, prefix: IpPrefix) -> Resu
     sock.request(m).map(drop)
 }
 
-/// 主路由表中经接口 `index`、协议为 `static` 的路由：nett 在组网接口上加的那些。
+/// Routes in the main routing table via interface `index` with protocol `static`: the ones nett adds on
+/// the mesh interface.
 pub(crate) fn get_routes(sock: &mut Socket, index: u32) -> Result<Vec<IpPrefix>, NlError> {
     let mut m = Message::new(RTM_GETROUTE, NLM_F_DUMP);
     m.fixed(&rtmsg(AF_UNSPEC, 0));

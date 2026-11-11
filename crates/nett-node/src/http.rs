@@ -1,5 +1,5 @@
-//! 签名工具调用 Hub API 的 HTTPS 客户端（design/hub.md 第 4 节）：每次请求一条连接，HTTP/1.1，带超时，回复
-//! 大小有上限。
+//! The HTTPS client the signing tool uses to call the Hub API (design/hub.md section 4): one
+//! connection per request, HTTP/1.1, with timeouts, and the reply size is capped.
 
 use std::time::Duration;
 
@@ -31,14 +31,14 @@ pub enum HttpError {
     Reply(String),
 }
 
-/// 一个 Hub：地址，以及自签证书时证书的指纹。
+/// A Hub: its address, and for a self-signed certificate the certificate's fingerprint.
 #[derive(Debug, Clone)]
 pub struct Target {
     pub url: String,
     pub tls_fingerprint: Option<[u8; 32]>,
 }
 
-/// 发一个 JSON 请求，返回成功时的回复。
+/// Sends a JSON request and returns the reply on success.
 pub async fn call(
     target: &Target,
     method: &str,
