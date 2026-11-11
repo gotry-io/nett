@@ -1,4 +1,4 @@
-# 只转发 Hub 的两段路径；WebSocket 由 reverse_proxy 自动处理（design/hub.md 第 8 节）
+# Forward only the Hub's two paths; reverse_proxy handles the WebSocket upgrade
 hub.example.com {
 	reverse_proxy /api/v1/* hub:8480
 	reverse_proxy /node/v1/connect hub:8480

@@ -1,6 +1,7 @@
-# nett 的组网进程（architecture.md 第 13.2 节，design/local-signing.md 第 5 节）。期望状态在
-# /etc/nett/desired.json（不含私钥），组网私钥在 /etc/nett/mesh.key（root 所有，权限 0600），由
-# LoadCredential 交给服务；更新期望状态后 `systemctl reload nett-mesh`。
+# The nett mesh service. Installed by `sudo nett install`.
+# The desired state is /etc/nett/desired.json (it holds no private keys). The mesh private key,
+# /etc/nett/mesh.key (owned by root, mode 0600), reaches the service through LoadCredential.
+# After the desired state changes, `systemctl reload nett-mesh` applies it without a restart.
 [Unit]
 Description=nett mesh
 After=network-online.target
@@ -10,13 +11,13 @@ Wants=network-online.target
 ExecStart=/usr/local/bin/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key
 ExecReload=/bin/kill -HUP $MAINPID
 LoadCredential=mesh.key:/etc/nett/mesh.key
-# 本机状态的套接字 /run/nett/mesh.sock（design/status.md 第 3 节）：目录属于服务的身份，只有它和 root 能进入
+# Local status socket /run/nett/mesh.sock: only the service and root can enter the directory
 RuntimeDirectory=nett
 RuntimeDirectoryMode=0700
-# 信任存储 /var/lib/nett（design/mesh.md 第 4.2 节）：固定的信任锚、撤销记录与已生效的版本，重启后保留
+# Trust store /var/lib/nett: pinned trust anchors, revocations and applied versions survive restarts
 StateDirectory=nett
 StateDirectoryMode=0700
-# 专用的身份，只有配置 WireGuard、nftables 与发送探测需要的两项能力
+# A dedicated identity with only the capabilities for WireGuard, nftables and path probes
 DynamicUser=yes
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
@@ -27,7 +28,7 @@ PrivateTmp=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_NETLINK AF_INET AF_INET6 AF_UNIX
-# 空闲时约 3 MB（硬性规则 14）；上限留出工作时的峰值余量。组网比其他进程更晚被 OOM 结束
+# Idle use is about 3 MB; the limit leaves room for peaks. The OOM killer picks the mesh late
 MemoryMax=64M
 OOMScoreAdjust=-500
 Restart=on-failure

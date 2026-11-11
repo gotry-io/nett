@@ -1,19 +1,21 @@
-# 容器内成员（ADR 0016，design/local-signing.md 第 6 节）：这个容器网络的智能入口。它在网络中使用固定地址，
-# 只把 Edge 专用地址发来、访问规则放行的连接转给宣告的服务地址，来源换成自己的地址。服务保留自己的网络，
-# 也使用固定地址；容器内成员重启不影响服务。
+# A mesh member inside a container, acting as the gateway into this container network. It has a
+# fixed address and forwards only connections the access rules allow to the advertised service
+# address, rewriting the source to its own address. The service keeps its own network and fixed
+# address; restarting the mesh member does not affect it.
 #
-# 第一次使用：docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett，在持有站点的
-# 电脑上用输出的一行 nett site add <名字> --keys "…"，再 nett site routes <名字> 172.30.0.10/32；生成的
-# desired.json 放进 ./nett；之后更新时 docker compose exec nett /nett reload，它报告新的期望状态是否被接受。不用
-# docker compose kill 发信号：Docker 会把容器记为手动停止过，主机重启后不再自动启动它（design/status.md
-# 第 4.1 节）。一次性任务不用 docker compose run：临时容器会继承服务的固定地址，与运行中的容器冲突
-# （design/local-signing.md 第 6 节）。
+# First use: `docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett`; on the
+# computer that holds the site, `nett site add <name> --keys "…"` with the printed line, then
+# `nett site routes <name> 172.30.0.10/32`; put the generated desired.json in ./nett.
+# After an update, `docker compose exec nett /nett reload` reports whether it was accepted.
+# Avoid `docker compose kill`: Docker records the container as stopped by hand and does not start
+# it after a reboot. Avoid `docker compose run` for one-off tasks: the temporary container takes
+# the same fixed address as the running one.
 services:
   nett:
     image: nett
     cap_add: [NET_ADMIN, NET_RAW]
     sysctls:
-      net.ipv4.ip_forward: "1"       # 只转发访问规则放行的连接
+      net.ipv4.ip_forward: "1"       # only connections the access rules allow are forwarded
     volumes:
       - ./nett:/etc/nett
     networks:
@@ -25,13 +27,13 @@ services:
     image: example/app
     networks:
       app:
-        ipv4_address: 172.30.0.10    # 在站点描述中宣告的地址
+        ipv4_address: 172.30.0.10    # the address advertised in the site
     restart: unless-stopped
-    # 需要真实客户端 IP 的服务：可信代理设为 172.30.0.200
+    # Services that need the real client IP: trust 172.30.0.200 as the proxy
 
 networks:
   app:
     ipam:
       config:
         - subnet: 172.30.0.0/24
-          ip_range: 172.30.0.0/25    # 动态分配的范围；固定地址取在它之外
+          ip_range: 172.30.0.0/25    # dynamic range; fixed addresses lie outside it
