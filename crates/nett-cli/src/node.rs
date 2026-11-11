@@ -45,6 +45,21 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             )
         })?;
     let identity = PrivateKey::load(&dir.join("identity.key"))?;
+    // The units follow the program (design/release.md section 7). Done before the upgrade check: a
+    // start that only picks up its own new unit does not count against the new version
+    let managed = nett_node::services::managed();
+    if managed {
+        match nett_node::services::refresh_units() {
+            Ok(true) => {
+                tracing::info!(
+                    "nett-node's unit changed; exiting so that systemd starts it with the new one"
+                );
+                return Ok(());
+            }
+            Ok(false) => {}
+            Err(e) => tracing::warn!(error = %e, "refreshing nett's units"),
+        }
+    }
     let upgrader = upgrader(&dir, &socket).map(Arc::new);
     if let Some(upgrader) = &upgrader
         && let Start::RolledBack(reason) = upgrader.on_start()
@@ -58,6 +73,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         desired: dir.join("desired.json"),
         socket,
         upgrader,
+        services: managed.then(|| std::sync::Mutex::new(None)),
     };
     drop(identity);
     let runtime = tokio::runtime::Builder::new_current_thread()

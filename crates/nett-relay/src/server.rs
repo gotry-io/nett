@@ -18,7 +18,8 @@ use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use crate::relay::{ConnId, Outcome, PeerAddr, Relay, RelayState};
+use crate::relay::{AssignedMember, ConnId, Outcome, PeerAddr, Relay, RelayState};
+use nett_trust::keys::X25519PublicKey;
 
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(1);
 /// Outer packets are at most about 1360 bytes (design/mesh.md section 4); leave some margin.
@@ -67,14 +68,26 @@ struct Conn {
     authenticated: bool,
 }
 
+/// A changed assignment from the mesh process (design/mesh.md section 5.2).
+#[derive(Debug, Clone)]
+pub struct Assignment {
+    pub members: Vec<AssignedMember>,
+    pub connections: Vec<(X25519PublicKey, X25519PublicKey)>,
+}
+
+/// Bound on assignments waiting to be applied: the fetcher sends one only when it changed.
+pub const ASSIGNMENT_QUEUE: usize = 4;
+
 /// Runs until `shutdown` completes. `udp` is the dual-stack relay port. `state` is the file holding
 /// the index table: restored at startup, and written once per second and again before exit, so
-/// connections through the relay survive a restart.
+/// connections through the relay survive a restart. Assignments arriving on `updates` are applied in
+/// place.
 pub async fn serve(
     udp: UdpSocket,
     tls: Option<TlsIngress>,
     mut relay: Relay,
     state: Option<PathBuf>,
+    mut updates: Option<mpsc::Receiver<Assignment>>,
     shutdown: impl Future<Output = ()>,
 ) -> std::io::Result<()> {
     if let Some(path) = &state {
@@ -112,6 +125,16 @@ pub async fn serve(
                 let packet = &buf[..len];
                 let outcome = relay.handle(from, packet, Instant::now(), now_ms());
                 dispatch(&udp, &conns, from, packet, outcome, &mut dropped);
+            }
+            Some(update) = next_update(&mut updates) => {
+                match relay.reassign(&update.members, &update.connections) {
+                    Ok(()) => tracing::info!(
+                        members = update.members.len(),
+                        links = update.connections.len(),
+                        "relay assignment applied"
+                    ),
+                    Err(error) => tracing::warn!(%error, "relay assignment not applied; keeping the previous one"),
+                }
             }
             accepted = accept(tls.as_ref()) => {
                 let Ok((stream, peer)) = accepted else { continue };
@@ -175,6 +198,20 @@ pub async fn serve(
         drop(save_in_background(path, relay.snapshot(Instant::now())).await);
     }
     Ok(())
+}
+
+/// The next assignment; waits forever when there is no channel or it has closed.
+async fn next_update(updates: &mut Option<mpsc::Receiver<Assignment>>) -> Option<Assignment> {
+    match updates {
+        Some(rx) => match rx.recv().await {
+            Some(update) => Some(update),
+            None => {
+                *updates = None;
+                std::future::pending().await
+            }
+        },
+        None => std::future::pending().await,
+    }
 }
 
 async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketAddr)> {
@@ -343,6 +380,22 @@ pub fn tls_acceptor(cert: &Path, key: &Path) -> Result<TlsAcceptor, TlsSetupErro
         .map_err(|e| TlsSetupError::Certificate(e.to_string()))?;
     // The error message does not contain private key material (hard rule 10)
     let key = PrivateKeyDer::from_pem_file(key).map_err(|_| TlsSetupError::Key)?;
+    acceptor(chain, key)
+}
+
+/// The server configuration for the relay's own certificate (design/mesh.md section 5.3).
+pub fn cert_acceptor(cert: &crate::cert::RelayCert) -> Result<TlsAcceptor, TlsSetupError> {
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+    acceptor(
+        vec![CertificateDer::from(cert.cert.clone())],
+        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der().to_vec())),
+    )
+}
+
+fn acceptor(
+    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
+    key: rustls::pki_types::PrivateKeyDer<'static>,
+) -> Result<TlsAcceptor, TlsSetupError> {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -419,7 +472,7 @@ mod tests {
                 .expect("runtime");
             runtime.block_on(async move {
                 let udp = UdpSocket::from_std(socket).expect("tokio socket");
-                serve(udp, None, relay, Some(server_state), async {
+                serve(udp, None, relay, Some(server_state), None, async {
                     drop(stopped.await);
                 })
                 .await

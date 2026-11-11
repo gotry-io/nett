@@ -68,6 +68,9 @@ pub struct Node {
     /// Installs new releases (design/release.md section 7); `None` where this machine does not
     /// upgrade itself.
     pub upgrader: Option<Arc<Upgrader>>,
+    /// Starts and stops the relay and the transport adapter with the desired state (design/hub.md
+    /// section 5); `None` where nett did not install the services. Holds what was last set up.
+    pub services: Option<std::sync::Mutex<Option<crate::services::Wants>>>,
 }
 
 /// Why [`run`] returned.
@@ -609,7 +612,30 @@ impl Node {
                 return (AckResult::Pending, e);
             }
         }
-        self.reload().await
+        let ack = self.reload().await;
+        self.follow_services(&doc).await;
+        ack
+    }
+
+    /// Enables or disables the relay and the transport adapter when what the desired state needs
+    /// changed.
+    async fn follow_services(&self, doc: &DesiredMeshDoc) {
+        let Some(last) = &self.services else {
+            return;
+        };
+        let wants = crate::services::Wants::of(doc);
+        if last.lock().ok().is_some_and(|l| *l == Some(wants)) {
+            return;
+        }
+        let problems = tokio::task::spawn_blocking(move || crate::services::reconcile(wants))
+            .await
+            .unwrap_or_else(|e| vec![e.to_string()]);
+        // When something failed, the next desired state tries again
+        if problems.is_empty()
+            && let Ok(mut l) = last.lock()
+        {
+            *l = Some(wants);
+        }
     }
 
     /// Asks the mesh process to read the desired state file again.
@@ -856,6 +882,7 @@ mod apply_tests {
             // No mesh process answers here
             socket: dir.join("mesh.sock"),
             upgrader: None,
+            services: None,
         };
         let content = serde_json::to_vec(&doc).expect("json");
         assert_eq!(node.apply_mesh(&content).await.0, AckResult::Pending);

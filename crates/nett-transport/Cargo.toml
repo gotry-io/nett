@@ -12,6 +12,8 @@ workspace = true
 
 [dependencies]
 nett-core.workspace = true
+# The client of the mesh process's helper socket (design/status.md section 3.1)
+nett-mesh.workspace = true
 futures-util.workspace = true
 ring.workspace = true
 rustls.workspace = true

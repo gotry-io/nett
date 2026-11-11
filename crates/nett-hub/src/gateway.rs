@@ -182,8 +182,8 @@ fn is_global(ip: IpAddr) -> bool {
     }
 }
 
-/// Per address family: use the machine's report when it is a global unicast address, otherwise the
-/// address the Hub sees; loopback addresses are not used.
+/// The public addresses of a machine, per address family: the machine's report when it is a global
+/// unicast address, otherwise the address the Hub sees; loopback addresses are not used.
 pub fn learn(reported: &[String], observed: Option<IpAddr>) -> Learned {
     let reported: Vec<IpAddr> = reported.iter().filter_map(|a| a.parse().ok()).collect();
     let pick = |v4: bool| {
@@ -207,6 +207,7 @@ pub fn learn(reported: &[String], observed: Option<IpAddr>) -> Learned {
             IpAddr::V6(ip) => Some(LearnedIp { ip, from }),
             IpAddr::V4(_) => None,
         }),
+        ..Learned::default()
     }
 }
 
@@ -531,7 +532,12 @@ async fn handle(
             // Only the first few addresses are taken: they are data supplied by the node (hard rule
             // 13)
             let reported: Vec<String> = inv.addresses.into_iter().take(MAX_ADDRESSES).collect();
-            if let Err(e) = hub.learned(node, learn(&reported, observed), now()).await {
+            let addresses = learn(&reported, observed);
+            let change = |l: &mut Learned| {
+                l.ipv4 = addresses.ipv4;
+                l.ipv6 = addresses.ipv6;
+            };
+            if let Err(e) = hub.learn(node, change, now()).await {
                 tracing::warn!(node_id = %node, error = %e, "recording the public address");
             }
         }
@@ -549,6 +555,16 @@ async fn handle(
                     .set_status(node.as_str(), &value.to_string(), now())
                     .await
                     .map_err(|e| e.to_string())?;
+                // The relay on this machine reports its certificate in the status (design/mesh.md
+                // section 5.3)
+                let fingerprint = value
+                    .pointer("/relay/fingerprint")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(|f| f.parse().ok());
+                let change = |l: &mut Learned| l.relay_fingerprint = fingerprint;
+                if let Err(e) = hub.learn(node, change, now()).await {
+                    tracing::warn!(node_id = %node, error = %e, "recording the relay fingerprint");
+                }
             }
         }
         Some(Body::Goodbye(_)) => return Ok(false),

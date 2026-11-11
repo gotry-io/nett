@@ -738,7 +738,7 @@ fn learned_addresses_fill_in_for_public_machines_without_one() {
             ip: "198.51.100.7".parse().expect("ip"),
             from: crate::state::AddressSource::Hub,
         }),
-        ipv6: None,
+        ..crate::state::Learned::default()
     };
     crate::updates::Updates {
         learned: vec![crate::updates::LearnedFor {
@@ -757,5 +757,277 @@ fn learned_addresses_fill_in_for_public_machines_without_one() {
         }]
     );
     assert!(state.unknown_public_addresses().is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// The site of [`site`] with two more public relays, r2 and r1 (r1 gets the smaller node ID), and a
+/// rule that connects mac and nas.
+fn relay_site(dir: &Path) -> (SiteDir, State) {
+    let (site, mut state) = site(dir);
+    let mut ids = [new_node_id().expect("id"), new_node_id().expect("id")];
+    ids.sort();
+    for (n, k, id, ip) in [
+        ("r1", 4, ids[0].clone(), "198.51.100.1"),
+        ("r2", 5, ids[1].clone(), "198.51.100.2"),
+    ] {
+        state
+            .add(
+                name(n),
+                MachineOptions {
+                    public: true,
+                    ipv4: Some(ip.parse().expect("ip")),
+                    keys: Some(keys(k)),
+                    ..MachineOptions::default()
+                },
+                id,
+            )
+            .expect("add relay");
+    }
+    let key = crate::state::RelayKey([7; 32]);
+    let role = |tls: Option<u16>| crate::state::RelayRole {
+        port: 41822,
+        tls_port: tls,
+        fingerprint: tls.map(|_| {
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                .parse()
+                .expect("fingerprint")
+        }),
+    };
+    state
+        .set_relay(&name("r2"), Some(role(Some(443))), key)
+        .expect("r2 relays");
+    state
+        .set_relay(
+            &name("r1"),
+            Some(role(None)),
+            crate::state::RelayKey([8; 32]),
+        )
+        .expect("r1 relays");
+    assert_eq!(
+        state.relay_key,
+        Some(key),
+        "the first relay creates the key"
+    );
+    state
+        .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&site, &mut state);
+    (site, state)
+}
+
+fn path<'a>(
+    doc: &'a nett_mesh::config::DesiredMeshDoc,
+    state: &State,
+    peer: &str,
+) -> &'a [Candidate] {
+    let id = &state.machine(&name(peer)).expect("peer").node_id;
+    &doc.paths
+        .iter()
+        .find(|p| &p.peer == id)
+        .expect("a path to the peer")
+        .candidates
+}
+
+#[test]
+fn connections_go_through_every_relay_udp_first() {
+    let dir = temp_dir("relay-candidates");
+    let (_site, state) = relay_site(&dir);
+    let id = |n: &str| state.machine(&name(n)).expect("machine").node_id.clone();
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    let nas = desired(&state, &name("nas")).expect("ok").expect("signed");
+    let kinds = |c: &[Candidate]| -> Vec<String> {
+        c.iter()
+            .map(|c| match c {
+                Candidate::Direct { endpoint } => format!("direct {endpoint}"),
+                Candidate::Punch => "punch".into(),
+                Candidate::Relay {
+                    relay, endpoint, ..
+                } => {
+                    format!("udp {} {endpoint}", state.name_of(relay).expect("name"))
+                }
+                Candidate::RelayTls { relay, address, .. } => {
+                    format!("tls {} {address}", state.name_of(relay).expect("name"))
+                }
+            })
+            .collect()
+    };
+    let expected = [
+        "punch",
+        "udp r1 198.51.100.1:41822",
+        "udp r2 198.51.100.2:41822",
+        "tls r2 198.51.100.2:443",
+    ];
+    assert_eq!(kinds(path(&mac, &state, "nas")), expected);
+    assert_eq!(
+        kinds(path(&nas, &state, "mac")),
+        expected,
+        "both ends get the same relays"
+    );
+    // A relay is never a path to itself; a connection to a relay goes through the other one
+    assert_eq!(
+        kinds(path(&mac, &state, "r1")),
+        [
+            "direct 198.51.100.1:41820",
+            "udp r2 198.51.100.2:41822",
+            "tls r2 198.51.100.2:443"
+        ]
+    );
+
+    // The relay gets the connections that list it, and the same token as the member
+    let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
+    let relay = r2.relay.expect("r2 runs a relay");
+    assert_eq!((relay.port, relay.tls_port), (41822, Some(443)));
+    let mut pair = [id("mac"), id("nas")];
+    pair.sort();
+    assert!(relay.links.contains(&pair));
+    assert!(
+        relay.links.iter().all(|l| !l.contains(&id("r2"))),
+        "no link through a relay to itself"
+    );
+    let mac_on_r2 = relay
+        .members
+        .iter()
+        .find(|m| m.node == id("mac"))
+        .expect("mac is a member of the relay");
+    assert_eq!(
+        mac_on_r2.address, None,
+        "a dial-only member binds by its handshake"
+    );
+    let token_in_candidate = path(&mac, &state, "nas")
+        .iter()
+        .find_map(|c| match c {
+            Candidate::Relay { relay, token, .. } if *relay == id("r2") => Some(token.clone()),
+            _ => None,
+        })
+        .expect("mac's candidate through r2");
+    assert_eq!(mac_on_r2.token, token_in_candidate);
+    let edge_on_r2 = relay
+        .members
+        .iter()
+        .find(|m| m.node == id("edge-vps"))
+        .expect("edge-vps is on r2's links");
+    assert_eq!(
+        edge_on_r2.address,
+        Some("203.0.113.10:41820".parse().expect("address")),
+        "a public member is bound to its address"
+    );
+    // Tokens differ per member and per relay
+    let other = relay
+        .members
+        .iter()
+        .find(|m| m.node == id("nas"))
+        .expect("nas");
+    assert_ne!(other.token, mac_on_r2.token);
+    for n in ["mac", "nas", "r1", "r2", "edge-vps"] {
+        admitted(&state, n);
+    }
+    assert!(
+        desired(&state, &name("mac"))
+            .expect("ok")
+            .expect("signed")
+            .relay
+            .is_none()
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn relays_need_a_public_machine_and_their_own_port() {
+    let dir = temp_dir("relay-checks");
+    let (_site, mut state) = site(&dir);
+    let role = |port| crate::state::RelayRole {
+        port,
+        tls_port: Some(443),
+        fingerprint: None,
+    };
+    let key = crate::state::RelayKey([1; 32]);
+    assert!(
+        state
+            .set_relay(&name("mac"), Some(role(41822)), key)
+            .is_err()
+    );
+    assert!(
+        state
+            .set_relay(&name("edge-vps"), Some(role(41820)), key)
+            .is_err()
+    );
+    assert!(
+        state
+            .set_relay(&name("edge-vps"), Some(role(41821)), key)
+            .is_err()
+    );
+    assert_eq!(
+        state.relay_key, None,
+        "a refused change leaves the site as it was"
+    );
+    state
+        .set_relay(&name("edge-vps"), Some(role(41822)), key)
+        .expect("relay");
+    let to_dial_only = MachineChange {
+        reachability: Some(Reachability::DialOnly),
+        ipv4: Some(None),
+        ..MachineChange::default()
+    };
+    assert!(
+        state.set(&name("edge-vps"), to_dial_only).is_err(),
+        "a relay keeps its machine public"
+    );
+    // Without a fingerprint there is no TLS path yet
+    state
+        .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&_site, &mut state);
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    assert!(
+        path(&mac, &state, "nas")
+            .iter()
+            .all(|c| !matches!(c, Candidate::RelayTls { .. }))
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn relay_changes_are_listed_with_the_paths_they_change() {
+    let dir = temp_dir("relay-describe");
+    let (site, mut old) = site(&dir);
+    old.allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&site, &mut old);
+    let mut new = old.clone();
+    new.set_relay(
+        &name("edge-vps"),
+        Some(crate::state::RelayRole {
+            port: 41822,
+            tls_port: Some(8443),
+            fingerprint: Some(
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .parse()
+                    .expect("fingerprint"),
+            ),
+        }),
+        crate::state::RelayKey([2; 32]),
+    )
+    .expect("relay");
+    let lines = describe(&old, &new);
+    assert!(
+        lines.contains(&"~ edge-vps runs a relay: UDP 41822, TLS 8443".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"  ~ mac - nas  punch, relay edge-vps (udp, tls)".to_owned()),
+        "{lines:?}"
+    );
+    let mut off = new.clone();
+    off.set_relay(&name("edge-vps"), None, crate::state::RelayKey([2; 32]))
+        .expect("off");
+    let lines = describe(&new, &off);
+    assert!(
+        lines.contains(&"~ edge-vps stops its relay".to_owned()),
+        "{lines:?}"
+    );
+    assert!(
+        lines.contains(&"  ~ mac - nas  punch only; may not connect".to_owned()),
+        "{lines:?}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }

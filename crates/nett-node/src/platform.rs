@@ -14,6 +14,50 @@ pub mod linux {
     pub const LINK: &str = "/usr/local/bin/nett";
     pub const MESH_UNIT: &str = "nett-mesh.service";
     pub const NODE_UNIT: &str = "nett-node.service";
+    pub const RELAY_UNIT: &str = "nett-relay.service";
+    pub const TRANSPORT_UNIT: &str = "nett-transport.service";
+    /// Where `sudo nett install` writes the units and nett-node refreshes them after an upgrade:
+    /// the directory for units of locally installed software (files of the same name in
+    /// `/etc/systemd/system` override them).
+    pub const UNIT_DIR: &str = "/usr/local/lib/systemd/system";
+
+    /// A systemd unit of nett: the file in `packaging/systemd/`, embedded at compile time so that
+    /// its content has a single source and follows the program through upgrades.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Unit {
+        pub name: &'static str,
+        pub content: &'static str,
+        /// What it is, for messages.
+        pub what: &'static str,
+    }
+
+    impl Unit {
+        pub fn path(&self) -> String {
+            format!("{UNIT_DIR}/{}", self.name)
+        }
+    }
+
+    pub const MESH: Unit = Unit {
+        name: MESH_UNIT,
+        content: include_str!("../../../packaging/systemd/nett-mesh.service"),
+        what: "the mesh service",
+    };
+    pub const NODE: Unit = Unit {
+        name: NODE_UNIT,
+        content: include_str!("../../../packaging/systemd/nett-node.service"),
+        what: "nett-node",
+    };
+    pub const RELAY: Unit = Unit {
+        name: RELAY_UNIT,
+        content: include_str!("../../../packaging/systemd/nett-relay.service"),
+        what: "the relay",
+    };
+    pub const TRANSPORT: Unit = Unit {
+        name: TRANSPORT_UNIT,
+        content: include_str!("../../../packaging/systemd/nett-transport.service"),
+        what: "the transport adapter",
+    };
+    pub const UNITS: [Unit; 4] = [MESH, NODE, RELAY, TRANSPORT];
     /// Fixed locations of systemctl (hard rule 9): most distributions use the former, older ones
     /// the latter.
     pub const SYSTEMCTL: [&str; 2] = ["/usr/bin/systemctl", "/bin/systemctl"];

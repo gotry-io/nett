@@ -11,10 +11,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+nett-core.workspace = true
 nett-mesh.workspace = true
 nett-trust.workspace = true
 blake2.workspace = true
 futures-util.workspace = true
+# The relay's own Ed25519 key and certificate (already used by rustls and nett-trust)
+ring.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,6 +26,11 @@ tokio = { workspace = true, features = ["rt", "net", "time", "sync", "macros"] }
 tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+# A TLS handshake with the transport adapter's client checks the relay's own certificate
+nett-transport.workspace = true
 
 [features]
 # Lab build: relay allocation is read from a local file (design/prototype.md section 3); official

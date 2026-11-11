@@ -10,6 +10,7 @@ use std::str::FromStr;
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
+use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_port};
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
@@ -25,6 +26,10 @@ use crate::SiteError;
 pub const FORMAT_V1: u32 = 1;
 /// Default WireGuard port of `public` machines.
 pub const DEFAULT_LISTEN_PORT: u16 = 41820;
+/// Default UDP port of a relay (design/site.md section 4.1).
+pub const DEFAULT_RELAY_PORT: u16 = 41822;
+/// Default TCP port of a relay's TLS transport.
+pub const DEFAULT_RELAY_TLS_PORT: u16 = 443;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,6 +56,35 @@ pub struct State {
     /// The signed access rule set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access_rules: Option<SignedVersion>,
+    /// Key the probe tokens between members and relays are derived from (design/site.md section
+    /// 4.1); created with the first relay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_key: Option<RelayKey>,
+}
+
+/// The site's relay key. `Debug` does not print it (hard rule 10).
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RelayKey(#[serde(with = "nett_trust::encoding::b64_fixed")] pub [u8; 32]);
+
+impl fmt::Debug for RelayKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RelayKey(<redacted>)")
+    }
+}
+
+/// A relay on a `public` machine (design/site.md section 4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayRole {
+    /// UDP relay port.
+    pub port: u16,
+    /// TCP port of the TLS transport; absent when the relay serves UDP only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_port: Option<u16>,
+    /// Certificate fingerprint given with `--fingerprint`; with a Hub it is learned instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<CertFingerprint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -80,6 +114,8 @@ pub struct Machine {
     pub learned: Learned,
     /// Mesh addresses.
     pub mesh: MeshAddresses,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<RelayRole>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
     /// Advertised routes.
@@ -117,6 +153,14 @@ impl Machine {
     pub fn public_ipv6(&self) -> Option<Ipv6Addr> {
         self.ipv6.or(self.learned.ipv6.map(|l| l.ip))
     }
+
+    /// Fingerprint of the relay's TLS certificate: the one given takes precedence, otherwise the
+    /// one learned by the Hub.
+    pub fn relay_fingerprint(&self) -> Option<CertFingerprint> {
+        self.relay
+            .and_then(|r| r.fingerprint)
+            .or(self.learned.relay_fingerprint)
+    }
 }
 
 /// A machine waiting to join (design/hub.md section 6). The enrollment private key appears only in
@@ -140,11 +184,14 @@ pub struct Learned {
     pub ipv4: Option<LearnedIp<Ipv4Addr>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ipv6: Option<LearnedIp<Ipv6Addr>>,
+    /// Fingerprint of the TLS certificate of the relay on this machine, from its status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_fingerprint: Option<CertFingerprint>,
 }
 
 impl Learned {
     pub fn is_empty(&self) -> bool {
-        self.ipv4.is_none() && self.ipv6.is_none()
+        self.ipv4.is_none() && self.ipv6.is_none() && self.relay_fingerprint.is_none()
     }
 }
 
@@ -318,6 +365,7 @@ impl State {
             rules: BTreeMap::new(),
             revoked: Vec::new(),
             access_rules: None,
+            relay_key: None,
         }
     }
 
@@ -414,6 +462,34 @@ impl State {
                     "machine `{name}`: WireGuard port {port} is 0 or one nett itself uses on the host; \
                      pick another with --port"
                 )));
+            }
+            if let Some(relay) = &m.relay {
+                if m.reachability != Reachability::Public {
+                    return Err(SiteError::invalid(format!(
+                        "machine `{name}` runs a relay, which needs a machine others connect to: \
+                         keep it --public, or stop the relay with `nett site relay {name} --off`"
+                    )));
+                }
+                if relay.port == 0
+                    || is_reserved_port(relay.port)
+                    || Some(relay.port) == m.listen_port(self.listen_port)
+                {
+                    return Err(SiteError::invalid(format!(
+                        "machine `{name}`: relay port {} is 0, the WireGuard port, or one nett \
+                         itself uses on the host; pick another with --port",
+                        relay.port
+                    )));
+                }
+                if relay.tls_port == Some(0) {
+                    return Err(SiteError::invalid(format!(
+                        "machine `{name}`: the relay's TLS port must not be 0"
+                    )));
+                }
+                if self.relay_key.is_none() {
+                    return Err(SiteError::invalid(
+                        "the site has a relay but no relay key".to_owned(),
+                    ));
+                }
             }
             if m.keys.is_some() && m.enrollment.is_some() {
                 return Err(SiteError::invalid(format!(

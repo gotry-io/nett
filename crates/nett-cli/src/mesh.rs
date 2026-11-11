@@ -12,6 +12,7 @@ use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
 use nett_mesh::engine::Engine;
 use nett_mesh::event::{EventSink, LogSink};
+use nett_mesh::helper::HelperServer;
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
 use nett_mesh::lab::{JsonLinesSink, LabClock, TransportConfigWriter};
@@ -355,6 +356,15 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let worker = worker.context("starting the mesh worker thread")?;
     // The local interface is only for people and nett-node: if the socket cannot be created, record
     // it and continue meshing as usual (hard rule 8)
+    let helpers_path = nett_mesh::helper::socket_path(&args.socket);
+    let helpers = match HelperServer::spawn(&helpers_path, worker.status_source(reload_tx.clone()))
+    {
+        Ok(server) => Some(server),
+        Err(e) => {
+            tracing::warn!(socket = %helpers_path.display(), error = %e, "helper socket unavailable; nett-relay and the transport adapter cannot fetch their configuration");
+            None
+        }
+    };
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
@@ -372,6 +382,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         };
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
         drop(status);
+        drop(helpers);
         tokio::task::spawn_blocking(move || worker.shutdown())
             .await
             .context("stopping the mesh worker")?

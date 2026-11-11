@@ -10,13 +10,14 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/lib/nett/nett node --dir /etc/nett
-# Runs as root to write the desired state and replace the program; CAP_DAC_OVERRIDE lets it reach
-# the mesh service's socket in /run/nett. It listens on no port; the only program it runs is
-# systemctl, to restart the mesh service after an upgrade.
+# Runs as root to write the desired state, replace the program and refresh nett's units after an
+# upgrade; CAP_DAC_OVERRIDE lets it reach the mesh service's socket in /run/nett. It listens on no
+# port; the only program it runs is systemctl, to restart services after an upgrade and to start or
+# stop the relay and the transport adapter.
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 ProtectSystem=strict
-ReadWritePaths=/etc/nett /usr/local/lib/nett
+ReadWritePaths=/etc/nett /usr/local/lib/nett /usr/local/lib/systemd/system
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

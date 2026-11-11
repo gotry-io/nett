@@ -198,6 +198,7 @@ impl Mesh {
                 .keys()
                 .map(|n| (node_id(*n), format!("node-{n}").parse().expect("name")))
                 .collect(),
+            relay: None,
         }
     }
 }

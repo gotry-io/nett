@@ -14,13 +14,16 @@ use lexopt::ValueExt as _;
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
+use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{DesiredMeshDoc, MAX_MEMBERS, Reachability};
 use nett_site::changes::{describe, path_kind, ports_text};
 use nett_site::compose::{connections, desired};
-use nett_site::dir::{DESIRED_FILE, NODES_DIR, SiteDir, new_node_id};
+use nett_site::dir::{DESIRED_FILE, NODES_DIR, SiteDir, new_node_id, new_relay_key};
 use nett_site::ops::{MachineChange, MachineOptions};
 use nett_site::sign::sign;
-use nett_site::state::{NodeKeys, RuleId, Selector, State};
+use nett_site::state::{
+    DEFAULT_RELAY_PORT, DEFAULT_RELAY_TLS_PORT, NodeKeys, RelayRole, RuleId, Selector, State,
+};
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{PortRange, Protocol};
@@ -43,6 +46,10 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        printed on it by `nett keys` or `sudo nett install`
   set <name> [--public | --dial-only] [--ipv4 <address>|none] [--ipv6 <address>|none]
              [--port <port>|default]   change how other machines reach it
+  relay <name> [--port <udp port>] [--tls <tcp port> | --no-tls] [--fingerprint <sha256:…>]
+                                       run a relay on this public Linux machine (UDP 41822 and
+                                       TLS 443 unless given); --off stops it. Without a Hub, give
+                                       the TLS fingerprint `sudo nett status` shows on the machine
   remove <name>                        remove a machine; rules that name it go with it
   invite <name>                        with a Hub: print the command that connects it to the Hub
                                        (a new token for a machine that has not joined yet);
@@ -76,6 +83,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let (mut ipv4, mut ipv6, mut port): (Option<String>, Option<String>, Option<String>) =
         (None, None, None);
     let (mut keys, mut note) = (None, None);
+    let (mut tls, mut no_tls, mut off, mut fingerprint) = (None::<String>, false, false, None);
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Value(v) => words.push(v.string()?),
@@ -91,6 +99,10 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             lexopt::Arg::Long("port") => port = Some(parser.value()?.string()?),
             lexopt::Arg::Long("keys") => keys = Some(parser.value()?.string()?),
             lexopt::Arg::Long("note") => note = Some(parser.value()?.string()?),
+            lexopt::Arg::Long("tls") => tls = Some(parser.value()?.string()?),
+            lexopt::Arg::Long("no-tls") => no_tls = true,
+            lexopt::Arg::Long("off") => off = true,
+            lexopt::Arg::Long("fingerprint") => fingerprint = Some(parser.value()?.string()?),
             other => return Err(other.unexpected().into()),
         }
     }
@@ -180,6 +192,49 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                     .context("--port")?,
             };
             Box::new(move |s| Ok(s.set(&name, change)?))
+        }
+        ["relay", name] => {
+            let name = machine(name)?;
+            if off && (port.is_some() || tls.is_some() || no_tls || fingerprint.is_some()) {
+                bail!("--off takes no other options");
+            }
+            if no_tls && tls.is_some() {
+                bail!("--tls and --no-tls do not go together");
+            }
+            let port: Option<u16> = port
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("--port")?;
+            let tls: Option<u16> = tls
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("--tls")?;
+            let fingerprint: Option<CertFingerprint> = fingerprint
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("--fingerprint")?;
+            let key = new_relay_key()?;
+            Box::new(move |s| {
+                let role = if off {
+                    None
+                } else {
+                    // Options not given keep the relay's current value, or the default
+                    let now = s.machine(&name)?.relay;
+                    Some(RelayRole {
+                        port: port.or(now.map(|r| r.port)).unwrap_or(DEFAULT_RELAY_PORT),
+                        tls_port: if no_tls {
+                            None
+                        } else {
+                            tls.or(now.map_or(Some(DEFAULT_RELAY_TLS_PORT), |r| r.tls_port))
+                        },
+                        fingerprint: fingerprint.or(now.and_then(|r| r.fingerprint)),
+                    })
+                };
+                Ok(s.set_relay(&name, role, key)?)
+            })
         }
         ["remove", name] => {
             let name = machine(name)?;
@@ -590,7 +645,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
             names.sort();
             [
                 format!("{} - {}", names[0], names[1]),
-                path_kind(&state, a, b).to_owned(),
+                path_kind(&state, a, b),
             ]
         })
         .collect();

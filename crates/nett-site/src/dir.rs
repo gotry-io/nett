@@ -252,6 +252,16 @@ fn random_ula() -> Result<IpPrefix, SiteError> {
     IpPrefix::new(addr.into(), 48).ok_or_else(|| SiteError::invalid("ULA prefix"))
 }
 
+/// A new relay key for the site (design/site.md section 4.1).
+pub fn new_relay_key() -> Result<crate::state::RelayKey, SiteError> {
+    use ring::rand::{SecureRandom as _, SystemRandom};
+    let mut key = [0u8; 32];
+    SystemRandom::new()
+        .fill(&mut key)
+        .map_err(|_| SiteError::invalid("the system random number generator failed"))?;
+    Ok(crate::state::RelayKey(key))
+}
+
 /// Node ID of a new machine: millisecond time plus 80 random bits (ULID form).
 pub fn new_node_id() -> Result<nett_core::id::NodeId, SiteError> {
     use ring::rand::{SecureRandom as _, SystemRandom};

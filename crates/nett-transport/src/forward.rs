@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -46,18 +46,43 @@ pub enum ForwardError {
     Invalid(String),
 }
 
-/// Runs until `shutdown` completes. The configuration file is written by the mesh process (ADR
-/// 0013); when the file does not exist yet it waits, and when the content changes it rebuilds all
-/// forwarding tasks with the new configuration.
-pub async fn run(path: &Path, shutdown: impl Future<Output = ()>) -> Result<(), ForwardError> {
-    tokio::pin!(shutdown);
-    let mut current: Option<(Vec<u8>, Vec<JoinHandle<()>>)> = None;
-    let mut poll = tokio::time::interval(CONFIG_POLL);
-    loop {
-        tokio::select! {
-            () = &mut shutdown => break,
-            _ = poll.tick() => {
-                let owned = path.to_path_buf();
+/// Where the configuration comes from (ADR 0013).
+#[derive(Debug, Clone)]
+pub enum ConfigSource {
+    /// The helper socket of the mesh process (design/status.md section 3.1), asked every 5 seconds.
+    Helper(PathBuf),
+    /// A local file written by the mesh process (lab builds), checked every second.
+    File(PathBuf),
+}
+
+impl ConfigSource {
+    fn interval(&self) -> Duration {
+        match self {
+            Self::Helper(_) => nett_mesh::helper::FETCH_INTERVAL,
+            Self::File(_) => CONFIG_POLL,
+        }
+    }
+
+    /// The current configuration; `None` while there is none yet. An unreachable mesh process is not
+    /// an error: the adapter keeps its configuration and asks again.
+    async fn fetch(&self) -> Result<Option<TransportConfig>, ForwardError> {
+        match self {
+            Self::Helper(path) => {
+                let owned = path.clone();
+                let got =
+                    tokio::task::spawn_blocking(move || nett_mesh::helper::fetch_transport(&owned))
+                        .await
+                        .map_err(|e| ForwardError::Invalid(e.to_string()))?;
+                match got {
+                    Ok(config) => Ok(config),
+                    Err(error) => {
+                        tracing::debug!(%error, "fetching the transport config");
+                        Ok(None)
+                    }
+                }
+            }
+            Self::File(path) => {
+                let owned = path.clone();
                 let read = tokio::task::spawn_blocking(move || std::fs::read(owned))
                     .await
                     .map_err(|e| ForwardError::Read {
@@ -66,16 +91,39 @@ pub async fn run(path: &Path, shutdown: impl Future<Output = ()>) -> Result<(), 
                     })?;
                 let bytes = match read {
                     Ok(bytes) => bytes,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
                     Err(source) => {
-                        return Err(ForwardError::Read { path: path.display().to_string(), source });
+                        return Err(ForwardError::Read {
+                            path: path.display().to_string(),
+                            source,
+                        });
                     }
                 };
-                if current.as_ref().is_some_and(|(seen, _)| *seen == bytes) {
+                serde_json::from_slice(&bytes)
+                    .map(Some)
+                    .map_err(|e| ForwardError::Invalid(e.to_string()))
+            }
+        }
+    }
+}
+
+/// Runs until `shutdown` completes. When there is no configuration yet it waits, and when the
+/// configuration changes it rebuilds all forwarding tasks with the new one.
+pub async fn run(
+    source: ConfigSource,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), ForwardError> {
+    tokio::pin!(shutdown);
+    let mut current: Option<(TransportConfig, Vec<JoinHandle<()>>)> = None;
+    let mut poll = tokio::time::interval(source.interval());
+    loop {
+        tokio::select! {
+            () = &mut shutdown => break,
+            _ = poll.tick() => {
+                let Some(config) = source.fetch().await? else { continue };
+                if current.as_ref().is_some_and(|(seen, _)| *seen == config) {
                     continue;
                 }
-                let config: TransportConfig = serde_json::from_slice(&bytes)
-                    .map_err(|e| ForwardError::Invalid(e.to_string()))?;
                 config.validate().map_err(|e| ForwardError::Invalid(e.to_string()))?;
                 if let Some((_, tasks)) = current.take() {
                     for task in tasks {
@@ -86,10 +134,11 @@ pub async fn run(path: &Path, shutdown: impl Future<Output = ()>) -> Result<(), 
                 tracing::info!(targets = config.targets.len(), "transport config applied");
                 let tasks = config
                     .targets
-                    .into_iter()
+                    .iter()
+                    .cloned()
                     .map(|t| tokio::spawn(target_or_log(t, wireguard)))
                     .collect();
-                current = Some((bytes, tasks));
+                current = Some((config, tasks));
             }
         }
     }

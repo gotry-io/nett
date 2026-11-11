@@ -473,11 +473,7 @@ pub fn status(
                     .map_or_else(|| "-".to_owned(), crate::status::path_label),
                 p.rtt_ms.map_or_else(|| "-".to_owned(), crate::status::ms),
             ),
-            None => (
-                "-".to_owned(),
-                path_kind(state, &a, &b).to_owned(),
-                "-".to_owned(),
-            ),
+            None => ("-".to_owned(), path_kind(state, &a, &b), "-".to_owned()),
         };
         pairs.push([names[0].clone(), names[1].clone(), st, path, rtt]);
     }

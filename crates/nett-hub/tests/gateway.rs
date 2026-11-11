@@ -33,6 +33,7 @@ fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
         // No mesh process: after the desired state is written it is acknowledged as pending
         socket: dir.join("mesh.sock"),
         upgrader: None,
+        services: None,
     }
 }
 

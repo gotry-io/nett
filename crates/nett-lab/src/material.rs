@@ -581,6 +581,8 @@ pub fn generate(
             access_rules: access_rules.clone(),
             advertised_routes: routes.clone(),
             names: names.clone(),
+            // Lab relays are separate processes with their own assignment file
+            relay: None,
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {
