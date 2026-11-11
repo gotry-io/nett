@@ -15,7 +15,7 @@ use crate::net::Underlay;
 use crate::topology::Topology;
 
 mod hub;
-pub use hub::{enroll_here, hub, leave_here};
+pub use hub::{hub, leave_here};
 
 /// Maximum wait for connectivity checks.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);

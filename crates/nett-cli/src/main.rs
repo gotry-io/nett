@@ -82,6 +82,13 @@ const COMMANDS: &[Command] = &[
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
+        name: "join",
+        group: Group::Machine,
+        summary: "Join the site through the Hub without installing services (containers)",
+        usage: install::JOIN_USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
         name: "leave",
         group: Group::Machine,
         summary: "Leave the site: tell the Hub, remove the services and delete the keys",
@@ -178,6 +185,8 @@ fn run() -> anyhow::Result<()> {
         "uninstall" => install::uninstall_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "leave" => install::leave_command(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "join" => install::join_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "keys" => mesh::keys(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]

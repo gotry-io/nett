@@ -3,10 +3,18 @@
 # address, rewriting the source to its own address. The service keeps its own network and fixed
 # address; restarting the mesh member does not affect it.
 #
-# First use: `docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett`; on the
-# computer that holds the site, `nett site add <name> --keys "…"` with the printed line, then
-# `nett site routes <name> 172.30.0.10/32`; put the generated desired.json in ./nett.
-# After an update, `docker compose exec nett /nett reload` reports whether it was accepted.
+# With a Hub: on the computer that holds the site, `nett site add <name>`, then join with the token
+# it prints (the CA certificates let nett verify the Hub; on macOS mount /etc/ssl/cert.pem instead):
+#   docker run --rm -v ./nett:/etc/nett \
+#     -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro nett join nett_enr_…
+# and `docker compose up -d`; the node service below keeps the desired state current. Set
+# `nett site routes <name> 172.30.0.10/32` on the computer. The image is upgraded by pulling a new one.
+#
+# Without a Hub: `docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett`; on
+# the computer that holds the site, `nett site add <name> --keys "…"` with the printed line, then
+# `nett site routes <name> 172.30.0.10/32`; put the generated desired.json in ./nett and leave out
+# the node service. After an update, `docker compose exec nett /nett reload` reports whether it was
+# accepted.
 # Avoid `docker compose kill`: Docker records the container as stopped by hand and does not start
 # it after a reboot. Avoid `docker compose run` for one-off tasks: the temporary container takes
 # the same fixed address as the running one.
@@ -18,9 +26,22 @@ services:
       net.ipv4.ip_forward: "1"       # only connections the access rules allow are forwarded
     volumes:
       - ./nett:/etc/nett
+      - nett-run:/run/nett           # the local socket nett-node talks to
     networks:
       app:
         ipv4_address: 172.30.0.200
+    restart: unless-stopped
+
+  # nett-node: connects to the Hub, writes the desired state and asks the mesh member to reload it.
+  # It needs no capabilities and no access to Docker.
+  node:
+    image: nett
+    command: ["node", "--dir", "/etc/nett"]
+    volumes:
+      - ./nett:/etc/nett
+      - nett-run:/run/nett
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    cap_drop: [ALL]
     restart: unless-stopped
 
   app:
@@ -37,3 +58,6 @@ networks:
       config:
         - subnet: 172.30.0.0/24
           ip_range: 172.30.0.0/25    # dynamic range; fixed addresses lie outside it
+
+volumes:
+  nett-run:

@@ -37,11 +37,19 @@ the user running sudo. Run it again after upgrading nett.";
 pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall\n\n\
 Stops and removes the services. Keys, the desired state and the Hub configuration stay;\n\
 `sudo nett install` brings the services back.";
-pub const LEAVE_USAGE: &str = "usage: sudo nett leave\n\n\
+pub const LEAVE_USAGE: &str = "usage: sudo nett leave [--dir <directory>]\n\n\
 Leaves the site: tells the Hub, which removes this machine from every member, stops and\n\
 removes the services, removes the mesh interface, and deletes the keys, the desired state,\n\
 the trust store and the Hub configuration. The machine can then join any site. Without a Hub,\n\
-remove it on the computer that holds the site with `nett site remove <name>`.";
+remove it on the computer that holds the site with `nett site remove <name>`.\n\n\
+With --dir, for a machine set up with `nett join` (a container member): tells the Hub and\n\
+deletes the keys and configuration in that directory, and leaves the services to you.";
+pub const JOIN_USAGE: &str = "usage: nett join <token> [--dir <directory>]\n\n\
+Joins this machine to the site through the Hub without installing services, for container\n\
+members and service managers other than systemd and launchd. Creates the keys in the directory\n\
+(or keeps them), joins with the token from `nett site add` or `nett site invite`, and writes\n\
+hub.json and desired.json there; then run `nett mesh` and `nett node` with that directory.\n\
+The directory defaults to /etc/nett.";
 
 pub struct InstallArgs {
     pub token: Option<String>,
@@ -74,10 +82,45 @@ pub fn uninstall_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 }
 
 pub fn leave_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    if let Some(arg) = parser.next()? {
-        return Err(arg.unexpected().into());
+    let mut dir = None;
+    while let Some(arg) = parser.next()? {
+        match arg {
+            lexopt::Arg::Long("dir") => dir = Some(parser.value()?.string()?),
+            other => return Err(other.unexpected().into()),
+        }
     }
-    platform::leave()
+    let Some(dir) = dir else {
+        return platform::leave();
+    };
+    // A machine set up with `nett join`: its services are not nett's to remove
+    tell_hub(&dir)?;
+    forget(&dir, &format!("{dir}/state"))?;
+    println!(
+        "Left the site: deleted the keys and configuration in {dir}. Stop its nett services yourself."
+    );
+    Ok(())
+}
+
+/// `nett join <token> [--dir]` (design/hub.md section 7): what `sudo nett install <token>` does,
+/// without the services.
+pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
+    let (mut token, mut dir) = (None, "/etc/nett".to_owned());
+    while let Some(arg) = parser.next()? {
+        match arg {
+            lexopt::Arg::Long("dir") => dir = parser.value()?.string()?,
+            lexopt::Arg::Value(v) if token.is_none() => token = Some(v.string()?),
+            other => return Err(other.unexpected().into()),
+        }
+    }
+    let token = token.ok_or_else(|| anyhow::anyhow!(JOIN_USAGE))?;
+    ensure_dir(&dir, 0o700)?;
+    let keys = crate::mesh::node_keys(Path::new(&dir))?;
+    let outcome = apply_token(&dir, &format!("{dir}/state"), Some(&token), &keys.0)?;
+    if let Some(bytes) = outcome.desired {
+        replace_if_changed(&Path::new(&dir).join("desired.json"), &bytes, 0o600)?;
+    }
+    println!("Ready in {dir}: run `nett mesh` and `nett node` with this directory.");
+    Ok(())
 }
 
 pub fn require_root() -> anyhow::Result<()> {
