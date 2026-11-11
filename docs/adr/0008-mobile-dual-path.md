@@ -1,38 +1,38 @@
-# 0008. 手机以标准 WireGuard 双路径接入
+# 0008. Phones join over standard WireGuard with dual paths
 
-- 状态：已采纳；配对改由命令行生成配置，见 0024
-- 日期：2026-10-12
+- Status: accepted (pairing runs in the signing tool, see 0024)
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-手机系统只允许通过系统 VPN 接口接入网络，而且同一时间只能运行一个 VPN。手机需要访问家里的服务（包括远程观看视频这类大流量场景）和其他节点。
+Phone operating systems only allow network access through the system VPN interface, and only one VPN can run at a time. Phones need to reach services at home (including heavy-traffic scenarios such as remote video viewing) and other nodes.
 
-## 决定
+## Decision
 
-- 手机端兼容**任意标准 WireGuard 客户端**，nett 导出标准配置，不限定客户端；也导出 Surge、mihomo、sing-box 的配置，由它们的策略组自动回落（ADR 0018）；
-- 配置**两条路径**，按网段分流：
-  - **直连家里的智能入口**：访问家里的服务，大流量不经过中继；
-  - **移动网关**（Hub 主机或其他 `public` 节点上的 WireGuard 接口）：访问其他节点，并在直连不可用时兜底；网关之后的路径由 nett 路径层负责；
-- 设备只与智能入口和移动网关建立对端。同一时间，设备的每份凭据只归属一个移动网关，由它代为向其他节点宣告这份凭据的地址；
-- 导出的配置中列出两个 DNS 服务器：移动网关和智能入口，任何一个可达都能解析组网名称；
-- **设备与凭据分离**：一台设备可以有多份凭据（例如两个不同的客户端程序各一份），各自独立吊销，权限按设备授予；
-- 配对：控制台添加设备（passkey 签名）→ 分配地址和密钥 → 导出标准 WireGuard 配置（配置文件和二维码）；
-- UDP 受限时，支持 HTTPS 代理的客户端可以经 nett-relay 的 CONNECT 代理访问内网服务（见 ADR 0011；入口节点的 443 上只支持 HTTP/2 CONNECT）；
-- 手机 App 在 M3（ADR 0018）；同时导出一份"全部经网关"的备用配置，供直连受阻时手动切换。备用配置使用**单独的一份凭据**（另一对密钥和地址）：同一份凭据的地址在智能入口上属于直连对端，经网关到达的包会被丢弃（mesh.md 第 13 节）。
+- The phone side is compatible with **any standard WireGuard client**; nett exports a standard configuration and does not restrict the client; it also exports Surge, mihomo, and sing-box configurations, whose policy groups fall back automatically (ADR 0018);
+- **Two paths** are configured, split by prefix:
+  - **Direct to the smart gateway at home**: reaches services at home, and heavy traffic does not go through a relay;
+  - **Mobile gateway** (a WireGuard interface on the Hub host or another `public` node): reaches other nodes and serves as the fallback when the direct path is unavailable; the path beyond the gateway is handled by the nett path layer;
+- A device establishes peers only with the smart gateway and the mobile gateway. At any one time, each credential of a device belongs to exactly one mobile gateway, which advertises that credential's address to other nodes on its behalf;
+- The exported configuration lists two DNS servers: the mobile gateway and the smart gateway; if either is reachable, mesh names resolve;
+- **Devices and credentials are separate**: a device can have multiple credentials (for example one each for two different client programs), each revoked independently, with permissions granted per device;
+- Pairing: the signing tool adds the device (signed with the recovery key) -> allocates the address and keys -> exports a standard WireGuard configuration (config file and QR code) (ADR 0024);
+- When UDP is restricted, clients that support an HTTPS proxy can reach internal services through nett-relay's CONNECT proxy (see ADR 0011; on the entry node's 443, only HTTP/2 CONNECT is supported);
+- The phone app is in M3 (ADR 0018); an "everything through the gateway" fallback configuration is exported at the same time, for manual switching when the direct path is blocked. The fallback configuration uses a **separate credential** (another key pair and address): the address of one credential is a direct peer on the smart gateway, and packets arriving through the gateway are dropped (mesh.md section 13).
 
-## 理由
+## Rationale
 
-- 标准协议意味着任何支持 WireGuard 的客户端都能接入，不必为每个平台开发客户端，也不限制用户的选择；
-- 直连家里避免大流量受限于中继带宽；
-- 移动网关让手机与节点之间的组网细节解耦。
+- A standard protocol means any WireGuard-capable client can join, so no client has to be developed for each platform, and the user's choice is not restricted;
+- Going direct to home keeps heavy traffic from being limited by relay bandwidth;
+- The mobile gateway decouples the phone from the mesh details between nodes.
 
-## 放弃的方案
+## Alternatives considered
 
-- **只经移动网关**：所有流量绕行网关，远程观看视频会受限于网关带宽。
-- **手机直接加入 tailscale 网络**：需要专用客户端，与自研组网不一致。
-- **只使用私有协议**：必须自研全部客户端；网络正常时 WireGuard 更快、更省电。
+- **Only through the mobile gateway**: all traffic detours through the gateway, so remote video viewing is limited by gateway bandwidth.
+- **Phone joins a tailscale network directly**: needs a dedicated client, inconsistent with the self-built mesh.
+- **Only a private protocol**: all clients must be self-built; when the network is healthy, WireGuard is faster and uses less battery.
 
-## 影响
+## Consequences
 
-- 标准客户端每个对端只有一个固定地址，手机端不会自动选路，直连受阻时需要用户手动切换到备用配置；使用代理客户端配置时，由策略组自动改走网关；
-- 家里的智能入口需要能被外部连入：映射 WireGuard 端口；同时做中继时，再映射一个中继端口（ADR 0011）。
+- A standard client has a single fixed address per peer, so the phone does not select paths automatically, and when the direct path is blocked the user must manually switch to the fallback configuration; with a proxy client configuration, the policy group switches to the gateway automatically;
+- The smart gateway at home must be reachable from outside: map the WireGuard port; if it also acts as a relay, map one more relay port (ADR 0011).

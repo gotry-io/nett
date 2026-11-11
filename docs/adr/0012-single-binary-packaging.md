@@ -1,37 +1,37 @@
-# 0012. 节点侧单一可执行文件，按子命令运行为多个进程
+# 0012. Single node-side executable, run as multiple processes by subcommand
 
-- 状态：已采纳；安装脚本的部分见 0024
-- 日期：2026-10-12
+- Status: accepted; the install script part is in 0024
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-节点上需要命令行工具、高权限的 nett-node 和低权限的 nett-relay。ADR 0001 和 0011 要求 node 与 relay 是独立进程、权限分离。问题是它们是否也应该是独立的安装包。
+A node needs the command-line tool, the high-privilege nett-node, and the low-privilege nett-relay. ADR 0001 and 0011 require node and relay to be separate processes with separated privileges. The question is whether they should also be separate install packages.
 
-## 决定
+## Decision
 
-- 节点侧只发布一个可执行文件 `nett`，按子命令运行为命令行、`nett node`、`nett mesh`（组网进程）、`nett transport`（传输适配进程）、`nett relay`（ADR 0013）；
-- Hub 单独发布 `nett-hub`，只安装在 Hub 主机上；
-- node、组网进程、传输适配进程与 relay 作为独立的系统服务运行，分别使用不同的系统用户和权限；
-- relay 是否运行由 Hub 按节点可达性和签名策略决定，由 nett-node 启停，不由安装过程决定；
-- 安装脚本和二进制由用户自己的 Hub 分发，脚本中预置 Hub 公钥指纹，发布包必须带签名；
-- **发布签名密钥属于项目，不属于用户的 Hub**。公钥在构建时嵌入 `nett`（主备两把，ADR 0020），节点用它验证每一个发布包。安装脚本本身由 Hub 提供，不能充当独立的信任锚；首次安装时，用户可以对照项目主页公布的指纹核对；
-- **防降级**：节点只自动接受更高的版本；回滚只能回到本机上一次安装过的版本；其他降级需要 passkey 签名；
-- Home Assistant OS 上以加载项形式提供：容器镜像加加载项仓库（ADR 0017），镜像同样签名。加载项由 HA 升级，不经 `release` 分区；防降级在启动时检查。
+- Only one executable, `nett`, is released for the node side, and it runs as the command line, `nett node`, `nett mesh` (mesh process), `nett transport` (transport adapter), or `nett relay` depending on the subcommand (ADR 0013);
+- The Hub is released separately as `nett-hub` and is installed only on the Hub host;
+- node, the mesh process, the transport adapter, and relay run as separate system services, each with a different system user and privileges;
+- Whether relay runs is decided by the Hub based on node reachability and signed policy, and relay is started and stopped by nett-node, not decided by the installation process;
+- The install script and binaries are distributed by the user's own Hub, the script has the Hub public key fingerprint preset, and release packages must carry signatures;
+- **The release signing key belongs to the project, not to the user's Hub**. The public keys are embedded into `nett` at build time (two keys, primary and backup, ADR 0020), and nodes use them to verify every release package. The install script itself is provided by the Hub and cannot serve as an independent trust anchor; on first installation, the user can check against the fingerprint published on the project home page;
+- **Downgrade protection**: a node automatically accepts only higher versions; a rollback can only go to the version last installed on this machine; other downgrades need a passkey signature;
+- On Home Assistant OS it is provided as an add-on: a container image plus an add-on repository (ADR 0017), and the image is signed as well. The add-on is upgraded by HA, not through the `release` partition; downgrade protection is checked at startup.
 
-## 理由
+## Rationale
 
-- 一次安装、一次升级，各进程不会版本错配；组网进程没有变化时，升级不重启它（ADR 0013）；
-- 共享依赖只存一份，多个进程共享同一文件的代码页，磁盘和内存占用更低；
-- 节点从 `dial-only` 变为 `public` 时无需重新安装；
-- 权限隔离由运行用户和权限保证，与文件是否相同无关；
-- 由 Hub 分发避免节点依赖公共代码托管平台，在网络受限的地区更可靠。
+- One installation and one upgrade, so processes cannot have mismatched versions; when the mesh process has not changed, an upgrade does not restart it (ADR 0013);
+- Shared dependencies are stored once, and multiple processes share the code pages of the same file, so disk and memory usage are lower;
+- A node changing from `dial-only` to `public` needs no reinstallation;
+- Privilege isolation is guaranteed by the running user and privileges, regardless of whether the files are the same;
+- Distribution by the Hub keeps nodes from depending on public code hosting platforms, which is more reliable in regions with restricted networks.
 
-## 放弃的方案
+## Alternatives considered
 
-- **node 与 relay 分为两个安装包**：多一次安装和升级，存在版本错配，依赖重复。
-- **Hub 也合并进同一个文件**：Hub 包含 Web 前端、数据库和认证等节点用不到的代码，会显著增大所有节点上的文件体积。
+- **node and relay as two install packages**: one more installation and upgrade, risk of version mismatch, duplicated dependencies.
+- **Merge the Hub into the same file too**: the Hub includes the Web frontend, database, authentication and other code that nodes do not need, which would noticeably enlarge the file on every node.
 
-## 影响
+## Consequences
 
-- relay 进程的文件中包含不会执行的 node 代码；安全边界依赖低权限用户和不持有组网私钥；
-- 发布流程需要对可执行文件签名，Hub 需要缓存并提供发布包。
+- The relay process's file contains node code that does not execute; the security boundary relies on the low-privilege user and on not holding the mesh private key;
+- The release process needs to sign the executable, and the Hub needs to cache and serve release packages.

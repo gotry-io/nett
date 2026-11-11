@@ -1,133 +1,133 @@
-# 用户态数据面与 macOS 原生成员
+# Userspace Data Plane and the macOS Native Member
 
-- 状态：草案
-- 阶段：M1，本地签名部署之后（roadmap M1，ADR 0018）
+- Status: draft
+- Phase: M1, after local signing (roadmap M1, ADR 0018)
 
-## 1. 目标
+## 1. Goal
 
-Mac 以原生成员加入组网：本机有自己的组网地址，其他成员按访问规则访问 Mac 上的原生服务，Mac 也能主动访问组网。Edge 回源到 Mac 上监听通配地址的服务时，服务看到的来源是 Edge 专用地址，不是回环地址（硬性规则 7）。
+A Mac joins the mesh as a native member: it has its own mesh address, other members reach native services on the Mac according to the access rules, and the Mac can also reach the mesh. When Edge forwards origin traffic to a service on the Mac that listens on a wildcard address, the service sees the Edge address as the source, not a loopback address (hard rule 7).
 
-用户态数据面与平台无关：DSM 和旧内核的 Linux 使用同一份实现，只换 TUN 和接口配置的后端（ADR 0018）。
+The userspace data plane is platform-independent: DSM and older-kernel Linux use the same implementation and only swap the TUN and interface-configuration backend (ADR 0018).
 
-## 2. 范围
+## 2. Scope
 
-| 包含 | 不包含 |
+| Included | Not included |
 |---|---|
-| 用户态数据面：WireGuard 会话、按 `AllowedIPs` 选择对端并校验来源、进程内的状态过滤、WireGuard 端口上的分流 | DNS 与 `/etc/resolver`（随主机名与 DNS 一起做） |
-| macOS 后端：utun、地址、路由、出站套接字绑定物理接口、网络变化 | macOS 上的 Edge 角色与宣告网段 |
-| Linux 的 TUN 后端：实验场景和 CI 用它验证用户态数据面，也是 DSM 和旧内核的基础 | DSM 的打包与开机任务；批量收发与卸载（GSO、GRO）等性能优化 |
-| launchd 运行方式（安装见 design/release.md 第 4 节）；本地签名部署中的 macOS 节点 | 笔记本休眠、频繁换网络的专门优化（基本的网络变化处理见第 6.4 节） |
-| 与代理类 VPN 应用（Surge 增强模式）共存的实测 | |
+| Userspace data plane: WireGuard sessions, peer selection by `AllowedIPs` with source validation, in-process stateful filtering, demultiplexing on the WireGuard port | DNS and `/etc/resolver` (done together with hostnames and DNS) |
+| macOS backend: utun, addresses, routes, binding outbound sockets to the physical interface, network changes | The Edge role and advertised routes on macOS |
+| Linux TUN backend: lab scenarios and CI use it to verify the userspace data plane; it is also the basis for DSM and older kernels | DSM packaging and boot tasks; performance optimizations such as batched I/O and offloads (GSO, GRO) |
+| launchd operation (installation is in design/release.md section 4); macOS nodes in local signing | Dedicated optimization for laptop sleep and frequent network switching (basic network-change handling is in section 6.4) |
+| Measured coexistence with proxy-type VPN apps (Surge enhanced mode) | |
 
-候选路径与本地签名部署相同（local-signing.md）。
+Candidate paths are the same as in local signing (local-signing.md).
 
-## 3. WireGuard 实现
+## 3. WireGuard implementation
 
-| 候选 | 许可证 | 状态 | 与本项目的适配 | 结论 |
+| Candidate | License | Status | Fit with this project | Verdict |
 |---|---|---|---|---|
-| gotatun（Mullvad） | MPL-2.0 | 2026 年发布了 21 个版本；2026 年 2 月完成第三方审计；Mullvad 在 Android、macOS、iOS 和桌面平台上使用 | `noise::Tunn` 可以单独使用，不带它自己的套接字和 TUN 层；`tokio`、`futures`、`eyre` 总会编译进来；定时器每 250 毫秒推进一次；握手完成前每个对端最多缓存 256 个包 | 采用 |
-| sanstun（Firezone） | Apache-2.0（crates.io 上的 0.1.0 标为 BSD-3-Clause） | 2026-10-30 发布 0.1.0，接口仍有不兼容的变化，没有审计，主要由一人维护 | 不做任何 I/O（包括时间和随机数）；定时器按截止时间推进；内部不缓存包；依赖最少 | M3 前再评估（第 9 节） |
-| boringtun（Cloudflare） | BSD-3-Clause | 只做维护，各分支中的修复没有合入 | | 不用 |
-| neptun（Nord） | BSD-3-Clause | 只以 git 标签发布 | | 不用 |
+| gotatun (Mullvad) | MPL-2.0 | 21 releases in 2026; third-party audit completed in February 2026; Mullvad uses it on Android, macOS, iOS and desktop platforms | `noise::Tunn` can be used on its own, without its socket and TUN layers; `tokio`, `futures` and `eyre` are always compiled in; the timer advances every 250 ms; up to 256 packets are buffered per peer before the handshake completes | Adopted |
+| sanstun (Firezone) | Apache-2.0 (0.1.0 on crates.io is marked BSD-3-Clause) | 0.1.0 released 2026-10-30, interface still has incompatible changes, not audited, maintained mainly by one person | Does no I/O (including time and randomness); timers advance by deadline; no internal packet buffering; fewest dependencies | Re-evaluate before M3 (section 9) |
+| boringtun (Cloudflare) | BSD-3-Clause | Maintenance only; fixes on other branches are not merged | | Not used |
+| neptun (Nord) | BSD-3-Clause | Published only as git tags | | Not used |
 
-用法：
+Usage:
 
-- 以 `default-features = false, features = ["ring"]` 引入：只用 `noise` 层，不用它的 `device`、`socket`、`tun`；AEAD 使用项目已有的 ring，不引入 aws-lc；
-- 会话层封装在 `Session` trait（加密、解密、定时、握手状态）之后，数据面的其他部分不直接使用 gotatun 的类型，换实现只改一个模块；
-- 引入时报告二进制体积（`cargo bloat`）和 macOS、Linux 上的空闲 RSS。
+- Imported with `default-features = false, features = ["ring"]`: only the `noise` layer is used, not its `device`, `socket` or `tun`; AEAD uses the project's existing ring, and aws-lc is not introduced;
+- The session layer is wrapped behind a `Session` trait (encryption, decryption, timers, handshake state); the rest of the data plane does not use gotatun types directly, so replacing the implementation changes one module;
+- When it is introduced, report binary size (`cargo bloat`) and idle RSS on macOS and Linux.
 
-## 4. 数据面结构
+## 4. Data plane structure
 
-组网进程的核心（引擎、路径层、探测）不变，通过 `DataPlane` 接口操作数据面。用户态实现由平台后端提供 TUN 和接口配置。
+The core of the mesh process (engine, path layer, probing) is unchanged and operates the data plane through the `DataPlane` interface. The userspace implementation gets its TUN and interface configuration from the platform backend.
 
-- **数据面线程**：用 `poll` 同时等待 TUN、WireGuard 端口的套接字和控制队列。会话、对端表和连接表只属于这个线程，不加锁；
-- **控制**：引擎线程经有界队列向数据面线程发命令（同步对端、修改 endpoint、重新握手、替换过滤规则、读取统计），带超时等待应答，`DataPlane` 的方法保持同步语义；
-- **定时**：数据面线程每 250 毫秒推进一次会话定时器；
-- **入方向**：UDP → 分流（第 4.1 节）→ 解密 → 校验内层包（IP 版本、长度）→ 来源地址必须在该对端的 `AllowedIPs` 内 → 过滤（第 5 节）→ 写入 TUN。任何一步不通过就丢弃，不作响应；
-- **出方向**：TUN → 按目的地址最长前缀匹配对端，没有对端时丢弃 → 记录连接（第 5 节）→ 加密 → 从 WireGuard 端口发往对端当前的 endpoint；
-- **endpoint**：与内核 WireGuard 相同。认证通过的包来自新地址时更新 endpoint（漫游），由路径层纠正（mesh.md 第 8.3 节）；`set_endpoint` 只改 endpoint，会话不受影响；`rehandshake` 丢弃会话，下一个包触发新的握手（mesh.md 第 8.4 节）；
-- **上限**：控制队列、连接表都有具名常量上限；握手完成前缓存的包由会话层限制（每个对端 256 个）；
-- **进程退出**：macOS 的 utun 属于创建它的进程，进程退出时接口随之删除，经组网的连接中断。服务管理器重启进程后，按本地保存的配置恢复（architecture.md 第 12 节）。
+- **Data plane thread**: uses `poll` to wait on the TUN, the WireGuard port socket and the control queue at the same time. Sessions, the peer table and the connection table belong to this thread alone and take no locks;
+- **Control**: the engine thread sends commands to the data plane thread through a bounded queue (sync peers, change endpoint, re-handshake, replace filter rules, read statistics) and waits for the reply with a timeout; the `DataPlane` methods keep synchronous semantics;
+- **Timing**: the data plane thread advances the session timers every 250 ms;
+- **Inbound**: UDP → demultiplex (section 4.1) → decrypt → validate the inner packet (IP version, length) → the source address must be within that peer's `AllowedIPs` → filter (section 5) → write to the TUN. A packet that fails any step is dropped without a response;
+- **Outbound**: TUN → longest-prefix match of the destination address against peers, drop if there is no peer → record the connection (section 5) → encrypt → send from the WireGuard port to the peer's current endpoint;
+- **endpoint**: same as kernel WireGuard. An authenticated packet from a new address updates the endpoint (roaming), and the path layer corrects it (mesh.md section 8.3); `set_endpoint` changes only the endpoint and leaves the session unaffected; `rehandshake` discards the session and the next packet triggers a new handshake (mesh.md section 8.4);
+- **Limits**: the control queue and the connection table have limits set by named constants; packets buffered before the handshake completes are limited by the session layer (256 per peer);
+- **Process exit**: on macOS a utun belongs to the process that created it, so the interface is deleted when the process exits and connections through the mesh are interrupted. After the service manager restarts the process, it recovers from the locally saved configuration (architecture.md section 12).
 
-### 4.1 WireGuard 端口上的分流
+### 4.1 Demultiplexing on the WireGuard port
 
-组网进程自己持有 WireGuard 端口的套接字，收发都在进程内分流：
+The mesh process itself holds the WireGuard port socket and demultiplexes both receiving and sending in-process:
 
-- 首个字节为 1–4 的是 WireGuard 消息，交给会话层；cookie 应答同时通知引擎（mesh.md 第 8.4 节）；
-- 探测消息的类型字节与 WireGuard 的不同（mesh.md 第 7.2 节），交给引擎认证；
-- 其他包一律丢弃，不作响应（硬性规则 2）；
-- **握手限额**：任何知道本机公钥的人都能构造通过 `mac1` 校验的握手消息，逐个处理（加解密、回 cookie、系统调用）的代价远高于接收。握手消息（类型 1、2）进入会话层之前按来源 IP 限额：每个来源每秒 128 个，所有来源合计每秒 2048 个，来源表最多 4096 条，超额的直接丢弃、不作响应。洪水因此只占一次接收和一次查表，挤不掉其他对端的握手和已建立会话的数据。会话层自己的负载保护照常：同一来源每秒超过 100 个握手发起时回 cookie，要求带 `mac2` 重试；
-- 直连探测从同一个套接字发出，与 WireGuard 自己的包同源端口、走同一个 NAT 映射。Linux 内核后端需要的原始套接字和 nftables 拷贝，在用户态平台上都不需要；
-- 来自闲置 TLS 回环端口的包（mesh.md 第 5.3 节）在分流时丢弃；
-- 隧道内探测与 Linux 相同：组网进程在本机组网地址的探测端口上监听，套接字绑定到组网接口。
+- A first byte of 1-4 is a WireGuard message and goes to the session layer; a cookie reply also notifies the engine (mesh.md section 8.4);
+- Probe messages have a type byte different from WireGuard's (mesh.md section 7.2) and go to the engine for authentication;
+- All other packets are dropped without a response (hard rule 2);
+- **Handshake limits**: anyone who knows this machine's public key can construct a handshake message that passes the `mac1` check, and processing each one (cryptography, cookie reply, system calls) costs far more than receiving it. Before entering the session layer, handshake messages (types 1 and 2) are limited per source IP: 128 per second per source, 2048 per second across all sources, and at most 4096 entries in the source table; anything over the limit is dropped without a response. A flood therefore costs one receive and one table lookup, and cannot crowd out other peers' handshakes or the data of established sessions. The session layer's own load protection still applies: when one source initiates more than 100 handshakes per second, it replies with a cookie and requires a retry carrying `mac2`;
+- Direct probes are sent from the same socket, with the same source port as WireGuard's own packets and through the same NAT mapping. The raw socket and nftables copy required by the Linux kernel backend are not needed on userspace platforms;
+- Packets from the idle TLS loopback port (mesh.md section 5.3) are dropped during demultiplexing;
+- In-tunnel probes are the same as on Linux: the mesh process listens on the probe port of the local mesh address, with the socket bound to the mesh interface.
 
-## 5. 进程内过滤
+## 5. In-process filtering
 
-使用与 Linux 相同的 `FilterSpec`（mesh.md 第 12 节）：规则只作用于从隧道进来的新建连接，没有规则放行的拒绝（ADR 0023），已建立连接的包和相关的包直接放行。IPv4 与 IPv6 的处理相同。本节针对发往本机的流量；用户态平台上的转发（DSM 作为智能入口）随 DSM 一起设计。
+It uses the same `FilterSpec` as Linux (mesh.md section 12): rules apply only to new connections arriving from the tunnel, anything not allowed by a rule is rejected (ADR 0023), and packets of established connections and related packets are allowed directly. IPv4 and IPv6 are handled the same way. This section covers traffic addressed to this machine; forwarding on userspace platforms (DSM as a smart gateway) is designed together with DSM.
 
-| 协议 | 新建连接 | 直接放行 |
+| Protocol | New connection | Allowed directly |
 |---|---|---|
-| TCP | 带 SYN、不带 ACK 的包，按规则匹配 | 其他 TCP 包：不属于任何连接的包由本机协议栈丢弃或复位，不能借此建立连接 |
-| UDP | 不属于连接表中任何一条的包，按规则匹配 | 本机发出过的流（两端地址和端口相同）的回包 |
-| ICMP | 回显请求，按规则匹配 | 本机发出过的回显请求的应答；内嵌包头的来源是本机组网地址的 ICMP 错误（不可达、超时、包过大） |
-| 其他 | 按规则匹配 | |
-| 分片 | 第一个分片按它的协议匹配 | 后续的分片：没有第一个分片，接收方无法重组 |
+| TCP | A packet with SYN and without ACK, matched against the rules | Other TCP packets: those not belonging to any connection are dropped or reset by the local stack and cannot be used to establish a connection |
+| UDP | A packet not belonging to any entry in the connection table, matched against the rules | Reply packets of flows this machine has sent (same addresses and ports at both ends) |
+| ICMP | Echo request, matched against the rules | Replies to echo requests this machine has sent; ICMP errors (unreachable, time exceeded, packet too big) whose embedded header has this machine's mesh address as the source |
+| Other | Matched against the rules | |
+| Fragments | The first fragment is matched by its protocol | Subsequent fragments: without the first fragment the receiver cannot reassemble them |
 
-- **连接表**：只记录本机经隧道发出的 UDP 流和 ICMP 回显，空闲 2 分钟后过期；条目数有上限（具名常量），满了淘汰最久没用的一条。被淘汰的流，回包按规则重新匹配，可能被拒绝，不会被放宽；
-- **失败时拒绝**：数据面启动时的过滤规则为全部拒绝，引擎安装第一份规则之前，所有新建连接都被丢弃；替换规则在数据面线程中一次完成，没有中间状态（硬性规则 6）。
+- **Connection table**: records only UDP flows and ICMP echoes that this machine sent through the tunnel, and expires entries after 2 minutes of idleness; the number of entries has a limit (named constant), and when full the least recently used entry is evicted. For an evicted flow, reply packets are matched against the rules again and may be rejected, but are never widened;
+- **Reject on failure**: when the data plane starts, the filter rules deny everything, so all new connections are dropped until the engine installs the first rule set; replacing rules completes in one step on the data plane thread with no intermediate state (hard rule 6).
 
-## 6. macOS 后端
+## 6. macOS backend
 
-### 6.1 utun、地址与路由
+### 6.1 utun, addresses and routes
 
-- **创建**：用 `PF_SYSTEM` 控制套接字连接 `com.apple.net.utun_control`，由系统分配编号（`utunN`）。接口名不是固定的 `nett0`，组网进程在创建后读取实际名称，写进日志和事件。每个包前有 4 字节的地址族头；
-- **地址**：IPv4 组网地址按点对点配置（本端和对端都是自己的组网地址）；IPv6 组网地址前缀长度为 128；MTU 1280（mesh.md 第 4 节）；
-- **路由**：组网网段（IPv4 与 IPv6）和其他成员宣告的网段，经路由套接字（`PF_ROUTE`）加到 utun 上，随接口删除而消失；
-- **只用系统调用**：不调用 `ifconfig`、`route`（硬性规则 1：组网进程不执行外部命令）。系统调用集中在一个模块，`unsafe` 只在这个模块中放开，逐处注释理由；
-- 隧道内探测的套接字用 `IP_BOUND_IF` 绑定到 utun，对应 Linux 的 `SO_BINDTODEVICE`。
+- **Creation**: a `PF_SYSTEM` control socket connects to `com.apple.net.utun_control`, and the system assigns the number (`utunN`). The interface name is not the fixed `nett0`; the mesh process reads the actual name after creation and writes it to logs and events. Each packet is preceded by a 4-byte address family header;
+- **Address**: the IPv4 mesh address is configured point-to-point (both the local and the remote end are its own mesh address); the IPv6 mesh address has prefix length 128; MTU 1280 (mesh.md section 4);
+- **Routes**: the mesh prefixes (IPv4 and IPv6) and the routes advertised by other members are added to the utun through a routing socket (`PF_ROUTE`) and disappear when the interface is deleted;
+- **System calls only**: `ifconfig` and `route` are not called (hard rule 1: the mesh process does not execute external commands). System calls are concentrated in one module, and `unsafe` is allowed only in that module, with the reason commented at each use;
+- The in-tunnel probe socket is bound to the utun with `IP_BOUND_IF`, corresponding to `SO_BINDTODEVICE` on Linux.
 
-### 6.2 与代理类 VPN 应用共存
+### 6.2 Coexistence with proxy-type VPN apps
 
-代理应用的增强模式（例如 Surge）会建立自己的 utun，接管默认路由和 DNS。
+The enhanced mode of a proxy app (for example Surge) creates its own utun and takes over the default route and DNS.
 
-- 发往底层网络的套接字（WireGuard 端口、发往中继的探测）用 `IP_BOUND_IF`、`IPV6_BOUND_IF` 绑定到承载默认路由的物理接口（不算 utun 等隧道接口）。这样 WireGuard 和探测的包不进入代理应用的 TUN：路径层测到的是真实网络，也不受代理应用"UDP 不能代理时拒绝"一类策略的影响。Tailscale 在 macOS 上也是这样做的；
-- 组网网段的路由比代理应用的默认路由更具体，发往组网的流量进入 nett 的 utun。如果代理应用把组网网段也列进自己的路由，就需要在它的配置中排除组网网段。实测结果写进使用手册（第 8 节）。
+- Sockets sent to the underlying network (the WireGuard port, probes sent to relays) are bound with `IP_BOUND_IF` and `IPV6_BOUND_IF` to the physical interface that carries the default route (tunnel interfaces such as utun do not count). This keeps WireGuard and probe packets out of the proxy app's TUN: the path layer measures the real network and is not affected by policies such as the proxy app's "reject when UDP cannot be proxied". Tailscale does the same on macOS;
+- The routes for the mesh prefixes are more specific than the proxy app's default route, so traffic to the mesh enters nett's utun. If the proxy app also lists the mesh prefixes in its own routes, the mesh prefixes must be excluded in its configuration. The measured results are written into the user manual (section 8).
 
-### 6.3 运行方式
+### 6.3 Operation
 
-- launchd 以 root 运行组网进程（创建 utun 需要 root），开机启动，退出后自动重启。`sudo nett install` 安装服务（design/release.md 第 4 节）：服务运行 root 专属目录中的副本，不运行 Homebrew 目录中的程序；
-- 文件放在 `/Library/Application Support/nett/`（属主 root，权限 `0700`）：程序的副本、组网私钥和身份私钥（`0600`），以及期望状态文件，都由 `sudo nett install` 生成和复制；
-- 重新加载：`sudo nett reload`，或期望状态有变化时的 `sudo nett install`（status.md 第 4.1 节）；
-- 日志：以服务运行时经 syslog 写进系统日志（info 记为 notice，系统默认持久保存），大小由系统管理；launchd 的标准错误文件只记录启动失败。交互运行时写标准错误。
+- launchd runs the mesh process as root (creating a utun requires root), starts it at boot and restarts it after it exits. `sudo nett install` installs the service (design/release.md section 4): the service runs the copy in the root-only directory, not the program in the Homebrew directory;
+- Files are placed in `/Library/Application Support/nett/` (owner root, mode `0700`): the copy of the program, the mesh private key and identity private key (`0600`), and the desired state file, all generated and copied by `sudo nett install`;
+- Reload: `sudo nett reload`, or `sudo nett install` when the desired state has changed (status.md section 4.1);
+- Logs: when running as a service, logs go to the system log through syslog (info is recorded as notice, which the system keeps persistently by default), and the size is managed by the system; the launchd standard error file records only startup failures. When run interactively, logs go to standard error.
 
-### 6.4 网络变化
+### 6.4 Network changes
 
-- 组网进程订阅路由套接字的消息。默认路由所在的物理接口变化时（换 Wi-Fi、插拔网线、唤醒），发往底层网络的套接字重新绑定到新接口，端口号不变。物理接口按路由表选择：不是隧道接口、有网关的默认路由，优先不限定接口的那一条；
-- 之后由路径层照常处理：测量、切换和重新握手（mesh.md 第 8 节）；
-- 组网接口上的路由在接口存在期间由组网进程维持；被其他程序删掉时，在下一次同步时补回。
+- The mesh process subscribes to routing socket messages. When the physical interface carrying the default route changes (switching Wi-Fi, plugging or unplugging a cable, waking from sleep), the sockets sent to the underlying network are rebound to the new interface, and the port number stays the same. The physical interface is chosen from the routing table: a default route that is not a tunnel interface and has a gateway, preferring the one that is not interface-scoped;
+- The path layer then handles it as usual: measurement, switching and re-handshake (mesh.md section 8);
+- The mesh process maintains the routes on the mesh interface while the interface exists; if another program deletes them, they are restored at the next sync.
 
-## 7. 本地签名部署中的 macOS 节点
+## 7. macOS nodes in local signing
 
-- 站点中，macOS 节点与其他节点相同，通常为 `dial-only`；签名产物和期望状态文件的格式不变；
-- 节点策略带 `edge` 或 `subnet_router` 角色时，macOS 上的组网进程不应用这部分，上报事件；
-- 同一台 Mac 可以同时有原生成员和容器内成员（architecture.md 第 13 节）。原生成员负责 Mac 本机的服务和 Mac 主动访问组网，容器内成员负责需要访客真实 IP 的容器服务（ADR 0016）。两者是不同的节点身份，有不同的组网地址。
+- In a site, a macOS node is the same as other nodes and is usually `dial-only`; the formats of signed artifacts and the desired state file are unchanged;
+- When the node policy carries an `edge` or `subnet_router` role, the mesh process on macOS does not apply that part and reports an event;
+- The same Mac can have both a native member and a container member (architecture.md section 13). The native member handles services on the Mac itself and the Mac's outbound access to the mesh, and the container member handles container services that need the visitor's real IP (ADR 0016). They are different node identities with different mesh addresses.
 
-## 8. 验证
+## 8. Verification
 
-| 层级 | 内容 | 在哪里 |
+| Level | Content | Where |
 |---|---|---|
-| 单元测试 | 分流、来源校验、过滤（TCP 新建连接、UDP 回包、ICMP 错误、连接表上限与过期）、命令超时；TUN 和 UDP 用替身 | 所有平台，CI |
-| 实验场景 | Linux TUN 后端运行现有场景（准入、切换、访问控制等），场景中混合用户态成员与内核 WireGuard 成员，通过标准不变。例外是握手洪水（场景 20c）：用户态的被洪水方按来源限额（第 4.1 节），不要求其他来源带 cookie，这一项改为换中继后的握手直接得到应答；隧道在洪水期间恢复、不来回切换的标准相同 | Linux，CI |
-| macOS 冒烟测试 | 创建 utun，配置地址和路由，隧道内探测的套接字，退出后清理 | macOS，CI |
-| macOS 端到端 | 同一台 Mac 上的原生成员与 OrbStack 中的 Linux 成员（内核 WireGuard）：握手、双向访问、访问规则、组网进程重启后恢复、换网络 | 开发者的 Mac，脚本化 |
-| 与代理应用共存 | Surge 增强模式开和关：组网连通；WireGuard 的包走物理接口；Surge 先启动和后启动；睡眠唤醒 | 开发者的 Mac |
-| 资源 | 空闲 RSS ≤ 5 MB（硬性规则 14）；macOS 上没有 PSS，记录 RSS 和 `footprint` | macOS、Linux |
-| 性能 | 同一台 Mac 与 OrbStack 成员之间，与 wireguard-go 对比吞吐、延迟和 CPU。先记录，在 M1 验收中按 roadmap 的标准判断 | 开发者的 Mac |
+| Unit tests | Demultiplexing, source validation, filtering (TCP new connections, UDP replies, ICMP errors, connection table limit and expiry), command timeouts; TUN and UDP use test doubles | All platforms, CI |
+| Lab scenarios | The Linux TUN backend runs the existing scenarios (admission, switching, access control, etc.), mixing userspace members and kernel WireGuard members in the scenarios, with unchanged pass criteria. The exception is the handshake flood (scenario 20c): the userspace flooded side limits by source (section 4.1) and does not require other sources to carry a cookie, so this item becomes that a handshake after switching relays gets an answer directly; the criterion that the tunnel recovers during the flood without switching back and forth is the same | Linux, CI |
+| macOS smoke test | Create a utun, configure addresses and routes, the in-tunnel probe socket, cleanup after exit | macOS, CI |
+| macOS end to end | A native member on a Mac and a Linux member in OrbStack (kernel WireGuard) on the same Mac: handshake, two-way access, access rules, recovery after mesh process restart, network change | Developer's Mac, scripted |
+| Coexistence with proxy app | Surge enhanced mode on and off: the mesh is connected; WireGuard packets use the physical interface; Surge started first and started later; sleep and wake | Developer's Mac |
+| Resources | Idle RSS ≤ 5 MB (hard rule 14); macOS has no PSS, so record RSS and `footprint` | macOS, Linux |
+| Performance | Between the Mac and the OrbStack member on the same Mac, compare throughput, latency and CPU with wireguard-go. Record first; judge against the roadmap's criteria in M1 acceptance | Developer's Mac |
 
-## 9. 待定问题
+## 9. Open questions
 
-| 问题 | 说明 |
+| Question | Notes |
 |---|---|
-| sanstun 再评估 | M3（手机）开工前进行：按截止时间推进的定时器和不缓存包的设计更省电。届时看接口是否稳定、有没有审计 |
-| 握手洪水下的接收能力 | 场景 20c 中每秒约 45 万个洪水包时，握手限额让换中继后的握手立即得到应答（最长间断 0.4–0.6 秒，内核 WireGuard 要等 cookie 重试，约 10.5 秒），但洪水期间单线程逐个接收跟不上，套接字缓冲区溢出，组网流量丢 22–50%，按延迟换中继时会来回切换。Linux 上改用 `recvmmsg` 批量接收；macOS 没有公开的批量接口，原生成员通常是 `dial-only`、在 NAT 之后，外部打不进它的 WireGuard 端口。在可被外部连入的用户态成员（DSM）之前做 |
-| 重启期间的中断 | macOS 的 utun 随进程退出而删除，组网进程重启期间经组网的连接中断。实测重启耗时后，再决定是否需要在重启之间保留接口 |
+| sanstun re-evaluation | Done before M3 (mobile) starts: the deadline-driven timers and the no-packet-buffering design save more power. At that point check whether the interface is stable and whether it has been audited |
+| Receive capacity under a handshake flood | In scenario 20 (c), at about 450,000 flood packets per second, the handshake limit lets a handshake after switching relays get an answer immediately (longest interruption 0.4-0.6 s, while kernel WireGuard has to wait for the cookie retry, about 10.5 s), but during the flood single-threaded one-by-one receiving cannot keep up, the socket buffer overflows, mesh traffic loses 22-50%, and switching relays by latency flaps back and forth. On Linux, switch to batched receiving with `recvmmsg`; macOS has no public batch interface, and native members are usually `dial-only` behind NAT, so the outside cannot reach their WireGuard port. Do this before userspace members that are reachable from outside (DSM) |
+| Interruption during restart | A macOS utun is deleted when the process exits, so connections through the mesh are interrupted while the mesh process restarts. After measuring the restart time, decide whether the interface needs to be kept across restarts |

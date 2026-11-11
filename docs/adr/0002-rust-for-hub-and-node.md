@@ -1,37 +1,37 @@
-# 0002. Hub 和 node 使用 Rust
+# 0002. Hub and node use Rust
 
-- 状态：已采纳
-- 日期：2026-10-12
+- Status: accepted
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-node 要常驻在 1 vCPU / 1 GB 级别的机器上，资源占用是硬性约束。
+The node must stay resident on machines of about 1 vCPU / 1 GB, so resource usage is a hard constraint.
 
-## 决定
+## Decision
 
-Hub 和 node 都用 Rust 编写。node 使用 tokio 单线程运行时。
+Both Hub and node are written in Rust. The node uses the tokio single-threaded runtime.
 
-## 理由
+## Rationale
 
-同一负载（每秒采集一次 CPU 和内存，并发一次本地 HTTP 请求）下的空闲常驻内存，Linux arm64、容器限制 1 CPU / 1 GB、运行 60 秒：
+Idle resident memory under the same workload (sample CPU and memory once per second, plus one local HTTP request concurrently), Linux arm64, container limited to 1 CPU / 1 GB, 60-second run:
 
-| 实现 | VmRSS |
+| Implementation | VmRSS |
 |---|---|
-| Rust（tokio + reqwest/rustls + sysinfo） | 1.9 MB |
-| C++（libcurl 静态，含 TLS） | 4.9 MB |
-| Go（net/http + gopsutil） | 7.5–8.6 MB |
-| Swift（SwiftNIO 或 Foundation） | 28–35 MB |
+| Rust (tokio + reqwest/rustls + sysinfo) | 1.9 MB |
+| C++ (libcurl static, including TLS) | 4.9 MB |
+| Go (net/http + gopsutil) | 7.5–8.6 MB |
+| Swift (SwiftNIO or Foundation) | 28–35 MB |
 
-- Rust 的内存最低，并且具备内存安全；
-- 强类型和编译期检查能拦截大量错误，对以审查为主的开发方式是一层保障；
-- 以后的私有传输和移动端隧道核心也可以用同一套 Rust 代码（iOS 网络扩展有严格的内存上限）。
+- Rust has the lowest memory and is memory-safe;
+- Strong typing and compile-time checks catch many errors, which is a layer of protection for a review-centered development style;
+- The same Rust code can later also serve the private transport and the mobile tunnel core (iOS network extensions have strict memory limits).
 
-## 放弃的方案
+## Alternatives considered
 
-- **Go**：生态最全（可嵌入 Tailscale），但内存约为 Rust 的 4 倍。在本项目的架构下（组网自研），Go 的独有优势大多用不上。
-- **C++**：内存与 Rust 相当，但缺乏内存安全；以 root 运行并解析网络数据的组件风险过高。
-- **Swift**：Linux 上 Foundation 体积大且依赖大量系统库。
+- **Go**: the richest ecosystem (Tailscale can be embedded), but memory is about 4 times that of Rust. Under this project's architecture (own mesh), most of Go's unique advantages go unused.
+- **C++**: memory comparable to Rust, but no memory safety; the risk is too high for a component that runs as root and parses network data.
+- **Swift**: on Linux, Foundation is large and depends on many system libraries.
 
-## 影响
+## Consequences
 
-- 开发速度比 Go 慢；交叉编译需要 musl 工具链或 cargo-zigbuild。
+- Development is slower than with Go; cross-compilation needs a musl toolchain or cargo-zigbuild.

@@ -1,36 +1,36 @@
-# 0001. Hub / node / 公网进程分离，管理与流量分离
+# 0001. Hub / node / public-facing processes are separate; management and traffic are separate
 
-- 状态：已采纳
-- 日期：2026-10-12
+- Status: accepted
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-系统同时要做管理（入网、组网配置、升级）和承载流量（中继、公网传输入口、反向代理）。最直接的做法是让每台机器上的守护进程同时承担两者，但管理组件需要高权限，而公网入口要解析来自整个互联网的请求。
+The system has to do management (enrollment, mesh configuration, upgrades) and carry traffic (relay, public transport entry point, reverse proxy). The most direct approach is to let one daemon on each machine do both, but management components need high privileges, while a public entry point has to parse requests from the entire Internet.
 
-## 决定
+## Decision
 
-分成以下角色：
+The system is split into these roles:
 
-- **Hub**：做决定，保存期望状态，汇总状态，提供 API；不直接操作机器。
-- **nett-node**：控制代理，在本机执行 Hub 下发的期望状态；**不监听任何公网端口**，不处理业务流量，不执行任意命令，不访问 Docker。
-- **Edge**：用户自己在入口节点上运行的反向代理，任何实现都可以；负责公网流量，没有任何管理权限。Edge 不属于 nett，nett 不生成、也不管理它的配置（ADR 0019）。
-- **nett-relay**：在能被外部连入的节点上运行的低权限进程；负责组网的中继转发和公网传输入口（见 ADR 0011）。
-- **组网进程**与**传输适配进程**：在开启组网的节点上运行，分别承担全部组网工作（WireGuard、路径层、DNS、过滤与地址转换）和 TLS 传输适配，与 nett-node 分开（见 ADR 0013）。
+- **Hub**: makes decisions, stores the desired state, aggregates status, and serves the API; it does not operate machines directly.
+- **nett-node**: the control agent; it applies the desired state issued by the Hub on the local machine; it **does not listen on any public port**, does not handle business traffic, does not execute arbitrary commands, and does not access Docker.
+- **Edge**: a reverse proxy the user runs on an entry node, any implementation will do; it handles public traffic and has no management privileges. Edge is not part of nett, and nett neither generates nor manages its configuration (ADR 0019).
+- **nett-relay**: a low-privilege process running on nodes that are reachable from outside; it handles mesh relay forwarding and the public transport entry point (see ADR 0011).
+- **Mesh process** and **transport adapter**: run on nodes with the mesh enabled, and respectively carry all mesh work (WireGuard, path layer, DNS, filtering and address translation) and the TLS transport adapter, separate from nett-node (see ADR 0013).
 
-node 不"充当" Edge，也不管理 Edge。
+A node does not "act as" an Edge and does not manage an Edge.
 
-## 理由
+## Rationale
 
-- 把权限最高的组件放在暴露面最大的位置，一个解析漏洞就可能导致整机失守；分离后两者互不叠加。
-- 管理和流量分离后，Hub 或 node 停止或升级时，网站和组网不受影响。
-- 成熟的反向代理在 HTTP 协议细节和证书管理上积累多年，自行实现收益很小。
+- Putting the most privileged component in the position with the largest exposure means a single parsing vulnerability can compromise the whole machine; separation keeps the two from stacking.
+- With management and traffic separated, websites and the mesh are unaffected when the Hub or a node stops or is upgraded.
+- Mature reverse proxies have accumulated years of work on HTTP protocol details and certificate management; implementing one ourselves would gain very little.
 
-## 放弃的方案
+## Alternatives considered
 
-- node 内置反向代理：节省一个进程的内存，但违反权限分离，并且 node 的每次升级都会中断全部网站。
+- A reverse proxy built into node: saves the memory of one process, but violates privilege separation, and every node upgrade would interrupt all websites.
 
-## 影响
+## Consequences
 
-- Edge 由用户自己运行和配置；nett 只为 Hub 主机上的反向代理生成 Hub 和 nett-relay 这两段配置（ADR 0009）。
-- 所有公网监听组件（Edge、nett-relay）都作为独立的低权限进程运行。
-- WireGuard 的 UDP 端口由内核或组网进程（ADR 0013）监听，对未认证的数据包不作任何响应，不视为 nett-node 监听公网端口。
+- The user runs and configures Edge; nett only generates the two configuration sections for the reverse proxy on the Hub host, for the Hub and nett-relay (ADR 0009).
+- All public-facing components (Edge, nett-relay) run as independent low-privilege processes.
+- The WireGuard UDP port is listened on by the kernel or the mesh process (ADR 0013) and does not respond to unauthenticated packets; it is not considered nett-node listening on a public port.

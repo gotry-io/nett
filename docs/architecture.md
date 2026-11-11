@@ -1,92 +1,95 @@
-# 架构
+# Architecture
 
-本文是 nett 的总体设计：每台机器上运行什么、三类流量怎么走、信任从哪里来、风险在哪里。各主题的细节见 [design/](design/README.md)，以那里为准；关键决定的理由见 [adr/](adr/README.md)；开发规则见 [CLAUDE.md](../CLAUDE.md)。
+This document is the overall design of nett: what runs on each machine, how the three kinds of traffic flow, where trust comes from, and where the risks are. Details for each topic are in [design/](design/README.md), which is authoritative; the rationale for key decisions is in [adr/](adr/README.md); development rules are in [CLAUDE.md](../CLAUDE.md).
 
-## 1. 总览
+## 1. Overview
 
 ```
-┌──────────────────────────── 用户的电脑 ──────────────────────────┐
-│ nett site：维护站点；在本机计算、显示并签名（恢复密钥）           │
-└───────────────┬────────────────────────────────────────────────┘
-                │ HTTPS：REST/JSON
-┌───────────────▼─────────────────── Hub 主机 ──────────────────────┐
-│ 反向代理（默认 Caddy）：Hub 的 HTTPS；按 SNI 转交 nett-relay      │
-│ nett-hub：对外 API · 认证 · 期望状态 · 审计                         │
-│           SQLite · node 网关                                         │
-│ nett-relay：中继与公网传输入口（低权限）                              │
-│ nett-node                                                       │
-└───────────────┬────────────────────────────────────────────────┘
-                │ 控制：WebSocket over TLS + Protobuf（node 主动连接）
-                │ 数据：nett 组网（WireGuard 会话 + nett 路径层）
+┌──────────────────────── The user's computer ─────────────────────┐
+│ nett site: maintains the site; computes, displays and signs      │
+│ locally (recovery key)                                           │
+└───────────────┬──────────────────────────────────────────────────┘
+                │ HTTPS: REST/JSON
+┌───────────────▼─────────────────── Hub host ─────────────────────┐
+│ Reverse proxy (Caddy by default): the Hub's HTTPS; hands off to  │
+│   nett-relay by SNI                                              │
+│ nett-hub: public API · authentication · desired state · audit    │
+│           SQLite · node gateway                                  │
+│ nett-relay: relay and public transport entry (low privilege)     │
+│ nett-node                                                        │
+└───────────────┬──────────────────────────────────────────────────┘
+                │ Control: WebSocket over TLS + Protobuf (node connects out)
+                │ Data: nett mesh (WireGuard session + nett path layer)
         ┌───────┼────────────┬─────────────────┐
-     VPS 节点   VPS 节点     家里的智能入口      家里的其他主机
-     nett-node（+ nett-relay）                 （经智能入口接入，无需安装）
+     VPS node   VPS node     Smart gateway     Other hosts at home
+     nett-node (+ nett-relay) at home          (join via the smart gateway,
+                                                nothing to install)
 
-外部：手机 ─标准 WireGuard─► 家里入口 / 移动网关
+External: phone ─standard WireGuard─► home gateway / mobile gateway
 ```
 
-**三个平面**
+**Three planes**
 
-| 平面 | 承载什么 | 组件 | 不依赖什么 |
+| Plane | Carries | Components | Does not depend on |
 |---|---|---|---|
-| 控制面 | 期望状态、清单与链路状态、任务 | Hub ⇄ nett-node（WebSocket + Noise，见 design/protocol.md） | 组网：Hub 端点列表中至少保留一个不经组网的端点（protocol.md 第 8 节） |
-| 组网数据面 | 成员之间的 IP 流量 | 组网进程（WireGuard、路径层、DNS、过滤）+ 传输适配进程 + nett-relay（见 design/mesh.md） | Hub 在线；nett-node 在线（ADR 0013） |
-| 入口面 | 公网访客经 Edge（用户自己的反向代理）到服务的流量 | Edge → 组网 → 服务（第 8 节） | Hub、nett-node 在线 |
+| Control plane | Desired state, inventory and link status, tasks | Hub ⇄ nett-node (WebSocket + Noise, see design/protocol.md) | The mesh: the Hub endpoint list keeps at least one endpoint that does not go through the mesh (protocol.md section 8) |
+| Mesh data plane | IP traffic between members | Mesh process (WireGuard, path layer, DNS, filtering) + transport adapter + nett-relay (see design/mesh.md) | The Hub being online; nett-node being online (ADR 0013) |
+| Ingress plane | Traffic from public visitors through the Edge (the user's own reverse proxy) to services | Edge → mesh → service (section 8) | The Hub and nett-node being online |
 
-入口面依赖组网数据面。控制面可以借道组网（例如经另一个入口节点连接 Hub），但不能只靠组网，否则一次错误的组网配置会让节点再也收不到修正。
+The ingress plane depends on the mesh data plane. The control plane can use the mesh as a route (for example, connecting to the Hub through another ingress node), but cannot rely on the mesh alone; otherwise one faulty mesh configuration would leave nodes unable to receive a fix.
 
-## 2. 角色与能力边界
+## 2. Roles and capability boundaries
 
-| 角色 | 负责 | 不负责 | 权限 | 监听公网 |
+| Role | Responsible for | Not responsible for | Privileges | Listens on public network |
 |---|---|---|---|---|
-| **Hub** | 保存期望状态；汇总节点和链路状态；对外 API；分发组网拓扑；转发签过名的策略 | 直接操作机器；自行提升任何节点的权限；处于数据通路上 | 普通 | 经本机的反向代理暴露（第 4 节） |
-| **nett-node** | 控制代理：入网，连接 Hub；把签名材料转交组网进程并启停各进程；上报清单和链路状态；升级（第 3 节） | 监听公网端口；执行任意命令；访问 Docker；运行 AI 逻辑；自行决定权限 | 高 | 否 |
-| **组网进程** | WireGuard 配置、路径层（测量、选路、切换）、DNS、访问规则与地址转换、准入材料验证；独立于 node 运行（ADR 0013） | 连接 Hub；访问 Docker；执行外部命令 | `CAP_NET_ADMIN`、`CAP_NET_RAW`（在 WireGuard 端口上探测，ADR 0021）；用户态平台上需要 TUN 权限 | 只有 WireGuard 端口：只应答带认证的探测，与内核实现一样不响应未认证的数据包 |
-| **传输适配进程** | TLS 传输适配，只经手密文（ADR 0013） | 持有任何密钥；任何管理功能 | 低 | 否（主动连出） |
-| **nett-relay** | 中继转发加密数据包；接收 TCP/TLS 等传输；探测应答；按连接转发（CONNECT） | 解密组网流量；任何管理功能 | 低 | 是 |
-| **Edge** | 用户自己在入口节点上运行的反向代理（任何实现）：TLS 终止，按域名把请求经组网转发到服务；nett 不生成、不管理它的配置（第 8 节） | 任何管理功能 | 低 | 是 |
-| **签名工具**（`nett site`） | 在用户自己的电脑上维护站点；计算、显示并签名提升权限的变更（design/site.md） | 常驻运行；直接连接节点 | 持有恢复密钥 | 否 |
+| **Hub** | Stores desired state; aggregates node and link status; public API; distributes the mesh topology; forwards signed policies | Operating machines directly; raising any node's privileges on its own; sitting on the data path | Normal | Exposed through the local reverse proxy (section 4) |
+| **nett-node** | Control agent: enrolls, connects to the Hub; hands signed material to the mesh process and starts and stops the processes; reports inventory and link status; upgrades (section 3) | Listening on public ports; executing arbitrary commands; accessing Docker; running AI logic; deciding privileges on its own | High | No |
+| **Mesh process** | WireGuard configuration, path layer (measurement, path selection, switchover), DNS, access rules and address translation, admission material verification; runs independently of the node (ADR 0013) | Connecting to the Hub; accessing Docker; executing external commands | `CAP_NET_ADMIN`, `CAP_NET_RAW` (probing on the WireGuard port, ADR 0021); TUN permission on userspace platforms | Only the WireGuard port: answers only authenticated probes and, like the kernel implementation, does not respond to unauthenticated packets |
+| **Transport adapter** | TLS transport adaptation; handles ciphertext only (ADR 0013) | Holding any key; any management function | Low | No (dials out) |
+| **nett-relay** | Relays encrypted packets; accepts transports such as TCP/TLS; probe responses; per-connection forwarding (CONNECT) | Decrypting mesh traffic; any management function | Low | Yes |
+| **Edge** | A reverse proxy the user runs on the ingress node (any implementation): terminates TLS and forwards requests to services through the mesh by domain name; nett does not generate or manage its configuration (section 8) | Any management function | Low | Yes |
+| **Signing tool** (`nett site`) | Maintains the site on the user's own computer; computes, displays and signs changes that raise privileges (design/site.md) | Running as a daemon; connecting to nodes directly | Holds the recovery key | No |
 
-**三条原则**
+**Three principles**
 
-1. **管理和流量分离**：Hub 和 node 都停止时，网站和组网照常工作，只是暂时无法变更。
-2. **有权限的不对外，对外的没权限**：nett-node 和组网进程都不监听公网地址（组网进程只在组网地址上提供 DNS 和探测应答；局域网地址上的探测应答只在存在局域网直连候选时开启，且不响应未认证的探测）；所有公网监听都交给独立的低权限进程（Edge、nett-relay）。WireGuard 的 UDP 端口由内核或组网进程监听，只应答带认证的探测，对未认证的数据包不作任何响应。
-3. **决定和执行分离，提升权限必须签名**：Hub 被攻破也无法越权：签名在用户自己的电脑上完成，签名的内容由签名工具在本机计算并显示，不经 Hub（ADR 0024，design/auth.md 第 2 节）。组网成员、宣告网段和访问规则同样由签名产物构成（ADR 0014）。
+1. **Management and traffic are separate**: when the Hub and the nodes are both stopped, websites and the mesh keep working; changes are temporarily impossible.
+2. **Privileged components are not exposed; exposed components are not privileged**: nett-node and the mesh process listen on no public address (the mesh process provides DNS and probe responses only on the mesh address; probe responses on a LAN address are enabled only when a LAN direct candidate exists, and do not respond to unauthenticated probes); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the mesh process, answers only authenticated probes, and does not respond at all to unauthenticated packets.
+3. **Decision and execution are separate; raising privileges requires a signature**: a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the content to be signed is computed and displayed locally by the signing tool, not through the Hub (ADR 0024, design/auth.md section 2). Mesh members, advertised routes and access rules are likewise composed of signed artifacts (ADR 0014).
 
 ## 3. nett-node
 
-单进程，tokio 单线程运行时，**直接运行在系统上，不放进容器**：组网要配置宿主的网络（组网进程通过 netlink 配置内核 WireGuard 和 nftables），nett-node 要启停本机的组网进程、传输适配进程和 nett-relay，并在升级时替换本机的可执行文件。放进容器就得开特权、共享宿主网络，实际上等于原生运行。macOS 的容器内成员只承担其他成员访问 Mac 上的容器服务，是例外（ADR 0016）；Home Assistant OS 不允许直接安装程序，nett 以加载项运行，是另一个例外（ADR 0017）。
+A single process on a tokio single-threaded runtime, **running directly on the system, not in a container**: the mesh needs to configure the host's network (the mesh process configures the kernel WireGuard and nftables through netlink), and nett-node has to start and stop the local mesh process, transport adapter and nett-relay, and replace the local executable on upgrade. Putting it in a container would require privileged mode and the host network, which amounts to running natively. The container member on macOS only lets other members reach container services on the Mac, and is an exception (ADR 0016); Home Assistant OS does not allow installing programs directly, so nett runs as an add-on, which is another exception (ADR 0017).
 
-nett-node 是控制代理，只负责入网、连接 Hub、保存本地状态、升级、把签名材料转交组网进程、上报清单（平台、能力、地址）和链路状态、执行组网动作，以及拉取 Hub 的加密备份（第 12.3 节）；不访问 Docker。它由以下部分组成：
+nett-node is the control agent. It only handles enrollment, connecting to the Hub, keeping local state, upgrades, handing signed material to the mesh process, reporting inventory (platform, capabilities, addresses) and link status, executing mesh actions, and pulling the Hub's encrypted backup (section 12.3); it does not access Docker. It consists of the following parts:
 
-- **Transport**：主动连接 Hub，认证，断线重连，多端点选优；
-- **Supervisor**：计算模块和角色是否生效（见下面的模块开关），管理模块生命周期，崩溃后带退避地重启；
-- **mesh 模块**：调和器（期望状态 → 实际状态 → 差异 → 执行），可重复执行。把 `trust`、`mesh` 分区交给组网进程，启停组网进程、传输适配进程和 nett-relay，转发链路状态。组网工作本身（第 6 节）在组网进程中完成，node 不在时照常进行（ADR 0013）；
-- **State Store**：本地保存身份密钥和上一次生效的配置（组网拓扑、准入材料和撤销记录由组网进程自己保存，ADR 0013）。**启动时先应用本地缓存，再连接 Hub**，避免组网和 Hub 相互依赖。
+- **Transport**: connects to the Hub, authenticates, reconnects after disconnection, and picks the best of multiple endpoints;
+- **Supervisor**: computes whether modules and roles are in effect (see the module switches below), manages module lifecycles, and restarts after a crash with backoff;
+- **mesh module**: a reconciler (desired state → actual state → diff → execute), safe to repeat. It hands the `trust` and `mesh` partitions to the mesh process, starts and stops the mesh process, transport adapter and nett-relay, and relays link status. The mesh work itself (section 6) is done in the mesh process and continues when the node is absent (ADR 0013);
+- **State Store**: stores the identity key and the last effective configuration locally (the mesh topology, admission material and revocations are stored by the mesh process itself, ADR 0013). **On startup it applies the local cache first, then connects to the Hub**, so the mesh and the Hub do not depend on each other.
 
-### 模块开关
+### Module switches
 
-**生效 = 本地未禁止 ∩ 节点能力 ∩ 签名策略**
+**Effective = not forbidden locally ∩ node capabilities ∩ signed policy**
 
-| 层 | 由谁决定 | 作用 |
+| Layer | Decided by | Effect |
 |---|---|---|
-| 本地硬性禁止 | 节点管理员 | 可选的绝对上限，签名策略也无法突破 |
-| 节点能力 | node 自动探测 | 缺少内核模块、root 权限等时，对应模块不可用或改用替代实现 |
-| 签名策略 | Hub 下发 | 降低权限可直接下发；**提升权限必须带用户签名**；版本号只增不减 |
+| Local hard prohibition | Node administrator | An optional absolute upper bound that a signed policy cannot exceed |
+| Node capabilities | Automatically detected by the node | When kernel modules, root permission and the like are missing, the corresponding module is unavailable or an alternative implementation is used |
+| Signed policy | Issued by the Hub | Lowering privileges can be issued directly; **raising privileges requires the user's signature**; the version number only increases |
 
-可以开关的是 mesh 模块和以下角色。角色写在签名的节点策略中（`node.set_roles`，需要签名）：
+The mesh module and the following roles can be switched. Roles are written in the signed node policy (`node.set_roles`, requires a signature):
 
-| 开关 | 作用 | 典型启用位置 |
+| Switch | Effect | Typically enabled on |
 |---|---|---|
-| **mesh** 模块 | 运行组网进程，本机直接加入组网（见上） | 直接加入组网的节点 |
-| `relay` | 运行 nett-relay，为其他节点中继（第 6.4 节） | `public` 节点 |
-| `gateway` | 移动网关（第 7 节） | Hub 主机或其他 `public` 节点 |
-| `subnet_router` | 智能入口，把局域网段接入组网（第 6.6 节） | 每个局域网一台 |
-| `edge` | 声明本机运行 Edge，并说明怎样识别 Edge 发出的流量；据此分配 Edge 专用地址（第 8 节） | 入口节点 |
+| **mesh** module | Runs the mesh process; this machine joins the mesh directly (see above) | Nodes that join the mesh directly |
+| `relay` | Runs nett-relay to relay for other nodes (section 6.4) | `public` nodes |
+| `gateway` | Mobile gateway (section 7) | The Hub host or other `public` nodes |
+| `subnet_router` | Smart gateway; brings a LAN prefix into the mesh (section 6.6) | One per LAN |
+| `edge` | Declares that this machine runs an Edge and how to identify traffic sent by the Edge; an Edge address is allocated accordingly (section 8) | Ingress nodes |
 
-### 零配置
+### Zero configuration
 
-节点本地只保存**身份和权限**，其余来自 Hub 下发或本地探测：Hub 端点列表（入网时只需一个公网地址，其余由 Hub 推送，node 并发探测并选择最优）、网络可达性（`public` / `dial-only`）、局域网地址、组网地址等。组网私钥在本机生成，永不离开节点。
+A node stores only **identity and permissions** locally; everything else comes from the Hub or local detection: the Hub endpoint list (at enrollment only one public address is needed, the Hub pushes the rest, and the node probes them concurrently and picks the best), network reachability (`public` / `dial-only`), LAN addresses, mesh address, and so on. The mesh private key is generated on the machine and never leaves the node.
 
 ```bash
 curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <token>
@@ -94,408 +97,412 @@ curl -fsSL https://hub.example.com/install.sh | sudo sh -s -- install <token>
 
 ## 4. Hub
 
-- **对外 API**：REST + JSON，资源化；从代码生成 OpenAPI 3.1；命令行、脚本，以及以后的 Web 控制台和移动端都使用同一套 API；
-- **node 网关**：WebSocket + Protobuf；
-- **组网控制**：分配地址、分发公钥和候选路径、维护中继名单和线路质量矩阵；
-- **存储**：SQLite（WAL）；
-- **HTTPS**：Hub 位于本机的反向代理之后，默认与 Caddy 一起用 Compose 运行（ADR 0009，design/hub.md 第 8 节）。Caddy 的配置中包括在同一个 443 端口上按 SNI 把 nett-relay 的域名转交给 nett-relay；Hub 主机上已有反向代理时，`nett-hub init` 打印这两段配置。这台反向代理也可以同时是用户的 Edge，但 nett 只提供 Hub 和 nett-relay 这两段配置。
+- **Public API**: REST + JSON, resource-oriented; OpenAPI 3.1 generated from code; the command line, scripts, and later the web console and mobile clients all use the same API;
+- **node gateway**: WebSocket + Protobuf;
+- **Mesh control**: allocates addresses, distributes public keys and candidate paths, maintains the relay list and the link quality matrix;
+- **Storage**: SQLite (WAL);
+- **HTTPS**: the Hub sits behind a reverse proxy on the same machine, run with Caddy by default through Compose (ADR 0009, design/hub.md section 8). The Caddy configuration includes handing nett-relay's domain off to nett-relay by SNI on the same port 443; when the Hub host already has a reverse proxy, `nett-hub init` prints these two configuration snippets. This reverse proxy can also be the user's Edge, but nett only provides the two snippets for the Hub and nett-relay.
 
-**资源保护**：所有队列、缓存和通道设置上限；数据和审计有保留策略；上线前做 24 小时浸泡测试。
+**Resource protection**: all queues, caches and channels have limits; data and audit records have retention policies; a 24-hour soak test is done before going live.
 
-## 5. 认证与授权
+## 5. Authentication and authorization
 
-| 身份 | 认证方式 |
+| Identity | Authentication |
 |---|---|
-| 用户 | 恢复密钥，由用户电脑上的签名工具使用（design/site.md 第 8 节）；passkey 与会话随 Web 控制台加入（ADR 0024） |
-| API token | `owner`（关联站点时发给签名工具，design/hub.md 第 4 节）与 `script`；带权限范围、有过期时间、可吊销；固定前缀；服务端只存哈希 |
-| node | 一次性入网 token → X25519 身份密钥；入网私钥由签名工具生成，节点用它签署准入证明（ADR 0014）；连接时在 WebSocket 内层用 Noise 协议双向认证并端到端加密 |
-| 手机设备 | 设备凭据（WireGuard 密钥，或 CONNECT 凭据） |
+| User | Recovery key, used by the signing tool on the user's computer (design/site.md section 8); passkeys and sessions arrive with the web console (ADR 0024) |
+| API token | `owner` (issued to the signing tool when the site is linked, design/hub.md section 4) and `script`; has a permission scope and an expiry time and is revocable; fixed prefix; the server stores only the hash |
+| node | One-time enrollment token → X25519 identity key; the enrollment private key is generated by the signing tool, and the node uses it to sign its admission proof (ADR 0014); on connection, the Noise protocol inside the WebSocket provides mutual authentication and end-to-end encryption |
+| Phone device | Device credentials (a WireGuard key, or CONNECT credentials) |
 
 ```
-请求 → 识别身份 → 检查权限范围 → 检查策略 → 执行 → 写入审计
+Request → identify → check permission scope → check policy → execute → write audit
 ```
 
-**token 只能提议高风险变更，不能批准。**批准由用户在自己的电脑上用签名工具签名，签名的内容在本机显示（ADR 0024）；Web 控制台加入之后，也可以用 passkey 签名（design/auth.md 第 10.2 节）。
+**A token can only propose high-risk changes, not approve them.** Approval is a signature made by the user on their own computer with the signing tool, and the content to be signed is displayed locally (ADR 0024); once the web console arrives, a passkey can also be used to sign (design/auth.md section 10.2).
 
-入网时，签名工具分配节点 ID 和地址、生成入网密钥对（design/hub.md 第 6 节）；token 携带 Hub 的完整公钥（Noise IK 需要它）和入网私钥；节点用入网私钥签署准入证明；其他成员凭"签名策略 + 准入证明"验证这个节点，不凭 Hub 的一面之词（design/auth.md 第 8 节）。
+At enrollment, the signing tool allocates the node ID and address and generates the enrollment key pair (design/hub.md section 6); the token carries the Hub's full public key (needed by Noise IK) and the enrollment private key; the node signs its admission proof with the enrollment private key; other members verify this node by "signed policy + admission proof", not by the Hub's word alone (design/auth.md section 8).
 
-**信任链**
+**Chain of trust**
 
-| 信任根 | 签什么 | 谁验证 |
+| Root of trust | Signs | Verified by |
 |---|---|---|
-| 用户的恢复密钥（以后加上 passkey） | 信任锚更新；变更批准；节点策略；组网准入材料（成员、设备凭据、宣告网段、访问规则集）；允许降级 | 节点独立验证，不信任 Hub |
-| 签名工具生成的一次性入网私钥 | 准入证明（绑定节点 ID、身份公钥、组网公钥） | Hub 与所有组网成员 |
-| 项目的发布签名密钥（主备两把，ADR 0020） | 发布包 | 节点（公钥在构建时嵌入 `nett`） |
-| 用户的备份密钥 | 加密 Hub 备份 | 只有持有离线私钥的用户能解开 |
+| The user's recovery key (passkeys later) | Trust anchor updates; change approvals; node policy; mesh admission material (members, device credentials, advertised routes, access rule sets); permission to downgrade | Nodes verify independently, without trusting the Hub |
+| The one-time enrollment private key generated by the signing tool | Admission proof (binds node ID, identity public key, mesh public key) | The Hub and all mesh members |
+| The project's release signing keys (primary and backup, ADR 0020) | Release packages | Nodes (the public keys are embedded in `nett` at build time) |
+| The user's backup key | Encrypted Hub backup | Only the user holding the offline private key can decrypt it |
 
-Hub 被攻破后，攻击者**能**：查看组网的状态；执行低风险操作；确认中风险操作，例如修改连接的策略；让组网连接断开；对从未收到某条撤销记录的成员隐瞒它。攻击者**不能**：提升任何节点的权限；加入组网成员或放宽组网访问（包括借助改标签，以及让 Edge 专用地址访问更多目标）；让节点降级；伪造节点身份；用重发旧签名产物的方式恢复已撤销的权限。
+After a Hub compromise, the attacker **can**: view the mesh state; perform low-risk operations; confirm medium-risk operations, such as changing a connection's policy; disconnect the mesh; and withhold a revocation from a member that has never received it. The attacker **cannot**: raise any node's privileges; add mesh members or widen mesh access (including by relabeling, and by letting an Edge address reach more targets); downgrade nodes; forge node identity; or restore revoked privileges by replaying old signed artifacts.
 
-这些都不需要用户避开被攻破的 Hub 提供的东西：签名的内容由用户电脑上的签名工具计算并显示，入网命令写明发布包的哈希，都不经 Hub；节点上的 `nett trust log` 可以事后核对节点接受过哪些授权（design/auth.md 第 2 节；ADR 0006、0012、0014、0024）。
+None of this requires the user to avoid anything the compromised Hub provides: the content to be signed is computed and displayed by the signing tool on the user's computer, and the enrollment command states the release package's hash, neither going through the Hub; `nett trust log` on a node lets the user check afterward which authorizations the node has accepted (design/auth.md section 2; ADR 0006, 0012, 0014, 0024).
 
-## 6. 组网
+## 6. The mesh
 
-### 6.1 目标
+### 6.1 Goals
 
-像导航软件一样工作：节点之间有多条候选路径和多种传输方式，持续测量，自动选择最优路径；路径抖动、中断，或某个节点离线时，在几秒内自动切换，**正在进行的连接不中断**；没有单点。断开、波动、回退、恢复时的体验以 Tailscale 为基线，不比它差（ADR 0021）。
+It works like a navigation app: there are multiple candidate paths and multiple transports between nodes, they are measured continuously, and the best path is selected automatically; when a path jitters or breaks, or a node goes offline, traffic switches automatically within seconds and **ongoing connections are not interrupted**; there is no single point. The experience on disconnect, fluctuation, fallback and recovery is no worse than the Tailscale baseline (ADR 0021).
 
-### 6.2 分层
+### 6.2 Layers
 
 ```
-┌─ 会话层：WireGuard（负责加密）────────────────────────────────┐
-│ 每对节点一个加密会话；更换路径时会话不变                           │
-│ Linux 使用内核 WireGuard；无内核模块的平台使用 Rust 用户态实现       │
-├─ 传输层：可插拔（负责把加密包送达）──────────────────────────────┤
-│ UDP（默认）· TCP/TLS 443 · QUIC 443（后期）· 混淆包装（后期）       │
-├─ 路径层：组网进程（负责选路，ADR 0013）──────────────────────────┤
-│ 候选路径：局域网直连 · 公网直连 · 经中继 · 多跳接力                   │
-│ 持续测量 → 打分 → 选择最优（带防抖）→ 变差时快速切换                  │
-└──────────────────────────────────────────────────────────────┘
-控制面：Hub（地址、公钥、候选路径、中继名单、线路质量矩阵）
+┌─ Session layer: WireGuard (encryption) ──────────────────────────┐
+│ One encrypted session per pair of nodes; the session is          │
+│ unchanged when the path changes                                  │
+│ Linux uses kernel WireGuard; platforms without the kernel        │
+│ module use a Rust userspace implementation                       │
+├─ Transport layer: pluggable (delivers encrypted packets) ────────┤
+│ UDP (default) · TCP/TLS 443 · QUIC 443 (later) ·                 │
+│ obfuscation wrapper (later)                                      │
+├─ Path layer: mesh process (path selection, ADR 0013) ────────────┤
+│ Candidate paths: LAN direct · public direct · via relay ·        │
+│ multi-hop relay                                                  │
+│ Measure continuously → score → select best (with hysteresis) →   │
+│ switch fast when degraded                                        │
+└──────────────────────────────────────────────────────────────────┘
+Control plane: Hub (addresses, public keys, candidate paths, relay list, link quality matrix)
 ```
 
-- **会话层只用 WireGuard**：代码精简，经过形式化验证，Linux 内核原生支持，所有平台都有标准客户端。WireGuard 支持对端更换地址（为漫游设计），因此切换路径只需更新会话的对端地址，上层连接不受影响。WireGuard 的配置、路径层和无内核模块平台上的用户态实现，都在独立的组网进程中（ADR 0013）；macOS 以原生成员加入（ADR 0018），需要访客真实 IP 的容器服务另用容器内成员（ADR 0016）。
-- **传输层可插拔**：WireGuard 只支持 UDP，特征也明显。UDP 受限时，把加密后的数据包放进 TCP/TLS 或 QUIC 传输，外部看到的是普通的 HTTPS 或 HTTP/3 流量。
-- **路径层是 nett 的核心**：它决定每对节点之间走哪条路径、用哪种传输。
+- **The session layer uses only WireGuard**: compact code, formally verified, natively supported by the Linux kernel, with standard clients on every platform. WireGuard lets a peer change its address (designed for roaming), so switching paths only requires updating the session's peer address, and upper-layer connections are unaffected. WireGuard configuration, the path layer, and the userspace implementation on platforms without the kernel module are all in the independent mesh process (ADR 0013); macOS joins as a native member (ADR 0018), and container services that need the visitor's real IP use a container member instead (ADR 0016).
+- **The transport layer is pluggable**: WireGuard supports only UDP, and its fingerprint is distinctive. When UDP is restricted, encrypted packets are put into a TCP/TLS or QUIC transport, so outsiders see ordinary HTTPS or HTTP/3 traffic.
+- **The path layer is the core of nett**: it decides which path and which transport each pair of nodes uses.
 
-### 6.3 候选路径与选路
+### 6.3 Candidate paths and path selection
 
-| 候选路径 | 条件 |
+| Candidate path | Condition |
 |---|---|
-| 局域网直连 | 两个节点在同一局域网（由 Hub 下发双方的局域网地址，组网进程探测确认） |
-| 公网直连 | 至少一端可从外部连入（`public`；IPv4、IPv6 分别判断） |
-| 经中继 | 经某个 `public` 节点的 nett-relay 转发 |
-| 多跳接力 | 经两个或更多中继（如跨境时经优质线路） |
-| 打洞直连 | 至少一端在锥形 NAT 后，或两端都有全局 IPv6 地址；映射地址取自 `public` 节点看到的来源地址，经当前隧道约定后从 WireGuard 端口同时发包，测通后再切换，失败不影响当前连接（design/mesh.md 第 6.1 节）；两端都在对称型 NAT 后在后期 |
+| LAN direct | Both nodes are on the same LAN (the Hub issues both sides' LAN addresses, and the mesh process confirms by probing) |
+| Public direct | At least one end is reachable from outside (`public`; IPv4 and IPv6 are judged separately) |
+| Via relay | Forwarded through the nett-relay of some `public` node |
+| Multi-hop relay | Through two or more relays (for example, over a high-quality line when crossing borders) |
+| Hole-punched direct | At least one end is behind a cone NAT, or both ends have global IPv6 addresses; the mapped address is taken from the source address seen by a `public` node, agreed over the current tunnel, then packets are sent simultaneously from the WireGuard port, and the switch happens after the path is verified; a failure does not affect the current connection (design/mesh.md section 6.1); both ends behind symmetric NAT comes later |
 
-选路：
+Path selection:
 
-- 对每条候选路径持续测量延迟、丢包和抖动；
-- 按得分选择当前路径；同类路径之间，新路径需要**明显更好并持续一段时间**才切换，避免来回跳动；类型更优的路径（例如从中继回到直连）测通就切回；
-- 当前路径的探测连续没有应答时立即加探，并同时探测全部候选，约 3 秒判定故障，**立即**切换到刚测到的最优候选（design/mesh.md 第 8.2 节）；
-- 节点按本地缓存的拓扑自主切换，**不依赖 Hub 在线**；
-- 支持策略覆盖，例如指定某类流量优先直连，或强制经某个中继。
+- Latency, loss and jitter are measured continuously for each candidate path;
+- The current path is chosen by score; among paths of the same type, a new path must be **clearly better and stay so for a while** before switching, to avoid flapping; a better type of path (for example, from relay back to direct) is switched back to as soon as it is verified;
+- When probes on the current path get no response several times in a row, extra probes are sent immediately and all candidates are probed at the same time; a failure is declared after about 3 seconds, and traffic switches **immediately** to the best candidate just measured (design/mesh.md section 8.2);
+- Nodes switch on their own according to the locally cached topology, **without depending on the Hub being online**;
+- Policy overrides are supported, for example preferring direct for a class of traffic, or forcing a particular relay.
 
-### 6.4 中继
+### 6.4 Relays
 
-- **所有 `public` 节点都具备中继能力**（`dial-only` 节点和手机不能为其他节点中转）。Hub 根据位置、实测质量、流量配额和资源余量决定实际使用哪些中继。
-- **中继只转发加密后的数据包，看不到内容**，端到端加密不受影响。
-- 中继由独立的低权限进程 nett-relay 承担，只在转发流量时消耗资源。
-- 每个中继只使用一个 UDP 端口。在 Hub 主机上与 Hub 共用 443：由 Hub 前的反向代理按 SNI 把 nett-relay 的域名转交给 nett-relay（第 4 节，ADR 0011）。
+- **All `public` nodes are relay-capable** (`dial-only` nodes and phones cannot relay for other nodes). The Hub decides which relays to actually use based on location, measured quality, traffic quota and spare resources.
+- **A relay only forwards encrypted packets and cannot see the content**, so end-to-end encryption is unaffected.
+- Relaying is handled by the separate low-privilege process nett-relay, which consumes resources only while forwarding traffic.
+- Each relay uses a single UDP port. On the Hub host it shares 443 with the Hub: the reverse proxy in front of the Hub hands nett-relay's domain off to nett-relay by SNI (section 4, ADR 0011).
 
-### 6.5 网络可达性
+### 6.5 Network reachability
 
-| 类型 | 含义 | 连接规则 |
+| Type | Meaning | Connection rule |
 |---|---|---|
-| `public` | 可从外部连入（公网地址，或映射了端口） | 可以接受连接，可以做中继 |
-| `dial-only` | 只能主动连出 | 主动连接 `public` 节点；**至少连接两个**，避免单点 |
+| `public` | Reachable from outside (a public address, or a mapped port) | Can accept connections and can act as a relay |
+| `dial-only` | Can only dial out | Connects to `public` nodes; **connects to at least two** to avoid a single point |
 
-可达性由 node 与 Hub 共同探测，IPv4、IPv6 分别判断，网络变化后自动更新。云厂商的安全组需要用户手动放行，各角色所需的端口见 design/mesh.md 第 5.5 节。
+Reachability is detected jointly by the node and the Hub, with IPv4 and IPv6 judged separately, and is updated automatically after network changes. Cloud provider security groups must be opened manually by the user; the ports each role needs are in design/mesh.md section 5.5.
 
-### 6.6 局域网接入
+### 6.6 LAN access
 
-一个局域网只需要一台主机运行 nett-node，作为**智能入口**（subnet router）：把整个局域网段接入组网，并具备完整的选路和切换能力。局域网内的其他主机无需安装任何组网软件。智能入口对转发进来的流量做源地址转换，避免局域网主机的回包被本机的其他 VPN 或代理截走；来自 Edge 专用地址的流量转换为单独的"入口地址"，需要真实 IP 的服务只信任它（ADR 0015）。宣告的局域网段默认只对用户的设备开放。网关设备自带的 WireGuard 可以作为备用路径。
+A LAN needs only one host running nett-node as the **smart gateway** (subnet router): it brings the whole LAN prefix into the mesh, with full path selection and switchover. Other hosts on the LAN do not need any mesh software. The smart gateway applies source NAT to forwarded traffic, so that replies of LAN hosts are not intercepted by other VPNs or proxies on the gateway itself; traffic from the Edge address is translated to a separate "ingress address", which services that need the real IP trust exclusively (ADR 0015). Advertised LAN prefixes are open only to the user's devices by default. The WireGuard built into the gateway device can serve as a backup path.
 
-### 6.7 按连接转发（CONNECT）
+### 6.7 Per-connection forwarding (CONNECT)
 
-除了数据包级别的组网，nett-relay 还提供 **HTTPS CONNECT 代理**（HTTP/2 over TLS）：
+Besides packet-level mesh networking, nett-relay also provides an **HTTPS CONNECT proxy** (HTTP/2 over TLS):
 
-- 适合"由应用自己发起 TCP 连接"的场景：支持 HTTPS 代理的程序在 UDP 受限的网络中访问内网服务（Edge 所在主机本身是组网成员，回源直接走组网，不用 CONNECT）；
-- Hub 主机的 443 上只支持 HTTP/2 CONNECT（由反向代理转交，实测标准 Caddy 不能转发 HTTP/1.1 CONNECT 隧道），其他节点上的 nett-relay 两种都支持；
-- 不需要专用客户端，任何支持 HTTPS 代理的程序都能使用；
-- 只支持 TCP；中继能看到目的地址，非加密流量的内容也可见。中继都运行在用户自己的机器上，且中继之间每一跳都使用 TLS。
+- It suits scenarios where "the application itself initiates the TCP connection": programs that support an HTTPS proxy reach internal services from networks where UDP is restricted (the host where the Edge runs is itself a mesh member, so origin traffic goes directly over the mesh without CONNECT);
+- On the Hub host's 443 only HTTP/2 CONNECT is supported (handed off by the reverse proxy; in testing, standard Caddy cannot forward HTTP/1.1 CONNECT tunnels), while nett-relay on other nodes supports both;
+- No dedicated client is needed; any program that supports an HTTPS proxy can use it;
+- TCP only; the relay can see the destination address, and the content of unencrypted traffic is visible too. All relays run on the user's own machines, and every hop between relays uses TLS.
 
-两种方式互补：组网承载任意协议；CONNECT 适合不便运行组网的客户端和应用层代理。
+The two approaches complement each other: the mesh carries any protocol; CONNECT suits clients that cannot conveniently run the mesh and application-layer proxies.
 
-### 6.8 后备方案
+### 6.8 Fallback
 
-tailscale（Headscale + derper + tailscaled）作为可选后备：在自研组网尚未覆盖的场景下使用，由 Hub 统一管理，对上层隐藏。上层只看到 nett 自己的概念（节点、地址、主机名、访问规则、链路状态）。后备方案未排期；只在用户显式启用的节点上运行，不受节点内存预算约束；Headscale 的地址池必须排除 nett 的组网网段。
+tailscale (Headscale + derper + tailscaled) is an optional fallback: it is used in scenarios the in-house mesh does not yet cover, managed centrally by the Hub and hidden from the upper layers. The upper layers see only nett's own concepts (nodes, addresses, hostnames, access rules, link status). The fallback is not scheduled; it runs only on nodes where the user explicitly enables it and is not bound by the node memory budget; Headscale's address pool must exclude nett's mesh prefixes.
 
-## 7. 手机接入
+## 7. Phone access
 
-手机端兼容**任意标准 WireGuard 客户端**：nett 导出标准配置（配置文件与二维码），不限定客户端；也导出 Surge、mihomo、sing-box 的配置（ADR 0018）。配置包含**两条路径**：
+The phone side is compatible with **any standard WireGuard client**: nett exports a standard configuration (a configuration file and a QR code) and does not pin a client; it also exports configurations for Surge, mihomo and sing-box (ADR 0018). The configuration contains **two paths**:
 
 ```
-手机 ─┬─ 直连家里的智能入口（标准 WireGuard）→ 家里的服务，大流量（如视频）不绕路
-      └─ 移动网关（标准 WireGuard）→ 其他节点；直连不可用时兜底
+Phone ─┬─ direct to the smart gateway at home (standard WireGuard) → services at home;
+       │   heavy traffic (such as video) does not detour
+       └─ mobile gateway (standard WireGuard) → other nodes; fallback when direct is unavailable
 ```
 
-- 两个对端按网段分流，标准客户端即支持；
-- 同一时间设备的每份凭据只归属一个移动网关，由它代为宣告这份凭据的地址；配置中列出两个 DNS 服务器（移动网关和智能入口）；
-- 移动网关是 Hub 主机（或其他 `public` 节点）上的 WireGuard 接口，网关之后的路径由 nett 路径层负责；
-- 一台设备可以有多份凭据（例如两个不同的客户端程序各一份），各自独立吊销，权限按设备授予；
-- UDP 受限时，支持 HTTPS 代理的客户端可以经 nett-relay 的 CONNECT 代理访问内网服务；
-- 标准客户端不会在路径之间自动切换，因此同时导出一份"全部经网关"的备用配置（使用单独的一份凭据），供直连受阻时手动切换。代理客户端的配置把两条路径放进自动回落的策略组，直连不通时自动改走网关，而且不占用手机唯一的 VPN 名额；
-- 手机 App 和 Windows 在 M3，届时它们是完整成员，自己选路（ADR 0018）。
+- The two peers split traffic by prefix, which standard clients support;
+- At any time, each credential of a device belongs to only one mobile gateway, which advertises that credential's address on its behalf; the configuration lists two DNS servers (the mobile gateway and the smart gateway);
+- The mobile gateway is a WireGuard interface on the Hub host (or another `public` node); the path beyond the gateway is handled by the nett path layer;
+- A device can have multiple credentials (for example, one each for two different client programs), each revocable independently, with permissions granted per device;
+- When UDP is restricted, clients that support an HTTPS proxy can reach internal services through nett-relay's CONNECT proxy;
+- Standard clients do not switch between paths automatically, so a backup configuration that sends "everything via the gateway" is exported as well (using a separate credential), for manual switching when direct is blocked. Proxy client configurations put the two paths in an automatic fallback policy group, so when direct fails they switch to the gateway automatically, and they do not use up the phone's only VPN slot;
+- The phone app and Windows arrive in M3, when they are full members and choose paths themselves (ADR 0018).
 
-## 8. 回源
+## 8. Origin traffic
 
-回源的最后一跳决定两件事：服务能否拿到访客的真实 IP，以及按来源信任的服务会不会被意外放开。
+The last hop of origin traffic determines two things: whether the service can get the visitor's real IP, and whether services that trust by source are accidentally opened up.
 
-Edge 是用户自己在入口节点上运行的反向代理，任何实现都可以（Caddy、nginx、Traefik 等）；nett 不生成、也不管理它的配置（ADR 0019）。Edge 回源经过组网，路径由路径层选择；Edge 配置中写组网地址而不是主机名（Edge 常运行在容器中，解析不了组网后缀）。
+The Edge is a reverse proxy the user runs on the ingress node, and any implementation works (Caddy, nginx, Traefik, and so on); nett does not generate or manage its configuration (ADR 0019). Origin traffic from the Edge goes through the mesh, and the path layer selects the path; the Edge configuration uses mesh addresses instead of hostnames (the Edge often runs in a container and cannot resolve the mesh suffix).
 
-**Edge 专用地址**：节点策略中的 `edge` 角色（`node.set_roles`，需要签名）声明本机运行 Edge，并说明怎样识别 Edge 发出的流量：Edge 所在容器的地址，或原生运行时的系统用户。据此分配 Edge 专用地址，组网进程把 Edge 发出的组网流量的来源换成这个地址；本机的其他进程和容器不能使用它（ADR 0015）。
+**Edge address**: the `edge` role in the node policy (`node.set_roles`, requires a signature) declares that this machine runs an Edge and how to identify traffic sent by the Edge: the address of the container the Edge runs in, or the system user when it runs natively. An Edge address is allocated accordingly, and the mesh process rewrites the source of mesh traffic sent by the Edge to this address; other processes and containers on the machine cannot use it (ADR 0015).
 
-**回源身份**（ADR 0015）：需要访客真实 IP 的服务，最后一跳必须来自一个只有 Edge 能使用的地址，服务只信任这个地址发来的 `X-Forwarded-For`，用户在服务里把对应的转发者地址配置为可信代理。Edge 要用访客的真实地址覆盖这个头（Caddy 默认如此，第 17 节事实 6），访客伪造的头才会被覆盖。
+**Origin identity** (ADR 0015): for a service that needs the visitor's real IP, the last hop must come from an address that only the Edge can use; the service trusts only the `X-Forwarded-For` sent from this address, and the user configures the corresponding forwarder address as a trusted proxy in the service. The Edge must overwrite this header with the visitor's real address (Caddy does so by default, fact 6 in section 17), so that a header forged by the visitor is overwritten.
 
-| 服务所在位置 | 回源路径 | 服务看到的转发者 |
+| Where the service is | Origin path | Forwarder the service sees |
 |---|---|---|
-| 组网成员上（Linux，容器或原生进程） | Edge → 组网 → 成员的组网地址:端口。Linux 上 Docker 的端口映射对外部流量做目的地址转换，保留来源 | 入口节点的 Edge 专用地址 |
-| 智能入口后面的局域网主机 | Edge → 组网 → 智能入口（按来源分类转换）→ 局域网主机 | 智能入口的入口地址（只用于转换来自 Edge 专用地址的流量） |
-| macOS 上 Docker 中的容器 | Edge → 组网 → 容器内成员 → 容器网络（发布端口会丢掉来源，第 17 节事实 1） | 容器内成员在该容器网络中的地址（ADR 0016） |
+| On a mesh member (Linux, container or native process) | Edge → mesh → member's mesh address:port. On Linux, Docker port mapping applies destination NAT to external traffic and preserves the source | The ingress node's Edge address |
+| LAN host behind a smart gateway | Edge → mesh → smart gateway (translation by source class) → LAN host | The smart gateway's ingress address (used only to translate traffic from Edge addresses) |
+| Container in Docker on macOS | Edge → mesh → container member → container network (a published port loses the source, fact 1 in section 17) | The container member's address in that container network (ADR 0016) |
 
-**按来源信任的服务**：
+**Services that trust by source**:
 
-- 转换后的地址绝不能是回环地址；转发到宿主上的服务时，使用宿主的局域网地址，绝不使用 `host.docker.internal`（第 17 节事实 2）；
-- 宣告的局域网段默认只对用户的设备开放；
-- Edge 专用地址默认不能访问任何目标，能访问哪些主机和端口由用户在访问规则中写。这些规则属于签名的访问规则集：新增或改变回源目标，等于把一个内网端口暴露到公网，因此放宽需要签名（design/mesh.md 第 12 节）；
-- Edge 回源到同一台主机上的服务时不经过组网，不受这些规则约束。
+- The translated address must never be a loopback address; when forwarding to a service on the host, use the host's LAN address and never `host.docker.internal` (fact 2 in section 17);
+- Advertised LAN prefixes are open only to the user's devices by default;
+- An Edge address cannot reach any target by default; which hosts and ports it can reach is written by the user in the access rules. These rules belong to the signed access rule set: adding or changing an origin target amounts to exposing an internal port to the public network, so widening requires a signature (design/mesh.md section 12);
+- Origin traffic from the Edge to a service on the same host does not go through the mesh and is not subject to these rules.
 
-## 9. AI 接入
+## 9. AI access
 
-nett 不含 AI 逻辑。AI 和其他外部程序一样，只经 Hub API（`script` 类型的 API token，第 5 节）使用 nett（ADR 0010）。
+nett contains no AI logic. AI, like any other external program, uses nett only through the Hub API (a `script`-type API token, section 5) (ADR 0010).
 
-## 10. 技术栈
+## 10. Technology stack
 
-| 部分 | 选择 |
+| Part | Choice |
 |---|---|
-| Hub | Rust：axum、SQLite + sqlx、utoipa、rustls；Web 控制台加入时加上 webauthn-rs、rust-embed（ADR 0024） |
-| node | Rust：tokio（单线程）、tokio-tungstenite、prost、hyper；WireGuard 通过 netlink 管理内核实现（只编码用到的几种消息，不引入 netlink 库） |
-| 各组件共用 | serde、serde_json；ring（签名验证、哈希、HMAC、HKDF，也作为 rustls 的加密后端）；x25519-dalek（由组网私钥派生成员之间直连探测的密钥，ring 不能导入已有的私钥）；rustix（netlink 与原始套接字的系统调用；nftables 规则也经 netlink 下发，不调用 `nft` 命令）；lexopt（命令行解析） |
-| nett-relay | Rust：tokio、rustls（经 tokio-rustls）、tokio-tungstenite（TLS 传输入口的 WebSocket）、hyper（HTTP/2 CONNECT）；blake2（按 WireGuard 协议计算 `mac1`）；后期 quinn（QUIC） |
-| nett-transport | Rust：tokio（单线程）、rustls（经 tokio-rustls，按指纹校验证书）、tokio-tungstenite |
-| 用户态 WireGuard | gotatun 的 `noise` 层，用于无内核模块的平台（design/userspace.md 第 3 节） |
-| 协议 | 对外 REST + JSON（OpenAPI 3.1），Web 控制台加入时加上 SSE；内部 WebSocket + Protobuf |
-| Web（控制台，ADR 0024） | React + Vite、TanStack Router / Query / Table、shadcn/ui + Tailwind、xyflow |
-| Hub 前的反向代理 | Caddy（默认，ADR 0009） |
+| Hub | Rust: axum, SQLite + sqlx, utoipa, rustls; webauthn-rs and rust-embed are added with the web console (ADR 0024) |
+| node | Rust: tokio (single-threaded), tokio-tungstenite, prost, hyper; WireGuard is managed through netlink against the kernel implementation (only the few message types used are encoded; no netlink library) |
+| Shared by all components | serde, serde_json; ring (signature verification, hashing, HMAC, HKDF, also the crypto backend of rustls); x25519-dalek (derives the keys for direct probing between members from the mesh private key; ring cannot import an existing private key); rustix (system calls for netlink and raw sockets; nftables rules are also installed through netlink, without calling the `nft` command); lexopt (command-line parsing) |
+| nett-relay | Rust: tokio, rustls (via tokio-rustls), tokio-tungstenite (WebSocket for the TLS transport entry), hyper (HTTP/2 CONNECT); blake2 (computes `mac1` per the WireGuard protocol); quinn later (QUIC) |
+| nett-transport | Rust: tokio (single-threaded), rustls (via tokio-rustls, verifying certificates by fingerprint), tokio-tungstenite |
+| Userspace WireGuard | The `noise` layer of gotatun, for platforms without the kernel module (design/userspace.md section 3) |
+| Protocols | Public: REST + JSON (OpenAPI 3.1), plus SSE when the web console arrives; internal: WebSocket + Protobuf |
+| Web (console, ADR 0024) | React + Vite, TanStack Router / Query / Table, shadcn/ui + Tailwind, xyflow |
+| Reverse proxy in front of the Hub | Caddy (default, ADR 0009) |
 
-## 11. 代码组织
+## 11. Code organization
 
 ```
 nett/
-├── proto/              # node ↔ Hub 的 Protobuf 定义
-├── crates/             # node、mesh、transport、relay、cli 链接为同一个 nett 可执行文件
+├── proto/              # Protobuf definitions for node ↔ Hub
+├── crates/             # node, mesh, transport, relay, cli are linked into the same nett executable
 │   ├── nett-proto/
-│   ├── nett-core/      # 共享领域模型
-│   ├── nett-trust/     # 签名载荷、信任锚、准入材料与撤销记录的验证（node 与组网进程共用）
+│   ├── nett-core/      # shared domain model
+│   ├── nett-trust/     # verification of signed payloads, trust anchors, admission material and revocations (shared by node and mesh process)
 │   ├── nett-hub/
 │   ├── nett-node/
-│   ├── nett-mesh/      # 组网进程：与平台无关的核心（准入、测量、选路、切换）+ 各平台的数据面后端（ADR 0018）
-│   ├── nett-transport/ # 传输适配进程
+│   ├── nett-mesh/      # mesh process: platform-independent core (admission, measurement, path selection, switchover) + per-platform data plane backends (ADR 0018)
+│   ├── nett-transport/ # transport adapter
 │   ├── nett-relay/
-│   ├── nett-site/      # 站点模型与期望状态的组成（签名工具与 Hub 共用，design/site.md）
-│   ├── nett-cli/       # nett 命令
-│   └── nett-lab/       # 实验工具：生成实验配置、搭建拓扑、注入故障、采集测量（只用于开发和测试，不进发布包）
-├── web/                # Web 控制台（React SPA，ADR 0024）；src/api 由 OpenAPI 生成
-├── keys/               # 发布签名公钥（ADR 0020）
-├── packaging/          # systemd 单元、容器镜像与 Homebrew 配方模板（第 13.2 节）
+│   ├── nett-site/      # site model and composition of desired state (shared by the signing tool and the Hub, design/site.md)
+│   ├── nett-cli/       # the nett command
+│   └── nett-lab/       # lab tooling: generates lab configuration, builds topologies, injects faults, collects measurements (development and testing only, not in release packages)
+├── web/                # web console (React SPA, ADR 0024); src/api is generated from OpenAPI
+├── keys/               # release signing public keys (ADR 0020)
+├── packaging/          # systemd units, container images and Homebrew formula templates (section 13.2)
 └── docs/
 ```
 
-生成链路：`proto → prost → Rust`；`Hub 代码 → utoipa → openapi.json → TypeScript 客户端`。CI 检查生成文件是否最新。
+Generation chain: `proto → prost → Rust`; `Hub code → utoipa → openapi.json → TypeScript client`. CI checks that the generated files are up to date.
 
-## 12. 故障与可用性
+## 12. Failure and availability
 
-### 12.1 Hub 与 node 的关系
+### 12.1 Relationship between the Hub and the node
 
-Hub 是控制面，node 是执行者：
+The Hub is the control plane and the node is the executor:
 
-- node 主动连接 Hub，Hub 从不主动连接 node；
-- node 只执行 Hub 下发的、签过名的期望状态，不自行决定权限；
-- **node 和组网进程各自在本地保存上一次生效的配置**（组网拓扑、准入材料和撤销记录由组网进程保存），重启时先应用本地配置，再连接 Hub；
-- **Hub 不在数据通路上**：节点之间的组网流量、访客访问服务的流量都不经过 Hub；路径切换由节点自主完成。
+- The node connects to the Hub; the Hub never connects to a node;
+- The node executes only the signed desired state issued by the Hub and does not decide privileges on its own;
+- **The node and the mesh process each store the last effective configuration locally** (the mesh topology, admission material and revocations are stored by the mesh process), and on restart apply the local configuration first, then connect to the Hub;
+- **The Hub is not on the data path**: neither mesh traffic between nodes nor visitor traffic to services goes through the Hub; path switching is done by the nodes on their own.
 
-### 12.2 故障场景
+### 12.2 Failure scenarios
 
-| 场景 | 继续工作 | 暂停 | 应对 |
+| Scenario | Keeps working | Paused | Response |
 |---|---|---|---|
-| **Hub 进程停止**（崩溃、升级、重启） | 节点间组网与自动切换、Edge 回源、手机接入 | 配置变更、新节点入网 | 服务管理器自动重启（第 13.2 节） |
-| **nett-node 停止**（崩溃、升级、被 OOM 杀掉） | 组网与自动切换、DNS、Edge 回源 | 状态上报、配置变更、升级 | 服务管理器自动重启；组网进程独立运行（ADR 0013） |
-| **组网进程停止** | 内核 WireGuard 保持当前路径 | 路径切换；用户态平台上全部路径中断 | 服务管理器自动重启，先加载信任存储，再加载期望状态（design/mesh.md 第 4.2 节） |
-| **Hub 前的反向代理停止** | 组网 | Hub 的 API；节点经这台主机连接 Hub | 节点改用 Hub 端点列表中的其他端点 |
-| **Hub 主机宕机** | 不经过该主机的路径和服务 | 上述全部，以及该主机上的反向代理、中继、移动网关 | 路径层自动绕开；见 12.3 |
-| **某个节点宕机** | 其余节点；以它为中继的路径自动绕开 | 该节点上的服务 | — |
-| **某条路径变差或中断** | — | — | 路径层在几秒内切换，连接不中断 |
+| **Hub process stops** (crash, upgrade, restart) | Mesh between nodes and automatic switching, Edge origin traffic, phone access | Configuration changes, new nodes enrolling | The service manager restarts it automatically (section 13.2) |
+| **nett-node stops** (crash, upgrade, killed by the OOM killer) | Mesh and automatic switching, DNS, Edge origin traffic | Status reporting, configuration changes, upgrades | The service manager restarts it automatically; the mesh process runs independently (ADR 0013) |
+| **Mesh process stops** | Kernel WireGuard keeps the current path | Path switching; all paths are interrupted on userspace platforms | The service manager restarts it automatically; it loads the trust store first, then the desired state (design/mesh.md section 4.2) |
+| **Reverse proxy in front of the Hub stops** | The mesh | The Hub's API; nodes that connect to the Hub through this host | Nodes switch to other endpoints in the Hub endpoint list |
+| **Hub host goes down** | Paths and services that do not go through this host | All of the above, plus the reverse proxy, relay and mobile gateway on this host | The path layer routes around it automatically; see 12.3 |
+| **A node goes down** | The remaining nodes; paths that use it as a relay route around it automatically | Services on that node | — |
+| **A path degrades or breaks** | — | — | The path layer switches within seconds and connections are not interrupted |
 
-### 12.3 消除单点
+### 12.3 Eliminating single points
 
-1. **多点连接**：`dial-only` 节点至少连接两个 `public` 节点。
-2. **至少两个可用中继**，且位于不同主机。这是冗余下限，不限制中继数量。
-3. **组网不依赖控制面在线**：拓扑和密钥持久化在各节点本地，没有过期问题；Hub 不在时，节点照常选路和切换。
-4. **移动网关可以部署多个**；手机同时保留直连家里的路径。
-5. **备份与重建**：Hub 的数据库连同 Hub 身份私钥，用备份公钥加密后，由其他节点定时拉取（Hub 从不主动连接节点）；提供在另一台主机上重建 Hub 的操作手册。node 的端点列表包含备用入口，Hub 迁移后节点自动连上新的 Hub。备份总是落后于节点的状态，恢复时由节点回传已生效的签名产物（protocol.md 第 6.4 节）。
+1. **Multi-point connectivity**: a `dial-only` node connects to at least two `public` nodes.
+2. **At least two usable relays**, on different hosts. This is a redundancy floor, not a limit on the number of relays.
+3. **The mesh does not depend on the control plane being online**: the topology and keys are persisted locally on each node and do not expire; when the Hub is absent, nodes keep selecting paths and switching.
+4. **Multiple mobile gateways can be deployed**; the phone also keeps its direct path to home.
+5. **Backup and rebuild**: the Hub's database, together with the Hub identity private key, is encrypted with the backup public key and pulled periodically by other nodes (the Hub never connects to nodes); an operations manual for rebuilding the Hub on another host is provided. The node's endpoint list includes a backup entry, so after the Hub moves, nodes connect to the new Hub automatically. A backup always lags behind the state of the nodes, and on restore the nodes send back the signed artifacts in effect (protocol.md section 6.4).
 
-## 13. 打包、安装与运行
+## 13. Packaging, installation and operation
 
-### 13.1 发布物
+### 13.1 Release artifacts
 
-| 发布物 | 包含 | 安装位置 |
+| Artifact | Contents | Installed on |
 |---|---|---|
-| **`nett`** | 一个可执行文件，按子命令运行为不同角色：命令行、`nett node`、`nett mesh`、`nett transport`、`nett relay` | 所有节点 |
-| **`nett-hub`** | Hub（可执行文件与容器镜像，design/hub.md 第 8 节） | 只在 Hub 主机 |
-| **HA 加载项** | `nett` 的容器镜像与加载项仓库（ADR 0017） | 运行 Home Assistant OS 的设备 |
+| **`nett`** | One executable that runs as different roles by subcommand: command line, `nett node`, `nett mesh`, `nett transport`, `nett relay` | All nodes |
+| **`nett-hub`** | The Hub (executable and container image, design/hub.md section 8) | The Hub host only |
+| **HA add-on** | The container image of `nett` and the add-on repository (ADR 0017) | Devices running Home Assistant OS |
 
-代码层面 node、mesh、transport、relay、cli 仍是独立的 crate，最终链接成同一个可执行文件。这样安装和升级只有一次、版本不会错配；多个进程映射同一个文件，代码页由系统共享，总内存更低。安全隔离依靠运行用户和权限，与是否同一个文件无关。
+At the code level, node, mesh, transport, relay and cli remain separate crates that are finally linked into the same executable. This way installation and upgrade happen once and versions cannot be mismatched; multiple processes map the same file, so code pages are shared by the system and total memory is lower. Security isolation relies on the user and privileges each process runs with, regardless of whether it is the same file.
 
-Linux 上的 `nett`（x86_64、aarch64）静态链接 musl：同一个文件可以用在各种发行版上，不依赖系统的 libc 版本；每个进程的常驻内存也更小。动态链接 glibc 时，ld.so、libc、libgcc_s 的代码页都计入每个进程的 RSS，实测各进程空闲 RSS 都超过 5 MB，其中进程自己的内存不到 1 MB（prototype.md 第 9 节场景 21）。各进程启动时关闭透明大页（`PR_SET_THP_DISABLE`）：系统设为 `always` 时（例如 Linux 6.1），一个线程栈会被整块换成 2 MB 的大页，RSS 随之多出 2 MB；这些进程用不上大页。
+`nett` on Linux (x86_64, aarch64) is statically linked against musl: the same file works on all distributions and does not depend on the system's libc version; the resident memory of each process is also smaller. With dynamic glibc linking, the code pages of ld.so, libc and libgcc_s all count toward each process's RSS, and measured idle RSS of every process exceeds 5 MB, of which the process's own memory is under 1 MB (prototype.md section 9, scenario 21). Each process disables transparent huge pages at startup (`PR_SET_THP_DISABLE`): when the system is set to `always` (for example, Linux 6.1), a thread stack is replaced wholesale by a 2 MB huge page and RSS grows by 2 MB; these processes have no use for huge pages.
 
-### 13.2 运行方式
+### 13.2 How it runs
 
-| 服务 | 运行身份 | 持有的密钥 | 监听 | 何时运行 |
+| Service | Runs as | Keys held | Listens on | When it runs |
 |---|---|---|---|---|
-| `nett-node` | root（升级时替换可执行文件、启停本机的其他 nett 进程）；直接运行在系统上，不放进容器（第 3 节） | 节点身份密钥 | 不监听 | 所有节点 |
-| `nett-mesh` | Linux 上为具备 `CAP_NET_ADMIN`、`CAP_NET_RAW`（DNS 需要时加 `CAP_NET_BIND_SERVICE`）的专用用户；用户态平台上为能创建 TUN 的身份 | 组网私钥 | 组网地址（DNS、探测应答）；用户态平台上的 WireGuard 端口 | 开启 mesh 模块的节点；先于 nett-node 启动，单独的内存上限和更低的 OOM 优先级 |
-| `nett-transport` | 专用的低权限用户 | 无 | 不监听（主动连出） | 存在 TLS 传输候选时由 nett-node 启用 |
-| `nett-relay` | 专用的低权限用户 | 中继的 TLS 证书私钥；不持有组网私钥 | 公网：一个中继 UDP 端口、TLS 443 | 由 Hub 按节点可达性和签名策略决定启用，nett-node 负责启用或停用，配置从组网进程获取；`dial-only` 节点不运行 |
-| `nett-hub` | 专用的低权限用户；也可以用容器运行（Hub 不需要访问宿主） | Hub 身份密钥 | 本机（经 Hub 前的反向代理暴露） | Hub 主机 |
-| Hub 前的反向代理 | 低权限 | Hub 域名的证书私钥 | 公网 80、443 | Hub 主机 |
+| `nett-node` | root (replaces the executable on upgrade, starts and stops the other nett processes on the machine); runs directly on the system, not in a container (section 3) | Node identity key | Nothing | All nodes |
+| `nett-mesh` | On Linux, a dedicated user with `CAP_NET_ADMIN` and `CAP_NET_RAW` (plus `CAP_NET_BIND_SERVICE` when DNS needs it); on userspace platforms, an identity that can create a TUN | Mesh private key | Mesh address (DNS, probe responses); on userspace platforms, the WireGuard port | Nodes with the mesh module enabled; starts before nett-node, with its own memory limit and a lower OOM priority |
+| `nett-transport` | A dedicated low-privilege user | None | Nothing (dials out) | Enabled by nett-node when a TLS transport candidate exists |
+| `nett-relay` | A dedicated low-privilege user | The relay's TLS certificate private key; does not hold the mesh private key | Public: one relay UDP port, TLS 443 | The Hub decides whether it is enabled based on node reachability and signed policy; nett-node enables or disables it, and the configuration comes from the mesh process; `dial-only` nodes do not run it |
+| `nett-hub` | A dedicated low-privilege user; can also run in a container (the Hub does not need to access the host) | Hub identity key | Local (exposed through the reverse proxy in front of the Hub) | The Hub host |
+| Reverse proxy in front of the Hub | Low privilege | Private key of the certificate for the Hub domain | Public 80, 443 | The Hub host |
 
-用户自己的 Edge 不属于 nett，不在此列。公网端口清单见 design/mesh.md 第 5.5 节。
+The user's own Edge is not part of nett and is not listed here. The list of public ports is in design/mesh.md section 5.5.
 
-每个服务崩溃后由服务管理器自动重启，不依赖 nett-node。服务管理：Linux 使用 systemd（设置内存上限），macOS 使用 launchd，Synology DSM 使用开机任务（以后提供套件包），Home Assistant OS 使用加载项（ADR 0017）。
+Each service is restarted automatically by the service manager after a crash, without depending on nett-node. Service management: Linux uses systemd (with a memory limit), macOS uses launchd, Synology DSM uses a boot task (a package comes later), and Home Assistant OS uses an add-on (ADR 0017).
 
-### 13.3 安装
+### 13.3 Installation
 
-**Hub（一次）**：在 Hub 主机上用项目提供的 Compose 示例运行 nett-hub 与 Caddy，也可以原生运行（design/hub.md 第 8 节），然后：
+**Hub (once)**: run nett-hub and Caddy on the Hub host using the project's Compose example, or run natively (design/hub.md section 8), then:
 
 ```bash
-nett-hub init --url https://hub.example.com   # Hub 主机上：打印一次性关联码
-nett site link nett_lnk_…                     # 用户自己的电脑上
+nett-hub init --url https://hub.example.com   # on the Hub host: prints a one-time link code
+nett site link nett_lnk_…                     # on the user's own computer
 ```
 
-关联码 1 小时内有效，只能使用一次，防止他人抢先关联；`nett site link` 把站点的信任锚交给 Hub（design/hub.md 第 3.1 节）。恢复密钥在 `nett site init` 时生成，只保存在用户的电脑上（design/site.md 第 8 节）。
+The link code is valid for 1 hour and can be used only once, which keeps others from linking first; `nett site link` hands the site's trust anchors to the Hub (design/hub.md section 3.1). The recovery key is generated at `nett site init` and is stored only on the user's computer (design/site.md section 8).
 
-**节点**：在用户的电脑上 `nett site add <名字>`，在那台机器上运行它打印的命令（design/hub.md 第 3.3 节）：
+**Nodes**: on the user's computer run `nett site add <name>`, then run the command it prints on that machine (design/hub.md section 3.3):
 
 ```bash
-curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-<版本>-<目标>.tar.gz \
+curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-<version>-<target>.tar.gz \
   && echo "<SHA-256>  nett.tar.gz" | sha256sum -c && tar -xzf nett.tar.gz && sudo ./nett install nett_enr_…
 ```
 
-- **安装不运行 Hub 提供的代码**：入网命令由签名工具生成，写明发布包的 SHA-256，签名工具先用嵌入的发布公钥核对过发布签名（主备两把公钥在构建时嵌入 `nett`，ADR 0020）。发布包可以从 Hub 的缓存下载（节点无需访问公共代码托管平台，在网络受限的地区更可靠），也可以从项目的发布页下载，核对哈希之后才运行（design/hub.md 第 3.3 节）；
-- token 一次性有效且很快过期；
-- 也可以手动下载、用 minisign 核对签名后执行 `sudo nett install <token>`；
-- macOS 也可以通过 Homebrew 安装后执行 `sudo nett install <token>`。
+- **Installation runs no code provided by the Hub**: the enrollment command is generated by the signing tool and states the release package's SHA-256, and the signing tool has already checked the release signature with the embedded release public keys (the primary and backup public keys are embedded in `nett` at build time, ADR 0020). The release package can be downloaded from the Hub's cache (nodes do not need to reach public code hosting platforms, which is more reliable in regions with restricted networks) or from the project's release page, and it runs only after the hash is verified (design/hub.md section 3.3);
+- The token is valid once and expires quickly;
+- You can also download manually, verify the signature with minisign, then run `sudo nett install <token>`;
+- On macOS you can also install through Homebrew and then run `sudo nett install <token>`.
 
-**手机**：无需安装 nett。设备凭据与移动网关实现之后，由 `nett site` 的命令生成标准 WireGuard 配置（配置文件与二维码，ADR 0008），用任意 WireGuard 客户端导入；也可以导出 Surge、mihomo、sing-box 的配置，直连家里不通时自动改走网关。
+**Phone**: no nett installation is needed. Once device credentials and the mobile gateway are implemented, the `nett site` command generates a standard WireGuard configuration (a configuration file and a QR code, ADR 0008) that any WireGuard client can import; configurations for Surge, mihomo and sing-box can also be exported, which switch to the gateway automatically when direct access to home fails.
 
-### 13.4 命令
+### 13.4 Commands
 
-命令按作用范围分三组，每个命令只做一件事。`nett` 或 `nett help` 按这三组列出全部命令，任何命令加 `--help` 显示它的用法。
+Commands are in three groups by scope, and each command does one thing. `nett` or `nett help` lists all commands in these three groups, and any command with `--help` shows its usage.
 
-**整张网**：只在持有站点的那台电脑上运行。`nett site` 的命令维护机器、Edge 与宣告的网段、访问规则，并与 Hub 关联；每条修改命令列出要签名的内容，确认后签名并送达。命令与用法见 design/site.md 第 3 节。
+**The whole network**: run only on the computer that holds the site. The `nett site` commands maintain machines, Edges, advertised routes and access rules, and link with the Hub; each modifying command lists what is to be signed, and after confirmation signs and delivers it. Commands and usage are in design/site.md section 3.
 
-**这台机器**：在每台机器上运行，多数需要 root。
+**This machine**: run on each machine, most need root.
 
-| 命令 | 作用 |
+| Command | Effect |
 |---|---|
-| `nett status` | 本机与各对端的状态（design/status.md） |
-| `nett reload` | 请组网进程重新读取期望状态文件，显示是否被接受（design/status.md 第 4.1 节） |
-| `nett install` | 把这台机器装成成员：生成密钥、安装服务、导入期望状态（macOS，design/release.md 第 4 节）；带入网 token 时向 Hub 入网（design/hub.md 第 6 节） |
-| `nett uninstall` | 停止并删除服务，保留密钥和期望状态，再次 `install` 即恢复 |
-| `nett keys` | 只生成本机密钥、打印 `nett site add --keys` 要用的一行：用于容器内成员和自己写服务配置的机器 |
-| `nett leave` | 退出这张网（root）：通知 Hub，拆掉组网接口，删除本机的密钥、信任锚和期望状态，卸载服务；之后可以加入任何网（design/auth.md 第 8.3 节） |
-| `nett doctor` | 自动诊断，给出通俗的说明和处理建议 |
-| `nett whois <地址>` | 按本机已验证的准入材料，查询一个组网地址属于哪个节点、设备或 Edge |
-| `nett trust log` | 列出本机接受过的签名产物和撤销记录，不经过 Hub（design/auth.md 第 2 节） |
-| `nett upgrade` | 手动升级；默认由 Hub 经 `release` 分区推送，校验发布签名、拒绝降级后替换，失败自动回滚 |
-| `nett deny <模块>` | 设置本地硬性禁止（第 3 节），签名策略也无法突破 |
+| `nett status` | State of this machine and its peers (design/status.md) |
+| `nett reload` | Asks the mesh process to re-read the desired state file and shows whether it was accepted (design/status.md section 4.1) |
+| `nett install` | Sets this machine up as a member: generates keys, installs services, imports the desired state (macOS, design/release.md section 4); with an enrollment token, enrolls with the Hub (design/hub.md section 6) |
+| `nett uninstall` | Stops and removes the services, keeping the keys and the desired state; running `install` again restores it |
+| `nett keys` | Only generates this machine's keys and prints the line needed by `nett site add --keys`: for container members and machines whose service configuration is written by hand |
+| `nett leave` | Leaves this network (root): notifies the Hub, tears down the mesh interface, deletes this machine's keys, trust anchors and desired state, and uninstalls the services; the machine can then join any network (design/auth.md section 8.3) |
+| `nett doctor` | Automatic diagnosis, with plain-language explanations and suggested fixes |
+| `nett whois <address>` | Looks up which node, device or Edge a mesh address belongs to, according to the admission material this machine has verified |
+| `nett trust log` | Lists the signed artifacts and revocations this machine has accepted, without going through the Hub (design/auth.md section 2) |
+| `nett upgrade` | Manual upgrade; by default the Hub pushes it through the `release` partition; verifies the release signature, rejects downgrades, then replaces, and rolls back automatically on failure |
+| `nett deny <module>` | Sets a local hard prohibition (section 3) that a signed policy cannot exceed |
 
-Hub 主机上的 `nett-hub` 是另一个可执行文件，它的命令见 design/hub.md 第 8 节。
+`nett-hub` on the Hub host is a separate executable; its commands are in design/hub.md section 8.
 
-**服务进程**：由 systemd、launchd 或容器运行，用户不直接运行：`nett mesh`（组网进程）、`nett node`（控制代理）、`nett relay`、`nett transport`（第 13.2 节）。
+**Service processes**: run by systemd, launchd or containers, not run directly by the user: `nett mesh` (mesh process), `nett node` (control agent), `nett relay`, `nett transport` (section 13.2).
 
-### 13.5 节点形态
+### 13.5 Node forms
 
-| 形态 | 典型机器 | 运行的进程 | 组网 | 备注 |
+| Form | Typical machine | Processes run | Mesh | Notes |
 |---|---|---|---|---|
-| Hub 主机 | 能使用 Hub 域名的公网 VPS | nett-hub、Hub 前的反向代理（默认 Caddy）、nett-node、组网进程、nett-relay | 内核 WireGuard，`public` | Web 控制台加入后只用这一个地址（design/auth.md 第 5 节） |
-| 公网节点 | 普通 VPS | nett-node、组网进程、nett-relay，可选用户自己的 Edge | 内核 WireGuard，`public` | 都具备中继能力 |
-| NAT 节点 | NAT 型 VPS | nett-node、组网进程、传输适配进程 | 内核 WireGuard，`dial-only` | 至少连接两个 `public` 节点 |
-| 智能入口 | 家里常开的 NAS 或小主机 | nett-node、组网进程、可选 nett-relay | 内核或用户态（在组网进程中） | 宣告局域网段；路由器映射端口后为 `public` |
-| 局域网主机 | 家里的其他机器 | 不运行 nett | 经智能入口 | 需要名字时添加别名（design/mesh.md 第 11 节） |
-| macOS 主机 | Mac（含笔记本） | 原生 nett-node、组网进程；可选容器内成员 | 原生成员：用户态 WireGuard + utun（ADR 0018）；容器内成员用内核 WireGuard（ADR 0016） | 开了容器内成员时，同一台主机对应多个节点身份 |
-| HAOS 设备 | 运行 Home Assistant OS 的设备 | 加载项内的 nett-node 与组网进程，可选 nett-relay | 内核 WireGuard（ADR 0017） | 可做智能入口 |
-| 设备 | 手机 | 标准 WireGuard 客户端，或 Surge、mihomo、sing-box | 双路径（ADR 0008）；代理客户端自动回落（ADR 0018） | 不运行 nett；App 在 M3 |
+| Hub host | A public VPS that can use the Hub domain | nett-hub, reverse proxy in front of the Hub (Caddy by default), nett-node, mesh process, nett-relay | Kernel WireGuard, `public` | After the web console arrives, only this one address is used (design/auth.md section 5) |
+| Public node | An ordinary VPS | nett-node, mesh process, nett-relay, optionally the user's own Edge | Kernel WireGuard, `public` | All are relay-capable |
+| NAT node | A NAT-type VPS | nett-node, mesh process, transport adapter | Kernel WireGuard, `dial-only` | Connects to at least two `public` nodes |
+| Smart gateway | An always-on NAS or small host at home | nett-node, mesh process, optionally nett-relay | Kernel or userspace (in the mesh process) | Advertises the LAN prefix; becomes `public` once the router maps a port |
+| LAN host | Other machines at home | Does not run nett | Through the smart gateway | Add an alias when a name is needed (design/mesh.md section 11) |
+| macOS host | A Mac (including laptops) | Native nett-node, mesh process; optionally a container member | Native member: userspace WireGuard + utun (ADR 0018); container member uses kernel WireGuard (ADR 0016) | With a container member enabled, the same host corresponds to multiple node identities |
+| HAOS device | A device running Home Assistant OS | nett-node and mesh process in the add-on, optionally nett-relay | Kernel WireGuard (ADR 0017) | Can act as a smart gateway |
+| Device | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | Dual path (ADR 0008); proxy clients fall back automatically (ADR 0018) | Does not run nett; the app arrives in M3 |
 
-## 14. 支持的平台与外部对接
+## 14. Supported platforms and external integrations
 
-### 14.1 平台（首个版本）
+### 14.1 Platforms (first release)
 
-| 平台 | 运行方式 | 组网 | 可用模块 |
+| Platform | How it runs | Mesh | Available modules |
 |---|---|---|---|
-| Linux（Debian、Ubuntu，以及其他内核 ≥ 5.6 的发行版） | systemd，原生 | 内核 WireGuard | 全部 |
-| Linux（旧内核） | systemd，原生 | 用户态 WireGuard | 全部 |
-| Synology DSM 7.x | 开机任务（以后提供套件包），原生 | 用户态 WireGuard | mesh、relay |
-| macOS | launchd，原生 | 原生成员：用户态 WireGuard + utun（ADR 0018）；需要访客真实 IP 的容器服务另用容器内成员（OrbStack、Docker Desktop，ADR 0016） | mesh、relay |
-| Home Assistant OS | 加载项（ADR 0017） | 内核 WireGuard | mesh（可做智能入口）、relay |
-| 手机 | 标准 WireGuard 客户端，或 Surge、mihomo、sing-box（自动回落） | — | — |
+| Linux (Debian, Ubuntu, and other distributions with kernel ≥ 5.6) | systemd, native | Kernel WireGuard | All |
+| Linux (older kernels) | systemd, native | Userspace WireGuard | All |
+| Synology DSM 7.x | Boot task (a package comes later), native | Userspace WireGuard | mesh, relay |
+| macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018); container services that need the visitor's real IP use a container member (OrbStack, Docker Desktop, ADR 0016) | mesh, relay |
+| Home Assistant OS | Add-on (ADR 0017) | Kernel WireGuard | mesh (can act as a smart gateway), relay |
+| Phone | A standard WireGuard client, or Surge, mihomo, sing-box (automatic fallback) | — | — |
 
-- Windows 成员和 iOS、Android App 在 M3（ADR 0018）；
-- 其他平台标为"未测试"，不承诺支持；能力探测会说明缺少什么、降级成什么；
-- 运行在普通 Linux 上的 Home Assistant（Container、Core 安装方式）按 Linux 处理。
+- Windows members and the iOS and Android apps arrive in M3 (ADR 0018);
+- Other platforms are marked "untested" and support is not promised; capability detection explains what is missing and what it degrades to;
+- Home Assistant running on ordinary Linux (the Container and Core installation methods) is treated as Linux.
 
-### 14.2 外部对接（首批）
+### 14.2 External integrations (first batch)
 
-| 类别 | 首批支持 | 扩展方式 |
+| Category | First batch supported | How to extend |
 |---|---|---|
-| Hub 前的反向代理 | Caddy（项目提供的 Compose 示例中，ADR 0009） | — |
+| Reverse proxy in front of the Hub | Caddy (in the project's Compose example, ADR 0009) | — |
 
-### 14.3 语言
+### 14.3 Language
 
-Web 界面、API 错误信息，以及面向用户的文档（README、安装、使用与排障手册），都提供中文和英文。设计文档和 ADR 以中文为准，只维护一份（CLAUDE.md "语言"）。
+Everything nett ships and documents is in English only, like common open-source projects: the command line, API error messages, the future web console, README and guides, design documents and ADRs (CLAUDE.md, "Language"). Each text exists once, so when users report problems or search for troubleshooting material they are matching the same sentence. How to write command-line output:
 
-命令行只用英文，与常见的开源命令行工具一致：输出、帮助和错误信息只有一种文本，用户报告问题、搜索排障资料时对照的都是同一句话。写法：
+- Keep the wording neutral and concise: state the result first, and when the user needs to do something next, give the complete command; do not reference design documents;
+- Human-readable output is column-aligned, with units on values and a precision suited to reading, and times written as relative times (`12s ago`); where there is no value, write `-`;
+- Output meant for programs uses `--json`, with stable field names and a version number;
+- No colors and no emoji;
+- Exit codes: 0 for success, non-zero for failure, which scripts use to decide.
 
-- 文案中性、简洁：先说结果，需要用户接着做什么时给出完整的命令；不引用设计文档；
-- 给人看的输出按列对齐，数值带单位、取适合阅读的精度，时间写成相对时间（`12s ago`）；没有值的地方写 `-`；
-- 给程序读的输出用 `--json`，字段名稳定，带版本号；
-- 不用颜色和表情符号；
-- 退出码：成功为 0，失败为非 0，脚本据此判断。
+### 14.4 Telemetry
 
-### 14.4 遥测
+No usage data is collected or reported by default.
 
-默认不收集、不上报任何使用数据。
+## 15. Security essentials
 
-## 15. 安全要点
-
-| 要点 | 在哪里 |
+| Point | Where |
 |---|---|
-| 发布签名属于项目，主备两把：主钥匙只在 CI 中单独的签名任务里可用，备用钥匙只离线保存；节点只自动接受更高版本，降级需要签名；升级只经 `release` 分区 | design/auth.md 第 11.3 节、ADR 0012、0020 |
-| 备份包含 Hub 身份私钥，用备份公钥加密，由其他节点定时拉取 | design/auth.md 第 12 节、design/protocol.md 第 5 节 |
-| 恢复密钥只在用户的电脑上由签名工具使用，Hub 从未见过恢复私钥 | design/site.md 第 8 节、design/auth.md 第 4 节 |
-| 节点不在云主机的"局域网地址"上提供 DNS；局域网地址上的探测应答不响应未认证的探测 | design/mesh.md 第 7、11 节 |
-| 签名的内容由签名工具在本机计算并显示，不经 Hub；`nett trust log` 事后核对 | design/auth.md 第 2 节、ADR 0024 |
-| 撤销记录：旧的签名产物不能恢复已撤销的权限；准入材料不按批准的过期时间拒绝 | design/auth.md 第 10.2、10.4 节 |
-| 访问规则签名展开后的结果，改标签不能扩大访问 | design/mesh.md 第 12 节、design/api-resources.md 第 5.5 节 |
-| Edge 专用地址防冒用；CONNECT 由 nett-relay 逐连接授权 | ADR 0015；design/mesh.md 第 5.4、12 节 |
-| 过滤规则挂在目的地址转换之前，先于对端生效，失败时拒绝 | design/mesh.md 第 12 节 |
-| Hub 只信任它前面那台反向代理发来的 `X-Forwarded-For` | design/auth.md 第 12 节 |
+| Release signing belongs to the project, with a primary and a backup key: the primary key is available only in a separate signing job in CI, and the backup key is stored offline only; nodes automatically accept only higher versions, and downgrades require a signature; upgrades go only through the `release` partition | design/auth.md section 11.3, ADR 0012, 0020 |
+| The backup contains the Hub identity private key, is encrypted with the backup public key, and is pulled periodically by other nodes | design/auth.md section 12, design/protocol.md section 5 |
+| The recovery key is used only by the signing tool on the user's computer, and the Hub has never seen the recovery private key | design/site.md section 8, design/auth.md section 4 |
+| Nodes do not serve DNS on the "LAN address" of a cloud host; probe responses on LAN addresses do not respond to unauthenticated probes | design/mesh.md sections 7, 11 |
+| The content to be signed is computed and displayed locally by the signing tool, not through the Hub; `nett trust log` checks afterward | design/auth.md section 2, ADR 0024 |
+| Revocations: old signed artifacts cannot restore revoked privileges; admission material is not rejected by its approved expiry time | design/auth.md sections 10.2, 10.4 |
+| Access rules are signed as the expanded result, so relabeling cannot widen access | design/mesh.md section 12, design/api-resources.md section 5.5 |
+| Edge address anti-spoofing; CONNECT is authorized per connection by nett-relay | ADR 0015; design/mesh.md sections 5.4, 12 |
+| Filter rules are attached before destination NAT, take effect before peers, and deny on failure | design/mesh.md section 12 |
+| The Hub trusts only the `X-Forwarded-For` sent by the reverse proxy in front of it | design/auth.md section 12 |
 
-## 16. 主要风险
+## 16. Main risks
 
-| 风险 | 说明 | 应对 |
+| Risk | Description | Response |
 |---|---|---|
-| 组网工作量 | M1 是全项目最大的一块：路径层、准入验证、单端口中继、分类转换、打洞 | M1 第一步是 Linux 原型关卡，实测中继接管、切换时间、漫游纠正、MTU，并与原生 WireGuard、Tailscale 对比性能，通过后再铺开；macOS 原生成员与 DSM 共用用户态 WireGuard；核心逻辑与平台无关，为 M3 的客户端预留 |
-| 用户态 WireGuard 的性能与内存 | 吞吐、延迟、CPU 和空闲 RSS | 会话层封装在 trait 之后，可以替换实现（design/userspace.md 第 3 节）；性能在同一台 Mac 上与 wireguard-go 对比、在同一台 NAS 上与 Tailscale 对比；在 NAS 系统上先逐项验证 TUN、IP 转发、NAT 能力 |
-| 网络环境 | UDP 被限速或识别、跨境链路晚高峰质量差、域名备案限制 | TLS 传输兜底；组网进程持续测量并上报线路质量；某条传输（例如按 IP、不带 SNI 的 TLS）在某个网络里是否可用，由测量决定，不预设 |
-| 资源预算 | 节点上最多四个常驻进程（node、组网进程、传输适配进程、relay），各 ≤ 5 MB | 分别计量，同时记录 RSS 和 PSS（CLAUDE.md "资源纪律"）；分片重组落盘；每个里程碑做浸泡测试 |
-| 只支持 HTTP/1.1 CONNECT 的客户端 | 入口节点上用不了 CONNECT | 使用非入口节点上的 nett-relay |
-| 云安全组只能手工改 | 无法自动化 | design/mesh.md 第 5.5 节的端口清单，`nett doctor` 给出具体提示 |
-| Hub 主机是最大的单点 | Hub、反向代理、中继、移动网关集中在一台机器上 | 第 12.3 节；加密备份由其他节点拉取 |
+| Mesh workload | M1 is the largest piece of the whole project: path layer, admission verification, single-port relay, classified translation, hole punching | The first step of M1 is the Linux prototype gate, which measures relay takeover, switchover time, roaming correction and MTU, and compares performance with native WireGuard and Tailscale; only after it passes is the work spread out; the macOS native member and DSM share the userspace WireGuard; the core logic is platform-independent, leaving room for M3 clients |
+| Userspace WireGuard performance and memory | Throughput, latency, CPU and idle RSS | The session layer is wrapped behind a trait so the implementation can be replaced (design/userspace.md section 3); performance is compared with wireguard-go on the same Mac and with Tailscale on the same NAS; TUN, IP forwarding and NAT capabilities are verified one by one on the NAS system first |
+| Network environment | UDP throttled or identified, poor cross-border line quality at evening peak, domain filing restrictions | TLS transport as a fallback; the mesh process measures continuously and reports line quality; whether a given transport (for example, TLS by IP without SNI) is usable in a given network is decided by measurement, not assumed |
+| Resource budget | Up to four resident processes per node (node, mesh process, transport adapter, relay), each ≤ 5 MB | Measured separately, recording both RSS and PSS (CLAUDE.md, "Resource discipline"); fragment reassembly is spilled to disk; a soak test at every milestone |
+| Clients that support only HTTP/1.1 CONNECT | CONNECT cannot be used on ingress nodes | Use nett-relay on a non-ingress node |
+| Cloud security groups can only be changed by hand | Cannot be automated | The port list in design/mesh.md section 5.5, and `nett doctor` gives specific hints |
+| The Hub host is the largest single point | The Hub, reverse proxy, relay and mobile gateway are concentrated on one machine | Section 12.3; encrypted backups are pulled by other nodes |
 
-## 17. 实践中得到的事实
+## 17. Facts learned in practice
 
-第 1–7 条来自一次真实部署：云主机上的 Caddy 经 WireGuard 隧道，回源到家里 macOS 上 OrbStack 中的容器服务。第 9、10 条是在容器中对标准 Caddy 2.10.2 的实测。
+Items 1-7 come from a real deployment: Caddy on a cloud host, over a WireGuard tunnel, forwarding origin traffic to a container service in OrbStack on a macOS machine at home. Items 9 and 10 were measured in a container against standard Caddy 2.10.2.
 
-| # | 事实 | 用在 |
+| # | Fact | Used in |
 |---|---|---|
-| 1 | macOS 上的 Docker（OrbStack）：经发布端口访问容器的所有客户端，在容器内都显示为容器网络的网关地址，局域网、VPN、本机访问都一样 | 第 8 节；ADR 0015、0016 |
-| 2 | 容器经 `host.docker.internal` 访问宿主上的原生服务，宿主看到的来源是 `127.0.0.1` | 第 8 节 |
-| 3 | OrbStack 容器中的内核 WireGuard，在宿主开着代理类 VPN 应用（增强模式）时工作正常，UDP 直接发出，没有被代理截走 | ADR 0016 |
-| 4 | 有的云厂商的安全组默认拒绝全部入方向 UDP，而且只能在网页控制台手动修改 | design/mesh.md 第 5.5 节 |
-| 5 | 容器中的 Caddy 可以直接经宿主的 WireGuard 接口访问隧道地址，Docker 的地址伪装把来源换成宿主的隧道地址 | ADR 0015（按容器地址匹配 Edge 流量） |
-| 6 | Caddy 默认用真实来源覆盖 `X-Forwarded-For`，并写入 `X-Forwarded-Proto: https`，伪造的头会被覆盖 | 第 8 节 |
-| 7 | 把隧道端点放进服务所在的容器网络、只在隧道地址上监听，可以让服务认出代理；这个端点容器空闲内存约 1.6 MiB | ADR 0016 |
-| 8 | 中国大陆的云主机：域名未在该云厂商接入备案时，不能用于网站服务（已知的平台限制，非实测） | design/mesh.md 第 5.3 节 |
-| 9 | 标准 Caddy 的反向代理能转发 HTTP/2 CONNECT 隧道（隧道内再套 TLS 也正常），但不能按 Host 路由它；用"方法为 CONNECT 且 SNI 匹配"的表达式匹配器，可以在同一个监听端口上把它和网站分开 | design/mesh.md 第 5.4 节；ADR 0011 |
-| 10 | 标准 Caddy 不能转发 HTTP/1.1 CONNECT 隧道：请求会到达后端，但 Caddy 把应答当作普通响应处理，隧道建立不起来 | design/mesh.md 第 5.4 节；ADR 0011 |
+| 1 | Docker on macOS (OrbStack): all clients that reach a container through a published port appear inside the container as the container network's gateway address, whether from the LAN, a VPN, or the machine itself | Section 8; ADR 0015, 0016 |
+| 2 | When a container reaches a native service on the host through `host.docker.internal`, the host sees the source as `127.0.0.1` | Section 8 |
+| 3 | Kernel WireGuard inside an OrbStack container works normally while a proxy-style VPN app (enhanced mode) is on, on the host; UDP is sent out directly and is not intercepted by the proxy | ADR 0016 |
+| 4 | Some cloud providers' security groups deny all inbound UDP by default and can only be changed manually in the web console | design/mesh.md section 5.5 |
+| 5 | Caddy in a container can reach a tunnel address directly through the host's WireGuard interface, and Docker's address masquerading rewrites the source to the host's tunnel address | ADR 0015 (matching Edge traffic by container address) |
+| 6 | Caddy overwrites `X-Forwarded-For` with the real source by default and writes `X-Forwarded-Proto: https`, so forged headers are overwritten | Section 8 |
+| 7 | Putting the tunnel endpoint into the container network where the service lives and listening only on the tunnel address lets the service recognize the proxy; this endpoint container uses about 1.6 MiB of idle memory | ADR 0016 |
+| 8 | Cloud hosts in mainland China: a domain that is not filed with that cloud provider cannot be used for website service (a known platform restriction, not measured) | design/mesh.md section 5.3 |
+| 9 | Standard Caddy's reverse proxy can forward HTTP/2 CONNECT tunnels (including TLS inside the tunnel), but cannot route them by Host; an expression matcher of "method is CONNECT and SNI matches" can separate them from websites on the same listening port | design/mesh.md section 5.4; ADR 0011 |
+| 10 | Standard Caddy cannot forward HTTP/1.1 CONNECT tunnels: the request reaches the backend, but Caddy treats the response as an ordinary response and the tunnel cannot be established | design/mesh.md section 5.4; ADR 0011 |

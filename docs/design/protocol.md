@@ -1,261 +1,261 @@
-# node ↔ Hub 协议
+# node ↔ Hub Protocol
 
-- 状态：草案
-- 阶段：P0 设计；M1 实现（见第 12 节）
-- 相关：ADR [0003](../adr/0003-api-and-protocols.md)、[0019](../adr/0019-mesh-only.md)、[auth.md](auth.md)、[changes.md](changes.md)、[api-resources.md](api-resources.md)
+- Status: draft
+- Phase: P0 design; M1 implementation (see section 12)
+- Related: ADR [0003](../adr/0003-api-and-protocols.md), [0019](../adr/0019-mesh-only.md), [auth.md](auth.md), [changes.md](changes.md), [api-resources.md](api-resources.md)
 
-## 1. 范围与目标
+## 1. Scope and goals
 
-本文定义 nett-node 与 Hub 之间的控制协议：连接建立、加密与认证、消息格式、期望状态下发、状态上报、任务执行、断线重连和版本兼容。组网数据面（节点之间的流量）不在本文范围，见 `mesh.md`。
+This document defines the control protocol between nett-node and the Hub: connection establishment, encryption and authentication, message format, desired state delivery, status reporting, task execution, reconnection, and version compatibility. The mesh data plane (traffic between nodes) is out of scope; see `mesh.md`.
 
-目标：
+Goals:
 
-| 目标 | 含义 |
+| Goal | Meaning |
 |---|---|
-| 端到端安全 | 即使 TLS 在 Hub 前的反向代理上终止，反向代理也无法读取或篡改消息 |
-| 离线可用 | Hub 不在线时 node 照常工作；恢复后自动补齐状态 |
-| 资源占用低 | 单条长连接；消息紧凑；所有缓冲区有上限 |
-| 可演进 | 相邻版本的 node 与 Hub 能够互通；新增能力不破坏旧版本 |
+| End-to-end security | Even if TLS terminates at a reverse proxy in front of the Hub, the reverse proxy cannot read or tamper with messages |
+| Works offline | The node keeps working when the Hub is offline; state is caught up automatically after recovery |
+| Low resource use | A single long-lived connection; compact messages; all buffers have limits |
+| Evolvable | Adjacent versions of node and Hub interoperate; new capabilities do not break old versions |
 
-## 2. 分层
+## 2. Layering
 
 ```
-┌─ 消息：Protobuf Envelope（第 4、5 节）
-├─ Noise 通道：Noise_IK_25519_ChaChaPoly_BLAKE2s（第 3 节）
-├─ WebSocket：二进制帧；一个 WebSocket 消息承载一个 Noise 消息
-└─ TLS：wss://，可以由 Hub 前的反向代理终止
+┌─ Messages: Protobuf Envelope (sections 4, 5)
+├─ Noise channel: Noise_IK_25519_ChaChaPoly_BLAKE2s (section 3)
+├─ WebSocket: binary frames; one WebSocket message carries one Noise message
+└─ TLS: wss://, may terminate at a reverse proxy in front of the Hub
 ```
 
-- WebSocket 路径：`/node/v1/connect`。它不属于对外 REST API，不出现在 OpenAPI 文档中；
-- 选择 WebSocket over TLS（443）而不是自定义端口，是为了穿过只放行 HTTPS 的网络，并与 Hub 的控制台共用入口。
+- WebSocket path: `/node/v1/connect`. It is not part of the public REST API and does not appear in the OpenAPI document;
+- WebSocket over TLS (443) is chosen over a custom port to pass through networks that allow only HTTPS and to share the entry point with the Hub's console.
 
-## 3. 加密通道与认证
+## 3. Encrypted channel and authentication
 
-### 3.1 密钥
+### 3.1 Keys
 
-| 密钥 | 类型 | 说明 |
+| Key | Type | Description |
 |---|---|---|
-| Hub 身份密钥 | X25519 静态密钥 | 公钥在入网时固定到节点（完整公钥包含在入网 token 中，IK 握手需要它） |
-| 节点身份密钥 | X25519 静态密钥 | 入网时在节点本地生成，私钥不离开节点；Hub 保存公钥与节点 ID 的对应关系 |
+| Hub identity key | X25519 static key | The public key is pinned to the node at enrollment (the full public key is contained in the enrollment token, since the IK handshake needs it) |
+| Node identity key | X25519 static key | Generated locally on the node at enrollment; the private key never leaves the node; the Hub stores the mapping between the public key and the node ID |
 
-Noise 的静态密钥直接作为身份密钥，不再另设签名密钥：通道本身已提供双向认证，需要独立验证的产物（节点策略、信任锚）由用户的 passkey 或恢复密钥签名（见 `auth.md`）。
+The Noise static keys serve directly as identity keys, with no separate signing key: the channel itself provides mutual authentication, and artifacts that need independent verification (node policies, trust anchors) are signed by the user's passkey or recovery key (see `auth.md`).
 
-### 3.2 握手（IK 模式，1 个往返）
+### 3.2 Handshake (IK pattern, 1 round trip)
 
 ```
 node                                                     Hub
- │ 消息 1：e, es, s, ss + 加密载荷 Hello ───────────────────►│
- │                                                         │ 解出节点静态公钥 → 查找节点
- │                                                         │（入网时：校验 Hello 中的准入证明）
- │◄─────────────────── 消息 2：e, ee, se + 加密载荷 Welcome │
- │ 之后双方使用传输密钥收发消息
+ │ Message 1: e, es, s, ss + encrypted payload Hello ───────►│
+ │                                                         │ Decrypt the node static public key → look up the node
+ │                                                         │ (at enrollment: verify the admission proof in Hello)
+ │◄─────────────────── Message 2: e, ee, se + encrypted payload Welcome │
+ │ After that both sides exchange messages with the transport keys
 ```
 
-- Prologue：`nett-control/1`，防止与其他协议混用；
-- 节点的静态公钥在消息 1 中加密传输，外部观察者无法得知是哪个节点在连接；
-- Hub 拒绝未知或已吊销的节点公钥；拒绝时返回明确的错误码后关闭连接（见第 4.3 节）；
-- 重新加密：每个方向每传输 2^20 条消息执行一次 Noise rekey。两端各自按条数进行，不需要额外的消息，也不依赖时钟；控制连接通常远在此之前就因重连而重新握手。
+- Prologue: `nett-control/1`, to prevent mixing with other protocols;
+- The node's static public key is transmitted encrypted in message 1, so an outside observer cannot tell which node is connecting;
+- The Hub rejects unknown or revoked node public keys; on rejection it returns a clear error code and then closes the connection (see section 4.3);
+- Rekeying: a Noise rekey is performed once per 2^20 messages in each direction. Each end counts on its own, which needs no extra messages and does not depend on the clock; control connections normally reconnect and re-handshake long before this.
 
-### 3.3 Hello 与 Welcome
+### 3.3 Hello and Welcome
 
-| Hello（node → Hub） | 说明 |
+| Hello (node → Hub) | Description |
 |---|---|
-| `protocol_versions` | 支持的协议版本范围 |
-| `node_version` | nett 版本 |
-| `node_id` | 节点 ID；入网时使用 token 中预先分配的 ID |
-| `admission_proof` | 仅入网时携带：入网私钥对 `{节点 ID, 身份公钥, 组网公钥}` 的签名，即 `auth.md` 第 10.5 节准入证明的 JSON（第 8.2 节）；其中的身份公钥必须是握手用的那一把 |
-| `boot_id` | 本次进程启动的随机 ID，用于识别重启 |
-| `applied_generation` | 本地已应用的期望状态代数（第 6 节） |
-| `capabilities` | 可选功能标志（第 9 节） |
+| `protocol_versions` | Range of supported protocol versions |
+| `node_version` | nett version |
+| `node_id` | Node ID; at enrollment, the ID pre-assigned in the token |
+| `admission_proof` | Carried only at enrollment: the signature by the enrollment private key over `{node ID, identity public key, mesh public key}`, that is, the JSON of the admission proof in `auth.md` section 10.5 (section 8.2); the identity public key in it must be the one used in the handshake |
+| `boot_id` | Random ID of this process start, used to detect restarts |
+| `applied_generation` | The desired state generation applied locally (section 6) |
+| `capabilities` | Optional feature flags (section 9) |
 
-| Welcome（Hub → node） | 说明 |
+| Welcome (Hub → node) | Description |
 |---|---|
-| `protocol_version` | 选定的协议版本 |
-| `hub_version` | Hub 版本 |
-| `session_id` | 本次会话 ID |
-| `server_time` | 服务器时间，用于时钟校准 |
-| `keepalive_secs` | 保活间隔 |
+| `protocol_version` | The selected protocol version |
+| `hub_version` | Hub version |
+| `session_id` | ID of this session |
+| `server_time` | Server time, for clock calibration |
+| `keepalive_secs` | Keepalive interval |
 
-入网时 Welcome 与平时相同：节点从随后的第一份期望状态中拿到信任锚清单和自己的准入材料，核对信任锚清单的指纹与 token 中的相同（`auth.md` 第 8.2 节）。
+At enrollment, Welcome is the same as usual: the node obtains the trust anchor list and its own admission material from the first desired state that follows, and checks that the fingerprint of the trust anchor list matches the one in the token (`auth.md` section 8.2).
 
-## 4. 消息格式
+## 4. Message format
 
 ### 4.1 Envelope
 
 ```protobuf
 message Envelope {
-  uint64 id = 1;                 // 每个方向单调递增
-  uint64 reply_to = 2;           // 应答时填写对方消息的 id
+  uint64 id = 1;                 // monotonically increasing in each direction
+  uint64 reply_to = 2;           // when replying, the id of the peer's message
   google.protobuf.Timestamp sent_at = 3;
   oneof body {
-    // 第 5 节列出的消息类型
+    // message types listed in section 5
   }
 }
 ```
 
-- 单条 Envelope 编码后不超过 60 KiB（Noise 单条消息上限为 65535 字节）；
-- 超过上限的内容（如完整期望状态）使用分片：`Chunk { stream_id, seq, last, data }`，接收方按 `stream_id` 重组，每个流的总大小有上限。
+- A single encoded Envelope does not exceed 60 KiB (a single Noise message is limited to 65535 bytes);
+- Content above the limit (such as a full desired state) uses chunking: `Chunk { stream_id, seq, last, data }`, which the receiver reassembles by `stream_id`, with a total size limit per stream.
 
-### 4.2 包名与演进
+### 4.2 Package name and evolution
 
-- 包名 `nett.v1`；字段编号不复用，删除的字段使用 `reserved`；枚举的 0 值为 `*_UNSPECIFIED`；
-- 不认识的 `oneof` 分支或字段：接收方忽略并记录调试日志，不断开连接。
+- Package name `nett.v1`; field numbers are never reused, and deleted fields use `reserved`; the 0 value of an enum is `*_UNSPECIFIED`;
+- An unrecognized `oneof` branch or field: the receiver ignores it and logs at debug level, without disconnecting.
 
-### 4.3 错误
+### 4.3 Errors
 
 ```protobuf
 message Error {
-  ErrorCode code = 1;   // 例如 NODE_REVOKED、UPGRADE_REQUIRED、INVALID_MESSAGE、RATE_LIMITED、ENROLLMENT_REFUSED
+  ErrorCode code = 1;   // for example NODE_REVOKED, UPGRADE_REQUIRED, INVALID_MESSAGE, RATE_LIMITED, ENROLLMENT_REFUSED
   string message = 2;
   uint64 related_id = 3;
 }
 ```
 
-致命错误（如节点已吊销、入网被拒绝）发送后关闭连接；非致命错误只针对相关消息。入网被拒绝（`ENROLLMENT_REFUSED`）的原因写在 `message` 中：token 过期、这台机器已经入网、准入证明不对（hub.md 第 6 节）。
+A fatal error (such as a revoked node or a refused enrollment) is sent and then the connection is closed; a non-fatal error concerns only the related message. The reason for a refused enrollment (`ENROLLMENT_REFUSED`) is written in `message`: token expired, this machine has already enrolled, or the admission proof is wrong (hub.md section 6).
 
-## 5. 消息类型
+## 5. Message types
 
-| 类别 | 方向 | 消息 | 用途 |
+| Category | Direction | Message | Purpose |
 |---|---|---|---|
-| 会话 | 双向 | `Ping` / `Pong` | 保活、往返时间、时钟偏差 |
-| | 双向 | `Goodbye` | 主动关闭，附原因（升级、重启、关机） |
-| | node → Hub | `Leave` | 节点自行退出（`nett leave`）；Hub 将节点标记为 `removed`，属于降低权限，不需要签名 |
-| | 双向 | `Error` | 见 4.3 |
-| 期望状态 | Hub → node | `DesiredState` | 期望状态快照或增量（第 6 节） |
-| | node → Hub | `StateAck` | 应用结果，按分区报告 |
-| 清单与状态 | node → Hub | `Inventory` | 平台、能力、地址（连接 Hub 时本机用的地址，Hub 据此得知 `public` 机器的公网地址，hub.md 第 5 节）；连接时发送完整版本，之后发送变化 |
-| | node → Hub | `ModuleStatus` | 各模块状态与条件 |
-| 事件 | node → Hub | `NodeEvent` | 节点侧发生的事件：策略被拒绝、升级结果等 |
-| 任务 | Hub → node | `Task` | 变更集步骤在节点上的执行请求（第 7 节） |
-| | node → Hub | `TaskUpdate` | 接受、执行中、成功、失败、中断（`interrupted`），以及结果 |
-| 备份 | node → Hub | `BackupFetch` | 存放备份的节点定时拉取最新的加密备份（Hub 从不主动连接节点） |
-| | Hub → node | `BackupChunk` | 加密备份的分片 |
-| 组网 | Hub → node | `DesiredState` 中的组网分区 | 地址、对端公钥及准入材料、候选路径、中继名单 |
-| | node → Hub | `LinkReport` | 链路的当前路径、传输方式与质量；本机的映射地址与 NAT 类型（`mesh.md` 第 6.1 节）。内容是组网进程本机状态的 JSON（`status.md` 第 6 节），有变化时发送 |
-| | 双向 | `PathSwitch` | 双方都是 `dial-only`、当前隧道又不可用时，经 Hub 转达"切换到某个中继"及确认（`mesh.md` 第 8.4 节） |
-| 恢复 | node → Hub | `ArtifactSync` | Hub 从备份恢复后，节点回传已生效的签名产物和撤销记录（第 6.4 节） |
+| Session | Both | `Ping` / `Pong` | Keepalive, round-trip time, clock offset |
+| | Both | `Goodbye` | Deliberate close, with a reason (upgrade, restart, shutdown) |
+| | node → Hub | `Leave` | The node leaves on its own (`nett leave`); the Hub marks the node `removed`, which lowers privileges and needs no signature |
+| | Both | `Error` | See 4.3 |
+| Desired state | Hub → node | `DesiredState` | Desired state snapshot or delta (section 6) |
+| | node → Hub | `StateAck` | Application result, reported per partition |
+| Inventory and status | node → Hub | `Inventory` | Platform, capabilities, addresses (the address this machine uses when connecting to the Hub, from which the Hub learns the public address of a `public` machine, hub.md section 5); the full version is sent on connect, changes afterwards |
+| | node → Hub | `ModuleStatus` | Status and conditions of each module |
+| Events | node → Hub | `NodeEvent` | Events that occur on the node: policy rejected, upgrade result, etc. |
+| Tasks | Hub → node | `Task` | A request to execute a change set step on the node (section 7) |
+| | node → Hub | `TaskUpdate` | Accepted, running, succeeded, failed, interrupted (`interrupted`), and the result |
+| Backup | node → Hub | `BackupFetch` | The node that stores backups periodically pulls the latest encrypted backup (the Hub never initiates connections to nodes) |
+| | Hub → node | `BackupChunk` | A chunk of the encrypted backup |
+| Mesh | Hub → node | The mesh partition in `DesiredState` | Addresses, peer public keys and admission material, candidate paths, relay list |
+| | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh process's local state (`status.md` section 6), sent when it changes |
+| | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4) |
+| Recovery | node → Hub | `ArtifactSync` | After the Hub is restored from a backup, the node sends back the signed artifacts and revocations in effect (section 6.4) |
 
-## 6. 期望状态
+## 6. Desired state
 
-### 6.1 分区与代数
+### 6.1 Partitions and generation
 
-期望状态按分区组织，每个分区独立版本化：
+The desired state is organized in partitions, each versioned independently:
 
-| 分区 | 内容 | 阶段 |
+| Partition | Content | Phase |
 |---|---|---|
-| `trust` | 信任锚清单（带签名） | M1 |
-| `policy` | 节点策略（提升权限时带签名） | M1 |
-| `hub_endpoints` | Hub 的端点列表：`https://` 地址组成的 JSON 数组 | M1 |
-| `release` | 目标版本与发布包地址；节点用嵌入 `nett` 的项目公钥（主备两把）验证发布包，只自动接受更高的版本（`auth.md` 第 11.3 节）。这是升级的唯一通路 | M1 |
-| `mesh` | 组网拓扑、准入材料与撤销记录。成员、宣告网段、访问规则集都是签名产物，由组网进程独立验证（`mesh.md` 第 4.1 节）；节点名不签名，只用于显示（`status.md` 第 5 节）；nett-node 只负责转交。内容就是组网进程的期望状态文件（JSON），与不接 Hub 时签名工具写出的文件相同（`hub.md` 第 4 节） | M1 |
+| `trust` | Trust anchor list (signed) | M1 |
+| `policy` | Node policy (signed when it raises privileges) | M1 |
+| `hub_endpoints` | The Hub's endpoint list: a JSON array of `https://` addresses | M1 |
+| `release` | Target version and release package address; the node verifies the package with the project public keys (primary and backup) embedded in `nett` and automatically accepts only higher versions (`auth.md` section 11.3). This is the only path for upgrades | M1 |
+| `mesh` | Mesh topology, admission material, and revocations. Members, advertised routes, and access rule sets are signed artifacts, verified independently by the mesh process (`mesh.md` section 4.1); node names are not signed and are used only for display (`status.md` section 5); nett-node only hands them over. The content is the mesh process's desired state file (JSON), identical to the file the signing tool writes when no Hub is used (`hub.md` section 4) | M1 |
 
-- 每个节点有一个单调递增的**代数**（generation），任一分区变化都会使代数加一；
-- `DesiredState` 携带 `generation`、`base_generation` 和若干分区：`base_generation` 为空时是完整快照，否则是相对该代数的增量；
-- 连接建立时，若节点的 `applied_generation` 与当前代数相差太多，或 Hub 不再保存对应的增量，Hub 发送完整快照。
+- Each node has a monotonically increasing **generation**; a change in any partition increments it by one;
+- `DesiredState` carries `generation`, `base_generation`, and a number of partitions: when `base_generation` is empty it is a full snapshot, otherwise a delta relative to that generation;
+- On connect, if the node's `applied_generation` is too far from the current generation, or the Hub no longer keeps the corresponding deltas, the Hub sends a full snapshot.
 
-### 6.2 应用与确认
+### 6.2 Applying and acknowledging
 
-- node 校验每个分区：带签名的分区先验签（见 `auth.md` 第 10 节），失败则拒绝该分区；与当前已生效版本完全相同的签名产物（例如完整快照中重发的策略）视为幂等，直接确认，但不解除已经生效的收窄（`auth.md` 第 10.4 节）；同一批期望状态中，先应用撤销记录，再应用新的授权；
-- 校验通过后写入本地 State Store，再交给对应模块调和；
-- `StateAck` 报告每个分区的结果：`applied` / `rejected`（附原因） / `pending`（模块仍在调和）；
-- 节点重启时先应用本地保存的期望状态，再连接 Hub。
+- The node validates each partition: a signed partition has its signature verified first (see `auth.md` section 10), and on failure the partition is rejected; a signed artifact identical to the version currently in effect (for example a policy resent in a full snapshot) is treated as idempotent and acknowledged directly, without lifting any narrowing already in effect (`auth.md` section 10.4); within one batch of desired state, revocations are applied before new authorizations;
+- After validation passes, it is written to the local State Store and then handed to the corresponding module to reconcile;
+- `StateAck` reports each partition's result: `applied` / `rejected` (with a reason) / `pending` (the module is still reconciling);
+- When a node restarts it first applies the locally saved desired state and then connects to the Hub.
 
-### 6.3 Hub 离线时
+### 6.3 When the Hub is offline
 
-- 节点按本地期望状态继续运行；
-- 模块的调和、组网的选路与切换都不依赖 Hub；
-- 需要 Hub 参与的操作（新任务、配置变更）在恢复连接后继续。
+- The node keeps running on its local desired state;
+- Module reconciliation, and mesh path selection and switching, do not depend on the Hub;
+- Operations that need the Hub (new tasks, configuration changes) continue after the connection is restored.
 
-### 6.4 Hub 从备份恢复后
+### 6.4 After the Hub is restored from a backup
 
-备份总是落后于节点：节点可能已经应用了更高的代数、更高版本的签名产物，或收到过更新的撤销记录。恢复后的 Hub 不能要求节点倒退：
+A backup always lags behind the nodes: a node may already have applied a higher generation, higher-versioned signed artifacts, or received newer revocations. A restored Hub must not require nodes to go backwards:
 
-- Hub 先进入**恢复状态**：只收集，不下发期望状态；
-- 节点连接时在 `Hello` 中报告 `applied_generation`，并用 `ArtifactSync` 回传已生效的签名产物、信任锚更新链、撤销记录和本地的收窄内容。签名产物带用户签名，Hub 验证后补齐数据库，不需要用户重新批准；撤销记录和收窄内容本来就不需要签名，Hub 直接合并（它们只会让权限更小）；
-- 按批次完成，不无限等待所有节点：控制台显示哪些节点尚未回传，用户可以结束恢复状态；之后才连上的节点先回传、对账，再接收变更；
-- 对账后，Hub 把各节点的代数推进到高于它报告的值，再下发完整快照；成员只因撤销记录删除对端，快照中缺少某个成员不会让它被删除；
-- 备份之后才入网的节点，恢复后的 Hub 不认识它的身份密钥，需要重新入网；重新入网前先在控制台移除旧身份（下发撤销记录），否则其他成员仍保留它的准入；
-- 没有签名的内容（主机名等）以恢复后的 Hub 为准；
-- Hub 身份密钥更换后立即生成一次备份（`auth.md` 第 8.3 节）：更早的备份中是旧密钥，用它恢复的 Hub 无法与节点握手；
-- M1 的验收使用落后于节点状态的备份（roadmap.md）。
+- The Hub first enters the **recovery state**: it only collects and does not deliver desired state;
+- When a node connects, it reports `applied_generation` in `Hello` and sends back the signed artifacts in effect, the trust anchor update chain, revocations, and local narrowing through `ArtifactSync`. Signed artifacts carry the user's signature, so the Hub verifies them and fills in the database without the user approving again; revocations and narrowing never needed a signature, so the Hub merges them directly (they can only make privileges smaller);
+- It completes in batches and does not wait indefinitely for all nodes: the console shows which nodes have not yet sent back their data, and the user can end the recovery state; nodes that connect afterwards first send back and reconcile, and then receive changes;
+- After reconciliation, the Hub advances each node's generation above the value it reported and then delivers a full snapshot; members remove a peer only because of a revocation, and a member missing from the snapshot is not removed;
+- For a node that enrolled after the backup was taken, the restored Hub does not know its identity key and the node must enroll again; before re-enrolling, remove the old identity in the console (delivering a revocation), otherwise the other members keep its admission;
+- Content without signatures (hostnames, etc.) follows the restored Hub;
+- When the Hub identity key is replaced, a backup is generated immediately (`auth.md` section 8.3): earlier backups contain the old key, and a Hub restored from them cannot handshake with nodes;
+- M1 acceptance uses a backup that lags behind the node state (roadmap.md).
 
-## 7. 任务
+## 7. Tasks
 
-变更集中需要节点执行的步骤，以任务的形式下发：
+The steps of a change set that need a node to execute them are delivered as tasks:
 
 ```protobuf
 message Task {
-  string task_id = 1;        // 全局唯一
+  string task_id = 1;        // globally unique
   string change_id = 2;
   uint32 step = 3;
   string action_type = 4;
-  bytes payload = 5;         // 按动作类型定义的 Protobuf 消息
+  bytes payload = 5;         // a Protobuf message defined per action type
   google.protobuf.Timestamp deadline = 6;
 }
 ```
 
-- **只执行动作目录中已定义的动作类型**；未知类型直接返回失败；
-- **至多执行一次**：节点在**开始执行之前**把 `task_id` 写入本地记录，完成后写入结果（保留 7 天，最多 1000 条；任务的 `deadline` 必须短于保留期）。**未过 `deadline` 的记录不淘汰**，记录满了就以 `RATE_LIMITED` 拒绝新任务。重复收到相同任务时返回已有结果，不重复执行。节点在执行中途崩溃时，重启后把这个任务上报为 `interrupted`（结果未知），不自动重做，由 Hub 按动作类型核对实际状态，或交给用户决定；
-- 同一时间进行中的任务数量有上限；超出时返回 `RATE_LIMITED`；
-- 超过 `deadline` 尚未开始的任务不再执行，返回超时；
-- 执行结果通过 `TaskUpdate` 上报；连接中断时结果保存在本地，恢复后补报。
+- **Only action types defined in the action catalog are executed**; an unknown type returns failure immediately;
+- **At most once**: the node writes the `task_id` to a local record **before starting execution** and writes the result on completion (kept for 7 days, at most 1000 entries; a task's `deadline` must be shorter than the retention period). **Records whose `deadline` has not passed are not evicted**, and when the records are full new tasks are rejected with `RATE_LIMITED`. When the same task is received again, the existing result is returned and it is not executed again. If the node crashes in the middle of execution, after restart it reports the task as `interrupted` (result unknown) and does not redo it automatically; the Hub checks the actual state according to the action type, or leaves the decision to the user;
+- The number of tasks in progress at the same time has a limit; beyond it `RATE_LIMITED` is returned;
+- A task that has not started by its `deadline` is not executed and a timeout is returned;
+- Execution results are reported via `TaskUpdate`; while the connection is down results are kept locally and reported after recovery.
 
-## 8. 保活与重连
+## 8. Keepalive and reconnection
 
-| 项 | 规则 |
+| Item | Rule |
 |---|---|
-| 保活 | 每 25 秒一次 `Ping`（也用于避免中间代理因空闲断开连接）；连续 3 次无应答视为断开 |
-| 重连 | 指数退避，起始 1 秒，上限 60 秒，带随机抖动 |
-| 端点选择 | 按 Hub 下发的端点列表并发尝试，选择最先完成握手的端点；连接到备用端点后，定期尝试优先端点。列表中至少保留一个不经组网的端点：控制连接可以借道组网，但不能只靠组网，否则一次错误的组网配置会让节点再也收不到修正。经其他入口节点的备用端点，由那台反向代理转到 Hub，这段配置由用户自己维护 |
-| 会话 | 不做会话恢复；每次重连重新握手，通过 `applied_generation` 和未确认的任务结果补齐状态 |
-| 时钟 | 根据 `Pong` 中的服务器时间估算偏差；偏差超过 30 秒时上报事件 |
+| Keepalive | A `Ping` every 25 seconds (also to keep intermediate proxies from dropping the connection as idle); 3 consecutive unanswered pings count as disconnected |
+| Reconnection | Exponential backoff, starting at 1 second with a cap of 60 seconds, with random jitter |
+| Endpoint selection | Try the endpoints in the Hub-delivered list concurrently and pick the first to complete the handshake; after connecting to a fallback endpoint, periodically retry the preferred endpoint. The list keeps at least one endpoint that does not go through the mesh: the control connection can route through the mesh but must not rely on it alone, otherwise one wrong mesh configuration would leave the node never receiving a correction again. A fallback endpoint through another entry node is forwarded to the Hub by that reverse proxy, and the user maintains that configuration |
+| Session | No session resumption; every reconnect performs a fresh handshake and catches up state through `applied_generation` and unacknowledged task results |
+| Clock | Estimate the offset from the server time in `Pong`; report an event when the offset exceeds 30 seconds |
 
-## 9. 版本兼容
+## 9. Version compatibility
 
-- 协议版本采用"主版本.次版本"：主版本不同则不兼容；次版本只做增量修改；
-- Hub 至少支持当前和上一个次版本的节点；节点同样能够连接上一个次版本的 Hub；
-- **可选功能**通过 `capabilities` 标志协商，例如 `chunked_state`；双方只使用都支持的功能；
-- 节点版本过旧、无法兼容时，Hub 返回 `UPGRADE_REQUIRED`，但仍允许其进入**仅升级模式**：只接收 `release` 分区和升级任务，以便完成自动升级。
+- Protocol versions use "major.minor": different major versions are incompatible; minor versions make only incremental changes;
+- The Hub supports nodes of at least the current and the previous minor version; a node can likewise connect to a Hub of the previous minor version;
+- **Optional features** are negotiated through `capabilities` flags, for example `chunked_state`; both sides use only features both support;
+- When a node's version is too old to be compatible, the Hub returns `UPGRADE_REQUIRED` but still lets it into **upgrade-only mode**: it receives only the `release` partition and upgrade tasks, so that it can complete an automatic upgrade.
 
-## 10. 安全
+## 10. Security
 
-| 威胁 | 措施 |
+| Threat | Measure |
 |---|---|
-| 反向代理或中间网络窃听、篡改 | Noise 端到端加密与认证 |
-| 冒充 Hub | 节点固定 Hub 公钥；握手失败即断开 |
-| 冒充节点 | Hub 只接受已登记的节点公钥；入网 token 一次性有效；准入证明由浏览器生成的入网私钥签名，Hub 无法替换节点的公钥 |
-| Hub 被攻破后加入组网成员 | 成员只为能验证准入材料的对端配置 WireGuard（ADR 0014） |
-| Hub 被攻破后提升节点权限 | 提升权限的分区必须带用户签名，节点独立验签 |
-| 重放 | Noise 传输层自带计数器；期望状态代数与策略版本只增不减；撤销记录阻止旧的签名产物恢复权限；任务按 `task_id` 去重 |
-| 资源耗尽 | 消息大小、分片总量、进行中的任务都有上限；Hub 对每个节点限流 |
-| 恶意载荷 | 所有消息在边界处校验；节点只执行已知的动作类型 |
+| Eavesdropping or tampering by a reverse proxy or intermediate network | Noise end-to-end encryption and authentication |
+| Impersonating the Hub | The node pins the Hub public key; a failed handshake disconnects |
+| Impersonating a node | The Hub accepts only registered node public keys; the enrollment token is valid once; the admission proof is signed by an enrollment private key that the signing tool generates and puts only in the token, so the Hub cannot replace the node's public key |
+| Adding mesh members after the Hub is compromised | A member configures WireGuard only for peers whose admission material it can verify (ADR 0014) |
+| Raising node privileges after the Hub is compromised | Partitions that raise privileges must carry the user's signature, and the node verifies it independently |
+| Replay | The Noise transport layer has its own counters; desired state generations and policy versions only increase; revocations stop old signed artifacts from restoring privileges; tasks are deduplicated by `task_id` |
+| Resource exhaustion | Message size, total chunk volume, and tasks in progress all have limits; the Hub rate-limits per node |
+| Malicious payloads | All messages are validated at the boundary; the node executes only known action types |
 
-## 11. 资源预算
+## 11. Resource budget
 
-| 项 | node 侧上限 |
+| Item | node-side limit |
 |---|---|
-| 单条消息 | 60 KiB |
-| 分片重组 | 单个流 8 MiB，在内存中重组：组网进程本来就要整份解析期望状态，期望状态文件本身不超过 4 MiB（`mesh.md` 第 17 节）；同时进行的流 2 个，用完即释放 |
-| 已完成任务记录 | 7 天，最多 1000 条；未过 `deadline` 的不淘汰，满了就拒绝新任务 |
+| Single message | 60 KiB |
+| Chunk reassembly | 8 MiB per stream, reassembled in memory: the mesh process has to parse the whole desired state anyway, and the desired state file itself does not exceed 4 MiB (`mesh.md` section 17); 2 streams at the same time, released as soon as they are used |
+| Completed task records | 7 days, at most 1000 entries; entries whose `deadline` has not passed are not evicted, and when full new tasks are rejected |
 
-M1 不使用压缩；如果快照的体积成为问题，再以可选功能标志的方式加入按消息压缩。
+M1 uses no compression; if snapshot size becomes a problem, per-message compression will be added as an optional feature flag.
 
-## 12. 分阶段实现
+## 12. Phased implementation
 
-本文的内容都在 M1 实现：
+Everything in this document is implemented in M1:
 
-| 能力 | 阶段 |
+| Capability | Phase |
 |---|---|
-| 会话：握手、保活、重连、错误、版本协商 | M1 |
-| 入网（准入证明）、`Leave` | M1 |
-| 备份拉取（`BackupFetch`）；从备份恢复后的对账（`ArtifactSync`） | M1 |
-| 期望状态：`trust`、`policy`、`hub_endpoints`、`release`、`mesh` | M1 |
-| 清单（平台、能力、地址）、模块状态、事件 | M1 |
-| 任务（`node.*` 动作、组网动作）；`release` 分区的升级 | M1 |
-| `LinkReport`、`PathSwitch` | M1 |
+| Session: handshake, keepalive, reconnection, errors, version negotiation | M1 |
+| Enrollment (admission proof), `Leave` | M1 |
+| Backup pull (`BackupFetch`); reconciliation after restoring from a backup (`ArtifactSync`) | M1 |
+| Desired state: `trust`, `policy`, `hub_endpoints`, `release`, `mesh` | M1 |
+| Inventory (platform, capabilities, addresses), module status, events | M1 |
+| Tasks (`node.*` actions, mesh actions); upgrades via the `release` partition | M1 |
+| `LinkReport`, `PathSwitch` | M1 |
 
-## 13. 待定问题
+## 13. Open questions
 
-| 问题 | 说明 |
+| Question | Description |
 |---|---|
-| 增量状态在 Hub 侧保留多久 | 影响重连后发送增量还是完整快照的比例 |
+| How long the Hub keeps incremental state | Affects the ratio of deltas to full snapshots sent after reconnection |

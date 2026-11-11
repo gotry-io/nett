@@ -1,20 +1,20 @@
-# 设计文档
+# Design documents
 
-[architecture.md](../architecture.md) 是总体设计；这里的文档各讲一个主题，细节到可以直接开始实现。每个阶段开工前，在这里写好该阶段的设计文档；实现与文档不一致时，先改文档。
+[architecture.md](../architecture.md) is the overall design; each document here covers one topic in enough detail to start implementing. Before each phase starts, write that phase's design document here; when the implementation and the document disagree, change the document first.
 
-| 文档 | 内容 | 状态 |
+| Document | Contents | Status |
 |---|---|---|
-| [prototype.md](prototype.md) | 原型关卡（M1 第一步）：要验证的问题、范围、静态配置、实验环境、场景与通过标准、推进顺序 | 草案 |
-| [local-signing.md](local-signing.md) | 本地签名部署（M1 第二步，接入 Hub 之前）：签名工具与密钥、站点、分发与更新、访问控制与 Edge、替换已有的隧道 | 草案 |
-| [userspace.md](userspace.md) | 用户态数据面与 macOS 原生成员（M1，本地签名部署之后）：WireGuard 实现的选型、数据面结构与分流、进程内过滤、utun 与路由、与代理应用共存、运行方式、验证 | 草案 |
-| [site.md](site.md) | 站点（M1，与接入 Hub 的 H1 一起）：用命令维护机器、Edge、宣告的网段与访问规则，连接由访问规则推导，修改、签名与送达，站点目录 | 草案 |
-| [hub.md](hub.md) | 接入 Hub（M1，本地签名部署之后）：命令行为操作界面、无界面的 Hub、站点与 Hub、节点与 Hub、入网、分步（H1–H5） | 草案 |
-| [status.md](status.md) | 本机状态（M1，接入 Hub 之前）：组网进程的本机套接字与只读查询、期望状态中的节点名、状态内容、`nett status` 的输出 | 草案 |
-| [release.md](release.md) | 发布与安装（M1）：版本与产物、发布工作流与签名、Homebrew 与 macOS 上的组网服务、Linux | 草案 |
-| [mesh.md](mesh.md) | 组网：地址规划、会话层与准入验证、中继、候选路径与打洞、测量、选路与切换、传输、局域网智能入口、主机名、访问控制、手机与移动网关、平台、故障与降级 | 草案 |
-| [auth.md](auth.md) | 认证与授权：信任模型、身份与凭据、初始化与恢复、API token、权限范围、node 入网、设备凭据、签名格式、撤销、信任锚、发布签名 | 草案 |
-| [protocol.md](protocol.md) | node ↔ Hub 协议：加密通道与认证、消息格式、期望状态、任务、保活与重连、版本兼容 | 草案 |
-| [api-resources.md](api-resources.md) | API 资源模型：通用约定、写入方式与风险分级、资源详解、实时推送 | 草案 |
-| [changes.md](changes.md) | 变更集与动作目录：状态机、风险与批准、签名、执行、动作目录 | 草案 |
+| [prototype.md](prototype.md) | Prototype gate (first step of M1): questions to validate, scope, static configuration, lab environment, scenarios and pass criteria, order of work | Draft |
+| [local-signing.md](local-signing.md) | Local signing (second step of M1, before joining the Hub): signing tool and keys, site, distribution and updates, access control and Edge, replacing existing tunnels | Draft |
+| [userspace.md](userspace.md) | Userspace data plane and the macOS native member (M1, after local signing): choice of WireGuard implementation, data plane structure and traffic splitting, in-process filtering, utun and routes, coexistence with proxy apps, how it runs, verification | Draft |
+| [site.md](site.md) | Site (M1, together with H1 of joining the Hub): maintaining machines, Edge, advertised routes and access rules with commands, connections derived from access rules, changes, signing and delivery, site directory | Draft |
+| [hub.md](hub.md) | Joining the Hub (M1, after local signing): the command line as the operating interface, the headless Hub, site and Hub, node and Hub, enrollment, steps (H1–H5) | Draft |
+| [status.md](status.md) | Local status (M1, before joining the Hub): the mesh process's local socket and read-only queries, node name in the desired state, status contents, output of `nett status` | Draft |
+| [release.md](release.md) | Release and installation (M1): versions and artifacts, release workflow and signing, Homebrew and the mesh service on macOS, Linux | Draft |
+| [mesh.md](mesh.md) | Mesh: address plan, session layer and admission verification, relay, candidate paths and hole punching, measurement, path selection and switchover, transports, LAN smart gateway, hostnames, access control, phones and mobile gateway, platforms, failures and degradation | Draft |
+| [auth.md](auth.md) | Authentication and authorization: trust model, identities and credentials, initialization and recovery, API tokens, permission scopes, node enrollment, device credentials, signature format, revocation, trust anchors, release signatures | Draft |
+| [protocol.md](protocol.md) | Node ↔ Hub protocol: encrypted channel and authentication, message format, desired state, tasks, keepalive and reconnection, version compatibility | Draft |
+| [api-resources.md](api-resources.md) | API resource model: general conventions, write paths and risk levels, resource details, real-time streams | Draft |
+| [changes.md](changes.md) | Change sets and the action catalog: state machine, risk and approval, signing, execution, action catalog | Draft |
 
-命名：`<主题>.md`。文档开头注明状态（草案 / 已采纳 / 已实现）和对应阶段。
+Naming: `<topic>.md`. Each document opens with its status (draft / accepted / implemented) and the phase it belongs to.

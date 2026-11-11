@@ -1,88 +1,88 @@
-# 愿景
+# Vision
 
-## 一句话
+## In one sentence
 
-nett 是一个开源、自托管的组网基础设施，把你分散在各处的机器连成一张网：自动选择最优路径，路径变差或节点离线时自动切换，进行中的连接不中断。
+nett is open-source, self-hosted mesh infrastructure that connects your scattered machines into one network: it picks the best path automatically, switches automatically when a path degrades or a node goes offline, and keeps in-flight connections alive.
 
-## 面向谁
+## Who it is for
 
-拥有少量、分散机器的个人或小团队：几台不同厂商、不同地域的 VPS，加上家里的 NAS、Mac 或迷你主机。这些机器网络环境各异，有的在 NAT 后面，有的跨境，规格普遍不高（常见 1 vCPU / 1 GB）。
+Individuals or small teams with a small number of scattered machines: a few VPSes from different vendors and regions, plus a NAS, Mac or mini PC at home. These machines sit in different network environments, some behind NAT, some across borders, and their specs are generally modest (typically 1 vCPU / 1 GB).
 
-nett 按开源项目设计：任何人都可以在自己的机器上部署；每份部署只服务一个用户。
+nett is designed as an open-source project: anyone can deploy it on their own machines; each deployment serves a single user.
 
-## 要解决的问题
+## Problems to solve
 
-| 问题 | 常见的现状 |
+| Problem | Typical situation today |
 |---|---|
-| **机器之间没有打通** | 家里的服务靠端口转发加 VPS 反代对外提供，回源往往是明文；NAT 后的机器从外面连不上 |
-| **线路时好时坏** | 跨境、跨运营商的线路时常抖动或中断，UDP 可能被限速或识别；手写的隧道断了只能手动处理 |
-| **手机在外访问家里不方便** | 直连家里最快，但有些网络下连不上；改走其他路径要手动切换配置 |
-| **回源分不清来源** | 服务看不到访客的真实 IP，也分不清访客和用户自己的设备 |
-| **小机器资源紧张** | 常驻的工具本身就占掉可观的内存 |
+| **Machines are not connected to each other** | Services at home are exposed through port forwarding plus a reverse proxy on a VPS, and origin traffic is often plaintext; machines behind NAT cannot be reached from outside |
+| **Links are intermittent** | Cross-border and cross-carrier links often jitter or drop, and UDP may be throttled or identified; a hand-written tunnel that breaks has to be fixed by hand |
+| **Reaching home from a phone is awkward** | Connecting directly to home is fastest, but on some networks it fails; switching to another path means changing configuration manually |
+| **Origin traffic cannot tell who is who** | Services cannot see the visitor's real IP, nor tell visitors from the user's own devices |
+| **Small machines are short on resources** | Always-on tools already take a considerable amount of memory |
 
-## 做成什么
+## What it consists of
 
-- **Hub**：中枢，即组网的控制面，负责节点入网与签名准入、设备与凭据、访问规则、主机名和对外 API；不在数据通路上，离线时组网照常工作；
-- **nett-node**：每台机器一个，直接运行在系统上（不放进容器），作为控制代理负责入网、连接 Hub、升级，把签名的组网配置转交组网进程，上报状态；
-- **nett-relay**：能被外部连入的节点上的低权限进程，负责中继转发和公网传输入口；
-- **组网进程**：加入组网的节点上运行，负责 WireGuard、选路与切换、DNS 和访问规则，与 nett-node 分开，node 升级、崩溃或重启时组网照常工作；UDP 不可用时，由单独的低权限**传输适配进程**把流量转成 TLS；
-- **命令行 `nett`**：操作界面。在用户自己的电脑上定义整张网、签名、查看全部机器，在每台机器上安装与排障；签名的内容由命令行在本机计算并显示，不经 Hub（ADR 0024）。Web 控制台以后作为同一套 API 上的图形界面加入。移动端 App 在 M3；在此之前手机通过标准 WireGuard 客户端或常见代理客户端接入组网。
+- **Hub**: the center, that is, the mesh control plane. It handles node enrollment and signed admission, devices and credentials, access rules, hostnames and the external API; it is not on the data path, and the mesh keeps working while it is offline;
+- **nett-node**: one per machine, running directly on the system (not in a container). As the control agent it handles enrollment, connects to the Hub, upgrades, hands the signed mesh configuration to the mesh process, and reports status;
+- **nett-relay**: a low-privilege process on nodes that are reachable from outside, responsible for relay forwarding and the public transport entry point;
+- **Mesh process**: runs on nodes that join the mesh and is responsible for WireGuard, path selection and switchover, DNS and access rules. It is separate from nett-node, so the mesh keeps working while the node upgrades, crashes or restarts; when UDP is unavailable, a separate low-privilege **transport adapter** converts traffic to TLS;
+- **Command line `nett`**: the operating interface. On the user's computer it defines and signs the whole network and shows all machines; on each machine it handles installation and troubleshooting. What gets signed is computed and displayed by the command line locally, not through the Hub (ADR 0024). A web console is added later as a graphical interface on the same API. The mobile app arrives in M3; until then, phones join the mesh through a standard WireGuard client or common proxy clients.
 
-入口节点上的反向代理（Edge）由用户自己运行，任何实现都可以（Caddy、nginx、Traefik 等）；nett 不生成、也不管理它的配置，只负责让它的回源经组网加密，并让需要真实 IP 的服务认得出它（ADR 0015、0019）。
+The reverse proxy at the entry node (Edge) is run by the user and can be any implementation (Caddy, nginx, Traefik, and so on); nett neither generates nor manages its configuration. It only makes sure the proxy's origin traffic is encrypted through the mesh and lets services that need the real IP recognize it (ADR 0015, 0019).
 
-## 功能范围
+## Feature scope
 
-| 领域 | 包含什么 |
+| Area | What is included |
 |---|---|
-| **选路与切换** | 局域网直连、公网直连、经中继、多跳接力、打洞；持续测量，自动选路、自动切换，进行中的连接不中断 |
-| **传输** | UDP、TLS、QUIC 和混淆传输；UDP 受阻时自动改用其他传输 |
-| **中继** | 能被外部连入的节点运行 nett-relay，只转发加密数据包，不解密组网流量 |
-| **局域网接入** | 局域网智能入口：家里的其他主机不用安装 nett，经智能入口接入组网 |
-| **手机接入** | 双路径：直连家里，同时经移动网关兜底；导出标准 WireGuard 配置和常见代理客户端的配置（直连不通时自动回落） |
-| **主机名与访问控制** | 节点主机名与别名；身份查询（`whois`）；访问规则：默认拒绝，按规则放行 |
-| **认证与授权** | 用户在自己的电脑上签名授权，以后加上 passkey；API token；提升权限、组网准入都必须由用户签名 |
-| **回源身份** | 用户的反向代理（Edge）回源经组网加密；Edge 发出的流量使用专用的组网地址，本机其他进程无法冒用；需要真实 IP 的服务只信任 Edge 转来的请求，从而看到访客的真实 IP，并分清访客和用户自己的设备 |
+| **Path selection and switchover** | LAN direct, public direct, via relay, multi-hop relaying, hole punching; continuous measurement, automatic path selection and switching, with in-flight connections kept alive |
+| **Transports** | UDP, TLS, QUIC and obfuscated transports; automatic fallback to other transports when UDP is blocked |
+| **Relay** | Nodes reachable from outside run nett-relay, which only forwards encrypted packets and does not decrypt mesh traffic |
+| **LAN access** | LAN smart gateway: other hosts at home join the mesh through the smart gateway without installing nett |
+| **Phone access** | Dual path: direct to home, with the mobile gateway as a fallback; export of standard WireGuard configurations and configurations for common proxy clients (automatic fallback when the direct path fails) |
+| **Hostnames and access control** | Node hostnames and aliases; identity lookup (`whois`); access rules: default deny, allow by rule |
+| **Authentication and authorization** | The user signs authorizations on their own computer, with passkeys later; API tokens; raising privileges and mesh admission must both be signed by the user |
+| **Origin identity** | The user's reverse proxy (Edge) sends origin traffic encrypted through the mesh; traffic from Edge uses a dedicated mesh address that other processes on the machine cannot spoof; services that need the real IP trust only requests forwarded by Edge, so they see the visitor's real IP and can tell visitors from the user's own devices |
 
-## 需求优先级
+## Requirement priorities
 
-**必须有**：组网（包括自动选路与切换、中继、多跳、打洞、TLS、QUIC 与混淆传输、局域网智能入口、手机接入、主机名与访问控制）；加密回源与访客真实 IP；认证与签名授权（包括签名准入）；完整的 API 与命令行，签名在用户自己的电脑上完成、签名内容在本机显示；iOS、Android App 与 Windows 成员（M3）。
+**Must have**: the mesh (including automatic path selection and switchover, relay, multi-hop, hole punching, TLS, QUIC and obfuscated transports, LAN smart gateway, phone access, hostnames and access control); encrypted origin traffic and the visitor's real IP; authentication and signed authorization (including signed admission); a complete API and command line, with signing done on the user's own computer and the signed content displayed locally; iOS and Android apps and Windows members (M3).
 
-**可以有**：用硬件密钥签名；Web 控制台与 passkey（ADR 0024）。
+**Nice to have**: signing with hardware keys; web console and passkeys (ADR 0024).
 
-**待讨论**：agent 互访。工作负载身份可能作为组网的扩展（沿用 Edge 专用地址的机制，给单个程序分配专用地址）；MCP 网关不属于 nett。不排期（ADR 0019）。
+**To be discussed**: agent-to-agent access. Workload identity may become a mesh extension (reusing the Edge address mechanism to give individual programs dedicated addresses); an MCP gateway is not part of nett. Not scheduled (ADR 0019).
 
-## 怎样算"能用了"
+## What counts as "usable"
 
-M1 完成时：手写的隧道、家宽端口转发和现有的组网工具都可以下线；反向代理回源全部经过组网，需要真实 IP 的服务能识别访客地址；手机在外既能直连家里，也能经移动网关访问其他节点；nett 的资源占用比被替代的工具更低。
+When M1 is done: hand-written tunnels, home broadband port forwarding and existing mesh tools can be retired; all reverse proxy origin traffic goes through the mesh, and services that need the real IP can identify the visitor's address; a phone away from home can connect directly to home and can also reach other nodes through the mobile gateway; nett uses fewer resources than the tools it replaces.
 
-## API 优先
+## API first
 
-- 所有状态都通过资源化的 API 暴露，界面能做的事 API 都能做；
-- 中高风险的修改都走同一条变更路径，用命令行操作和经 API 操作没有区别；高风险的修改必须由用户签名批准。
+- All state is exposed through a resource-oriented API, and whatever the interface can do, the API can do;
+- Medium- and high-risk changes all go through the same change path, so there is no difference between operating from the command line and through the API; high-risk changes must be approved by the user's signature.
 
-## 设计约束
+## Design constraints
 
-| 约束 | 含义 |
+| Constraint | Meaning |
 |---|---|
-| **资源占用极低** | 节点上每个常驻进程（node、组网进程、传输适配进程、relay）空闲 ≤ 5 MB；Hub 稳定运行 ≤ 30–50 MB |
-| **性能好** | 组网加密使用 WireGuard，Linux 上由内核完成；大流量优先直连，不绕中继 |
-| **适应复杂网络** | 局域网、公网、国内、跨境；没有入站 80/443 的家宽、NAT 型 VPS、UDP 被限速或识别的链路 |
-| **高可用** | 路径抖动、中断或节点离线时自动切换，连接不中断；没有单点；Hub 离线不影响组网 |
-| **多平台** | Linux、Synology DSM、macOS（原生加入组网，需要访客真实 IP 的容器服务另用容器内成员）、Home Assistant OS（以加载项运行）；手机通过标准 WireGuard 客户端或代理客户端接入；iOS、Android App 与 Windows 在 M3。支持矩阵见 architecture.md 第 14 节 |
-| **通用** | 开源项目：不依赖特定的云厂商、地区或网络环境；环境之间的差异由能力探测和测量处理，不写死 |
-| **双语** | Web 界面、API 错误信息和面向用户的文档提供中文和英文；命令行只用英文 |
-| **单用户** | 每份部署只服务一个用户，不做多租户 |
-| **安全默认** | 控制和流量分离，Hub 不在数据通路上；高权限组件不对外；提升权限必须签名，组网成员也凭签名准入；Hub 被攻破后不能越权：签名在用户自己的电脑上完成，签名的内容在本机计算和显示，不经 Hub（design/auth.md 第 2 节） |
+| **Very low resource use** | Each resident process on a node (node, mesh process, transport adapter, relay) uses ≤ 5 MB when idle; the Hub uses ≤ 30–50 MB when running steadily |
+| **High performance** | Mesh encryption uses WireGuard, done by the kernel on Linux; bulk traffic prefers the direct path and avoids relays |
+| **Adapts to complex networks** | LAN, public internet, mainland China, cross-border; home broadband without inbound 80/443, NAT-based VPSes, links where UDP is throttled or identified |
+| **High availability** | Automatic switching when a path jitters, breaks or a node goes offline, with connections kept alive; no single point; the mesh is unaffected when the Hub is offline |
+| **Multi-platform** | Linux, Synology DSM, macOS (native mesh membership; container services that need the visitor's real IP use a container member instead), Home Assistant OS (runs as an add-on); phones join through a standard WireGuard client or proxy client; iOS, Android apps and Windows in M3. See architecture.md section 14 for the support matrix |
+| **General purpose** | Open-source project: does not depend on a specific cloud vendor, region or network environment; differences between environments are handled by capability detection and measurement, not hard-coded |
+| **Bilingual** | The web interface, API error messages and user-facing documentation are provided in Chinese and English; the command line is English only |
+| **Single user** | Each deployment serves a single user; no multi-tenancy |
+| **Secure by default** | Control and traffic are separated and the Hub is not on the data path; high-privilege components are not exposed externally; raising privileges requires a signature, and mesh members are admitted by signature too; a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the signed content is computed and displayed locally, not through the Hub (design/auth.md section 2) |
 
-## 不做什么
+## Non-goals
 
-| 不做 | 原因 |
+| Not done | Reason |
 |---|---|
-| Kubernetes | nett 不替代、也不集成 K8s。在某些机器上自行运行 k3s 的用户，仍然可以用 nett 把这些机器连起来 |
-| 多租户 | 每份部署只服务一个用户 |
-| 一台机器同时加入多张网、一键切换网络 | 一张网就能容纳一个用户的全部机器，分组用访问规则（成员之间默认拒绝，ADR 0023）。换网是有意的操作：在机器上以 root 执行 `nett leave`，再加入新的网（design/auth.md 第 8.3 节）；能随意切换信任锚，被攻破的机器也就能被拉进别的网 |
-| 远程 shell、任意命令执行 | agent 一旦被提示词注入，shell 就意味着可以执行任意命令，并沿组网扩散，事后也难以审计和撤销。nett 只提供管道：需要时经组网 SSH，由访问规则限定谁能连哪台机器 |
-| 观测与管理 | 监控、告警、容器部署、入口路由、AI 运维以后作为独立项目，经 nett 的 API 和身份查询（`whois`）对接；nett 不为它们预留接口（ADR 0019） |
-| 遥测 | 默认不收集、不上报任何使用数据 |
-| 运行 AI 逻辑 | nett 不含 AI 逻辑；node 保持小巧、行为确定（ADR 0010） |
-| 计费与用量核算 | nett 是基础设施：只提供容量上限、测量和自动选路这些机制。机器按什么方式计费、上层业务怎样使用带宽，由用户自己决定，nett 不做判断 |
+| Kubernetes | nett neither replaces nor integrates with K8s. Users who run k3s on some machines can still use nett to connect those machines |
+| Multi-tenancy | Each deployment serves a single user |
+| One machine joining several networks at once, one-click network switching | One network can hold all of a user's machines, and grouping is done with access rules (default deny between members, ADR 0023). Changing networks is a deliberate operation: run `nett leave` as root on the machine, then join the new network (design/auth.md section 8.3); if trust anchors could be switched freely, a compromised machine could be pulled into another network |
+| Remote shell, arbitrary command execution | Once an agent is hit by prompt injection, a shell means arbitrary command execution that spreads along the mesh and is hard to audit and revoke afterwards. nett only provides the pipe: when needed, use SSH over the mesh, with access rules limiting who can reach which machine |
+| Observability and management | Monitoring, alerting, container deployment, ingress routing and AI operations will be separate projects later, integrating through nett's API and identity lookup (`whois`); nett reserves no interfaces for them (ADR 0019) |
+| Telemetry | No usage data is collected or reported by default |
+| Running AI logic | nett contains no AI logic; the node stays small and deterministic (ADR 0010) |
+| Billing and usage accounting | nett is infrastructure: it provides only mechanisms such as capacity limits, measurement and automatic path selection. How machines are billed and how upper-layer workloads use bandwidth is up to the user, and nett makes no judgment about it |

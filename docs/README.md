@@ -1,18 +1,18 @@
-# 文档
+# Documentation
 
-| 文档 | 内容 |
+| Document | Contents |
 |---|---|
-| [vision.md](vision.md) | 要解决的问题、功能范围、需求优先级、设计约束、不做什么 |
-| [architecture.md](architecture.md) | 总体设计：三个平面、角色边界、信任链、组网、手机接入、回源、技术栈、故障与可用性、打包与运行、平台、安全要点、主要风险、实践中得到的事实 |
-| [roadmap.md](roadmap.md) | 各阶段内容与验收标准 |
-| [design/](design/README.md) | 各主题的详细设计，细节以这里为准 |
-| [adr/](adr/README.md) | 架构决策记录：每个关键决定的背景、理由和放弃的方案 |
+| [vision.md](vision.md) | The problem to solve, feature scope, requirement priorities, design constraints, non-goals |
+| [architecture.md](architecture.md) | Overall design: the three planes, role boundaries, chain of trust, mesh, phone access, origin traffic, tech stack, failures and availability, packaging and running, platforms, security essentials, main risks, facts learned in practice |
+| [roadmap.md](roadmap.md) | Content and acceptance criteria of each phase |
+| [design/](design/README.md) | Detailed design per topic; the details are authoritative here |
+| [adr/](adr/README.md) | Architecture decision records: the context, rationale and rejected alternatives of each key decision |
 
-开发规则（安全边界、编码规范、文档写法、提交约定）见仓库根目录的 [CLAUDE.md](../CLAUDE.md)。
+Development rules (security boundaries, coding conventions, documentation style, commit conventions) are in [CLAUDE.md](../CLAUDE.md) at the repository root.
 
-**维护约定**
+**Maintenance conventions**
 
-- 架构层面的决定变化时，新增或修订 ADR，再同步 `architecture.md` 和 `roadmap.md`；
-- 每个阶段开工前，先在 `design/` 写好设计文档；实现与文档不一致时，先改文档；
-- 每条知识只写在一处，其他地方写摘要并链接过去；文档描述现状，历史留在 git 中；
-- 仓库中不放调研过程材料和具体部署环境的信息。
+- When an architectural decision changes, add or revise an ADR, then update `architecture.md` and `roadmap.md`;
+- Before each phase starts, write its design document in `design/`; when the implementation and the document disagree, change the document first;
+- Each piece of knowledge is written in one place; elsewhere, write a summary and link to it; documents describe the current state, and history stays in git;
+- The repository holds no research material and no information about specific deployment environments.

@@ -1,26 +1,26 @@
-# 0004. Hub 使用 SQLite 存储
+# 0004. Hub uses SQLite storage
 
-- 状态：已采纳
-- 日期：2026-10-12
+- Status: accepted
+- Date: 2026-10-12
 
-## 背景
+## Context
 
-Hub 需要保存期望状态、身份和审计。目标规模是单用户、数个到数十个节点。
+The Hub needs to store the desired state, identities, and audit records. The target scale is a single user with several to a few dozen nodes.
 
-## 决定
+## Decision
 
-- 使用 SQLite（WAL 模式），通过 sqlx 访问。
+- Use SQLite (WAL mode), accessed through sqlx.
 
-## 理由
+## Rationale
 
-- 无需额外的数据库进程，部署仍然是单一二进制；
-- sqlx 在编译期检查 SQL，能拦截一类常见错误；
-- 在目标规模下数据量很小，SQLite 足以支撑。
+- No extra database process is needed, and deployment remains a single binary;
+- sqlx checks SQL at compile time, catching a common class of errors;
+- At the target scale the data volume is tiny, and SQLite is more than sufficient.
 
-## 放弃的方案
+## Alternatives considered
 
-- 独立的关系数据库：多一个进程和运维负担。
+- A standalone relational database: one more process and more operational burden.
 
-## 影响
+## Consequences
 
-- 需要显式限制 SQLite 的缓存和 mmap。
+- The SQLite cache and mmap must be limited explicitly.

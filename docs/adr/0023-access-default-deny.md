@@ -1,33 +1,33 @@
-# 0023. 访问默认拒绝
+# 0023. Access is default deny
 
-- 状态：已采纳
-- 日期：2026-11-09
+- Status: accepted
+- Date: 2026-11-09
 
-## 背景
+## Context
 
-访问规则的默认值决定了一台被攻破的机器能走多远。macOS 原生成员（ADR 0018）让 Mac 本机进入组网，而 Mac 上常有很多监听在通配地址上的服务。如果成员之间默认互通，任何一个成员被攻破（例如对外提供服务的 VPS），都能访问这些端口。
+The default of the access rules determines how far a compromised machine can go. The macOS native member (ADR 0018) brings the Mac itself into the mesh, and a Mac often has many services listening on wildcard addresses. If members can reach each other by default, any member that is compromised (for example a VPS that serves traffic externally) can reach those ports.
 
-Edge 专用地址、宣告的网段和容器内成员已经是默认拒绝（ADR 0015、0016）。其中容器内成员靠期望状态中一个没有签名的本地开关表示"入方向默认拒绝"。
+The Edge address, advertised prefixes and the container member are already default deny (ADR 0015, 0016). Of these, the container member expresses "inbound default deny" through an unsigned local switch in the desired state.
 
-## 决定
+## Decision
 
-1. **没有规则放行的新建连接一律拒绝**：节点之间、宣告的网段、容器内成员、来自 Edge 专用地址的连接都一样，没有例外的开关；
-2. **用户的设备**（手机、笔记本，M2 起）默认可以访问所有成员和宣告的局域网段（ADR 0015）；
-3. 组网自己的隧道内探测不受访问规则影响；已建立连接的回包和相关的包放行（mesh.md 第 12 节）。没有规则集时只有这一条生效。
+1. **A new connection that no rule allows is always denied**: connections between nodes, to advertised prefixes, to container members and from the Edge address are all treated the same, with no exception switches;
+2. **The user's devices** (phones and laptops with device credentials) can access all members and the advertised LAN prefixes by default (ADR 0015);
+3. The mesh's own in-tunnel probes are not affected by access rules; return packets and related packets of established connections are allowed (mesh.md section 12). When there is no rule set, only this rule is in effect.
 
-## 理由
+## Rationale
 
-- 一台机器被攻破，影响范围只限于规则放行给它的目标；
-- 单用户的组网中，需要的访问（Edge 回源、从自己的电脑 SSH 到服务器）屈指可数。本地签名部署中一条规则只有几行，接入 Hub 之后在控制台中编写；
-- 一个默认值比按目标区分的默认值容易理解和验证，也不需要节点上一个没有签名的开关来决定入方向的默认值。
+- When a machine is compromised, the impact is limited to the targets the rules allow it to reach;
+- In a single-user mesh, the access needed (Edge origin traffic, SSH from one's own computer to servers) is very limited. In local signing a rule is only a few lines, and after joining the Hub it is written in the console;
+- One default is easier to understand and verify than defaults that differ by target, and it also needs no unsigned switch on the node to decide the inbound default.
 
-## 放弃的方案
+## Alternatives considered
 
-- **成员之间默认允许，为本机服务多的成员写拒绝规则**：漏写一条，这个成员就对所有成员开放；
-- **节点策略中声明"只接受规则放行的连入"**：签名的节点策略要多一个字段，而默认值仍然是开放，新加入的节点要记得设置。
+- **Members allow each other by default, with deny rules for members that have many local services**: miss one rule and that member is open to all members;
+- **The node policy declares "accept only connections allowed by rules"**: the signed node policy needs an extra field, while the default is still open, and a newly joined node must remember to set it.
 
-## 影响
+## Consequences
 
-- 节点之间需要的访问逐条写进访问规则，例如从 Mac SSH 到 VPS；
-- 期望状态中的容器内成员开关删除，容器内成员与其他成员使用同一份默认值；
-- 实验拓扑中显式写出场景需要的成员之间的访问规则。
+- The access needed between nodes is written into the access rules one by one, for example SSH from a Mac to a VPS;
+- The container member switch in the desired state is deleted, and the container member uses the same default as other members;
+- Lab topologies state explicitly the access rules between members that a scenario needs.

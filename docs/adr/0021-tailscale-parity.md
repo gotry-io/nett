@@ -1,52 +1,52 @@
-# 0021. 组网体验以 Tailscale 为基线
+# 0021. Mesh experience is baselined against Tailscale
 
-- 状态：已采纳
-- 日期：2026-11-05
+- Status: accepted
+- Date: 2026-11-05
 
-## 背景
+## Context
 
-用户要求：路径断开、质量波动、回退到中继或 TLS、恢复到更优路径时的体验，以及性能，都要对齐 Tailscale。
+The user requires that the experience when a path breaks, when quality fluctuates, when falling back to a relay or TLS, and when recovering to a better path, as well as performance, match Tailscale.
 
-Tailscale 的做法（以 v1.104.5 的 magicsock 为准）：
+How Tailscale does it (per magicsock in v1.104.5):
 
-- 有流量的连接每 3 秒探测一次当前路径；6.5 秒内没有收到应答，就不再信任这条路径，之后每个包同时经这条路径和 DERP 发出，DERP 连接一直保持；
-- 不在直连路径上时，每次心跳都探测全部候选（每个候选最多 5 秒一次），第一个应答回来就立即改用这条直连路径，没有等待期；已经在直连上、延迟高于 5 毫秒时，每分钟尝试一次更优的路径，延迟改善超过约 1% 就切换；
-- 只按延迟和有无应答选路，不看丢包率；
-- 打洞的探测从 WireGuard 自己的端口发出，打洞期间流量照常经 DERP，失败也不中断连接。
+- For a connection with traffic, the current path is probed every 3 seconds; if no reply arrives within 6.5 seconds, the path is no longer trusted, and from then on every packet is sent over both this path and DERP at the same time, with the DERP connection always kept;
+- When not on a direct path, every heartbeat probes all candidates (each candidate at most once every 5 seconds), and as soon as the first reply comes back it switches to that direct path immediately, with no waiting period; when already on a direct path with latency above 5 milliseconds, it tries for a better path once a minute and switches when latency improves by more than about 1%;
+- It selects paths only by latency and whether there is a reply, ignoring packet loss;
+- Hole punching probes are sent from WireGuard's own port; during hole punching traffic keeps flowing through DERP, and a failure does not interrupt the connection.
 
-按"更优路径持续 30 秒才切换""打洞时先改 endpoint 再握手""故障后切到次优候选"这几条做法，nett 会在三处比它差：从中继或 TLS 恢复到更优路径要等 30 秒；打洞失败要停顿约 10 秒；UDP 全部被拦时，可能逐个试过 UDP 中继才回退到 TLS。另外，内核 WireGuard 的一个对端只有一个 endpoint，nett 做不到"同时经两条路径发送"，只能把故障判定做得更快。
+Following the practices "switch only after a better path persists for 30 seconds", "change the endpoint before the handshake when hole punching" and "switch to the next-best candidate after a failure", nett would be worse in three places: recovering from a relay or TLS to a better path would wait 30 seconds; a failed hole punch would stall for about 10 seconds; and when all UDP is blocked, it might try UDP relays one by one before falling back to TLS. In addition, a peer in kernel WireGuard has only one endpoint, so nett cannot "send over two paths at once" and can only make fault detection faster.
 
-## 决定
+## Decision
 
-- **基线**：断开、波动、回退、恢复这四类情况，在同一个实验拓扑、同样的故障下与 Tailscale 对比。中断时间、恢复时间、波动期间的切换次数、吞吐和延迟，nett 都不比 Tailscale 差；任何情况下进行中的 TCP 连接都不能中断。性能另按 roadmap 的 M1 验收。原型关卡和 M1 验收都包含这组对比（design/prototype.md）。
-- **断开**：有流量的连接，隧道内探测每 1 秒一次。连续 2 次没有应答，进入"疑似故障"：立即在当前路径上加探 3 次（间隔 200 毫秒），同时探测全部候选路径；加探全部丢失即判为故障，从刚测到的候选中选一条切过去。故障判定约 3 秒。对端的包仍在到达（WireGuard 对它的接收字节数在增长）、10 秒内收到过隧道内应答（包括迟到的）时不判为故障：路径是通的，只是在排队。
-- **波动**：丢包率超过 30% 持续 3 秒也判为故障（Tailscale 只看有没有应答，这里更积极），正在排队时（10 秒内收到过迟到的应答）除外；同类路径之间按得分切换，保持"优于当前至少 15% 且至少 10 毫秒、持续 30 秒"的防抖规则，比 Tailscale 切换得少。当前路径丢包明显（最近 10 次隧道内探测丢失 2 次以上）而同类候选连续有应答时，持续 5 秒即切换，并且同类候选改为每 3 秒探测。
-- **回退**：只按疑似故障时刚测到的结果选下一条路径；UDP 候选全部不通时直接改用 TLS，不逐个尝试 UDP 中继。存在 TLS 候选的 `dial-only` 成员，传输适配进程与 TLS 中继保持空闲连接（组网进程对它的第一个探测建立连接，之后保活），回退时不必临时建立 TLS 连接。
-- **恢复**：当前路径不是最优类型时（经中继而有直连候选，经 TLS 而有 UDP 候选），每 1 秒探测一次这些更优类型的候选；刚因故障从一条更优类型的路径切走时，15 秒内每 50 毫秒探测它一次，应答一到就处理。第一次有应答后立即再探测一次确认，连续 2 次有应答就切过去，不等 30 秒。同一条路径 10 分钟内第二次故障起，切回前的等待时间按故障次数加倍（10 秒起，最长 5 分钟），避免在时好时坏的路径上来回切；第一次故障后的恢复不等待，与 Tailscale 第一个应答就切回对齐。路径从未连通过就失败（例如首次握手还没完成）时，第一次不算故障；再次这样失败照常计入，避免在探测能通而 WireGuard 不通的路径上来回切。
-- **打洞不中断：M1 就在 WireGuard 端口上探测**。Linux 内核 WireGuard 上，组网进程用原始套接字、以 WireGuard 端口为源端口发送探测；接收时由 nftables 规则只把发往这个端口的探测包的副本交给组网进程（这些包不是 WireGuard 消息，内核 WireGuard 会丢弃）；用户态平台上，组网进程本来就持有这个端口。打洞期间流量照常走当前路径，打洞路径测通之后再切换，失败不影响连接。探测走的就是 WireGuard 自己的 NAT 映射，直连候选也能在切换前测准。只要有一端是锥形 NAT 就尝试；两端都是对称型 NAT 时的端口猜测仍在 M2。
-- 组网进程在 Linux 上因此多需要 `CAP_NET_RAW`。WireGuard 端口上只应答带认证的探测，未认证的包照旧不作任何响应。
+- **Baseline**: for the four kinds of situations, break, fluctuation, fallback and recovery, compare with Tailscale on the same lab topology under the same faults. nett is no worse than Tailscale in interruption time, recovery time, number of switches during fluctuation, throughput and latency; in no case may an in-progress TCP connection be interrupted. Performance is accepted separately under M1 in the roadmap. Both the prototype gate and the M1 acceptance include this comparison (design/prototype.md).
+- **Break**: for a connection with traffic, an in-tunnel probe is sent every 1 second. After 2 consecutive probes with no reply, the path enters "suspected failure": 3 extra probes are sent immediately on the current path (200 millisecond interval) while all candidate paths are probed at the same time; if all the extra probes are lost, the path is judged failed, and one of the candidates just measured is chosen to switch to. Failure detection takes about 3 seconds. When packets from the peer are still arriving (the bytes WireGuard has received from it are increasing) and an in-tunnel reply (including a late one) was received within 10 seconds, the path is not judged failed: it is up, just queuing.
+- **Fluctuation**: packet loss above 30% for 3 seconds is also judged a failure (Tailscale looks only at whether there is a reply; this is more aggressive), except while queuing (a late reply was received within 10 seconds); between paths of the same type, switching is by score, keeping the hysteresis rule "better than the current by at least 15% and at least 10 milliseconds, persisting for 30 seconds", which switches less than Tailscale. When the current path has obvious loss (2 or more of the last 10 in-tunnel probes lost) while candidates of the same type reply consistently, it switches after 5 seconds, and candidates of the same type are probed every 3 seconds.
+- **Fallback**: the next path is chosen only from the results just measured at suspected failure; when all UDP candidates are unreachable, it switches directly to TLS without trying UDP relays one by one. For a `dial-only` member that has a TLS candidate, the transport adapter keeps an idle connection to the TLS relay (the mesh process's first probe to it establishes the connection, which is then kept alive), so a TLS connection does not have to be set up on the spot during fallback.
+- **Recovery**: when the current path is not of the best type (via a relay while a direct candidate exists, via TLS while a UDP candidate exists), candidates of those better types are probed once per second; right after switching away from a better-type path because of a failure, that path is probed every 50 milliseconds for 15 seconds, and a reply is handled as soon as it arrives. After the first reply, it probes once more immediately to confirm, and after 2 consecutive replies it switches, without waiting 30 seconds. From the second failure of the same path within 10 minutes, the wait before switching back doubles with the failure count (starting at 10 seconds, at most 5 minutes), to avoid flapping on an intermittent path; recovery after the first failure does not wait, matching Tailscale's switch back on the first reply. When a path fails without ever having connected (for example the first handshake has not completed), the first time does not count as a failure; a repeat of this kind of failure is counted as usual, to avoid flapping on a path where probes get through but WireGuard does not.
+- **Hole punching without interruption: probing on the WireGuard port from M1**. On Linux kernel WireGuard, the mesh process sends probes with a raw socket using the WireGuard port as the source port; for receiving, an nftables rule hands the mesh process only copies of probe packets destined for this port (these packets are not WireGuard messages, and kernel WireGuard discards them); on userspace platforms the mesh process already holds this port. During hole punching traffic continues on the current path, and the switch happens after the punched path is verified; a failure does not affect the connection. Probes use WireGuard's own NAT mapping, so direct candidates can also be measured accurately before switching. It is attempted as long as one end is behind a cone NAT; port guessing when both ends are behind symmetric NAT remains in M2.
+- The mesh process therefore needs `CAP_NET_RAW` in addition on Linux. On the WireGuard port only authenticated probes are answered; unauthenticated packets still get no response.
 
-## 理由
+## Rationale
 
-- 用户的要求；Tailscale 是用户最可能拿来比较的对象；
-- 故障判定约 3 秒，加上一次重新握手，短于 Tailscale 的 3.5–6.5 秒，弥补了不能同时经两条路径发送的差距；
-- 疑似故障时的加探把误判控制在很低的水平：随机丢包 10% 时，连续 5 个探测全部丢失的概率约为十万分之一；
-- 拥塞不是断开：自己的流量塞满一段慢链路、队列很深时（限速的 VPS、上传缓冲很深的家庭宽带），隧道内探测的应答要排几秒的队。只按超时判断，会反复切换、重新握手，可所有路径都要过同一个瓶颈，换了也没用，吞吐反而下降（prototype.md 第 9 节场景 24）。完全断开时对端的包也到不了，所以"对端的包仍在到达"不影响断开的判定速度；只有一个方向通时，判定最多晚 10 秒；
-- 低于故障阈值的丢包同样要尽快离开：Tailscale 的 DERP 经 TCP，丢包变成延迟而不丢数据；nett 的中继经 UDP，丢包直接到达上层。实测当前中继的链路丢包 5% 时，只靠 30 秒的防抖要在受损的中继上停留 36–105 秒，期间约 10% 的包丢失。"10 次中丢 2 次"在随机丢包 1% 时几乎不会出现，单个丢包不会触发切换；
-- 恢复不再等 30 秒，按路径类型分开处理：类型更优的路径测通就切，同类路径之间仍然防抖；
-- Tailscale 断开期间每个包同时经直连和 DERP 发出，直连一恢复就切回（实测 20 次中 19 次在 0.26–0.29 秒内）；nett 不能同时发两路，只能靠探测发现恢复。短时故障最常见，所以切走后的 15 秒内高频探测，之后降到每秒一次；高频探测只在第一次故障后（不需要退避时）进行；
-- 打洞不中断，是 Tailscale 体验中最明显的一点；在 WireGuard 端口上探测是唯一能在内核 WireGuard 上做到这一点的办法。
+- The user's requirement; Tailscale is what the user is most likely to compare with;
+- Failure detection takes about 3 seconds, plus one re-handshake, shorter than Tailscale's 3.5-6.5 seconds, which makes up for not being able to send over two paths at once;
+- The extra probes at suspected failure keep false positives very low: with 10% random packet loss, the probability that 5 consecutive probes are all lost is about one in a hundred thousand;
+- Congestion is not a break: when the connection's own traffic fills a slow link and queues are deep (a rate-limited VPS, home broadband with deep upload buffers), replies to in-tunnel probes queue for several seconds. Judging by timeout alone would switch repeatedly and re-handshake, yet all paths go through the same bottleneck, so switching does not help and throughput drops (prototype.md section 9, scenario 24). When the link is fully broken, packets from the peer cannot arrive either, so "packets from the peer are still arriving" does not affect how fast a break is detected; when only one direction works, detection is at most 10 seconds later;
+- Packet loss below the failure threshold also needs to be left quickly: Tailscale's DERP runs over TCP, so loss becomes latency and no data is lost; nett's relay runs over UDP, so loss reaches the upper layer directly. Measurements show that with 5% link loss on the current relay, the 30-second hysteresis alone would keep the connection on the impaired relay for 36-105 seconds, losing about 10% of packets in that time. "2 lost out of 10" almost never occurs with 1% random loss, so a single lost packet does not trigger a switch;
+- Recovery no longer waits 30 seconds, handled separately by path type: a path of a better type switches as soon as it is verified, while paths of the same type are still subject to hysteresis;
+- During a break Tailscale sends every packet over both the direct path and DERP, and switches back as soon as the direct path recovers (measured: 19 of 20 times within 0.26-0.29 seconds); nett cannot send over two paths at once and can only discover recovery by probing. Short failures are the most common, so within 15 seconds after switching away it probes at high frequency and then drops to once per second; high-frequency probing happens only after the first failure (when no backoff is needed);
+- Hole punching without interruption is the most noticeable point of the Tailscale experience; probing on the WireGuard port is the only way to achieve it on kernel WireGuard.
 
-## 放弃的方案
+## Alternatives considered
 
-- **沿用上面那几条做法，只记录对比结果**：恢复和打洞明显比 Tailscale 差，不满足用户的要求。
-- **把 nett 的组网也改成能同时经两条路径发送**：只有用户态 WireGuard 能做到，Linux 上要放弃内核 WireGuard 的性能。
-- **用 nftables 把发往 WireGuard 端口的探测应答转给组网进程**：转发会改动这条五元组的连接跟踪，之后来自同一地址的 WireGuard 数据也会被转走。只拷贝副本（`log`）不影响连接跟踪，所以接收用它。
-- **用挂了 BPF 过滤器的原始套接字接收**：内核把每个进来的 UDP 包先复制一份交给原始套接字再过滤，实测让 WireGuard 的吞吐下降约 7%。
+- **Keep the practices above and only record the comparison results**: recovery and hole punching would be clearly worse than Tailscale, which does not meet the user's requirement.
+- **Make nett's mesh able to send over two paths at once**: only userspace WireGuard can do this, and on Linux the performance of kernel WireGuard would be given up.
+- **Use nftables to redirect probe replies destined for the WireGuard port to the mesh process**: redirecting alters connection tracking for that five-tuple, and later WireGuard data from the same address would also be diverted. Copying only (`log`) does not affect connection tracking, so receiving uses it.
+- **Receive with a raw socket carrying a BPF filter**: the kernel first copies every incoming UDP packet to the raw socket and then filters; measurements show this lowers WireGuard throughput by about 7%.
 
-## 影响
+## Consequences
 
-- mesh.md 第 6.1、7、7.1、8.2、15、18 节写明这些参数和做法；在 WireGuard 端口上探测属于 M1，M2 只留两端都是对称型 NAT 时的端口猜测；
-- 组网进程的运行身份在 Linux 上增加 `CAP_NET_RAW`（architecture.md 第 2、13.2 节，ADR 0013）；
-- 探测流量增加：每对有流量的连接每秒一个隧道内探测，仍在每对约 1 KiB/s 的预算内；因故障切走后的 15 秒内，快速恢复的探测往返约 2.5 KB/s；
-- 原型关卡和 M1 验收的实验环境中要同时运行 Tailscale（自建 Headscale 和 DERP）。
+- mesh.md sections 6.1, 7, 7.1, 8.2, 15 and 18 state these parameters and practices; probing on the WireGuard port belongs to M1, and M2 keeps only port guessing when both ends are behind symmetric NAT;
+- The mesh process's run identity gains `CAP_NET_RAW` on Linux (architecture.md sections 2 and 13.2, ADR 0013);
+- Probe traffic increases: one in-tunnel probe per second for each pair with traffic, still within the budget of about 1 KiB/s per pair; in the 15 seconds after switching away because of a failure, the fast-recovery probe round trips use about 2.5 KB/s;
+- The lab environment for the prototype gate and M1 acceptance must run Tailscale at the same time (self-hosted Headscale and DERP).

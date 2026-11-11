@@ -1,43 +1,43 @@
-# 0017. Home Assistant OS 上以加载项运行
+# 0017. Running as an add-on on Home Assistant OS
 
-- 状态：已采纳
-- 日期：2026-11-04
+- Status: accepted
+- Date: 2026-11-04
 
-## 背景
+## Context
 
-nett 按开源项目设计，需要覆盖家庭用户常见的设备。Home Assistant OS（HAOS）运行在树莓派、迷你主机、官方硬件或虚拟机上，通常常年开机，并且就在家里的局域网中，很适合做组网成员和智能入口。
+nett is designed as an open-source project and needs to cover the devices common among home users. Home Assistant OS (HAOS) runs on Raspberry Pi, mini PCs, official hardware or virtual machines, is usually powered on all the time, and sits on the home LAN, which makes it well suited as a mesh member and smart gateway.
 
-但 HAOS 是封闭的系统：没有包管理器，用户不能在系统上直接安装程序，所有扩展都以**加载项**（add-on，由 HA 的 Supervisor 管理的容器）的形式运行。architecture.md 第 3 节要求 nett-node 直接运行在系统上，这在 HAOS 上做不到。
+But HAOS is a closed system: it has no package manager, users cannot install programs directly on the system, and all extensions run as **add-ons** (containers managed by HA's Supervisor). architecture.md section 3 requires nett-node to run directly on the system, which is impossible on HAOS.
 
-在普通 Linux 上运行的 Home Assistant（Container 或 Core 安装方式）不受影响，所在主机按普通 Linux 节点处理。
+Home Assistant running on ordinary Linux (the Container or Core installation methods) is not affected; its host is treated as an ordinary Linux node.
 
-## 决定
+## Decision
 
-- 在 HAOS 上，nett 以**加载项**的形式提供：项目维护一个 HA 加载项仓库，镜像覆盖 HA 支持的架构（amd64、aarch64）；
-- 加载项申请运行所需的最小权限：宿主网络、`NET_ADMIN`、`/dev/net/tun`。加载项内运行 nett-node 和组网进程（组网使用 HAOS 内核自带的 WireGuard），需要时也运行传输适配进程和 nett-relay，由加载项内的进程管理器分别守护（ADR 0013）；
-- 模块范围：
+- On HAOS, nett is provided as an **add-on**: the project maintains an HA add-on repository, with images covering the architectures HA supports (amd64, aarch64);
+- The add-on requests the minimum privileges needed to run: host network, `NET_ADMIN`, `/dev/net/tun`. The add-on runs nett-node and the mesh process (the mesh uses the WireGuard built into the HAOS kernel), and also the transport adapter and nett-relay when needed, each supervised by the process manager inside the add-on (ADR 0013);
+- Module scope:
 
-| 模块 | 在 HAOS 上 | 说明 |
+| Module | On HAOS | Notes |
 |---|---|---|
-| mesh | ✅ | 组网成员、智能入口、移动网关都可以 |
-| relay | ✅ | 需要路由器映射端口 |
+| mesh | ✅ | Can be a mesh member, a smart gateway or a mobile gateway |
+| relay | ✅ | Needs port forwarding on the router |
 
-- 升级：加载项的版本跟随 nett 发布；**升级由 HA 负责**（用户在 HA 中更新加载项），不经 `release` 分区，节点也不替换自己的文件。控制台在有新版本时提示"在 HA 中更新"。HAOS 不会在运行前验证镜像签名，镜像签名只供用户手动核对；
-- 防降级在启动时检查：nett 在加载项的持久目录中记录运行过的最高版本，启动时发现自己低于它，就进入**受限模式**：照常连接 Hub 并上报，但不应用任何新的配置，直到升级回去或收到 `release_override`。从 HA 的备份恢复加载项时，这条记录会随持久目录一起回退，检查不到；
-- 节点的 `status.install_method` 记为 `haos_addon`，控制台据此只显示可用的模块。
+- Upgrades: the add-on version follows nett releases; **HA is responsible for upgrades** (the user updates the add-on in HA), they do not go through the `release` partition, and the node does not replace its own files. When a new version is available, the console prompts "update in HA". HAOS does not verify image signatures before running, so the image signature is only for users to check manually;
+- Downgrade protection is checked at startup: nett records the highest version it has run in the add-on's persistent directory, and if at startup it finds itself lower than that, it enters **restricted mode**: it still connects to the Hub and reports, but applies no new configuration until it is upgraded back or receives `release_override`. When the add-on is restored from an HA backup, this record rolls back together with the persistent directory and cannot be detected;
+- The node's `status.install_method` is recorded as `haos_addon`, and the console shows only the available modules accordingly.
 
-## 理由
+## Rationale
 
-- 加载项是 HAOS 上唯一被支持的扩展方式，HA 上已有的组网类加载项也是这样运行的；
-- 智能入口需要的内核 WireGuard、TUN、IP 转发和 NAT，在宿主网络加 `NET_ADMIN` 下都能使用。
+- Add-ons are the only supported extension mechanism on HAOS, and the existing mesh add-ons on HA run the same way;
+- The kernel WireGuard, TUN, IP forwarding and NAT that the smart gateway needs are all usable with host network plus `NET_ADMIN`.
 
-## 放弃的方案
+## Alternatives considered
 
-- **要求用户在 HAOS 上打开调试模式、直接安装**：不被 HA 支持，升级 HAOS 后会丢失。
-- **申请最高权限（关闭保护模式、访问 Docker）**：会削弱 HAOS 自身的安全边界，与"安全默认"冲突，组网也用不到。
-- **只支持 HA 的 Container / Core 安装方式**：覆盖不到使用最广的 HAOS。
+- **Require users to enable debug mode on HAOS and install directly**: not supported by HA, and lost after a HAOS upgrade.
+- **Request the highest privileges (disable protection mode, access Docker)**: would weaken HAOS's own security boundary, conflicts with "secure by default", and the mesh does not need it.
+- **Support only HA's Container / Core installation methods**: would not cover HAOS, the most widely used.
 
-## 影响
+## Consequences
 
-- 发布物增加 HA 加载项镜像与加载项仓库（ADR 0012）；
-- architecture.md 中"nett-node 必须直接运行在系统上"增加 HAOS 这一例外。
+- The release artifacts gain an HA add-on image and an add-on repository (ADR 0012);
+- The statement in architecture.md that "nett-node must run directly on the system" gains HAOS as an exception.

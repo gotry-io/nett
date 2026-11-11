@@ -1,54 +1,53 @@
-# 0020. 发布签名：主备两把钥匙，公钥是构建参数
+# 0020. Release signing: two keys, primary and backup, with the public keys as build parameters
 
-- 状态：已采纳
-- 日期：2026-11-05
+- Status: accepted
+- Date: 2026-11-05
 
-## 背景
+## Context
 
-节点只安装通过项目发布签名验证的包，并自动接受版本更高的包（ADR 0012）。nett-node 以 root 运行，所以发布私钥是整个系统中影响最大的一把钥匙：
+Nodes install only packages that pass verification against the project's release signature, and automatically accept packages with a higher version (ADR 0012). nett-node runs as root, so the release private key is the most impactful key in the whole system:
 
-- 它被盗，攻击者可以签出一个"新版本"，所有开着自动升级的节点都会装上；
-- 它丢失，项目就再也发不出节点会自动接受的升级，只能逐台重装；
-- 只在 `nett` 中嵌入一把公钥时，泄露和丢失都没有补救办法。
+- If it is stolen, an attacker can sign a "new version" that every node with automatic upgrade enabled will install;
+- If it is lost, the project can never again issue upgrades that nodes accept automatically, and machines must be reinstalled one by one;
+- With only one public key embedded in `nett`, there is no remedy for either leakage or loss.
 
-nett 是开源项目：任何人都可以自己编译，不信任项目钥匙的人需要能换成自己的钥匙。
+nett is an open-source project: anyone can compile it themselves, and those who do not trust the project's keys need to be able to substitute their own.
 
-## 决定
+## Decision
 
-- **私钥由项目维护者掌握**：官方发布包由项目的发布私钥签名。所有安装只带公钥，只能验证，不能签名。
-- **公钥是构建参数**：官方构建嵌入项目的公钥；自己编译的人在构建时换成自己的公钥，用自己的私钥签名，由自己的 Hub 分发。开发构建嵌入开发公钥，官方构建不接受开发钥匙签的包。
-- **主备两把**：每个构建嵌入两把公钥。主钥匙用于日常签名；备用钥匙只离线保存，平时不用。节点接受任一把签名的包。主钥匙泄露或丢失时，用备用钥匙签发一个新版本，其中嵌入新的主、备两把公钥；节点装上之后，不再接受旧主钥匙的签名。
-- **升级默认自动**：节点自动接受项目签名、版本更高的包，由 Hub 经 `release` 分区推送（低风险）；回滚只能回到本机上一次安装过的版本；其他降级需要用户签名（`release_override`，design/auth.md 第 11.3 节）。
-- **签名格式**：Ed25519，使用 minisign 的格式。节点只需要一个很小的纯验证库；签名中带有钥匙 ID，节点据此选择公钥；用户也可以用 `minisign` 命令手动核对发布包。
-- **CI 自动签名，发布不需要人介入**：
-  - 主私钥存放在代码托管平台 CI 的加密密钥中，只对受保护的版本标签触发的发布工作流可见；
-  - 签名是发布工作流中单独的一个任务：只接收构建任务产出的文件，只运行固定版本、校验过哈希的签名工具，不安装其他依赖、不使用第三方 action；构建任务拿不到私钥；
-  - 工作流中的第三方 action 固定到提交哈希，各任务只授予需要的最小权限；
-  - 发布页公布每个文件的哈希和签名；
-  - 版本标签受保护；维护者的代码托管账号开启两步验证（硬件密钥或 passkey）。
-- **离线备份**：主私钥另有一份本地离线备份；备用私钥只离线保存，从不进入 CI。
-- 两把公钥放在仓库的 `keys/` 目录，项目主页同样公布，用户可以对照核对。
-- **首次安装信任项目网站**：新机器用项目网站 `nett.gotry.io` 上的安装脚本安装 `nett`（design/release.md 第 6 节），脚本按写明的哈希核对压缩包，但不核对发布签名：机器上还没有可信的验证工具。网站由发布工作流部署，不在 Hub 上，被攻破的 Hub 换不了装上的程序。之后的每次升级照常核对发布签名。
-- 主私钥存放在 CI 的 `release` 环境中，这个环境只允许 `v*` 版本标签使用；版本标签由规则集保护，只有仓库管理员能创建、修改和删除。
+- **The private keys are held by the project maintainers**: official release packages are signed by the project's release private key. All installations carry only public keys and can verify but not sign.
+- **Public keys are build parameters**: official builds embed the project's public keys; people who compile it themselves replace them with their own public keys at build time, sign with their own private keys, and distribute through their own Hub. Development builds embed development public keys, and official builds do not accept packages signed with development keys.
+- **Two keys, primary and backup**: every build embeds two public keys. The primary key is used for everyday signing; the backup key is kept only offline and is not used normally. Nodes accept packages signed by either key. When the primary key is leaked or lost, the backup key signs a new version that embeds a new pair of primary and backup public keys; once a node has installed it, it no longer accepts signatures from the old primary key.
+- **Upgrades are automatic by default**: nodes automatically accept packages signed by the project with a higher version, pushed by the Hub through the `release` partition (low risk); a rollback can only go back to the version this machine last installed; other downgrades require a user signature (`release_override`, design/auth.md section 11.3).
+- **Signature format**: Ed25519, in the minisign format. Nodes need only a very small verification-only library; the signature carries a key ID, from which the node selects the public key; users can also check release packages manually with the `minisign` command.
+- **CI signs automatically, with no human involved in releases**:
+  - The primary private key is stored in CI's `release` environment, which only `v*` version tags may use; version tags are protected by a ruleset, and only repository administrators can create, modify and delete them;
+  - Signing is a separate job in the release workflow: it receives only the files produced by the build job, runs only a signing tool of a pinned version with a verified hash, installs no other dependencies and uses no third-party actions; the build job cannot get the private key;
+  - Third-party actions in the workflow are pinned to commit hashes, and each job is granted only the minimum permissions it needs;
+  - The release page publishes the hash and signature of every file;
+  - Version tags are protected; the maintainers' code hosting accounts have two-step verification enabled (hardware key or passkey).
+- **Offline backup**: the primary private key also has a local offline backup; the backup private key is kept only offline and never enters CI.
+- The two public keys are placed in the repository's `keys/` directory and also published on the project homepage, so users can compare them.
+- **First installation trusts the project website**: a new machine installs `nett` with the install script on the project website `nett.gotry.io` (design/release.md section 6); the script checks the archive against the stated hash, but does not check the release signature: the machine does not yet have a trusted verification tool. The website is deployed by the release workflow and is not on the Hub, so a compromised Hub cannot replace the installed program. Every later upgrade checks the release signature as usual.
 
-## 理由
+## Rationale
 
-- 维护者掌握私钥、安装只带公钥，是开源项目分发官方二进制的通常做法（例如 Syncthing 的自动升级、Linux 发行版的软件源）；
-- 公钥作为构建参数，自己编译的人不必信任项目；
-- 发布全自动，不需要人介入（用户的选择）；签名任务与构建分开，构建依赖被攻破时拿不到私钥；
-- 备用钥匙从不进入 CI：CI 中的主钥匙泄露后，仍然能换钥匙，节点不需要重装；
-- 升级默认自动，修复能及时到达所有节点（用户的选择）。
+- Maintainers holding the private key with installations carrying only public keys is the usual way open-source projects distribute official binaries (for example Syncthing's automatic upgrades and Linux distribution package repositories);
+- With public keys as build parameters, people who compile it themselves do not have to trust the project;
+- Releases are fully automatic with no human involved (the user's choice); the signing job is separate from the build, so a compromised build dependency cannot get the private key;
+- The backup key never enters CI: after the primary key in CI is leaked, keys can still be replaced and nodes do not need to be reinstalled;
+- Automatic upgrades by default let fixes reach all nodes promptly (the user's choice).
 
-## 放弃的方案
+## Alternatives considered
 
-- **维护者在本地手动签名**：代码托管账号或 CI 被攻破时签不出发布包，但每次发版都要人介入。用户选择 CI 自动签名。
-- **Sigstore 无密钥签名**：不用保管私钥，但验证依赖 Sigstore 的证书链和公开日志，验证代码较重，在网络受限的地区也难以保证；代码托管账号被盗同样能签。
-- **默认要求用户批准每个版本**（项目签名加用户签名才安装）：项目钥匙被盗也装不到用户的机器上，但每次升级都要签名，不批准时节点停在旧版本。用户选择默认自动。
-- **只嵌入一把公钥**：泄露或丢失时只能逐台重装。
+- **Maintainers sign locally by hand**: when the code hosting account or CI is compromised, release packages cannot be signed, but every release needs a human. The user chose CI automatic signing.
+- **Sigstore keyless signing**: no private key to keep, but verification depends on Sigstore's certificate chain and public log, the verification code is heavy, and it is hard to guarantee in regions with restricted networks; a stolen code hosting account can also sign.
+- **Require the user to approve every version by default** (install only with project signature plus user signature): even a stolen project key could not reach the user's machines, but every upgrade needs a signature, and without approval the node stays on the old version. The user chose automatic by default.
+- **Embed only one public key**: when it is leaked or lost, machines can only be reinstalled one by one.
 
-## 影响
+## Consequences
 
-- **剩余风险**：维护者的代码托管账号被盗，或者有人能推送受保护的版本标签、改动发布工作流，就能用主钥匙签出所有开着自动升级的节点都会安装的版本，直到备用钥匙签发的新版本换掉主钥匙。以后可以增加"升级需要用户批准"的可选模式；
-- **首次安装的剩余风险**：项目网站、它的 DNS 或托管账号被攻破时，这段时间里新装的机器会被接管；已经装好的机器不受影响。这些账号同样开启两步验证；
-- 构建脚本接受发布公钥作为参数；发布手册写明发布工作流的配置，以及用备用钥匙换钥匙的步骤；
-- Home Assistant OS 加载项由 HA 升级，不经过本机制（ADR 0017）。
+- **Residual risk**: if a maintainer's code hosting account is stolen, or someone can push protected version tags or change the release workflow, they can use the primary key to sign a version that all nodes with automatic upgrade enabled will install, until a new version signed by the backup key replaces the primary key. An optional "upgrades need user approval" mode can be added later;
+- **Residual risk of the first installation**: if the project website, its DNS or its hosting account is compromised, machines newly installed in that period are taken over; machines already installed are unaffected. These accounts also have two-step verification enabled;
+- The build script accepts the release public keys as parameters; the release handbook documents the configuration of the release workflow and the steps for replacing keys with the backup key;
+- The Home Assistant OS add-on is upgraded by HA and does not go through this mechanism (ADR 0017).
