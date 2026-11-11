@@ -17,11 +17,18 @@ const DEFAULT_DATA: &str = "/var/lib/nett-hub";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8480";
 const KEY_FILE: &str = "hub.key";
 const DB_FILE: &str = "hub.db";
+/// Where the Hub learns about new releases (design/release.md section 7).
+const DEFAULT_RELEASES: &str = "https://nett.gotry.io/release.json";
+const RELEASES_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+const RELEASES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 const USAGE: &str = "usage: nett-hub <command> [--data <dir>]
 
   serve [--listen <address:port>] [--tls-cert <cert.pem> --tls-key <key.pem>]
-                       run the Hub; it listens on 127.0.0.1:8480 behind a reverse proxy by default
+        [--releases <https URL> | <file> | off]
+                       run the Hub; it listens on 127.0.0.1:8480 behind a reverse proxy by default.
+                       Machines upgrade to the release described at --releases (default
+                       https://nett.gotry.io/release.json, checked every 6 hours); off turns that off
   init --url https://<host> [--tls-cert <cert.pem>]
                        print a one-time link code for `nett site link`, valid for an hour
   reset                forget the linked site and its machines; the Hub identity key stays
@@ -47,6 +54,7 @@ fn run() -> anyhow::Result<()> {
     let mut words = Vec::new();
     let mut data = PathBuf::from(DEFAULT_DATA);
     let (mut listen, mut url, mut cert, mut key) = (None, None, None, None);
+    let mut releases = DEFAULT_RELEASES.to_owned();
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Value(v) => words.push(v.string()?),
@@ -55,6 +63,7 @@ fn run() -> anyhow::Result<()> {
             lexopt::Arg::Long("url") => url = Some(parser.value()?.string()?),
             lexopt::Arg::Long("tls-cert") => cert = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("tls-key") => key = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("releases") => releases = parser.value()?.string()?,
             lexopt::Arg::Long("help") | lexopt::Arg::Short('h') => {
                 println!("{USAGE}");
                 return Ok(());
@@ -79,7 +88,7 @@ fn run() -> anyhow::Result<()> {
                 (None, None) => None,
                 _ => bail!("--tls-cert and --tls-key go together"),
             };
-            runtime.block_on(serve(&data, listen, tls))
+            runtime.block_on(serve(&data, listen, tls, &releases))
         }
         ["init"] => {
             let url = url.context("--url https://<host> is needed: machines and the site connect there")?;
@@ -164,10 +173,44 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Fetches the release manifest now and every 6 hours; a failure keeps the previous one.
+fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
+    if source == "off" {
+        tracing::info!("upgrades are off");
+        return;
+    }
+    tokio::spawn(async move {
+        loop {
+            let fetched = if source.starts_with("https://") {
+                nett_node::http::get(
+                    &source,
+                    nett_trust::release::MAX_MANIFEST_BYTES,
+                    RELEASES_TIMEOUT,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            } else {
+                nett_mesh::config::read_bounded(
+                    Path::new(&source),
+                    u64::try_from(nett_trust::release::MAX_MANIFEST_BYTES).unwrap_or(u64::MAX),
+                )
+                .map_err(|e| e.to_string())
+                .and_then(|b| b.ok_or_else(|| "not a regular file".to_owned()))
+            };
+            match fetched.and_then(|bytes| hub.set_release(bytes)) {
+                Ok(()) => tracing::debug!(%source, "release manifest checked"),
+                Err(e) => tracing::warn!(%source, error = %e, "fetching the release manifest"),
+            }
+            tokio::time::sleep(RELEASES_EVERY).await;
+        }
+    });
+}
+
 async fn serve(
     data: &Path,
     listen: SocketAddr,
     tls: Option<(PathBuf, PathBuf)>,
+    releases: &str,
 ) -> anyhow::Result<()> {
     let key = prepare(data)?;
     let db = db::Db::open(&data.join(DB_FILE)).await?;
@@ -178,6 +221,7 @@ async fn serve(
     let hub = hub::Hub::load(db, x25519_dalek::StaticSecret::from(*key.as_bytes()), url)
         .await
         .map_err(anyhow::Error::msg)?;
+    follow_releases(hub.clone(), releases.to_owned());
     let app = api::router(hub);
     let listener = tokio::net::TcpListener::bind(listen)
         .await

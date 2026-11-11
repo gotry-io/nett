@@ -1,5 +1,6 @@
-//! The HTTPS client the signing tool uses to call the Hub API (design/hub.md section 4): one
-//! connection per request, HTTP/1.1, with timeouts, and the reply size is capped.
+//! The HTTPS client the signing tool uses to call the Hub API (design/hub.md section 4), and that
+//! the Hub and nett-node use to fetch releases (design/release.md section 7): one connection per
+//! request, HTTP/1.1, with timeouts, and the reply size is capped.
 
 use std::time::Duration;
 
@@ -29,6 +30,8 @@ pub enum HttpError {
     },
     #[error("the Hub's answer is not valid: {0}")]
     Reply(String),
+    #[error("{url} answered {status}")]
+    Fetch { url: String, status: u16 },
 }
 
 /// A Hub: its address, and for a self-signed certificate the certificate's fingerprint.
@@ -51,6 +54,32 @@ pub async fn call(
         .map_err(|_| HttpError::Connect(format!("{}: no answer within {TIMEOUT:?}", target.url)))?
 }
 
+/// GETs an `https://` URL, verifying the certificate against the system root certificates: at
+/// most `limit` bytes, within `timeout`. Redirects are not followed.
+pub async fn get(url: &str, limit: usize, timeout: Duration) -> Result<Vec<u8>, HttpError> {
+    let rest = url
+        .strip_prefix("https://")
+        .ok_or_else(|| HttpError::Connect(format!("{url}: only https:// URLs are fetched")))?;
+    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+    let target = Target {
+        url: format!("https://{authority}"),
+        tls_fingerprint: None,
+    };
+    let path = if path.is_empty() { "/" } else { path };
+    let (status, bytes) =
+        tokio::time::timeout(timeout, send(&target, "GET", path, None, None, limit))
+            .await
+            .map_err(|_| HttpError::Connect(format!("{url}: no answer within {timeout:?}")))??;
+    if status.is_success() {
+        Ok(bytes)
+    } else {
+        Err(HttpError::Fetch {
+            url: url.to_owned(),
+            status: status.as_u16(),
+        })
+    }
+}
+
 async fn call_inner(
     target: &Target,
     method: &str,
@@ -58,6 +87,34 @@ async fn call_inner(
     token: Option<&str>,
     body: Option<Vec<u8>>,
 ) -> Result<Vec<u8>, HttpError> {
+    let limit = usize::try_from(MAX_DESIRED_BYTES).unwrap_or(usize::MAX);
+    let (status, bytes) = send(target, method, path, token, body, limit).await?;
+    if status.is_success() {
+        return Ok(bytes);
+    }
+    let problem: Option<nett_proto::api::Problem> = serde_json::from_slice(&bytes).ok();
+    Err(HttpError::Status {
+        url: target.url.clone(),
+        status: status.as_u16(),
+        title: problem
+            .as_ref()
+            .map_or_else(String::new, |p| p.title.clone()),
+        detail: problem
+            .map(|p| p.detail)
+            .filter(|d| !d.is_empty())
+            .map_or_else(String::new, |d| format!(": {d}")),
+    })
+}
+
+/// One request on its own connection; the body of the reply is capped at `limit` bytes.
+async fn send(
+    target: &Target,
+    method: &str,
+    path: &str,
+    token: Option<&str>,
+    body: Option<Vec<u8>>,
+    limit: usize,
+) -> Result<(hyper::StatusCode, Vec<u8>), HttpError> {
     let url = HubUrl::parse(&target.url).map_err(HttpError::Connect)?;
     let connect = |e: &dyn std::fmt::Display| {
         HttpError::Connect(format!("connecting to {}: {e}", target.url))
@@ -89,26 +146,11 @@ async fn call_inner(
         .map_err(|e| HttpError::Connect(e.to_string()))?;
     let res = sender.send_request(req).await.map_err(|e| connect(&e))?;
     let status = res.status();
-    let limit = usize::try_from(MAX_DESIRED_BYTES).unwrap_or(usize::MAX);
     let bytes = Limited::new(res.into_body(), limit)
         .collect()
         .await
         .map_err(|e| HttpError::Reply(e.to_string()))?
         .to_bytes()
         .to_vec();
-    if status.is_success() {
-        return Ok(bytes);
-    }
-    let problem: Option<nett_proto::api::Problem> = serde_json::from_slice(&bytes).ok();
-    Err(HttpError::Status {
-        url: target.url.clone(),
-        status: status.as_u16(),
-        title: problem
-            .as_ref()
-            .map_or_else(String::new, |p| p.title.clone()),
-        detail: problem
-            .map(|p| p.detail)
-            .filter(|d| !d.is_empty())
-            .map_or_else(String::new, |d| format!(": {d}")),
-    })
+    Ok((status, bytes))
 }

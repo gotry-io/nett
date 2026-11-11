@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE nodes SET upgrade_result = ?2, upgrade_reason = ?3 WHERE node_id = ?1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "b93d04be236c888ad7d0ca715336ccfa2e14c210544c7978627131bae88c75fa"
+}

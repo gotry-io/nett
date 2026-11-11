@@ -9,6 +9,7 @@ use std::future::Future;
 use std::io::Write as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
@@ -30,6 +31,7 @@ use x25519_dalek::StaticSecret;
 
 use crate::config::HubConfig;
 use crate::tls::connector;
+use crate::upgrade::{Plan, Upgrader};
 use crate::url::HubUrl;
 
 /// Interval for reading the mesh process's local status once (design/hub.md section 5).
@@ -63,30 +65,66 @@ pub struct Node {
     pub desired: PathBuf,
     /// The mesh process's local socket (design/status.md section 3).
     pub socket: PathBuf,
+    /// Installs new releases (design/release.md section 7); `None` where this machine does not
+    /// upgrade itself.
+    pub upgrader: Option<Arc<Upgrader>>,
 }
+
+/// Why [`run`] returned.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Exit {
+    Shutdown,
+    /// A new version is installed: exit so that the service manager starts it.
+    Upgraded,
+}
+
+/// An upgrade running in the background, and the generation that carried its manifest.
+type Upgrading = Option<(u64, tokio::task::JoinHandle<Result<(), String>>)>;
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
-/// Runs until `shutdown` completes.
-pub async fn run(node: Node, shutdown: impl Future<Output = ()>) {
+/// Runs until `shutdown` completes or a new version is installed.
+pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
     tokio::pin!(shutdown);
+    if let Some(upgrader) = node.upgrader.clone() {
+        // A new version that keeps running counts as working even while the Hub is away
+        tokio::spawn(async move {
+            tokio::time::sleep(crate::upgrade::SETTLED).await;
+            upgrader.settled();
+        });
+    }
+    let mut upgrading: Upgrading = None;
     let mut backoff = BACKOFF_MIN;
     loop {
         let result = tokio::select! {
-            r = node.session() => r,
-            () = &mut shutdown => return,
+            r = node.session(&mut upgrading) => r,
+            () = &mut shutdown => return Exit::Shutdown,
         };
         match result {
-            Ok(()) => backoff = BACKOFF_MIN,
+            Ok(Exit::Upgraded) => return Exit::Upgraded,
+            Ok(Exit::Shutdown) => backoff = BACKOFF_MIN,
             Err(SessionError::Refused { code, message }) => {
                 tracing::error!(?code, %message, "the Hub refused this machine");
                 backoff = BACKOFF_MAX;
             }
             Err(e) => tracing::warn!(error = %e, "Hub connection"),
         }
+        // An upgrade keeps going while the connection is down
+        let finished = async {
+            match upgrading.as_mut() {
+                Some((_, task)) => task.await.ok(),
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             () = tokio::time::sleep(jitter(backoff)) => {}
-            () = &mut shutdown => return,
+            done = finished => {
+                upgrading = None;
+                if done == Some(Ok(())) {
+                    return Exit::Upgraded;
+                }
+            }
+            () = &mut shutdown => return Exit::Shutdown,
         }
         backoff = (backoff * 2).min(BACKOFF_MAX);
     }
@@ -339,9 +377,13 @@ pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), Se
 
 impl Node {
     /// One connection, until it disconnects.
-    pub async fn session(&self) -> Result<(), SessionError> {
+    /// One connection, until it ends. `upgrading` outlives the connection.
+    pub async fn session(&self, upgrading: &mut Upgrading) -> Result<Exit, SessionError> {
         let (mut ws, transport, local) = connect(&self.config, &self.identity, Vec::new()).await?;
         tracing::info!(url = %self.config.url, "connected to the Hub");
+        if let Some(upgrader) = &self.upgrader {
+            upgrader.settled();
+        }
         let mut out = Outbox {
             transport,
             next_id: 1,
@@ -359,7 +401,31 @@ impl Node {
         // result: ask it to read again when reading status
         let mut pending: Option<u64> = None;
         loop {
+            let finished = async {
+                match upgrading.as_mut() {
+                    Some((generation, task)) => (*generation, task.await),
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
+                (generation, done) = finished => {
+                    *upgrading = None;
+                    match done {
+                        Ok(Ok(())) => return Ok(Exit::Upgraded),
+                        Ok(Err(reason)) => {
+                            let ack = StateAck {
+                                generation,
+                                partitions: vec![PartitionAck {
+                                    kind: PartitionKind::Release as i32,
+                                    result: AckResult::Rejected as i32,
+                                    reason,
+                                }],
+                            };
+                            out.send(&mut ws, Body::StateAck(ack)).await?;
+                        }
+                        Err(e) => tracing::error!(error = %e, "the upgrade task failed"),
+                    }
+                }
                 message = ws.next() => {
                     let message = match message {
                         Some(Ok(m)) => m,
@@ -379,7 +445,7 @@ impl Node {
                     };
                     match env.body {
                         Some(Body::DesiredState(desired)) => {
-                            let ack = self.apply(desired).await;
+                            let ack = self.apply(desired, upgrading).await;
                             pending = is_pending(&ack).then_some(ack.generation);
                             out.send(&mut ws, Body::StateAck(ack)).await?;
                             // Report status immediately after applying
@@ -393,7 +459,7 @@ impl Node {
                         }
                         Some(Body::Goodbye(g)) => {
                             tracing::info!(reason = %g.reason, "the Hub closed the session");
-                            return Ok(());
+                            return Ok(Exit::Shutdown);
                         }
                         _ => {}
                     }
@@ -442,13 +508,16 @@ impl Node {
     }
 
     /// Applies a desired state and acknowledges it per partition (protocol.md section 6.2).
-    async fn apply(&self, desired: DesiredState) -> StateAck {
+    async fn apply(&self, desired: DesiredState, upgrading: &mut Upgrading) -> StateAck {
         let mut partitions = Vec::new();
         for p in desired.partitions {
             let (result, reason) = match PartitionKind::try_from(p.kind) {
                 Ok(PartitionKind::Mesh) => self.apply_mesh(&p.content).await,
                 // Nothing to do when there is only one Hub address (design/hub.md section 5)
                 Ok(PartitionKind::HubEndpoints) => (AckResult::Applied, String::new()),
+                Ok(PartitionKind::Release) => {
+                    self.apply_release(&p.content, desired.generation, upgrading)
+                }
                 _ => (
                     AckResult::Rejected,
                     "this node does not know this partition".to_owned(),
@@ -463,6 +532,41 @@ impl Node {
         StateAck {
             generation: desired.generation,
             partitions,
+        }
+    }
+
+    /// The release manifest (design/release.md section 7): nothing to do, a known failure, or an
+    /// upgrade started in the background and acknowledged as pending.
+    fn apply_release(
+        &self,
+        manifest: &[u8],
+        generation: u64,
+        upgrading: &mut Upgrading,
+    ) -> (AckResult, String) {
+        let Some(upgrader) = &self.upgrader else {
+            return (
+                AckResult::Rejected,
+                "this machine does not upgrade itself".to_owned(),
+            );
+        };
+        match upgrader.plan(manifest) {
+            Err(e) => (AckResult::Rejected, e),
+            Ok(Plan::Current) => (AckResult::Applied, String::new()),
+            Ok(Plan::NoProgram) => (
+                AckResult::Rejected,
+                format!("the release has no program for {}", upgrader.target),
+            ),
+            Ok(Plan::Failed(reason)) => (AckResult::Rejected, reason),
+            Ok(Plan::Upgrade { version, program }) => {
+                if upgrading.is_none() {
+                    let task = upgrader.clone();
+                    *upgrading = Some((
+                        generation,
+                        tokio::spawn(async move { task.upgrade(version, &program).await }),
+                    ));
+                }
+                (AckResult::Pending, format!("upgrading to {version}"))
+            }
         }
     }
 
@@ -750,6 +854,7 @@ mod apply_tests {
             desired: dir.join("desired.json"),
             // No mesh process answers here
             socket: dir.join("mesh.sock"),
+            upgrader: None,
         };
         let content = serde_json::to_vec(&doc).expect("json");
         assert_eq!(node.apply_mesh(&content).await.0, AckResult::Pending);

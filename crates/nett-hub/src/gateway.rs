@@ -40,6 +40,8 @@ const IDLE: Duration = Duration::from_secs(KEEPALIVE_SECS as u64 * 3);
 const MAX_STATUS: usize = 512 * 1024;
 /// Number of addresses taken in `Inventory`.
 const MAX_ADDRESSES: usize = 8;
+/// Longest reason kept from an acknowledgement.
+const MAX_REASON: usize = 1024;
 
 /// The peer address of a connection: recorded by axum when `serve` uses
 /// `into_make_service_with_connect_info::<Peer>()`.
@@ -334,6 +336,8 @@ async fn serve(
         next_stream: 0,
     };
     let mut changes = hub.subscribe();
+    let mut releases = hub.subscribe_release();
+    releases.mark_unchanged();
     send_desired(hub, node, socket, &mut out).await?;
     let mut reassembler = Reassembler::default();
     let idle = tokio::time::sleep(IDLE);
@@ -362,6 +366,12 @@ async fn serve(
                 }
                 send_desired(hub, node, socket, &mut out).await?;
             }
+            changed = releases.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                send_release(hub, socket, &mut out).await?;
+            }
             () = replaced.notified() => return Ok(()),
             () = &mut idle => return Err("no message within the keepalive window".into()),
         }
@@ -388,26 +398,33 @@ async fn handle(
             .await?;
         }
         Some(Body::StateAck(ack)) => {
-            if let Some(p) = ack
-                .partitions
-                .iter()
-                .find(|p| p.kind == PartitionKind::Mesh as i32)
-            {
-                let result = match AckResult::try_from(p.result) {
-                    Ok(AckResult::Applied) => "applied",
-                    Ok(AckResult::Rejected) => "rejected",
-                    Ok(AckResult::Pending) => "pending",
-                    _ => "unknown",
-                };
-                hub.db
-                    .set_ack(
-                        node.as_str(),
-                        i64::try_from(ack.generation).unwrap_or(i64::MAX),
-                        result,
-                        &p.reason,
-                    )
-                    .await
-                    .map_err(|e| e.to_string())?;
+            let result = |p: &nett_proto::v1::PartitionAck| match AckResult::try_from(p.result) {
+                Ok(AckResult::Applied) => "applied",
+                Ok(AckResult::Rejected) => "rejected",
+                Ok(AckResult::Pending) => "pending",
+                _ => "unknown",
+            };
+            // The reasons are the node's text: stored bounded (hard rule 13)
+            let reason = |p: &nett_proto::v1::PartitionAck| -> String {
+                p.reason.chars().take(MAX_REASON).collect()
+            };
+            for p in &ack.partitions {
+                if p.kind == PartitionKind::Mesh as i32 {
+                    hub.db
+                        .set_ack(
+                            node.as_str(),
+                            i64::try_from(ack.generation).unwrap_or(i64::MAX),
+                            result(p),
+                            &reason(p),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                } else if p.kind == PartitionKind::Release as i32 {
+                    hub.db
+                        .set_upgrade(node.as_str(), result(p), &reason(p))
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
             }
         }
         Some(Body::Inventory(inv)) => {
@@ -459,21 +476,48 @@ async fn send_desired(
         return Ok(());
     };
     let endpoints = serde_json::to_vec(&[&hub.url]).map_err(|e| e.to_string())?;
+    let mut partitions = vec![
+        Partition {
+            kind: PartitionKind::Mesh as i32,
+            content: mesh.clone(),
+        },
+        Partition {
+            kind: PartitionKind::HubEndpoints as i32,
+            content: endpoints,
+        },
+    ];
+    if let Some(manifest) = hub.release() {
+        partitions.push(Partition {
+            kind: PartitionKind::Release as i32,
+            content: manifest.to_vec(),
+        });
+    }
     out.send(
         socket,
         Body::DesiredState(DesiredState {
             generation: site.generation,
             base_generation: 0,
-            partitions: vec![
-                Partition {
-                    kind: PartitionKind::Mesh as i32,
-                    content: mesh.clone(),
-                },
-                Partition {
-                    kind: PartitionKind::HubEndpoints as i32,
-                    content: endpoints,
-                },
-            ],
+            partitions,
+        }),
+    )
+    .await
+}
+
+/// A new release manifest alone, as an increment on the current generation (protocol.md
+/// section 6.1).
+async fn send_release(hub: &Hub, socket: &mut WebSocket, out: &mut Outbox) -> Result<(), String> {
+    let (Some(site), Some(manifest)) = (hub.site().await, hub.release()) else {
+        return Ok(());
+    };
+    out.send(
+        socket,
+        Body::DesiredState(DesiredState {
+            generation: site.generation,
+            base_generation: site.generation,
+            partitions: vec![Partition {
+                kind: PartitionKind::Release as i32,
+                content: manifest.to_vec(),
+            }],
         }),
     )
     .await

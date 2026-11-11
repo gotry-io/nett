@@ -52,6 +52,8 @@ pub struct NodeRow {
     pub status: Option<String>,
     pub status_at: Option<i64>,
     pub learned: Option<String>,
+    pub upgrade_result: Option<String>,
+    pub upgrade_reason: Option<String>,
 }
 
 impl Db {
@@ -219,11 +221,29 @@ impl Db {
         Ok(sqlx::query_as!(
             NodeRow,
             "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,
-                    ack_reason, status, status_at, learned
+                    ack_reason, status, status_at, learned, upgrade_result, upgrade_reason
              FROM nodes ORDER BY node_id"
         )
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// The machine's answer to the release manifest (design/release.md section 7).
+    pub async fn set_upgrade(
+        &self,
+        node_id: &str,
+        result: &str,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        sqlx::query!(
+            "UPDATE nodes SET upgrade_result = ?2, upgrade_reason = ?3 WHERE node_id = ?1",
+            node_id,
+            result,
+            reason
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn set_learned(&self, node_id: &str, learned: &str) -> Result<(), DbError> {

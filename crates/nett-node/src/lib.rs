@@ -5,6 +5,8 @@
 pub mod config;
 pub mod http;
 pub mod join;
+pub mod platform;
 pub mod session;
 pub mod tls;
+pub mod upgrade;
 pub mod url;

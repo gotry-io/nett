@@ -1,5 +1,6 @@
 //! Service installation on Linux (design/hub.md section 7): `sudo nett install` generates or reuses
-//! the keys in `/etc/nett`, copies the running `nett` to `/usr/local/bin/nett`, writes the systemd
+//! the keys in `/etc/nett`, copies the running `nett` to `/usr/local/lib/nett/nett` with the link
+//! `/usr/local/bin/nett` (design/release.md section 5), writes the systemd
 //! units and starts them. The units are the files in `packaging/systemd/`, embedded at compile
 //! time, so their content has a single source. Without a Hub, the desired state is imported with
 //! `--config`; with a Hub (a token, or an existing Hub configuration) only nett-node writes it.
@@ -14,13 +15,12 @@ use crate::install::{
     InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
 };
 
-const DIR: &str = "/etc/nett";
+use nett_node::platform::linux::{
+    CONFIG_DIR as DIR, LINK, MESH_UNIT, NODE_UNIT, PROGRAM as BINARY, PROGRAM_DIR,
+};
+
 const DESIRED: &str = "/etc/nett/desired.json";
-const BINARY: &str = "/usr/local/bin/nett";
 const UNIT_DIR: &str = "/etc/systemd/system";
-/// Fixed locations of systemctl (hard rule 9): most distributions use the former, older ones the
-/// latter.
-const SYSTEMCTL: [&str; 2] = ["/usr/bin/systemctl", "/bin/systemctl"];
 
 struct Unit {
     name: &'static str,
@@ -29,19 +29,19 @@ struct Unit {
 }
 
 const MESH: Unit = Unit {
-    name: "nett-mesh.service",
+    name: MESH_UNIT,
     content: include_str!("../../../packaging/systemd/nett-mesh.service"),
     what: "the mesh service",
 };
 
 const NODE: Unit = Unit {
-    name: "nett-node.service",
+    name: NODE_UNIT,
     content: include_str!("../../../packaging/systemd/nett-node.service"),
     what: "nett-node",
 };
 
 fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
-    let Some(program) = SYSTEMCTL.iter().find(|p| Path::new(p).exists()) else {
+    let Some(program) = nett_node::platform::linux::systemctl() else {
         bail!(
             "systemctl is not on this machine; without systemd, run `nett mesh` (and `nett node`) with \
              your own service manager"
@@ -111,7 +111,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         }
         (None, None, _) => false,
     };
+    ensure_dir(PROGRAM_DIR, 0o755)?;
     let binary_changed = copy_self(BINARY)?;
+    if !ensure_link(LINK, BINARY)? {
+        println!("{LINK} belongs to another installer; the services run {BINARY}.");
+    }
     let mesh_unit_changed =
         replace_if_changed(Path::new(&unit_path(&MESH)), MESH.content.as_bytes(), 0o644)?;
     let node_unit_changed =
@@ -198,6 +202,25 @@ fn remove_services() -> anyhow::Result<()> {
     }
     systemctl(&["daemon-reload"])?;
     Ok(())
+}
+
+/// Makes `link` a symbolic link to `target` (Linux: `/usr/local/bin/nett`, design/release.md
+/// section 5). A regular file there is replaced; a link to somewhere else is left alone, since
+/// another installer owns it. Returns whether the link points at `target` afterwards.
+pub fn ensure_link(link: &str, target: &str) -> anyhow::Result<bool> {
+    match fs::symlink_metadata(link) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Ok(fs::read_link(link).is_ok_and(|t| t == Path::new(target)));
+        }
+        Ok(_) => fs::remove_file(link).with_context(|| format!("replacing {link}"))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("reading {link}")),
+    }
+    if let Some(dir) = Path::new(link).parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    std::os::unix::fs::symlink(target, link).with_context(|| format!("linking {link}"))?;
+    Ok(true)
 }
 
 #[cfg(test)]

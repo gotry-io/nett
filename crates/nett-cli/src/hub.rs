@@ -359,6 +359,9 @@ pub fn status(
         if let Some(pending) = pending_text(state, name, now) {
             lines.push(("joining", pending));
         }
+        if let Some(upgrade) = upgrade_text(m) {
+            lines.push(("upgrade", upgrade));
+        }
         print!("{}", key_values(&lines));
         match m.status.clone().map(serde_json::from_value::<StatusDoc>) {
             Some(Ok(doc)) => print!("\n{}", crate::status::overview(&doc, now)),
@@ -488,6 +491,16 @@ fn config_text(m: &MachineStatus, generation: u64) -> String {
     }
 }
 
+/// The machine's last answer to the release manifest (design/release.md section 7).
+fn upgrade_text(m: &MachineStatus) -> Option<String> {
+    let reason = m.upgrade_reason.as_deref().unwrap_or("");
+    match m.upgrade_result.as_deref()? {
+        "rejected" => Some(format!("not upgraded: {reason}")),
+        "pending" => Some(reason.to_owned()),
+        _ => None,
+    }
+}
+
 /// A machine waiting to join: how long until its token expires (design/hub.md section 3.3).
 fn pending_text(state: &State, name: &NodeName, now: Timestamp) -> Option<String> {
     let pending = state.machines.get(name)?.enrollment.as_ref()?;
@@ -540,6 +553,11 @@ fn problems_text(m: &MachineStatus, now: Timestamp) -> String {
     if let Some(reason) = &m.reason {
         out.push(reason.clone());
     }
+    if let Some(upgrade) = upgrade_text(m)
+        && m.upgrade_result.as_deref() == Some("rejected")
+    {
+        out.push(upgrade);
+    }
     if let Some(Ok(doc)) = m.status.clone().map(serde_json::from_value::<StatusDoc>) {
         let n = doc.problems.len();
         if n > 0 && m.reason.is_none() {
@@ -583,6 +601,8 @@ mod tests {
             reason: ack.and_then(|a| a.2.map(str::to_owned)),
             status: None,
             status_at: None,
+            upgrade_result: None,
+            upgrade_reason: None,
         }
     }
 

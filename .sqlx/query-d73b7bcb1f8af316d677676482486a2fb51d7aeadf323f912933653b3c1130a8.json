@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,\n                    ack_reason, status, status_at, learned\n             FROM nodes ORDER BY node_id",
+  "query": "SELECT node_id, last_seen, nett_version, platform, applied_generation, ack_result,\n                    ack_reason, status, status_at, learned, upgrade_result, upgrade_reason\n             FROM nodes ORDER BY node_id",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,28 @@
             "name": "learned"
           }
         }
+      },
+      {
+        "name": "upgrade_result",
+        "ordinal": 10,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "nodes",
+            "name": "upgrade_result"
+          }
+        }
+      },
+      {
+        "name": "upgrade_reason",
+        "ordinal": 11,
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "nodes",
+            "name": "upgrade_reason"
+          }
+        }
       }
     ],
     "parameters": {
@@ -127,8 +149,10 @@
       true,
       true,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "0508bbae7839f6d38c2d01a56c134f8f671b7eeb0766d416546c1db736f1a1c8"
+  "hash": "d73b7bcb1f8af316d677676482486a2fb51d7aeadf323f912933653b3c1130a8"
 }

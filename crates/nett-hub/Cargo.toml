@@ -22,6 +22,8 @@ futures-util.workspace = true
 lexopt.workspace = true
 nett-core.workspace = true
 nett-mesh.workspace = true
+# The HTTPS client for fetching the release manifest (design/release.md section 7)
+nett-node.workspace = true
 nett-proto.workspace = true
 nett-site.workspace = true
 nett-trust.workspace = true
@@ -42,7 +44,6 @@ zeroize.workspace = true
 
 [dev-dependencies]
 http-body-util.workspace = true
-nett-node.workspace = true
 # A new machine signs its admission proof in tests
 nett-trust = { workspace = true, features = ["signing"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "net"] }

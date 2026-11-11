@@ -202,6 +202,10 @@ async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderMap) -> Resp
                     .and_then(|r| r.status.as_deref())
                     .and_then(|s| serde_json::from_str(s).ok()),
                 status_at: row.and_then(|r| r.status_at),
+                upgrade_result: row.and_then(|r| r.upgrade_result.clone()),
+                upgrade_reason: row
+                    .and_then(|r| r.upgrade_reason.clone())
+                    .filter(|r| !r.is_empty()),
             });
         }
     }

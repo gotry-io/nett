@@ -32,6 +32,7 @@ fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
         desired: dir.join("desired.json"),
         // No mesh process: after the desired state is written it is acknowledged as pending
         socket: dir.join("mesh.sock"),
+        upgrader: None,
     }
 }
 
@@ -132,33 +133,103 @@ async fn unknown_or_mismatched_machines_are_refused() {
         .node_id
         .to_string();
 
-    let refused = |r: Result<(), SessionError>| match r {
+    let refused = |r: Result<nett_node::session::Exit, SessionError>| match r {
         Err(SessionError::Refused { code, .. }) => code,
         other => panic!("expected a refusal, got {other:?}"),
     };
     // An identity not in the site
     assert_eq!(
-        refused(node(&url, &mac, identity(9), &dir).session().await),
+        refused(node(&url, &mac, identity(9), &dir).session(&mut None).await),
         ErrorCode::NodeUnknown
     );
     // mac's identity impersonates nas
     assert_eq!(
-        refused(node(&url, &nas, identity(2), &dir).session().await),
+        refused(node(&url, &nas, identity(2), &dir).session(&mut None).await),
         ErrorCode::NodeUnknown
     );
     // Wrong Hub public key: the handshake fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.hub_key = Bytes32([7; 32]);
     assert!(matches!(
-        wrong.session().await,
+        wrong.session(&mut None).await,
         Err(SessionError::Connect(_))
     ));
     // Wrong certificate fingerprint: TLS fails
     let mut wrong = node(&url, &mac, identity(2), &dir);
     wrong.config.tls_fingerprint = Some(Bytes32([1; 32]));
     assert!(matches!(
-        wrong.session().await,
+        wrong.session(&mut None).await,
         Err(SessionError::Connect(_))
     ));
     assert!(!dir.join("desired.json").exists());
+}
+
+#[tokio::test]
+async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
+    let (hub, app, token, _site, state) = linked("gateway-release", "https://127.0.0.1").await;
+    assert_eq!(push(&app, &token, &state).await.0, StatusCode::OK);
+    let url = serve(hub.clone()).await;
+    let dir = temp_dir("gateway-release-mac");
+    let mac = state
+        .machine(&name("mac"))
+        .expect("mac")
+        .node_id
+        .to_string();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(nett_node::session::run(
+        node(&url, &mac, identity(2), &dir),
+        async move {
+            stopped.await.ok();
+        },
+    ));
+    acked(&hub, &mac, 1).await;
+
+    // A manifest that does not parse is not taken
+    assert!(hub.set_release(b"{\"version\": \"1\"}".to_vec()).is_err());
+    // A new release reaches the connected node as an increment; this one does not upgrade itself
+    let manifest = serde_json::json!({
+        "version": "9.9.9",
+        "programs": { "x86_64-unknown-linux-musl": {
+            "url": "https://nett.example.com/dl/nett-9.9.9-x86_64-unknown-linux-musl",
+            "sha256": "ab".repeat(32),
+            "minisig": include_str!("../../nett-trust/tests/data/SHA256SUMS.minisig"),
+        }}
+    });
+    hub.set_release(manifest.to_string().into_bytes())
+        .expect("manifest");
+    let mut answer = None;
+    for _ in 0..200 {
+        answer = hub
+            .db
+            .nodes()
+            .await
+            .expect("nodes")
+            .into_iter()
+            .find(|r| r.node_id == mac && r.upgrade_result.is_some());
+        if answer.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let row = answer.expect("the node answered the release");
+    assert_eq!(row.upgrade_result.as_deref(), Some("rejected"));
+    assert_eq!(
+        row.upgrade_reason.as_deref(),
+        Some("this machine does not upgrade itself")
+    );
+    // The answer appears in the site status
+    let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;
+    let status: nett_proto::api::StatusResponse = serde_json::from_slice(&body).expect("status");
+    let m = status
+        .machines
+        .iter()
+        .find(|m| m.name == "mac")
+        .expect("mac");
+    assert_eq!(m.upgrade_result.as_deref(), Some("rejected"));
+
+    stop.send(()).ok();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the node stops")
+        .expect("no panic");
 }

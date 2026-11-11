@@ -67,6 +67,8 @@ jobs:
           tar -czf "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" nett \
             -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
+          # The bare program, which nodes download when they upgrade themselves (design/release.md section 7)
+          cp "target/${{ matrix.target }}/release/nett" "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}"
           if [ "$RUNNER_OS" = Linux ]; then
             tar -czf "dist/nett-hub-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
               -C "target/${{ matrix.target }}/release" nett-hub \
@@ -106,8 +108,8 @@ jobs:
           printf '%s\n' "$NETT_RELEASE_PRIMARY_KEY" > "$key"
           minisign="$PWD/minisign-linux/x86_64/minisign"
           cd dist
-          sha256sum -- *.tar.gz > SHA256SUMS
-          for f in *.tar.gz SHA256SUMS; do
+          sha256sum -- nett-* > SHA256SUMS
+          for f in nett-* SHA256SUMS; do
             "$minisign" -S -s "$key" -m "$f" -t "nett $GITHUB_REF_NAME $f"
           done
           rm -f "$key"
@@ -136,7 +138,8 @@ jobs:
           curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
           echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
           tar -xzf minisign.tar.gz minisign-linux/x86_64/minisign
-          for f in dist/*.tar.gz dist/SHA256SUMS; do
+          for f in dist/nett-* dist/SHA256SUMS; do
+            case "$f" in *.minisig) continue ;; esac
             minisign-linux/x86_64/minisign -V -p keys/nett-release-primary.pub -m "$f"
           done
           (cd dist && sha256sum -c SHA256SUMS)
@@ -209,12 +212,21 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           (cd dist && sha256sum -c SHA256SUMS)
-          sha() { awk -v f="nett-$version-$1.tar.gz" '$2 == f { print $1 }' dist/SHA256SUMS; }
+          sum() { awk -v f="$1" '$2 == f { print $1 }' dist/SHA256SUMS; }
+          sha() { sum "nett-$version-$1.tar.gz"; }
           mkdir -p site/dl
+          programs='{}'
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
-            test -n "$(sha "$target")"
-            cp "dist/nett-$version-$target.tar.gz" site/dl/
+            program="nett-$version-$target"
+            test -n "$(sha "$target")" && test -n "$(sum "$program")"
+            cp "dist/$program.tar.gz" "dist/$program" site/dl/
+            programs=$(jq --arg t "$target" --arg url "https://nett.gotry.io/dl/$program" \
+              --arg sha "$(sum "$program")" --rawfile sig "dist/$program.minisig" \
+              '. + {($t): {url: $url, sha256: $sha, minisig: $sig}}' <<< "$programs")
           done
+          # The release manifest nodes upgrade from (design/release.md section 7)
+          jq -n --arg v "$version" --argjson programs "$programs" '{version: $v, programs: $programs}' \
+            > site/release.json
           sed -e "s/@VERSION@/$version/" \
             -e "s/@SHA256_X86_64_LINUX@/$(sha x86_64-unknown-linux-musl)/" \
             -e "s/@SHA256_AARCH64_LINUX@/$(sha aarch64-unknown-linux-musl)/" \

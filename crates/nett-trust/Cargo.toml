@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 nett-core.workspace = true
 base64.workspace = true
+# minisign's prehashed signatures (BLAKE2b-512); already used by nett-proto
+blake2.workspace = true
 ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -23,5 +25,5 @@ zeroize = { workspace = true, optional = true }
 zeroize.workspace = true
 
 [features]
-# Generating signatures: only for lab tools and tests; not enabled in official builds
+# Generating signatures: the signing tool, enrollment on new machines, lab tools and tests
 signing = ["dep:zeroize"]

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installs nett to /usr/local/bin/nett on Linux and macOS:
+# Installs nett on Linux and macOS, so that `nett` is on the path:
 #
 #   curl -fsSL https://nett.gotry.io/install.sh | sh
 #
@@ -7,11 +7,15 @@
 # below for this release, and installs only the nett program. It reads no token, contacts no Hub
 # and writes no configuration: `sudo nett install` does that afterwards. Each release's archives
 # and signatures are also published at https://github.com/gotry-io/nett/releases.
+#
+# On Linux the program goes to /usr/local/lib/nett/nett, linked from /usr/local/bin/nett: the
+# services run it from its own directory, where nett-node replaces it when it upgrades itself.
+# On macOS it goes to /usr/local/bin/nett.
 set -eu
 
 VERSION="@VERSION@"
 BASE="https://nett.gotry.io/dl"
-TARGET_DIR="/usr/local/bin"
+LINK="/usr/local/bin/nett"
 
 fail() {
     printf 'nett install: %s\n' "$*" >&2
@@ -19,8 +23,8 @@ fail() {
 }
 
 case "$(uname -s)" in
-    Linux) os=linux ;;
-    Darwin) os=darwin ;;
+    Linux) os=linux program=/usr/local/lib/nett/nett ;;
+    Darwin) os=darwin program="$LINK" ;;
     *) fail "nett runs on Linux and macOS, not on $(uname -s)" ;;
 esac
 case "$(uname -m)" in
@@ -35,7 +39,7 @@ case "$os-$arch" in
     darwin-aarch64) target=aarch64-apple-darwin sum="@SHA256_AARCH64_DARWIN@" ;;
 esac
 
-for tool in curl tar mktemp install; do
+for tool in curl tar mktemp install ln; do
     command -v "$tool" >/dev/null 2>&1 || fail "$tool is needed to install nett"
 done
 if command -v sha256sum >/dev/null 2>&1; then
@@ -46,15 +50,15 @@ else
     fail "sha256sum or shasum is needed to check the download"
 fi
 
-if [ -L "$TARGET_DIR/nett" ]; then
-    fail "$TARGET_DIR/nett is a link, probably from Homebrew; upgrade it with \`brew upgrade nett\`"
+if [ -L "$LINK" ] && [ "$(readlink "$LINK")" != "$program" ]; then
+    fail "$LINK is a link made by another installer, probably Homebrew; upgrade it with \`brew upgrade nett\`"
 fi
 if [ "$(id -u)" -eq 0 ]; then
     as_root=""
 elif command -v sudo >/dev/null 2>&1; then
     as_root="sudo"
 else
-    fail "run this as root: $TARGET_DIR is only writable by root"
+    fail "run this as root: $(dirname "$program") is only writable by root"
 fi
 
 tmp=$(mktemp -d)
@@ -66,7 +70,10 @@ curl -fsSL --proto '=https' --tlsv1.2 -o "$tmp/$file" "$BASE/$file" ||
 [ "$(digest "$tmp/$file")" = "$sum" ] ||
     fail "$file does not match the checksum in this script; nothing was installed"
 tar -xzf "$tmp/$file" -C "$tmp" nett || fail "unpacking $file failed"
-$as_root mkdir -p "$TARGET_DIR"
-$as_root install -m 0755 "$tmp/nett" "$TARGET_DIR/nett" ||
-    fail "copying nett to $TARGET_DIR failed"
-printf 'Installed nett %s to %s/nett.\n' "$VERSION" "$TARGET_DIR"
+$as_root mkdir -p "$(dirname "$program")" "$(dirname "$LINK")"
+$as_root install -m 0755 "$tmp/nett" "$program" ||
+    fail "copying nett to $program failed"
+if [ "$program" != "$LINK" ]; then
+    $as_root ln -sfn "$program" "$LINK" || fail "linking $LINK failed"
+fi
+printf 'Installed nett %s to %s.\n' "$VERSION" "$program"
