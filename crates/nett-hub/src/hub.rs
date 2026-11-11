@@ -470,7 +470,7 @@ impl Hub {
         let mut learned = self
             .site()
             .await
-            .and_then(|s| s.state.by_id(node).map(|m| m.learned))
+            .and_then(|s| s.state.by_id(node).map(|m| m.learned.clone()))
             .unwrap_or_default();
         change(&mut learned);
         self.learned(node, learned, now).await

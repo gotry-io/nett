@@ -378,7 +378,7 @@ async fn learned_public_addresses_reach_the_other_members() {
         .seen(vps.as_str(), nett_hub::now(), "0.0.0")
         .await
         .expect("seen");
-    hub.learned(&vps, learned, nett_hub::now())
+    hub.learned(&vps, learned.clone(), nett_hub::now())
         .await
         .expect("learned");
     let current = hub.site().await.expect("site");
@@ -390,7 +390,7 @@ async fn learned_public_addresses_reach_the_other_members() {
     );
     // The same address does not change the generation
     let generation = current.generation;
-    hub.learned(&vps, learned, nett_hub::now())
+    hub.learned(&vps, learned.clone(), nett_hub::now())
         .await
         .expect("again");
     assert_eq!(hub.site().await.expect("site").generation, generation);

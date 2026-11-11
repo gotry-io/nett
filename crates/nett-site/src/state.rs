@@ -12,6 +12,7 @@ use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_port};
+use nett_mesh::lan::LanAddress;
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Sha256Digest;
@@ -176,8 +177,9 @@ pub struct Enrollment {
     pub policy: Option<SignedVersion>,
 }
 
-/// Public address learned by the Hub and its source (design/hub.md section 5).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// What the Hub learned about a machine (design/hub.md section 5): its public addresses and their
+/// source, and from its status its LAN addresses, WireGuard port and relay certificate.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Learned {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -187,11 +189,18 @@ pub struct Learned {
     /// Fingerprint of the TLS certificate of the relay on this machine, from its status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_fingerprint: Option<CertFingerprint>,
+    /// LAN addresses, from its status (design/mesh.md section 6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lan: Vec<LanAddress>,
+    /// The port WireGuard actually listens on, from its status: a `dial-only` machine's is assigned by
+    /// the system.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen_port: Option<u16>,
 }
 
 impl Learned {
     pub fn is_empty(&self) -> bool {
-        self.ipv4.is_none() && self.ipv6.is_none() && self.relay_fingerprint.is_none()
+        *self == Self::default()
     }
 }
 

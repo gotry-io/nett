@@ -256,11 +256,18 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
         return "-".to_owned();
     };
     let public = |m: &Machine| m.reachability == Reachability::Public;
-    let mut parts = vec![if public(ma) || public(mb) {
+    let mut parts = Vec::new();
+    if crate::compose::candidates(state, ma, mb)
+        .iter()
+        .any(|c| matches!(c, nett_mesh::config::Candidate::Lan { .. }))
+    {
+        parts.push("lan".to_owned());
+    }
+    parts.push(if public(ma) || public(mb) {
         "direct".to_owned()
     } else {
         "punch".to_owned()
-    }];
+    });
     let paths = relay_paths(state, ma, mb);
     let mut relays: Vec<&NodeId> = Vec::new();
     for p in &paths {
@@ -279,7 +286,7 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
             .map_or_else(|| relay.to_string(), ToString::to_string);
         parts.push(format!("relay {name} ({})", ways.join(", ")));
     }
-    if parts.len() == 1 && !public(ma) && !public(mb) {
+    if parts == ["punch"] {
         return "punch only; may not connect".to_owned();
     }
     parts.join(", ")

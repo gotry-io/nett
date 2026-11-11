@@ -286,10 +286,13 @@ pub enum SwitchTarget {
     Relay(KeyId),
     /// The direct path punched for this pair (section 6.1).
     Punched,
+    /// The LAN direct path of this pair (section 6).
+    Lan,
 }
 
 /// Switch proposal and confirmation: `type | target kind | 0 | 0 | round | identifier of the target relay`.
-/// Target kind 0 is a relay, 1 is a punched direct path (relay identifier is 0). Sent and received
+/// Target kind 0 is a relay, 1 is a punched direct path, 2 the LAN direct path (relay identifier is 0 for
+/// both). Sent and received
 /// through the tunnel; the source has been authenticated by WireGuard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SwitchMessage {
@@ -302,10 +305,10 @@ impl SwitchMessage {
     pub fn encode(&self) -> [u8; SWITCH_LEN] {
         let mut b = [0u8; SWITCH_LEN];
         b[0] = self.kind;
-        if let SwitchTarget::Relay(relay) = self.target {
-            b[8..16].copy_from_slice(&relay.0);
-        } else {
-            b[1] = 1;
+        match self.target {
+            SwitchTarget::Relay(relay) => b[8..16].copy_from_slice(&relay.0),
+            SwitchTarget::Punched => b[1] = 1,
+            SwitchTarget::Lan => b[1] = 2,
         }
         b[4..8].copy_from_slice(&self.round.to_be_bytes());
         b
@@ -321,6 +324,7 @@ impl SwitchMessage {
         let target = match b[1] {
             0 => SwitchTarget::Relay(KeyId(relay)),
             1 if relay == [0; 8] => SwitchTarget::Punched,
+            2 if relay == [0; 8] => SwitchTarget::Lan,
             _ => return None,
         };
         Some(Self {

@@ -198,12 +198,50 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
     })
 }
 
-/// Direct candidate paths from this machine to a peer (design/mesh.md section 6): when the peer is
-/// `public`, connect directly to its public address (the one given, or the one the Hub learned; one
-/// each for IPv4 and IPv6 when both exist); when both ends are `dial-only`, hole punching; when
-/// this machine is `public` and the peer is `dial-only`, there is none and the peer connects in
-/// (WireGuard roaming).
+/// The LAN direct path to a peer (design/mesh.md section 6): both machines reported LAN addresses on
+/// the same network and reach the Hub from the same public IPv4 address (they are behind the same NAT),
+/// and the peer's WireGuard port is known. IPv4 comes first; there is at most one.
+fn lan(state: &State, me: &Machine, peer: &Machine) -> Option<Candidate> {
+    let same_nat = matches!(
+        (me.learned.ipv4, peer.learned.ipv4),
+        (Some(a), Some(b)) if a.ip == b.ip
+    );
+    if !same_nat {
+        return None;
+    }
+    let port = peer
+        .listen_port(state.listen_port)
+        .or(peer.learned.listen_port)?;
+    let mut shared: Vec<IpAddr> = peer
+        .learned
+        .lan
+        .iter()
+        .filter(|theirs| {
+            me.learned
+                .lan
+                .iter()
+                .any(|mine| mine.shares_network(theirs))
+        })
+        .map(|theirs| theirs.addr)
+        .collect();
+    shared.sort_by_key(|ip| !ip.is_ipv4());
+    shared.first().map(|ip| Candidate::Lan {
+        endpoint: SocketAddr::new(*ip, port),
+    })
+}
+
+/// Direct candidate paths from this machine to a peer (design/mesh.md section 6): the LAN direct
+/// path first; when the peer is `public`, connect directly to its public address (the one given, or
+/// the one the Hub learned; one each for IPv4 and IPv6 when both exist); when both ends are
+/// `dial-only`, hole punching; when this machine is `public` and the peer is `dial-only`, nothing
+/// more, and the peer connects in (WireGuard roaming).
 fn direct(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = lan(state, me, peer).into_iter().collect();
+    out.extend(public(state, me, peer));
+    out
+}
+
+fn public(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     match (me.reachability, peer.reachability) {
         (_, Reachability::Public) => {
             let port = peer

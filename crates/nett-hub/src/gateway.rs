@@ -572,15 +572,34 @@ async fn handle(
                     .set_status(node.as_str(), &value.to_string(), now())
                     .await
                     .map_err(|e| e.to_string())?;
-                // The relay on this machine reports its certificate in the status (design/mesh.md
-                // section 5.3)
+                // From the status the Hub learns the relay's certificate (design/mesh.md section 5.3),
+                // the LAN addresses and the WireGuard port (section 6)
                 let fingerprint = value
                     .pointer("/relay/fingerprint")
                     .and_then(serde_json::Value::as_str)
                     .and_then(|f| f.parse().ok());
-                let change = |l: &mut Learned| l.relay_fingerprint = fingerprint;
+                let mut lan: Vec<nett_mesh::lan::LanAddress> = value
+                    .pointer("/node/lan")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|a| a.as_str()?.parse().ok())
+                    .take(nett_mesh::lan::MAX_LAN_ADDRESSES)
+                    .collect();
+                lan.sort();
+                lan.dedup();
+                let listen_port = value
+                    .pointer("/node/listen_port")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|p| u16::try_from(p).ok())
+                    .filter(|p| *p != 0);
+                let change = |l: &mut Learned| {
+                    l.relay_fingerprint = fingerprint;
+                    l.lan = lan;
+                    l.listen_port = listen_port;
+                };
                 if let Err(e) = hub.learn(node, change, now()).await {
-                    tracing::warn!(node_id = %node, error = %e, "recording the relay fingerprint");
+                    tracing::warn!(node_id = %node, error = %e, "recording what the status tells");
                 }
             }
         }
