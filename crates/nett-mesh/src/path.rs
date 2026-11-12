@@ -34,6 +34,15 @@ const FAILURE_MEMORY: Duration = Duration::from_secs(600);
 const SAME_TYPE_RATIO: f64 = 0.85;
 const SAME_TYPE_MIN_MS: f64 = 10.0;
 const SAME_TYPE_HOLD: Duration = Duration::from_secs(30);
+/// A UDP relay replaces a working direct path only when it is much faster (section 8.2): its score is
+/// at most this share of the current path's and at least this much lower, for this long, while the pair
+/// is not busy.
+const FASTER_RELAY_RATIO: f64 = 0.7;
+const FASTER_RELAY_MIN_MS: f64 = 20.0;
+const FASTER_RELAY_HOLD: Duration = Duration::from_secs(30);
+/// Back to direct from a relay chosen for being faster once the direct score is within this share of the
+/// relay's.
+const DIRECT_RETURN_RATIO: f64 = 0.85;
 /// When the current path has noticeable loss (at least this many of the last [`LOSS_WINDOW`] in-tunnel
 /// probes were lost) and the candidate replies consecutively, a better path of the same type only needs
 /// to be sustained for [`LOSSY_HOLD`] (ADR 0021).
@@ -246,6 +255,8 @@ struct Candidate {
     /// The "failure without ever having connected does not count as a failure" allowance has already been
     /// used once.
     grace_used: bool,
+    /// For a relay: the latest reply carried the peer's leg, so the round-trip time covers the whole path.
+    far_leg: bool,
 }
 
 impl Candidate {
@@ -262,6 +273,7 @@ impl Candidate {
             first_probe: None,
             healthy_since: None,
             grace_used: false,
+            far_leg: false,
         }
     }
 }
@@ -416,6 +428,13 @@ pub struct PeerPaths {
     cookie_rounds: u32,
     high_loss_since: Option<Instant>,
     better_since: Option<(usize, Instant)>,
+    /// A UDP relay much faster than the current direct path, and since when (section 8.2).
+    faster_since: Option<(usize, Instant)>,
+    /// The current relay was chosen for being much faster than direct: it returns to direct by its own
+    /// rule, not as soon as direct answers.
+    on_faster_relay: bool,
+    /// The pair carries more than [`crate::prober::BUSY_RATE`]: it stays on, or returns to, direct.
+    busy: bool,
     /// During a two-ended switchover (waiting for confirmation, rotating): only detects outages, does not
     /// choose a better path separately.
     hold: bool,
@@ -453,6 +472,9 @@ impl PeerPaths {
             cookie_rounds: 0,
             high_loss_since: None,
             better_since: None,
+            faster_since: None,
+            on_faster_relay: false,
+            busy: false,
             hold: false,
             punched: None,
             seq: 0,
@@ -756,6 +778,11 @@ impl PeerPaths {
         self.phase = Phase::Normal;
     }
 
+    /// Whether the pair carries more than [`crate::prober::BUSY_RATE`] at the moment (section 8.2).
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
     /// Result of a candidate probe; `extra` is the round-trip time and loss rate of the other leg of a relay
     /// path (carried by the peer in the in-tunnel reply).
     pub fn on_candidate_reply(
@@ -778,6 +805,7 @@ impl PeerPaths {
             c.stats.record_loss();
         }
         let (_, sent) = c.outstanding.pop_front().expect("position is in range");
+        c.far_leg = extra.is_some();
         let (extra_rtt, extra_loss) = extra.unwrap_or((Duration::ZERO, 0.0));
         if extra_loss >= 1.0 {
             // The other leg is down: the relay path as a whole is down
@@ -1156,6 +1184,17 @@ impl PeerPaths {
     /// When the current path is healthy, checks whether there is a better path.
     fn check_improvement(&mut self, now: Instant) -> Option<Action> {
         let current_kind = self.current_kind();
+        let current_score = self.tunnel.score(current_kind);
+        // A relay chosen for being faster gives way to direct only when the pair is busy or direct has
+        // come close again (section 8.2)
+        let returns = |c: &Candidate| {
+            !self.on_faster_relay
+                || self.busy
+                || c.stats
+                    .score(c.kind)
+                    .zip(current_score)
+                    .is_some_and(|(direct, relay)| direct * DIRECT_RETURN_RATIO <= relay)
+        };
         // Better type: 2 consecutive replies, and the backoff after failure is satisfied
         let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
             *i != self.current
@@ -1163,9 +1202,13 @@ impl PeerPaths {
                 && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                 && c.healthy_since
                     .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
+                && returns(c)
         });
         if let Some((i, _)) = better_type {
             return Some(self.decide(i, SwitchReason::BetterType, now));
+        }
+        if let Some(action) = self.check_faster_relay(now, current_kind, current_score) {
+            return Some(action);
         }
         // A better path of the same type: switch only after it holds for 30 seconds
         let current_score = self.tunnel.score(current_kind)?;
@@ -1197,7 +1240,10 @@ impl PeerPaths {
                     SAME_TYPE_HOLD
                 };
                 if now.saturating_duration_since(since) >= hold {
-                    return Some(self.decide(i, SwitchReason::BetterScore, now));
+                    let faster = self.on_faster_relay;
+                    let action = self.decide(i, SwitchReason::BetterScore, now);
+                    self.on_faster_relay = faster;
+                    return Some(action);
                 }
             }
             (Some(i), _) => self.better_since = Some((i, now)),
@@ -1206,7 +1252,63 @@ impl PeerPaths {
         None
     }
 
+    /// A UDP relay much faster than the current direct path, held for [`FASTER_RELAY_HOLD`] while the
+    /// pair is not busy and the path is not queuing (section 8.2). Pairs that switch together keep the
+    /// order of path types.
+    fn check_faster_relay(
+        &mut self,
+        now: Instant,
+        current_kind: PathKind,
+        current_score: Option<f64>,
+    ) -> Option<Action> {
+        // A queue on the way (late in-tunnel replies) slows every path alike: no relay is faster then
+        let queuing = self
+            .last_late_reply
+            .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON);
+        let eligible =
+            self.role == Role::Decide && current_kind == PathKind::Direct && !self.busy && !queuing;
+        let faster = current_score.filter(|_| eligible).and_then(|current| {
+            self.candidates
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    c.kind == PathKind::Relay
+                        && c.far_leg
+                        && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
+                        && c.last_reply.is_some_and(|t| {
+                            now.saturating_duration_since(t) <= 2 * CANDIDATE_INTERVAL
+                        })
+                })
+                .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, s)))
+                .filter(|(_, s)| {
+                    *s <= current * FASTER_RELAY_RATIO && current - s >= FASTER_RELAY_MIN_MS
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        });
+        match (faster, self.faster_since) {
+            (Some(i), Some((j, since)))
+                if i == j && now.saturating_duration_since(since) >= FASTER_RELAY_HOLD =>
+            {
+                let action = self.decide(i, SwitchReason::BetterScore, now);
+                self.on_faster_relay = true;
+                Some(action)
+            }
+            (Some(i), Some((j, _))) if i == j => None,
+            (Some(i), _) => {
+                self.faster_since = Some((i, now));
+                None
+            }
+            (None, _) => {
+                self.faster_since = None;
+                None
+            }
+        }
+    }
+
     fn switch_to(&mut self, target: usize, reason: SwitchReason, now: Instant) -> Action {
+        self.on_faster_relay = false;
+        self.faster_since = None;
         let from = self.candidates[self.current].route;
         let to = self.candidates[target].route;
         let old_rtt_ms = self.tunnel.rtt_ms();
@@ -1324,6 +1426,10 @@ mod tests {
         lost: Vec<Instant>,
         proposals: Vec<(Instant, usize, SwitchReason)>,
         candidate_probes: usize,
+        /// The peer's leg of each relay path, carried with candidate replies (`None`: not reported).
+        far_leg: Vec<Option<Duration>>,
+        /// The pair carries more than the busy rate.
+        busy: bool,
     }
 
     impl Sim {
@@ -1355,6 +1461,8 @@ mod tests {
                 lost: Vec::new(),
                 proposals: Vec::new(),
                 candidate_probes: 0,
+                far_leg: vec![None; n],
+                busy: false,
             }
         }
 
@@ -1375,7 +1483,8 @@ mod tests {
                     if tunnel {
                         self.paths.on_tunnel_reply(seq, at);
                     } else {
-                        self.paths.on_candidate_reply(index, seq, at, None);
+                        let extra = self.far_leg[index].map(|d| (d, 0.0));
+                        self.paths.on_candidate_reply(index, seq, at, extra);
                     }
                 }
                 if self.handshakes.iter().any(|t| *t <= now) {
@@ -1398,6 +1507,7 @@ mod tests {
                 if self.up[i] && !self.tunnel_broken[i] {
                     self.paths.on_receive(now);
                 }
+                self.paths.set_busy(self.busy);
                 for action in self.paths.tick(now, true) {
                     match action {
                         Action::TunnelProbe { seq } => {
@@ -1933,6 +2043,75 @@ mod tests {
         assert_eq!(backoff(&many, now), BACKOFF_MAX);
         let old: VecDeque<_> = [now - Duration::from_secs(700)].into();
         assert_eq!(backoff(&old, now), Duration::ZERO);
+    }
+
+    /// A long direct path and a relay path with both legs reported: 250 ms against 145 ms.
+    fn slow_direct_fast_relay() -> Sim {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.rtt = vec![250 * MS, 145 * MS];
+        sim.far_leg = vec![None, Some(Duration::ZERO)];
+        sim
+    }
+
+    #[test]
+    fn moves_a_quiet_pair_to_a_much_faster_relay_and_stays() {
+        let mut sim = slow_direct_fast_relay();
+        sim.run(Duration::from_secs(25));
+        assert!(
+            sim.switches.is_empty(),
+            "holds for 30 s first: {:?}",
+            sim.switches
+        );
+        sim.run(Duration::from_secs(40));
+        let (_, to, _, reason) = sim.switches[0];
+        assert_eq!((to, reason), (relay(1), SwitchReason::BetterScore));
+        // Direct still answers, but it is not close enough to win back the pair
+        sim.run(Duration::from_secs(60));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+    }
+
+    #[test]
+    fn a_busy_pair_stays_on_its_direct_path() {
+        let mut sim = slow_direct_fast_relay();
+        sim.busy = true;
+        sim.run(Duration::from_secs(90));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+    }
+
+    #[test]
+    fn a_relay_without_the_peers_leg_is_not_taken_for_faster() {
+        let mut sim = slow_direct_fast_relay();
+        // Only this end's leg is known: 5 ms looks much faster, but says nothing about the whole path
+        sim.rtt[1] = 5 * MS;
+        sim.far_leg[1] = None;
+        sim.run(Duration::from_secs(90));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+    }
+
+    #[test]
+    fn leaves_a_faster_relay_when_the_pair_gets_busy() {
+        let mut sim = slow_direct_fast_relay();
+        sim.run(Duration::from_secs(65));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+        sim.busy = true;
+        sim.run(Duration::from_secs(5));
+        let (_, to, _, reason) = sim.switches[1];
+        assert_eq!((to, reason), (direct(), SwitchReason::BetterType));
+    }
+
+    #[test]
+    fn leaves_a_faster_relay_when_direct_comes_close_again() {
+        let mut sim = slow_direct_fast_relay();
+        sim.run(Duration::from_secs(65));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+        // 120 ms direct against 155 for the relay (145 ms plus the relay preference)
+        sim.rtt[0] = 120 * MS;
+        sim.run(Duration::from_secs(20));
+        let (_, to, _, reason) = sim.switches[1];
+        assert_eq!((to, reason), (direct(), SwitchReason::BetterType));
     }
 
     #[test]

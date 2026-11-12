@@ -4,7 +4,7 @@
 //! 8.4). It does not touch sockets or the data plane; [`crate::engine`] performs those, and tests can
 //! drive it directly.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -38,6 +38,16 @@ const MAX_OUTSTANDING: usize = 4096;
 const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Window for judging whether there is traffic (design/mesh.md section 7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
+/// Bytes a second, both directions together (2 Mbit/s), above which a pair is busy: it stays on, or
+/// returns to, its direct path rather than a faster relay with a narrower uplink (design/mesh.md
+/// section 8.2).
+pub const BUSY_RATE: u64 = 250_000;
+/// The traffic rate is measured over this window, from byte counts sampled at most once a
+/// [`BYTE_SAMPLE_INTERVAL`].
+const BUSY_WINDOW: Duration = Duration::from_secs(10);
+const BYTE_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
+/// Upper limit of the byte count samples kept per peer.
+const MAX_BYTE_SAMPLES: usize = 16;
 /// Resend interval and count of switch proposals: if no confirmation arrives in about 2 seconds, the
 /// decider switches as usual, and a later outage enters rotation (section 8.4).
 const PROPOSAL_RETRY: Duration = Duration::from_millis(300);
@@ -145,6 +155,8 @@ struct Peer {
     punch: Option<Punch>,
     reports: HashMap<KeyId, (Duration, f64)>,
     last_activity: Option<Instant>,
+    /// WireGuard's byte count for this peer (received and sent), sampled for the traffic rate.
+    bytes: VecDeque<(Instant, u64)>,
 }
 
 /// Two-ended switchover (design/mesh.md section 8.4).
@@ -489,7 +501,8 @@ impl Prober {
                         .as_ref()
                         .map(|p| p.reports.clone())
                         .unwrap_or_default(),
-                    last_activity: previous.and_then(|p| p.last_activity),
+                    last_activity: previous.as_ref().and_then(|p| p.last_activity),
+                    bytes: previous.map(|p| p.bytes).unwrap_or_default(),
                 },
             );
         }
@@ -524,6 +537,27 @@ impl Prober {
             .paths
             .as_ref()
             .map(|p| p.current().endpoint())
+    }
+
+    /// WireGuard's byte count for this peer, received and sent together, read by the engine.
+    pub fn on_bytes(&mut self, peer: &NodeId, now: Instant, total: u64) {
+        let Some(p) = self.peers.get_mut(peer) else {
+            return;
+        };
+        if p.bytes
+            .back()
+            .is_some_and(|(at, _)| now.saturating_duration_since(*at) < BYTE_SAMPLE_INTERVAL)
+        {
+            return;
+        }
+        p.bytes.push_back((now, total));
+        while p.bytes.len() > MAX_BYTE_SAMPLES
+            || p.bytes.front().is_some_and(|(at, _)| {
+                now.saturating_duration_since(*at) > BUSY_WINDOW + BYTE_SAMPLE_INTERVAL
+            })
+        {
+            p.bytes.pop_front();
+        }
     }
 
     /// Records that the peer recently had traffic.
@@ -623,9 +657,11 @@ impl Prober {
                 .last_activity
                 .is_some_and(|t| now.saturating_duration_since(t) < ACTIVE_WINDOW)
                 || peer.together.as_ref().is_some_and(|t| t.rotation.is_some());
+            let busy = busy(&peer.bytes);
             let Some(paths) = peer.paths.as_mut() else {
                 continue;
             };
+            paths.set_busy(busy);
             let mut actions = paths.tick(now, active);
             actions.extend(self.coordinate(&id, now, now_ms));
             for action in actions {
@@ -1436,6 +1472,16 @@ impl Prober {
     }
 }
 
+/// Whether the sampled byte counts show more than [`BUSY_RATE`] over the window they span.
+fn busy(samples: &VecDeque<(Instant, u64)>) -> bool {
+    let (Some((first_at, first)), Some((last_at, last))) = (samples.front(), samples.back()) else {
+        return false;
+    };
+    let span = last_at.saturating_duration_since(*first_at).as_secs_f64();
+    span >= BYTE_SAMPLE_INTERVAL.as_secs_f64()
+        && last.saturating_sub(*first) as f64 / span > BUSY_RATE as f64
+}
+
 fn switch_of(peer: &NodeId, public_key: X25519PublicKey, action: Action) -> Option<Switch> {
     match action {
         Action::Switch {
@@ -1473,6 +1519,19 @@ mod tests {
     use nett_trust::anchors::TrustAnchors;
     use nett_trust::revocation::Revocations;
     use x25519_dalek::{PublicKey, StaticSecret};
+
+    #[test]
+    fn a_pair_is_busy_above_two_megabits_over_the_window() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        // 300 kB a second for 10 seconds, then 100 kB a second
+        let heavy: VecDeque<_> = (0..=10).map(|s| (at(s), s * 300_000)).collect();
+        assert!(busy(&heavy));
+        let light: VecDeque<_> = (0..=10).map(|s| (at(s), s * 100_000)).collect();
+        assert!(!busy(&light));
+        // One sample says nothing about a rate
+        assert!(!busy(&VecDeque::from([(t0, 5_000_000)])));
+    }
 
     const TOKEN_A: [u8; 32] = [0xa1; 32];
     const TOKEN_B: [u8; 32] = [0xb2; 32];
