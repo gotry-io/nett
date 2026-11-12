@@ -385,6 +385,21 @@ mod tests {
     }
 
     #[test]
+    fn the_built_in_keys_refuse_a_development_key() {
+        // A build made with NETT_RELEASE_PUBLIC_KEYS trusts a development key; an official build
+        // trusts only the project's keys, so what such a key signs is never installed
+        let (pair, id, _) = key(9);
+        let data = b"a program signed by a development key";
+        let sig = sign(&pair, id, data, "nett v99.0.0 nett", true);
+        assert!(matches!(
+            ReleaseKeys::built_in()
+                .expect("built-in keys")
+                .verify(data, &sig),
+            Err(ReleaseError::UnknownKey(_))
+        ));
+    }
+
+    #[test]
     fn the_published_release_verifies_against_the_project_keys() {
         // SHA256SUMS of v0.1.5 and its signature, as published on the releases page
         let keys = ReleaseKeys::parse(&format!("{PRIMARY}\n{BACKUP}")).expect("keys");
