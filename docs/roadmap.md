@@ -91,7 +91,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [x] Run the Hub; connect the existing members (`nett site invite`) and enroll the rest
 - [x] At least two usable relays on different hosts; `dial-only` nodes connect to at least two `public` nodes. On a host whose TCP 443 is held by a reverse proxy, the relay serves TLS on another TCP port until stage 7
 - [ ] Measurements on real machines: full-speed direct paths across the public internet against native WireGuard and Tailscale, the maximum forwarding throughput of a 1 vCPU relay, a Mac laptop changing networks and waking from sleep, coexistence with a proxy-style VPN app's enhanced mode
-- [ ] Release key rotation: a release signed by the backup key
+- [x] Release key rotation: a release signed by the backup key (CI, `linux` job)
 - [x] Troubleshooting manual, including how to run alongside proxy-style VPN apps ([troubleshooting.md](troubleshooting.md))
 
 ### 7. Phones and restricted networks
@@ -132,7 +132,7 @@ Checked items are met; the others name the stage that verifies them.
 - [ ] Block UDP: automatically falls back to TCP/TLS 443. *Met in the lab (stages 1 and 4); on real machines: stage 6; through entry nodes: stage 7*
 - [ ] Stop the Hub: the mesh, automatic switching and phone access keep working. *Mesh and switching met in the lab (stage 4); phones: stage 7*
 - [ ] Stop nett-node: the mesh keeps measuring and switching, and DNS keeps answering. *Stage 6*
-- [ ] Replace the primary key with a release signed by the backup key: after installation, nodes reject packages signed by the old primary key; official builds refuse to install packages signed by the development key. *Stage 6*
+- [x] Replace the primary key with a release signed by the backup key: after installation, nodes reject packages signed by the old primary key; official builds refuse to install packages signed by the development key. *Stage 6 (CI, with test keys)*
 - [x] The Hub sends a peer without admission material: all members refuse to configure it; after a member is removed, the Hub resends its original admission material: all members refuse; a member that enrolled long ago can be verified normally by newly joined members. *Stages 1 and 4 (lab)*
 - [ ] Rebuild the Hub from backup on another host following the runbook, and all nodes reconnect automatically. The backup used is older than the nodes' state (changes were approved after the backup), and after restoration the user does not need to approve again (protocol.md section 6.4). *Met in the lab (stage 4); on another host: stage 6*
 - [ ] Idle for 24 hours on a 1 vCPU / 1 GB machine: the memory of nett-node, mesh process, transport adapter and nett-relay each meets the resource budget; Hub ≤ 30–50 MB with memory not growing. *Stage 6*
