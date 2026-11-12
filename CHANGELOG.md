@@ -4,12 +4,15 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-11-12
+
 - A pair with little traffic moves to a relay that is much faster than its direct path, for example across
   a congested border: when the relay scores at most 70% of direct for 30 seconds. It returns to direct when
   direct comes close again or the pair carries more than 2 Mbit/s, so bulk transfers keep the direct path.
 - On Linux, `nett doctor` says when `/etc/resolv.conf` names the upstream DNS servers instead of
   systemd-resolved's stub: programs then skip the routing of `nett.internal` to `nett0`, and only
   `resolvectl query` sees the names. It gives the command that points the file at the stub.
+
 ## [0.3.3] - 2026-11-11
 
 - macOS: names under `nett.internal` resolve. The system resolver's queries to this machine's own mesh
