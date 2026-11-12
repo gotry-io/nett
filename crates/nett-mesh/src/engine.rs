@@ -810,6 +810,7 @@ impl<D: DataPlane> Engine<D> {
             traffic.tx_bytes = stat.tx_bytes;
             traffic.endpoint = stat.endpoint;
             traffic.last_handshake = stat.last_handshake;
+            prober.on_bytes(id, now, stat.rx_bytes.saturating_add(stat.tx_bytes));
             if before != Some(bytes) {
                 prober.mark_active(id, now);
             }
