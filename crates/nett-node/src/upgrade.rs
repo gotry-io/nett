@@ -412,11 +412,15 @@ mod tests {
         }
     }
 
-    fn temp(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nett-upgrade-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).expect("dir");
-        dir
+    /// A directory removed with everything in it when the returned guard is dropped; keep the
+    /// guard for as long as the path is used.
+    fn temp(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("nett-upgrade-{name}-"))
+            .tempdir()
+            .expect("temp dir");
+        let dir = tmp.path().to_path_buf();
+        (tmp, dir)
     }
 
     /// A release key and a manifest for `version` whose program is `bytes`.
@@ -483,7 +487,7 @@ mod tests {
 
     #[test]
     fn only_higher_versions_for_this_target_are_planned() {
-        let dir = temp("plan");
+        let (_dir_tmp, dir) = temp("plan");
         let (keys, manifest) = release("0.2.0", "x86_64-unknown-linux-musl", b"new");
         let (up, _) = upgrader(&dir, keys.clone(), true);
         assert!(matches!(up.plan(&manifest), Ok(Plan::Upgrade { .. })));
@@ -501,7 +505,7 @@ mod tests {
 
     #[test]
     fn a_verified_program_is_installed_and_the_old_one_kept() {
-        let dir = temp("install");
+        let (_dir_tmp, dir) = temp("install");
         let (keys, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
         let (up, services) = upgrader(&dir, keys, true);
         up.clone_paths()
@@ -528,7 +532,7 @@ mod tests {
 
     #[test]
     fn a_mesh_that_does_not_come_up_is_rolled_back() {
-        let dir = temp("rollback");
+        let (_dir_tmp, dir) = temp("rollback");
         let (keys, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"bad program");
         let (up, services) = upgrader(&dir, keys, false);
         let paths = up.clone_paths();
@@ -549,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_new_node_that_keeps_exiting_is_rolled_back() {
-        let dir = temp("starts");
+        let (_dir_tmp, dir) = temp("starts");
         let (keys, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"x");
         let (mut up, services) = upgrader(&dir, keys, true);
         // as installed: the new program in place, the old one kept, the marker written

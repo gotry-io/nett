@@ -410,7 +410,11 @@ mod tests {
 
     #[test]
     fn plist_is_valid() {
-        let dir = std::env::temp_dir().join(format!("nett-plist-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-plist-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("p.plist");
         for service in [&MESH, &NODE] {

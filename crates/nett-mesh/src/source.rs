@@ -83,7 +83,11 @@ mod tests {
 
     #[tokio::test]
     async fn a_reload_request_rereads_and_carries_its_reply() {
-        let dir = std::env::temp_dir().join(format!("nett-source-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-source-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("desired.json");
         std::fs::write(&path, b"not json").expect("write");

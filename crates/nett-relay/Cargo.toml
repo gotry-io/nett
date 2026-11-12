@@ -29,6 +29,8 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
 # A TLS handshake with the transport adapter's client checks the relay's own certificate
 nett-transport.workspace = true
 

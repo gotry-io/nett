@@ -25,11 +25,15 @@ use x25519_dalek::{PublicKey, StaticSecret};
 pub const URL: &str = "https://127.0.0.1";
 pub const SECRET: [u8; 32] = [42; 32];
 
-pub fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nett-hub-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).expect("temp dir");
-    dir
+/// A directory removed with everything in it when the returned guard is dropped; keep the
+/// guard for as long as the path is used.
+pub fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("nett-hub-{name}-"))
+        .tempdir()
+        .expect("temp dir");
+    let dir = tmp.path().to_path_buf();
+    (tmp, dir)
 }
 
 pub fn name(s: &str) -> NodeName {
@@ -167,9 +171,19 @@ pub async fn push(app: &axum::Router, token: &str, state: &State) -> (StatusCode
     .await
 }
 
-/// A linked Hub: returns the Hub, router, owner token and site.
-pub async fn linked(name: &str, url: &str) -> (Arc<Hub>, axum::Router, String, SiteDir, State) {
-    let dir = temp_dir(name);
+/// A linked Hub: returns the Hub, router, owner token and site, and the guard of their directory.
+pub async fn linked(
+    name: &str,
+    url: &str,
+) -> (
+    Arc<Hub>,
+    axum::Router,
+    String,
+    SiteDir,
+    State,
+    tempfile::TempDir,
+) {
+    let (_dir_tmp, dir) = temp_dir(name);
     let (site, state) = site(&dir.join("site"));
     let hub = hub(&dir, url).await;
     let app = nett_hub::api::router(hub.clone());
@@ -185,7 +199,7 @@ pub async fn linked(name: &str, url: &str) -> (Arc<Hub>, axum::Router, String, S
     let token = serde_json::from_slice::<LinkResponse>(&body)
         .expect("token")
         .token;
-    (hub, app, token, site, state)
+    (hub, app, token, site, state, _dir_tmp)
 }
 
 pub const DATA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");

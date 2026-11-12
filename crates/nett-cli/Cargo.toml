@@ -51,6 +51,10 @@ rustix = { workspace = true, features = ["thread", "process"] }
 libc.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
+[dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
+
 [features]
 # Lab build: lab options of the mesh process (event file, simulated clock skew, transport adapter
 # configuration file), and the relay reading its assignment from a file (design/prototype.md

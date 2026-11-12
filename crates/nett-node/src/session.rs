@@ -860,11 +860,15 @@ mod tests {
         );
     }
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nett-node-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        dir
+    /// A directory removed with everything in it when the returned guard is dropped; keep the
+    /// guard for as long as the path is used.
+    fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("nett-node-{name}-"))
+            .tempdir()
+            .expect("temp dir");
+        let dir = tmp.path().to_path_buf();
+        (tmp, dir)
     }
 
     #[test]
@@ -928,7 +932,7 @@ mod tests {
 
     #[test]
     fn desired_state_is_replaced_whole_and_keeps_its_mode() {
-        let dir = temp_dir("write");
+        let (_dir_tmp, dir) = temp_dir("write");
         let path = dir.join("desired.json");
         let doc = b"{}";
         write_desired(&path, doc).expect("first write");
@@ -1005,7 +1009,11 @@ mod apply_tests {
     /// and after a reconnect it must not be reported as applied.
     #[tokio::test]
     async fn an_unchanged_file_is_still_confirmed_by_the_mesh_process() {
-        let dir = std::env::temp_dir().join(format!("nett-node-apply-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-node-apply-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("dir");
         let doc = member(&dir.join("site"));

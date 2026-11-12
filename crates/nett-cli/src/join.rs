@@ -113,11 +113,15 @@ mod tests {
 
     use super::*;
 
-    fn temp_dir(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("nett-cli-join-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).expect("dir");
-        dir
+    /// A directory removed with everything in it when the returned guard is dropped; keep the
+    /// guard for as long as the path is used.
+    fn temp_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("nett-cli-join-{name}-"))
+            .tempdir()
+            .expect("temp dir");
+        let dir = tmp.path().to_path_buf();
+        (tmp, dir)
     }
 
     /// A machine in a site: returns its desired state and the site's trust anchor.
@@ -169,7 +173,7 @@ mod tests {
 
     #[test]
     fn tokens_must_match_this_machine_and_its_site() {
-        let root = temp_dir("match");
+        let (_root_tmp, root) = temp_dir("match");
         let (doc, anchors) = member(&root.join("site"));
         let (_, other_anchors) = member(&root.join("other-site"));
         let dir = root.join("etc");

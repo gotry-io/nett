@@ -44,6 +44,8 @@ x25519-dalek.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
 http-body-util.workspace = true
 # A new machine signs its admission proof in tests
 nett-trust = { workspace = true, features = ["signing"] }

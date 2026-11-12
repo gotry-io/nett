@@ -1029,7 +1029,6 @@ mod tests {
     use super::*;
     use crate::event::VecSink;
     use crate::path::SwitchReason;
-    use std::sync::atomic::AtomicUsize;
 
     fn node(n: u8) -> NodeId {
         crate::testutil::node_id(n)
@@ -1118,16 +1117,15 @@ mod tests {
         }
     }
 
-    /// A short path for tests (Unix socket paths on macOS are at most 104 bytes).
-    fn temp_dir() -> PathBuf {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "nst{}-{}",
-            std::process::id(),
-            N.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        dir
+    /// A short directory for tests (Unix socket paths on macOS are at most 104 bytes), removed with
+    /// everything in it when the returned guard is dropped; keep the guard while the path is used.
+    fn temp_dir() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix("nst-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = tmp.path().join("s");
+        (tmp, dir)
     }
 
     fn raw(path: &Path, request: &[u8]) -> serde_json::Value {
@@ -1164,7 +1162,7 @@ mod tests {
         if !rustix::process::geteuid().is_root() {
             return;
         }
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("peer.sock");
         let mut server = std::process::Command::new("unshare")
@@ -1197,7 +1195,7 @@ mod tests {
 
     #[test]
     fn answers_a_status_query_over_a_private_socket() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("mesh.sock");
         let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
@@ -1219,7 +1217,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_requests() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("mesh.sock");
         let _server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let code = |request: &[u8]| raw(&path, request)["error"]["code"].clone();
@@ -1245,7 +1243,7 @@ mod tests {
 
     #[test]
     fn a_slow_client_cannot_hold_the_socket_past_the_time_limit() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("mesh.sock");
         let _server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mut slow = UnixStream::connect(&path).expect("connect");
@@ -1274,7 +1272,7 @@ mod tests {
 
     #[test]
     fn reload_reports_the_outcome_or_busy() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("mesh.sock");
         let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         assert_eq!(
@@ -1299,7 +1297,7 @@ mod tests {
 
     #[test]
     fn takes_over_a_stale_socket_but_not_a_live_one_or_a_file() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         std::fs::create_dir_all(&dir).expect("dir");
         let path = dir.join("mesh.sock");
         // The socket left by the previous abnormal exit: the file is still there and no process is listening
@@ -1322,7 +1320,7 @@ mod tests {
 
     #[test]
     fn reports_a_missing_service() {
-        let dir = temp_dir();
+        let (_dir_tmp, dir) = temp_dir();
         let err = query(&dir.join("mesh.sock")).expect_err("no service");
         assert!(matches!(
             err,

@@ -62,11 +62,12 @@ fn written(path: &PathBuf) -> DesiredMeshDoc {
 #[tokio::test]
 async fn nodes_receive_apply_and_acknowledge_the_desired_state() {
     // The Hub's address must be fixed before linking: reserve a port first
-    let (hub, app, token, site, mut state) = linked("gateway", "https://127.0.0.1").await;
+    let (hub, app, token, site, mut state, _linked_tmp) =
+        linked("gateway", "https://127.0.0.1").await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
     let url = serve(hub.clone()).await;
-    let dir = temp_dir("gateway-mac");
+    let (_dir_tmp, dir) = temp_dir("gateway-mac");
     let mac = state
         .machine(&name("mac"))
         .expect("mac")
@@ -118,11 +119,12 @@ async fn nodes_receive_apply_and_acknowledge_the_desired_state() {
 
 #[tokio::test]
 async fn unknown_or_mismatched_machines_are_refused() {
-    let (hub, app, token, _site, state) = linked("gateway-refuse", "https://127.0.0.1").await;
+    let (hub, app, token, _site, state, _linked_tmp) =
+        linked("gateway-refuse", "https://127.0.0.1").await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
     let url = serve(hub.clone()).await;
-    let dir = temp_dir("gateway-refuse-node");
+    let (_dir_tmp, dir) = temp_dir("gateway-refuse-node");
     let mac = state
         .machine(&name("mac"))
         .expect("mac")
@@ -191,10 +193,11 @@ async fn unknown_or_mismatched_machines_are_refused() {
 
 #[tokio::test]
 async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
-    let (hub, app, token, _site, state) = linked("gateway-release", "https://127.0.0.1").await;
+    let (hub, app, token, _site, state, _linked_tmp) =
+        linked("gateway-release", "https://127.0.0.1").await;
     assert_eq!(push(&app, &token, &state).await.0, StatusCode::OK);
     let url = serve(hub.clone()).await;
-    let dir = temp_dir("gateway-release-mac");
+    let (_dir_tmp, dir) = temp_dir("gateway-release-mac");
     let mac = state
         .machine(&name("mac"))
         .expect("mac")
@@ -284,7 +287,8 @@ fn coordination() -> (
 /// and only between members the site connects.
 #[tokio::test]
 async fn switch_messages_pass_between_connected_members() {
-    let (hub, app, token, site, mut state) = linked("gateway-switch", "https://127.0.0.1").await;
+    let (hub, app, token, site, mut state, _linked_tmp) =
+        linked("gateway-switch", "https://127.0.0.1").await;
     state
         .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
@@ -297,7 +301,7 @@ async fn switch_messages_pass_between_connected_members() {
 
     let mut ends = Vec::new();
     for (n, key) in [("mac", 2), ("nas", 3)] {
-        let dir = temp_dir(&format!("gateway-switch-{n}"));
+        let (_dir_tmp, dir) = temp_dir(&format!("gateway-switch-{n}"));
         let agent = node(&url, id(n).as_str(), identity(key), &dir);
         let (coordination, sent, received) = coordination();
         tokio::spawn(async move { agent.session(&mut None, &coordination).await });

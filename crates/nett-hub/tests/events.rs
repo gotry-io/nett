@@ -13,7 +13,7 @@ use common::*;
 
 #[tokio::test]
 async fn events_are_bounded_per_machine_and_in_time() {
-    let dir = temp_dir("events-retention");
+    let (_dir_tmp, dir) = temp_dir("events-retention");
     let db = Db::open(&dir.join("hub.db")).await.expect("db");
     let now = nett_hub::now();
     // an old event of another machine expires when anything is recorded
@@ -42,7 +42,8 @@ async fn events_are_bounded_per_machine_and_in_time() {
 
 #[tokio::test]
 async fn a_connected_machine_has_events_through_the_api() {
-    let (hub, app, token, _site, state) = linked("events-api", "https://127.0.0.1").await;
+    let (hub, app, token, _site, state, _linked_tmp) =
+        linked("events-api", "https://127.0.0.1").await;
     assert_eq!(push(&app, &token, &state).await.0, StatusCode::OK);
     let url = serve(hub.clone()).await;
     let mac = state
@@ -50,7 +51,7 @@ async fn a_connected_machine_has_events_through_the_api() {
         .expect("mac")
         .node_id
         .to_string();
-    let dir = temp_dir("events-api-mac");
+    let (_dir_tmp, dir) = temp_dir("events-api-mac");
     let config = nett_node::config::HubConfig {
         url,
         hub_key: hub_key(),

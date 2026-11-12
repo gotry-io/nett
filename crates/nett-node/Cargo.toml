@@ -45,6 +45,8 @@ tracing.workspace = true
 x25519-dalek.workspace = true
 
 [dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
 blake2.workspace = true
 nett-site.workspace = true
 tokio = { workspace = true, features = ["rt", "macros"] }

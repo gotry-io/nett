@@ -35,6 +35,8 @@ libc.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "time"] }
 nett-trust = { workspace = true, features = ["signing"] }
 

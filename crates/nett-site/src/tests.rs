@@ -16,10 +16,15 @@ use crate::ops::{MachineChange, MachineOptions};
 use crate::sign::{RESIGN_BEFORE_SECS, expand_rules, sign};
 use crate::state::{NodeKeys, Part, RuleId, State};
 
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("nett-site-lib-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    dir
+/// A directory removed with everything in it when the returned guard is dropped; keep the
+/// guard for as long as the path is used.
+fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+    let tmp = tempfile::Builder::new()
+        .prefix(&format!("nett-site-lib-{name}-"))
+        .tempdir()
+        .expect("temp dir");
+    let dir = tmp.path().join("site");
+    (tmp, dir)
 }
 
 fn name(s: &str) -> NodeName {
@@ -107,7 +112,7 @@ fn admitted(state: &State, n: &str) -> MemberSet {
 
 #[test]
 fn a_new_site_is_private() {
-    let dir = temp_dir("init");
+    let (_dir_tmp, dir) = temp_dir("init");
     SiteDir::init(&dir, "https://nett.invalid").expect("init");
     let mode = |p: PathBuf| std::fs::metadata(p).expect("exists").permissions().mode() & 0o777;
     assert_eq!(mode(dir.clone()), 0o700);
@@ -126,7 +131,7 @@ fn a_new_site_is_private() {
 
 #[test]
 fn machines_get_admissible_desired_states() {
-    let dir = temp_dir("add");
+    let (_dir_tmp, dir) = temp_dir("add");
     let (site, mut state) = site(&dir);
     signed(&site, &mut state);
     site.save(&state).expect("saved");
@@ -160,7 +165,7 @@ fn machines_get_admissible_desired_states() {
 
 #[test]
 fn signatures_stay_until_their_inputs_change() {
-    let dir = temp_dir("keep");
+    let (_dir_tmp, dir) = temp_dir("keep");
     let (site, mut state) = site(&dir);
     signed(&site, &mut state);
     let before = state.clone();
@@ -186,7 +191,7 @@ fn signatures_stay_until_their_inputs_change() {
 
 #[test]
 fn rules_expand_to_addresses_and_bring_connections() {
-    let dir = temp_dir("rules");
+    let (_dir_tmp, dir) = temp_dir("rules");
     let (site, mut state) = site(&dir);
     signed(&site, &mut state);
     let before = state.clone();
@@ -256,7 +261,7 @@ fn rules_expand_to_addresses_and_bring_connections() {
 
 #[test]
 fn removing_a_machine_revokes_it_and_cleans_up_its_rules() {
-    let dir = temp_dir("remove");
+    let (_dir_tmp, dir) = temp_dir("remove");
     let (site, mut state) = site(&dir);
     state
         .allow(
@@ -311,7 +316,7 @@ fn removing_a_machine_revokes_it_and_cleans_up_its_rules() {
 
 #[test]
 fn edge_and_routes_selectors_need_their_part_and_go_with_it() {
-    let dir = temp_dir("parts");
+    let (_dir_tmp, dir) = temp_dir("parts");
     let (site, mut state) = site(&dir);
     assert!(
         state
@@ -379,7 +384,7 @@ fn edge_and_routes_selectors_need_their_part_and_go_with_it() {
 
 #[test]
 fn policies_close_to_expiry_are_signed_again() {
-    let dir = temp_dir("expiry");
+    let (_dir_tmp, dir) = temp_dir("expiry");
     let (site, mut state) = site(&dir);
     let recovery = site.recovery().expect("recovery");
     let now = Timestamp::now();
@@ -415,7 +420,7 @@ fn policies_close_to_expiry_are_signed_again() {
 
 #[test]
 fn inconsistent_machines_are_refused() {
-    let dir = temp_dir("check");
+    let (_dir_tmp, dir) = temp_dir("check");
     let (_site, mut state) = site(&dir);
     let add = |state: &mut State, n: &str, opts: MachineOptions| {
         state.add(name(n), opts, new_node_id().expect("id"))
@@ -509,7 +514,7 @@ fn inconsistent_machines_are_refused() {
 /// (design/mesh.md section 4.2).
 #[test]
 fn advertised_routes_keep_counting_after_they_are_removed() {
-    let dir = temp_dir("routes-version");
+    let (_dir_tmp, dir) = temp_dir("routes-version");
     let (site, mut state) = site(&dir);
     let nas = name("nas");
     let version = |s: &State| {
@@ -573,7 +578,7 @@ fn joined(
 
 #[test]
 fn a_machine_waiting_to_join_gets_a_policy_with_its_enrollment_key() {
-    let dir = temp_dir("pending");
+    let (_dir_tmp, dir) = temp_dir("pending");
     let (site, mut state) = site(&dir);
     let recovery = site.recovery().expect("recovery");
     state
@@ -642,7 +647,7 @@ fn a_machine_waiting_to_join_gets_a_policy_with_its_enrollment_key() {
 
 #[test]
 fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
-    let dir = temp_dir("enrolled");
+    let (_dir_tmp, dir) = temp_dir("enrolled");
     let (this_site, mut state) = site(&dir);
     let recovery = this_site.recovery().expect("recovery");
     state
@@ -696,7 +701,7 @@ fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
     assert!(members.get(&m.node_id).is_some());
 
     // Material signed by another site, or meant for another node, is not accepted
-    let other_dir = temp_dir("enrolled-other");
+    let (_other_dir_tmp, other_dir) = temp_dir("enrolled-other");
     let (other_site, mut other) = site(&other_dir);
     other
         .add(name("box"), MachineOptions::default(), m.node_id.clone())
@@ -717,7 +722,7 @@ fn a_recorded_enrollment_makes_the_machine_a_member_without_signing_again() {
 
 #[test]
 fn learned_addresses_fill_in_for_public_machines_without_one() {
-    let dir = temp_dir("learned");
+    let (_dir_tmp, dir) = temp_dir("learned");
     let (_site, mut state) = site(&dir);
     state
         .add(
@@ -830,7 +835,7 @@ fn path<'a>(
 
 #[test]
 fn connections_go_through_every_relay_udp_first() {
-    let dir = temp_dir("relay-candidates");
+    let (_dir_tmp, dir) = temp_dir("relay-candidates");
     let (_site, state) = relay_site(&dir);
     let id = |n: &str| state.machine(&name(n)).expect("machine").node_id.clone();
     let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
@@ -934,7 +939,7 @@ fn connections_go_through_every_relay_udp_first() {
 
 #[test]
 fn relays_need_a_public_machine_and_their_own_port() {
-    let dir = temp_dir("relay-checks");
+    let (_dir_tmp, dir) = temp_dir("relay-checks");
     let (_site, mut state) = site(&dir);
     let role = |port| crate::state::RelayRole {
         port,
@@ -989,7 +994,7 @@ fn relays_need_a_public_machine_and_their_own_port() {
 
 #[test]
 fn relay_changes_are_listed_with_the_paths_they_change() {
-    let dir = temp_dir("relay-describe");
+    let (_dir_tmp, dir) = temp_dir("relay-describe");
     let (site, mut old) = site(&dir);
     old.allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
@@ -1035,7 +1040,7 @@ fn relay_changes_are_listed_with_the_paths_they_change() {
 
 #[test]
 fn machines_behind_the_same_nat_connect_over_their_lan() {
-    let dir = temp_dir("lan");
+    let (_dir_tmp, dir) = temp_dir("lan");
     let (site, mut state) = site(&dir);
     state
         .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)

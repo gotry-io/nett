@@ -429,7 +429,11 @@ mod tests {
     /// the relay keeps answering and forwarding.
     #[test]
     fn a_stuck_state_write_does_not_hold_up_forwarding() {
-        let dir = std::env::temp_dir().join(format!("nett-relay-save-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-relay-save-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("scratch dir");
         let state = dir.join("relay-state.json");
         // The temporary file written first when saving is a pipe: opening it for writing blocks

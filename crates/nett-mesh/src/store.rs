@@ -423,7 +423,11 @@ mod tests {
     #[test]
     fn the_directory_backend_writes_private_files() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("nett-store-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-store-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         let mut backend = DirBackend::new(dir.join("state"));
         assert_eq!(backend.read(TRUST_FILE).expect("readable"), None);
