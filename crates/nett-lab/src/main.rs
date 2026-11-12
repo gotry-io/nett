@@ -56,6 +56,8 @@ const USAGE: &str = "usage:
       soak.csv, rests 10 minutes and checks that memory stayed flat)
   nett-lab run throughput --topology <direct.toml|relay-only.toml> --nett <path/to/release/nett> --out <dir> [--duration SECONDS]
       (iperf3 over the underlying network and the mesh; add --userspace a --userspace b to compare)
+  nett-lab run faster-relay --topology failover.toml --nett <path/to/nett> --out <dir>
+      (150 ms on the direct path only: a quiet pair moves to a relay, a bulk transfer moves it back)
   nett-lab run hub-relay --topology hub-relay.toml --nett <path/to/nett> --out <dir>
       (members join through the Hub; a relay, its TLS fingerprint learned, and TLS fallback)
   nett-lab down --topology <file.toml>
@@ -198,6 +200,7 @@ fn run() -> anyhow::Result<bool> {
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
                 "throughput" => scenario::throughput(&topology, &nett()?, &out, duration_s)?,
+                "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,
