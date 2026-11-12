@@ -470,7 +470,11 @@ mod tests {
             })
         );
 
-        let dir = std::env::temp_dir().join(format!("nett-config-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-config-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("desired.json");
         std::fs::write(&file, [b' '; 11]).expect("written");

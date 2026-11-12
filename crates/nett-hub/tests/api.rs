@@ -13,7 +13,7 @@ use common::*;
 
 #[tokio::test]
 async fn link_code_works_once() {
-    let dir = temp_dir("link");
+    let (_dir_tmp, dir) = temp_dir("link");
     let (_site, state) = site(&dir.join("site"));
     let app = nett_hub::api::router(hub(&dir, URL).await);
     let (status, _) = call(
@@ -51,7 +51,7 @@ async fn link_code_works_once() {
 
 #[tokio::test]
 async fn expired_link_code_is_refused() {
-    let dir = temp_dir("expired");
+    let (_dir_tmp, dir) = temp_dir("expired");
     let (_site, state) = site(&dir.join("site"));
     let db = nett_hub::db::Db::open(&dir.join("hub.db"))
         .await
@@ -81,7 +81,7 @@ async fn expired_link_code_is_refused() {
 
 #[tokio::test]
 async fn site_routes_need_the_owner_token() {
-    let (_hub, app, token, _site, state) = linked("token", URL).await;
+    let (_hub, app, token, _site, state, _linked_tmp) = linked("token", URL).await;
     let body = serde_json::to_vec(&state).expect("json");
     for t in [
         None,
@@ -99,7 +99,7 @@ async fn site_routes_need_the_owner_token() {
 
 #[tokio::test]
 async fn pushes_advance_and_status_lists_the_machines() {
-    let (_hub, app, token, site, mut state) = linked("push", URL).await;
+    let (_hub, app, token, site, mut state, _linked_tmp) = linked("push", URL).await;
     let (status, body) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -146,7 +146,7 @@ async fn pushes_advance_and_status_lists_the_machines() {
 
 #[tokio::test]
 async fn forged_or_older_artifacts_are_refused_whole() {
-    let (_hub, app, token, site, state) = linked("forged", URL).await;
+    let (_hub, app, token, site, state, _linked_tmp) = linked("forged", URL).await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
 
@@ -199,7 +199,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
     assert_eq!(status, StatusCode::CONFLICT, "bad signature");
 
     // Another site's trust anchor
-    let other = temp_dir("forged-other");
+    let (_other_tmp, other) = temp_dir("forged-other");
     let (_, foreign) = common::site(&other);
     let (status, body) = push(&app, &token, &foreign).await;
     assert_eq!(status, StatusCode::CONFLICT, "other trust anchors");
@@ -208,7 +208,7 @@ async fn forged_or_older_artifacts_are_refused_whole() {
 
 #[tokio::test]
 async fn removed_machines_stay_removed() {
-    let (_hub, app, token, site, state) = linked("revoked", URL).await;
+    let (_hub, app, token, site, state, _linked_tmp) = linked("revoked", URL).await;
     let (status, _) = push(&app, &token, &state).await;
     assert_eq!(status, StatusCode::OK);
     // Dropping a machine without leaving a revocation

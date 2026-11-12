@@ -168,7 +168,11 @@ mod tests {
 
     #[test]
     fn the_certificate_is_created_once_and_kept() {
-        let dir = std::env::temp_dir().join(format!("nett-relay-cert-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-relay-cert-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         let first = RelayCert::load_or_create(&dir).expect("created");
         let mode = std::fs::metadata(dir.join(KEY_FILE))
@@ -202,7 +206,11 @@ mod tests {
     /// with the relay's own certificate.
     #[test]
     fn the_transport_adapter_accepts_the_certificate_by_fingerprint() {
-        let dir = std::env::temp_dir().join(format!("nett-relay-tls-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-relay-tls-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         let cert = RelayCert::load_or_create(&dir).expect("created");
         let acceptor = crate::server::cert_acceptor(&cert).expect("acceptor");

@@ -11,6 +11,10 @@ publish.workspace = true
 # desired state from the model (design/site.md). The signing tool `nett site` and the Hub share this
 # logic (design/hub.md section 4)
 
+[dev-dependencies]
+# Test directories removed when a test ends
+tempfile.workspace = true
+
 [lints]
 workspace = true
 

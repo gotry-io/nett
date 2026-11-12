@@ -228,7 +228,11 @@ mod tests {
 
     #[test]
     fn helpers_fetch_their_configuration() {
-        let dir = std::env::temp_dir().join(format!("nett-helper-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-helper-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join(SOCKET_NAME);
         let fake = Fake::default();

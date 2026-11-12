@@ -103,7 +103,7 @@ fn refused(e: &EnrollError) -> Option<&str> {
 
 #[tokio::test]
 async fn a_new_machine_joins_through_the_hub_once() {
-    let (hub, app, owner, site, mut state) = linked("enroll", URL).await;
+    let (hub, app, owner, site, mut state, _linked_tmp) = linked("enroll", URL).await;
     let expires = nett_hub::now() + 1800;
     let (box_id, key) = pending(&site, &mut state, expires);
     assert_eq!(push(&app, &owner, &state).await.0, StatusCode::OK);
@@ -112,7 +112,7 @@ async fn a_new_machine_joins_through_the_hub_once() {
 
     // The new machine enrolls: the first desired state it gets is for it, and contains its own
     // admission material
-    let dir = temp_dir("enroll-box");
+    let (_dir_tmp, dir) = temp_dir("enroll-box");
     let mine = machine_keys(&dir);
     let enrolled = nett_node::join::enroll(&dir, &join, nett_hub::now())
         .await
@@ -140,7 +140,7 @@ async fn a_new_machine_joins_through_the_hub_once() {
     let generation = current.generation;
 
     // The same token with a different machine: rejected
-    let other = temp_dir("enroll-other");
+    let (_other_tmp, other) = temp_dir("enroll-other");
     machine_keys(&other);
     let e = nett_node::join::enroll(&other, &join, nett_hub::now())
         .await
@@ -190,7 +190,7 @@ async fn a_new_machine_joins_through_the_hub_once() {
 
 #[tokio::test]
 async fn expired_forged_and_borrowed_enrollments_are_refused() {
-    let (hub, app, owner, site, mut state) = linked("enroll-refused", URL).await;
+    let (hub, app, owner, site, mut state, _linked_tmp) = linked("enroll-refused", URL).await;
     let expired = nett_hub::now() - 10;
     let (box_id, key) = pending(&site, &mut state, expired);
     assert_eq!(push(&app, &owner, &state).await.0, StatusCode::OK);
@@ -234,7 +234,7 @@ async fn expired_forged_and_borrowed_enrollments_are_refused() {
     // Expired: this machine rejects it first, and the Hub also rejects it when this machine's check
     // is bypassed
     let join = token(&url, &state, &box_id, &key, expired);
-    let dir = temp_dir("enroll-expired");
+    let (_dir_tmp, dir) = temp_dir("enroll-expired");
     machine_keys(&dir);
     assert!(matches!(
         nett_node::join::enroll(&dir, &join, nett_hub::now()).await,
@@ -277,7 +277,7 @@ async fn expired_forged_and_borrowed_enrollments_are_refused() {
 
 #[tokio::test]
 async fn a_machine_that_leaves_is_removed_from_every_member() {
-    let (hub, app, owner, site, mut state) = linked("leave", URL).await;
+    let (hub, app, owner, site, mut state, _linked_tmp) = linked("leave", URL).await;
     state
         .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
@@ -339,7 +339,7 @@ async fn a_machine_that_leaves_is_removed_from_every_member() {
 
 #[tokio::test]
 async fn learned_public_addresses_reach_the_other_members() {
-    let (hub, app, owner, site, mut state) = linked("learned", URL).await;
+    let (hub, app, owner, site, mut state, _linked_tmp) = linked("learned", URL).await;
     // A public machine with no address written
     state
         .add(

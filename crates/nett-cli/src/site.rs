@@ -861,10 +861,15 @@ mod tests {
     use super::*;
     use nett_mesh::key::PrivateKey;
 
-    fn temp_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("nett-site-{name}-{}", std::process::id()));
-        std::fs::remove_dir_all(&dir).ok();
-        dir
+    /// A directory removed with everything in it when the returned guard is dropped; keep the
+    /// guard for as long as the path is used.
+    fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::Builder::new()
+            .prefix(&format!("nett-cli-site-{name}-"))
+            .tempdir()
+            .expect("temp dir");
+        let dir = tmp.path().join("site");
+        (tmp, dir)
     }
 
     fn keys() -> (X25519PublicKey, String) {
@@ -910,7 +915,7 @@ mod tests {
 
     #[test]
     fn commands_change_the_site_and_write_desired_states() {
-        let dir = temp_dir("commands");
+        let (_dir_tmp, dir) = temp_dir("commands");
         site(&dir, &["init"]).expect("init");
         let (_, vps) = keys();
         let (mac_key, mac) = keys();
@@ -990,7 +995,7 @@ mod tests {
 
     #[test]
     fn reads_only_regular_files_without_following_links_or_blocking() {
-        let dir = temp_dir("read-desired");
+        let (_dir_tmp, dir) = temp_dir("read-desired");
         std::fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("desired.json");
         std::fs::write(&file, b"{}").expect("written");
@@ -1014,7 +1019,7 @@ mod tests {
 
     #[test]
     fn desired_state_must_belong_to_this_machine() {
-        let dir = temp_dir("owner");
+        let (_dir_tmp, dir) = temp_dir("owner");
         site(&dir, &["init"]).expect("init");
         let (vps_key, vps) = keys();
         let (mac_key, mac) = keys();

@@ -141,7 +141,11 @@ mod tests {
         use nett_site::ops::MachineOptions;
         use nett_site::state::{NodeKeys, RelayKey, RelayRole};
         use nett_trust::keys::X25519PublicKey;
-        let dir = std::env::temp_dir().join(format!("nett-node-wants-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-node-wants-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         SiteDir::init(&dir, "https://nett.invalid").expect("init");
         let site = SiteDir::open(&dir).expect("open");

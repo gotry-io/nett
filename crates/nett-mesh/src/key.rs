@@ -174,7 +174,11 @@ mod tests {
 
     #[test]
     fn loads_wireguard_keys_with_strict_permissions() {
-        let dir = std::env::temp_dir().join(format!("nett-key-test-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-key-test-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("dir");
         let key = STANDARD.encode([7u8; 32]);
 
@@ -204,7 +208,11 @@ mod tests {
     fn a_group_readable_key_passes_only_in_the_services_credentials_directory() {
         // systemd's LoadCredential= leaves the key group-readable inside a directory others
         // cannot enter; the same file anywhere else is refused
-        let dir = std::env::temp_dir().join(format!("nett-key-cred-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-key-cred-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         let creds = dir.join("credentials");
         std::fs::create_dir_all(&creds).expect("dir");
         std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o750)).expect("chmod");
@@ -231,7 +239,11 @@ mod tests {
 
     #[test]
     fn generated_keys_round_trip_and_are_never_overwritten() {
-        let dir = std::env::temp_dir().join(format!("nett-keygen-test-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-keygen-test-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("dir");
         let key = PrivateKey::generate().expect("generate");
         assert_ne!(

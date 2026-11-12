@@ -21,7 +21,8 @@ use common::*;
 
 #[tokio::test]
 async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
-    let (hub, app, token, site, mut state) = linked("backup", "https://127.0.0.1").await;
+    let (hub, app, token, site, mut state, _linked_tmp) =
+        linked("backup", "https://127.0.0.1").await;
     // `nett site link` creates the backup key in the site directory and pushes its public half
     assert!(site.ensure_backup_key(&mut state).expect("backup key"));
     let line = std::fs::read_to_string(site.path().join(BACKUP_FILE)).expect("key file");
@@ -43,7 +44,7 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
         .expect("mac")
         .node_id
         .to_string();
-    let dir = temp_dir("backup-mac");
+    let (_dir_tmp, dir) = temp_dir("backup-mac");
     let agent = Node {
         config: HubConfig {
             url: url.clone(),
@@ -94,7 +95,7 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
         .expect("no panic");
 
     // Rebuild in an empty directory with the backup key on standard input
-    let rebuilt = temp_dir("backup-rebuilt");
+    let (_rebuilt_tmp, rebuilt) = temp_dir("backup-rebuilt");
     let mut restore = std::process::Command::new(env!("CARGO_BIN_EXE_nett-hub"))
         .args(["restore", "--data"])
         .arg(&rebuilt)

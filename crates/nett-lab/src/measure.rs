@@ -462,7 +462,11 @@ mod tests {
 
     #[test]
     fn probe_gaps_include_window_edges() {
-        let dir = std::env::temp_dir().join(format!("nett-lab-probe-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-lab-probe-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::create_dir_all(&dir).expect("dir");
         let file = dir.join("probe.txt");
         // 1000..1300 normal, 1300..3300 interrupted for 2 seconds, then recovered; the window ends

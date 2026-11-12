@@ -690,7 +690,11 @@ mod tests {
     #[test]
     fn site_hub_file_is_private() {
         use std::os::unix::fs::PermissionsExt as _;
-        let dir = std::env::temp_dir().join(format!("nett-cli-site-hub-{}", std::process::id()));
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-cli-site-hub-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().join("dir");
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).expect("dir");
         let hub = SiteHub {
