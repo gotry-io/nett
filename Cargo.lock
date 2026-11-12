@@ -1206,7 +1206,7 @@ checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
 name = "nett-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "nett-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "nett-hub"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "axum",
@@ -1276,7 +1276,7 @@ dependencies = [
 
 [[package]]
 name = "nett-lab"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1300,7 +1300,7 @@ dependencies = [
 
 [[package]]
 name = "nett-mesh"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "nett-node"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64 0.23.1",
  "blake2 0.11.0",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "nett-proto"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64 0.23.1",
  "blake2 0.11.0",
@@ -1374,14 +1374,14 @@ dependencies = [
 
 [[package]]
 name = "nett-proto-gen"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "prost-build",
 ]
 
 [[package]]
 name = "nett-relay"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "blake2 0.11.0",
  "futures-util",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "nett-site"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nett-core",
  "nett-mesh",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "nett-transport"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "futures-util",
  "nett-core",
@@ -1437,7 +1437,7 @@ dependencies = [
 
 [[package]]
 name = "nett-trust"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "base64 0.23.1",
  "blake2 0.11.0",
