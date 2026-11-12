@@ -29,7 +29,7 @@ The system resolver sends only names under `nett.internal` to this machine's mes
 | Platform | How | Done by |
 |---|---|---|
 | macOS | `/etc/resolver/nett.internal` with `nameserver <mesh IPv4>` | the mesh process (it runs as root) when the interface is up; removed by `sudo nett leave` |
-| Linux with systemd-resolved | per-link settings on `nett0`: its DNS server is the mesh IPv4, the routing domain `~nett.internal`, not a default route | `nett resolver`, run by the mesh unit after it starts (`ExecStartPost=+`, with root, through `resolvectl`); it waits up to 15 seconds for `nett0`, and never fails the unit |
+| Linux with systemd-resolved | per-link settings on `nett0`: its DNS server is the mesh IPv4, the routing domain `~nett.internal`, not a default route. Programs reach them when `/etc/resolv.conf` points at systemd-resolved's stub (`127.0.0.53`); some images point it at the upstream servers instead, and then only `resolvectl query` sees the names: `nett doctor` says so and leaves the file as it is | `nett resolver`, run by the mesh unit after it starts (`ExecStartPost=+`, with root, through `resolvectl`); it waits up to 15 seconds for `nett0`, and never fails the unit |
 | Linux without systemd-resolved | no split resolution in `/etc/resolv.conf`: names work with `dig @<mesh IPv4>` and in programs that take a DNS server; `nett doctor` says so | — |
 | Container member | the container's own resolver; services in the container use mesh addresses | — |
 

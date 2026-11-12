@@ -4,6 +4,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- On Linux, `nett doctor` says when `/etc/resolv.conf` names the upstream DNS servers instead of
+  systemd-resolved's stub: programs then skip the routing of `nett.internal` to `nett0`, and only
+  `resolvectl query` sees the names. It gives the command that points the file at the stub.
 ## [0.3.3] - 2026-11-11
 
 - macOS: names under `nett.internal` resolve. The system resolver's queries to this machine's own mesh

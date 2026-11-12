@@ -438,7 +438,50 @@ fn check_names(doc: &StatusDoc) -> Finding {
             nett_mesh::dns::lookup_ipv4(at, &full, Duration::from_secs(2)),
         )
     });
-    names_finding(doc, &full, responder)
+    let platform = if cfg!(target_os = "linux") {
+        Platform::Linux(linux_resolver())
+    } else {
+        Platform::MacOs
+    };
+    names_finding(doc, &full, responder, platform)
+}
+
+/// Where the system resolver sends names under nett.internal (design/names-and-diagnostics.md
+/// section 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    MacOs,
+    Linux(Resolver),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Resolver {
+    /// No systemd-resolved: nothing routes the suffix.
+    Absent,
+    /// Programs ask systemd-resolved through its stub, which routes the suffix to `nett0`.
+    Stub,
+    /// systemd-resolved runs, but /etc/resolv.conf names the upstream servers: programs ask them
+    /// directly and never see the routing on `nett0`.
+    Bypassed,
+}
+
+fn linux_resolver() -> Resolver {
+    if !Path::new("/run/systemd/resolve").exists() {
+        return Resolver::Absent;
+    }
+    let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+    if uses_stub(&conf) {
+        Resolver::Stub
+    } else {
+        Resolver::Bypassed
+    }
+}
+
+fn uses_stub(resolv_conf: &str) -> bool {
+    resolv_conf.lines().any(|l| {
+        let mut words = l.split_whitespace();
+        words.next() == Some("nameserver") && words.next() == Some("127.0.0.53")
+    })
 }
 
 /// The names finding once the system resolver did not resolve this machine's own name; `responder`
@@ -447,6 +490,7 @@ fn names_finding(
     doc: &StatusDoc,
     full: &str,
     responder: Option<(SocketAddr, Option<std::net::Ipv4Addr>)>,
+    platform: Platform,
 ) -> Finding {
     if doc
         .problems
@@ -469,19 +513,35 @@ fn names_finding(
              say why",
         );
     }
-    if cfg!(target_os = "linux") {
-        Finding::warn(
+    let found = format!("{full} does not resolve through the system resolver");
+    match platform {
+        Platform::MacOs => Finding::warn(
             "names",
-            format!("{full} does not resolve through the system resolver"),
-            "with systemd-resolved, restart the mesh service (it routes nett.internal to nett0); \
-             without it, use `dig @<mesh address> <name>.nett.internal` or the mesh address",
-        )
-    } else {
-        Finding::warn(
-            "names",
-            format!("{full} does not resolve through the system resolver"),
+            found,
             "restart the mesh service: it writes /etc/resolver/nett.internal",
-        )
+        ),
+        Platform::Linux(Resolver::Stub) => Finding::warn(
+            "names",
+            found,
+            "restart the mesh service: it routes nett.internal to nett0 through systemd-resolved",
+        ),
+        Platform::Linux(Resolver::Absent) => Finding::warn(
+            "names",
+            found,
+            "without systemd-resolved nothing routes nett.internal: use \
+             `dig @<mesh address> <name>.nett.internal` or the mesh address",
+        ),
+        Platform::Linux(Resolver::Bypassed) => Finding::warn(
+            "names",
+            format!(
+                "{found}: /etc/resolv.conf names the upstream servers, so programs ask them \
+                 directly and skip systemd-resolved, which routes nett.internal to nett0 \
+                 (`resolvectl query {full}` answers)"
+            ),
+            "point /etc/resolv.conf at the stub to resolve these names in every program: \
+             `sudo ln -sf ../run/systemd/resolve/stub-resolv.conf /etc/resolv.conf` (all \
+             queries then go through systemd-resolved)",
+        ),
     }
 }
 
@@ -635,19 +695,61 @@ mod tests {
     fn a_responder_that_does_not_answer_its_own_name_is_a_problem() {
         let doc = doc();
         let at: SocketAddr = "100.88.0.4:53".parse().expect("addr");
-        let silent = names_finding(&doc, "mac.nett.internal", Some((at, None)));
+        let silent = names_finding(&doc, "mac.nett.internal", Some((at, None)), Platform::MacOs);
         assert_eq!(silent.level, Level::Problem);
         assert!(silent.found.contains("does not answer"), "{}", silent.found);
         let answering = names_finding(
             &doc,
             "mac.nett.internal",
             Some((at, Some("100.88.0.4".parse().expect("ip")))),
+            Platform::MacOs,
         );
         assert_eq!(answering.level, Level::Warning);
         assert!(
             answering.found.contains("system resolver"),
             "{}",
             answering.found
+        );
+    }
+
+    #[test]
+    fn a_resolv_conf_past_systemd_resolved_is_named() {
+        assert!(uses_stub(
+            "# managed by systemd\nnameserver 127.0.0.53\noptions edns0\n"
+        ));
+        assert!(!uses_stub(
+            "nameserver 10.27.255.1\nnameserver 8.8.8.8\nsearch .\n"
+        ));
+        let doc = doc();
+        let at: SocketAddr = "100.88.0.4:53".parse().expect("addr");
+        let answered = Some((at, Some("100.88.0.4".parse().expect("ip"))));
+        let bypassed = names_finding(
+            &doc,
+            "voyra.nett.internal",
+            answered,
+            Platform::Linux(Resolver::Bypassed),
+        );
+        assert_eq!(bypassed.level, Level::Warning);
+        assert!(
+            bypassed.found.contains("/etc/resolv.conf"),
+            "{}",
+            bypassed.found
+        );
+        assert!(
+            bypassed.advice.contains("stub-resolv.conf"),
+            "{}",
+            bypassed.advice
+        );
+        let stub = names_finding(
+            &doc,
+            "voyra.nett.internal",
+            answered,
+            Platform::Linux(Resolver::Stub),
+        );
+        assert!(
+            stub.advice.contains("restart the mesh service"),
+            "{}",
+            stub.advice
         );
     }
 
