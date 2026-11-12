@@ -290,6 +290,7 @@ jobs:
               Scenarios 1, 8: direct path fails and switches to the relay, then returns to direct after recovery | failover --topology crates/nett-lab/topologies/failover.toml
               Scenario 2: the current relay fails and switches to another relay | relay-loss --topology crates/nett-lab/topologies/relays.toml
               Scenario 3: restart the current relay without interrupting the connection | relay-restart --topology crates/nett-lab/topologies/relays.toml
+              Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
               Scenarios 7, 9: switch to TLS when all UDP is blocked, then return to direct after recovery | fallback --topology crates/nett-lab/topologies/fallback.toml
               Scenario 16: both sides are dial-only, and after a proposal through the tunnel both ends switch together | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
               Scenario 17: both sides are dial-only, the current relay fails, and they meet by time slice | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
