@@ -31,11 +31,14 @@ const MAX_FAILED: usize = 16;
 pub const STATE_FILE: &str = "upgrade.json";
 pub const MARKER_FILE: &str = "upgrade-pending.json";
 
-/// Restarting the mesh service and checking that it answers; the service manager on a real
-/// machine, a double in tests.
+/// Restarting the services that run this program and checking that the mesh process answers; the
+/// service manager on a real machine, a double in tests (design/release.md section 7).
 pub trait Services: Send + Sync {
     fn restart_mesh(&self) -> Result<(), String>;
     fn mesh_answers(&self) -> bool;
+    /// nett-relay and the transport adapter, when they run: they move to the new program once it
+    /// has settled.
+    fn restart_helpers(&self);
 }
 
 /// The platform's service manager (design/release.md sections 4 and 5).
@@ -71,6 +74,28 @@ impl Services for ServiceManager {
 
     fn mesh_answers(&self) -> bool {
         nett_mesh::status::query_raw(&self.socket).is_ok()
+    }
+
+    fn restart_helpers(&self) {
+        // macOS runs neither helper
+        let Some(systemctl) =
+            crate::platform::linux::systemctl().filter(|_| cfg!(target_os = "linux"))
+        else {
+            return;
+        };
+        // They run the same program and, unrestarted, keep the old one until the machine reboots;
+        // try-restart leaves helpers that are not running alone
+        let units = [
+            crate::platform::linux::RELAY.name,
+            crate::platform::linux::TRANSPORT.name,
+        ];
+        let args = ["try-restart", units[0], units[1]];
+        if !crate::platform::run(systemctl, &args, SERVICE_TIMEOUT).unwrap_or(false) {
+            tracing::warn!(
+                ?units,
+                "restarting the helper services on the new program failed"
+            );
+        }
     }
 }
 
@@ -227,6 +252,7 @@ impl Upgrader {
         {
             tracing::info!(version = %self.current, "upgrade complete");
             paths.clear_marker();
+            self.services.restart_helpers();
         }
     }
 
@@ -392,6 +418,7 @@ mod tests {
 
     struct FakeServices {
         restarts: AtomicUsize,
+        helper_restarts: AtomicUsize,
         healthy: AtomicBool,
         /// What the program file held at each restart.
         seen: Mutex<Vec<Vec<u8>>>,
@@ -409,6 +436,9 @@ mod tests {
         }
         fn mesh_answers(&self) -> bool {
             self.healthy.load(Ordering::SeqCst)
+        }
+        fn restart_helpers(&self) {
+            self.helper_restarts.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -466,6 +496,7 @@ mod tests {
         std::fs::write(&program, b"old program").expect("write");
         let services = Arc::new(FakeServices {
             restarts: AtomicUsize::new(0),
+            helper_restarts: AtomicUsize::new(0),
             healthy: AtomicBool::new(healthy),
             seen: Mutex::new(Vec::new()),
             program: program.clone(),
@@ -588,6 +619,10 @@ mod tests {
             .expect("marker");
         up.settled();
         assert!(up.clone_paths().marker().is_none());
+        // the helpers move to the settled program, once
+        assert_eq!(services.helper_restarts.load(Ordering::SeqCst), 1);
+        up.settled();
+        assert_eq!(services.helper_restarts.load(Ordering::SeqCst), 1);
         assert_eq!(up.on_start(), Start::Continue);
         std::fs::remove_dir_all(&dir).ok();
     }

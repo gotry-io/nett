@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- On Linux, nett-relay and the transport adapter move to a new version once its upgrade has settled. They
+  kept running the program they started with until the machine rebooted, through any number of upgrades.
 ## [0.3.4] - 2026-11-12
 
 - A pair with little traffic moves to a relay that is much faster than its direct path, for example across
