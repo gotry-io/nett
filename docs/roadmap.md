@@ -88,11 +88,11 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 
 A site that runs on local signing moves to the Hub, and the acceptance that does not depend on stages 7–9 is verified on real machines.
 
-- [ ] Run the Hub; connect the existing members (`nett site invite`) and enroll the rest
-- [ ] At least two usable relays on different hosts; `dial-only` nodes connect to at least two `public` nodes. On a host whose TCP 443 is held by a reverse proxy, the relay serves TLS on another TCP port until stage 7
+- [x] Run the Hub; connect the existing members (`nett site invite`) and enroll the rest
+- [x] At least two usable relays on different hosts; `dial-only` nodes connect to at least two `public` nodes. On a host whose TCP 443 is held by a reverse proxy, the relay serves TLS on another TCP port until stage 7
 - [ ] Measurements on real machines: full-speed direct paths across the public internet against native WireGuard and Tailscale, the maximum forwarding throughput of a 1 vCPU relay, a Mac laptop changing networks and waking from sleep, coexistence with a proxy-style VPN app's enhanced mode
 - [ ] Release key rotation: a release signed by the backup key
-- [ ] Troubleshooting manual, including how to run alongside proxy-style VPN apps
+- [x] Troubleshooting manual, including how to run alongside proxy-style VPN apps ([troubleshooting.md](troubleshooting.md))
 
 ### 7. Phones and restricted networks
 

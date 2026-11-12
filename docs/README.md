@@ -5,6 +5,7 @@
 | [vision.md](vision.md) | The problem to solve, feature scope, requirement priorities, design constraints, non-goals |
 | [architecture.md](architecture.md) | Overall design: the three planes, role boundaries, chain of trust, mesh, phone access, origin traffic, tech stack, failures and availability, packaging and running, platforms, security essentials, main risks, facts learned in practice |
 | [roadmap.md](roadmap.md) | Content and acceptance criteria of each phase |
+| [troubleshooting.md](troubleshooting.md) | Finding out why a machine is unreachable, a name does not resolve or an upgrade failed, and what to collect for a report |
 | [design/](design/README.md) | Detailed design per topic; the details are authoritative here |
 | [adr/](adr/README.md) | Architecture decision records: the context, rationale and rejected alternatives of each key decision |
 

@@ -58,6 +58,7 @@ The mesh service runs as root from a copy in a root-only directory, so run `sudo
 - [Vision](docs/vision.md): problems, goals and constraints
 - [Architecture](docs/architecture.md): role boundaries, chain of trust, mesh, origin identity, technology stack
 - [Roadmap](docs/roadmap.md): milestones and acceptance criteria
+- [Troubleshooting](docs/troubleshooting.md): when a machine is unreachable, a name does not resolve or an upgrade failed
 - [Architecture decision records](docs/adr/README.md)
 - [Design documents](docs/design/README.md)
 - [Changelog](CHANGELOG.md)
