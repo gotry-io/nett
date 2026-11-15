@@ -1,12 +1,11 @@
 //! nett's launchd services on macOS (design/userspace.md section 6.3, design/release.md section 4):
-//! their configuration, which `sudo nett install` writes and nett-node keeps for the transport
-//! adapter, the launchctl calls that start and stop them, and the transport adapter's account. Every
-//! call is blocking: async callers use a blocking thread.
+//! their configuration, which `sudo nett install` writes, and the launchctl calls that start and stop
+//! them. Every call is blocking: async callers use a blocking thread.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::platform::macos::{DIR, LAUNCHCTL, MESH_LABEL, NODE_LABEL, PROGRAM, TRANSPORT_LABEL};
+use crate::platform::macos::{DIR, LAUNCHCTL, MESH_LABEL, NODE_LABEL, PROGRAM};
 
 pub const LOG_DIR: &str = "/Library/Logs/nett";
 pub const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
@@ -18,10 +17,6 @@ const DSCL: &str = "/usr/bin/dscl";
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound for waiting for launchd to unload a service.
 const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
-/// Upper bound for the directory service to show an account it just created.
-const ACCOUNT_TIMEOUT: Duration = Duration::from_secs(10);
-/// The account's ID: the highest one in this range free as both a user and a group ID.
-const ACCOUNT_IDS: std::ops::Range<u32> = 300..400;
 
 /// A launchd service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,15 +46,17 @@ pub const NODE: Service = Service {
     what: "nett-node",
 };
 
-/// Started as root like the others: the copy is in the root-only directory, and the adapter switches
-/// to its own account before anything else.
-pub const TRANSPORT: Service = Service {
-    label: TRANSPORT_LABEL,
+/// The separate transport service release 0.3.11 ran, under the hidden account `_nett-transport`;
+/// the mesh process carries the TLS transport itself (ADR 0013). [`remove_transport_service`]
+/// removes both.
+const OLD_TRANSPORT: Service = Service {
+    label: "io.gotry.nett.transport",
     plist: "/Library/LaunchDaemons/io.gotry.nett.transport.plist",
     args: &["transport"],
     log: "transport.log",
-    what: "the transport adapter",
+    what: "the transport service of nett 0.3.11",
 };
+const OLD_TRANSPORT_ACCOUNT: &str = "_nett-transport";
 
 /// launchd configuration: root runs the copy, starts at boot, restarts after exit
 /// (design/userspace.md section 6.3).
@@ -72,7 +69,7 @@ pub fn plist(service: &Service) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Written by nett; changes here are replaced. -->
+<!-- Written by `sudo nett install`; it rewrites this file on the next run. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -108,19 +105,11 @@ pub fn plist(service: &Service) -> String {
 /// Rotation of the start-up failure records: rotates above 1 MB, keeps 5 copies, compresses the old
 /// ones.
 pub fn newsyslog() -> String {
-    let lines: String = [MESH, NODE, TRANSPORT]
-        .iter()
-        .map(|s| {
-            format!(
-                "{LOG_DIR}/{:<14} root:wheel     600   5      1024      *     JN\n",
-                s.log
-            )
-        })
-        .collect();
     format!(
-        "# Written by nett: rotation of the services' start-up failure logs.\n\
-         # logfilename                            [owner:group]  mode  count  size(KB)  when  flags\n\
-         {lines}"
+        "# Written by `sudo nett install`: rotation of the services' start-up failure logs.\n\
+         # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
+         {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n\
+         {LOG_DIR}/node.log    root:wheel     600   5      1024      *     JN\n"
     )
 }
 
@@ -130,18 +119,6 @@ pub fn launchctl(args: &[&str]) -> Result<bool, String> {
 
 pub fn loaded(service: &Service) -> Result<bool, String> {
     launchctl(&["print", &format!("system/{}", service.label)])
-}
-
-/// Loads the service from its configuration file.
-pub fn start(service: &Service) -> Result<(), String> {
-    if launchctl(&["bootstrap", "system", service.plist])? {
-        Ok(())
-    } else {
-        Err(format!(
-            "launchctl could not start {}; see {LOG_DIR}/{}",
-            service.what, service.log
-        ))
-    }
 }
 
 /// Unloads the service, and waits until launchd no longer has it: when bootout returns, the process
@@ -167,128 +144,41 @@ pub fn stop(service: &Service) -> Result<(), String> {
     Ok(())
 }
 
-/// Restarts a loaded service, on the program as it is now; one that is not loaded stays so.
-pub fn restart(service: &Service) -> Result<(), String> {
-    if !loaded(service)? {
-        return Ok(());
-    }
-    let target = format!("system/{}", service.label);
-    if launchctl(&["kickstart", "-k", &target])? {
-        Ok(())
-    } else {
-        Err(format!("launchctl could not restart {}", service.what))
-    }
-}
-
-/// Writes a service's configuration file when it differs; returns whether it changed.
-pub fn write_plist(service: &Service) -> Result<bool, String> {
-    let content = plist(service);
-    if std::fs::read(service.plist).ok().as_deref() == Some(content.as_bytes()) {
+/// Removes the transport service of nett 0.3.11 and its account and group where they exist: stops
+/// the service, deletes the account and the group, then its log and its configuration. The
+/// configuration goes last, so a step that fails is tried again the next time. Returns whether there
+/// was anything to remove.
+pub fn remove_transport_service() -> Result<bool, String> {
+    let plist = Path::new(OLD_TRANSPORT.plist);
+    if !plist.exists() {
         return Ok(false);
     }
-    write_file(service.plist, content.as_bytes())
-        .map_err(|e| format!("writing {}: {e}", service.plist))?;
+    stop(&OLD_TRANSPORT)?;
+    for record in [
+        format!("/Users/{OLD_TRANSPORT_ACCOUNT}"),
+        format!("/Groups/{OLD_TRANSPORT_ACCOUNT}"),
+    ] {
+        if crate::platform::run(DSCL, &[".", "-read", &record, "RecordName"], CALL_TIMEOUT)?
+            && !crate::platform::run(DSCL, &[".", "-delete", &record], CALL_TIMEOUT)?
+        {
+            return Err(format!("dscl could not delete {record}"));
+        }
+    }
+    for path in [
+        format!("{LOG_DIR}/{}", OLD_TRANSPORT.log),
+        OLD_TRANSPORT.plist.to_owned(),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("removing {path}: {e}")),
+        }
+    }
+    tracing::info!(
+        account = OLD_TRANSPORT_ACCOUNT,
+        "removed the transport service of nett 0.3.11 and its account"
+    );
     Ok(true)
-}
-
-/// Runs the transport adapter while `want` (design/userspace.md section 6.3): makes its account
-/// first, and reloads it when its configuration changed (launchd keeps the configuration it loaded).
-/// When not wanted, unloads it and deletes its configuration.
-pub fn set_transport(want: bool) -> Result<(), String> {
-    if !want {
-        stop(&TRANSPORT)?;
-        return match std::fs::remove_file(TRANSPORT.plist) {
-            Ok(()) => {
-                tracing::info!("the transport adapter stopped");
-                Ok(())
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("removing {}: {e}", TRANSPORT.plist)),
-        };
-    }
-    ensure_account()?;
-    if write_plist(&TRANSPORT)? {
-        stop(&TRANSPORT)?;
-    }
-    if !loaded(&TRANSPORT)? {
-        start(&TRANSPORT)?;
-        tracing::info!("the transport adapter started");
-    }
-    Ok(())
-}
-
-/// Makes the transport adapter's account and its group of the same name when they are missing
-/// (design/userspace.md section 6.3): hidden, no password, no shell, no home.
-pub fn ensure_account() -> Result<(), String> {
-    let name = nett_mesh::helper::TRANSPORT_USER;
-    if nett_mesh::macos::account_ids(name)
-        .map_err(|e| format!("looking up the account {name}: {e}"))?
-        .is_some()
-    {
-        return Ok(());
-    }
-    let id = ACCOUNT_IDS
-        .rev()
-        .find(|id| !nett_mesh::macos::id_in_use(*id))
-        .ok_or_else(|| {
-            format!(
-                "no ID from {} to {} is free for the account {name}",
-                ACCOUNT_IDS.start,
-                ACCOUNT_IDS.end - 1
-            )
-        })?
-        .to_string();
-    let (group, user) = (format!("/Groups/{name}"), format!("/Users/{name}"));
-    let what = "nett transport adapter";
-    let steps: [&[&str]; 12] = [
-        &[".", "-create", &group],
-        &[".", "-create", &group, "PrimaryGroupID", &id],
-        &[".", "-create", &group, "RealName", what],
-        &[".", "-create", &group, "Password", "*"],
-        &[".", "-create", &user],
-        &[".", "-create", &user, "UniqueID", &id],
-        &[".", "-create", &user, "PrimaryGroupID", &id],
-        &[".", "-create", &user, "UserShell", "/usr/bin/false"],
-        &[".", "-create", &user, "NFSHomeDirectory", "/var/empty"],
-        &[".", "-create", &user, "RealName", what],
-        &[".", "-create", &user, "Password", "*"],
-        &[".", "-create", &user, "IsHidden", "1"],
-    ];
-    for args in steps {
-        if !crate::platform::run(DSCL, args, CALL_TIMEOUT)? {
-            return Err(format!("dscl {} failed", args.join(" ")));
-        }
-    }
-    // The directory service caches lookups: the new account appears shortly after
-    let deadline = Instant::now() + ACCOUNT_TIMEOUT;
-    loop {
-        if let Ok(Some(_)) = nett_mesh::macos::account_ids(name) {
-            tracing::info!(account = name, id = %id, "account created for the transport adapter");
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "the account {name} did not appear after it was created"
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-}
-
-/// Writes a configuration file through a temporary file, mode `0644`.
-fn write_file(path: &str, content: &[u8]) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let tmp = format!("{path}.new");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&tmp)?;
-    file.write_all(content)?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, Path::new(path))
 }
 
 #[cfg(test)]
@@ -299,7 +189,7 @@ mod tests {
     #[test]
     fn plists_are_valid_and_run_the_copy() {
         let dir = tempfile::tempdir().expect("temp dir");
-        for service in [MESH, NODE, TRANSPORT] {
+        for service in [MESH, NODE] {
             let text = plist(&service);
             assert!(text.contains(&format!("<string>{PROGRAM}</string>")));
             assert!(text.contains(&format!("<string>{}</string>", service.label)));
@@ -318,7 +208,6 @@ mod tests {
                 String::from_utf8_lossy(&lint.stdout)
             );
         }
-        assert!(plist(&TRANSPORT).contains("<string>transport</string>"));
         assert!(plist(&NODE).contains("<string>node</string>"));
         let mesh = plist(&MESH);
         assert!(mesh.contains(&format!("<string>{DESIRED}</string>")));
@@ -331,7 +220,7 @@ mod tests {
     #[test]
     fn every_log_is_rotated() {
         let conf = newsyslog();
-        for service in [MESH, NODE, TRANSPORT] {
+        for service in [MESH, NODE] {
             assert!(
                 conf.contains(&format!("{LOG_DIR}/{}", service.log)),
                 "{conf}"

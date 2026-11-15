@@ -1,7 +1,6 @@
-//! `nett transport`: the transport adapter (design/mesh.md section 5.3). It fetches its configuration
-//! from the mesh process over the helper socket; the lab build can instead read a local file the mesh
-//! process writes (`--config`). On macOS launchd starts it as root, and it switches to its own account
-//! before anything else (design/userspace.md section 6.3). Exits on `SIGTERM` or `SIGINT`.
+//! `nett transport`: the transport adapter on Linux (design/mesh.md section 5.3). It fetches its
+//! configuration from the mesh process over the helper socket; the lab build can instead read a local
+//! file the mesh process writes (`--config`). Exits on `SIGTERM` or `SIGINT`.
 
 use std::path::PathBuf;
 
@@ -27,18 +26,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             }
             other => return Err(other.unexpected().into()),
         }
-    }
-    // Before any thread exists, so that every thread runs as the account
-    #[cfg(target_os = "macos")]
-    if rustix::process::geteuid().is_root() {
-        nett_mesh::macos::switch_to_account(nett_mesh::helper::TRANSPORT_USER).with_context(
-            || {
-                format!(
-                    "switching to the account {}",
-                    nett_mesh::helper::TRANSPORT_USER
-                )
-            },
-        )?;
     }
     crate::mesh::init_logging();
     let runtime = tokio::runtime::Builder::new_current_thread()

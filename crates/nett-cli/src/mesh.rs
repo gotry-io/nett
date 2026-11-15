@@ -1,9 +1,9 @@
 //! `nett mesh`: the mesh process, run by the service manager. The desired state comes from a
 //! local file and is re-read on `SIGHUP` or a `reload` on the local interface
-//! (design/local-signing.md section 5, status.md section 4.1). `nett keys` generates the mesh
-//! private key and the identity private key on this machine (local-signing.md section 3). The event
-//! file, simulated clock skew and transport adapter configuration exist only in the lab build (the
-//! `lab` feature).
+//! (design/local-signing.md section 5, status.md section 4.1). On macOS it also carries the TLS
+//! transport (ADR 0013). `nett keys` generates the mesh private key and the identity private key on
+//! this machine (local-signing.md section 3). The event file, simulated clock skew and transport
+//! adapter configuration exist only in the lab build (the `lab` feature).
 
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
@@ -12,6 +12,7 @@ use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
 use nett_mesh::engine::Engine;
 use nett_mesh::event::{EventSink, LogSink};
+#[cfg(target_os = "linux")]
 use nett_mesh::helper::HelperServer;
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
@@ -359,7 +360,9 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let worker = worker.context("starting the mesh worker thread")?;
     // The local interface is only for people and nett-node: if the socket cannot be created, record
     // it and continue meshing as usual (hard rule 8)
+    #[cfg(target_os = "linux")]
     let helpers_path = nett_mesh::helper::socket_path(&args.socket);
+    #[cfg(target_os = "linux")]
     let helpers = match HelperServer::spawn(&helpers_path, worker.status_source(reload_tx.clone()))
     {
         Ok(server) => Some(server),
@@ -368,6 +371,12 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             None
         }
     };
+    // On macOS this process carries the TLS transport itself and asks its worker thread for the
+    // configuration (ADR 0013)
+    #[cfg(target_os = "macos")]
+    let transport = nett_transport::forward::ConfigSource::Mesh(std::sync::Arc::new(
+        worker.status_source(reload_tx.clone()),
+    ));
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
@@ -383,8 +392,27 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
+        #[cfg(target_os = "macos")]
+        let (stop_transport, transport) = {
+            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+            let task = tokio::spawn(async move {
+                let stopped = async {
+                    let _ = stopped.await;
+                };
+                if let Err(error) = nett_transport::forward::run(transport, stopped).await {
+                    tracing::error!(%error, "the TLS transport stopped; paths over TLS stay down until the mesh service restarts");
+                }
+            });
+            (stop, task)
+        };
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
+        #[cfg(target_os = "macos")]
+        {
+            drop(stop_transport);
+            let _ = transport.await;
+        }
         drop(status);
+        #[cfg(target_os = "linux")]
         drop(helpers);
         tokio::task::spawn_blocking(move || worker.shutdown())
             .await

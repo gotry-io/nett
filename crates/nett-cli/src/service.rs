@@ -18,7 +18,7 @@ use crate::install::{
 };
 
 use nett_node::launchd::{
-    self, DESIRED, LOG_DIR, MESH, NEWSYSLOG, NODE, Service, TRANSPORT, newsyslog, plist,
+    self, DESIRED, LOG_DIR, MESH, NEWSYSLOG, NODE, Service, newsyslog, plist,
 };
 use nett_node::platform::macos::{DIR, PROGRAM as BINARY};
 
@@ -161,16 +161,12 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     {
         messages.push(m);
     }
-    // Without a Hub the transport adapter follows the imported desired state; with one, nett-node
-    // starts and stops it
-    if !linked && let Some(doc) = read_doc() {
-        messages.extend(nett_node::services::reconcile(
-            nett_node::services::Wants::of(&doc),
-        ));
-    }
-    // A running adapter keeps the old program until it restarts
-    if binary_changed {
-        launchd::restart(&TRANSPORT).map_err(anyhow::Error::msg)?;
+    // The mesh service carries the TLS transport
+    if launchd::remove_transport_service().map_err(anyhow::Error::msg)? {
+        messages.push(
+            "Removed the transport service of nett 0.3.11 and its account _nett-transport."
+                .to_owned(),
+        );
     }
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
@@ -269,16 +265,11 @@ pub fn leave() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn read_doc() -> Option<nett_mesh::config::DesiredMeshDoc> {
-    let bytes = std::fs::read(DESIRED).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
 fn remove_services() -> anyhow::Result<()> {
-    stop(&TRANSPORT)?;
+    launchd::remove_transport_service().map_err(anyhow::Error::msg)?;
     stop(&NODE)?;
     stop(&MESH)?;
-    for path in [TRANSPORT.plist, NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
+    for path in [NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
