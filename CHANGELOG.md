@@ -7,6 +7,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - A stopping Hub says goodbye to every machine, which tries to connect again after about a second, and records
   when each was last seen and its disconnection. `nett site status` showed a machine that was online until
   the Hub restarted as last seen when it had connected, possibly hours before.
+- A machine whose connection to the Hub breaks after more than a minute tries to connect again after
+  about a second. It waited up to 90 seconds once earlier failures had lengthened its wait.
 
 ## [0.3.6] - 2026-11-15
 

@@ -205,7 +205,7 @@ message Task {
 | Item | Rule |
 |---|---|
 | Keepalive | A `Ping` every 25 seconds (also to keep intermediate proxies from dropping the connection as idle); 3 consecutive unanswered pings count as disconnected |
-| Reconnection | Exponential backoff, starting at 1 second with a cap of 60 seconds, with random jitter |
+| Reconnection | Exponential backoff, starting at 1 second with a cap of 60 seconds, with random jitter; it starts again at 1 second after a `Goodbye` from the Hub, and after a session that lasted longer than 60 seconds |
 | Endpoint selection | Try the endpoints in the Hub-delivered list concurrently and pick the first to complete the handshake; after connecting to a fallback endpoint, periodically retry the preferred endpoint. The list keeps at least one endpoint that does not go through the mesh: the control connection can route through the mesh but must not rely on it alone, otherwise one wrong mesh configuration would leave the node never receiving a correction again. A fallback endpoint through another entry node is forwarded to the Hub by that reverse proxy, and the user maintains that configuration |
 | Session | No session resumption; every reconnect performs a fresh handshake and catches up state through `applied_generation` and unacknowledged task results |
 | Clock | Estimate the offset from the server time in `Pong`; report an event when the offset exceeds 30 seconds |
