@@ -1,13 +1,11 @@
-//! Service installation on macOS (design/release.md section 4, hub.md section 7): `sudo nett
+//! Service installation on macOS (design/release.md sections 4 and 8, hub.md section 7): `sudo nett
 //! install` generates the keys in a root-only directory, places a copy of the program, writes the
-//! launchd and log rotation configuration and starts the mesh service; without a Hub, it finds the
-//! desired state for this machine in the site directory of the user who ran sudo; with a Hub (a
-//! token, or an existing Hub configuration) it also starts nett-node, which receives the desired
-//! state from the Hub. `sudo nett uninstall` stops the services and deletes the copy and
-//! configuration. The Homebrew directory is writable by ordinary users, so the root service only
-//! runs this copy.
+//! launchd configuration and starts the mesh service; without a Hub, it finds the desired state for
+//! this machine in the site directory of the user who ran sudo; with a Hub (a token, or an existing
+//! Hub configuration) it also starts nett-node, which receives the desired state from the Hub.
+//! `sudo nett uninstall` removes everything but the identity, and `sudo nett leave` the identity.
+//! The Homebrew directory is writable by ordinary users, so the root service only runs this copy.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
@@ -17,10 +15,8 @@ use crate::install::{
     InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
 };
 
-use nett_node::launchd::{
-    self, DESIRED, LOG_DIR, MESH, NEWSYSLOG, NODE, Service, newsyslog, plist,
-};
-use nett_node::platform::macos::{DIR, PROGRAM as BINARY};
+use nett_node::launchd::{self, DESIRED, MESH, NODE, Service, plist};
+use nett_node::platform::macos::{COMMAND, DIR, PROGRAM as BINARY};
 
 fn loaded(service: &Service) -> anyhow::Result<bool> {
     launchd::loaded(service).map_err(anyhow::Error::msg)
@@ -65,9 +61,8 @@ fn ensure_running(
     };
     if !ok {
         bail!(
-            "launchctl could not start {}; see {LOG_DIR}/{}",
-            service.label,
-            service.log
+            "launchctl could not start {}; see `log show --last 10m --predicate 'process == \"nett\"'`",
+            service.label
         );
     }
     Ok(Some(message))
@@ -80,7 +75,6 @@ fn ensure_running(
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
-    ensure_dir(LOG_DIR, 0o700)?;
     let keys = crate::mesh::node_keys(Path::new(DIR))?;
     let token = apply_token(
         DIR,
@@ -127,7 +121,6 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         replace_if_changed(Path::new(MESH.plist), plist(&MESH).as_bytes(), 0o644)?;
     let node_plist_changed =
         linked && replace_if_changed(Path::new(NODE.plist), plist(&NODE).as_bytes(), 0o644)?;
-    replace_if_changed(Path::new(NEWSYSLOG), newsyslog().as_bytes(), 0o644)?;
 
     // The public key line is only needed when this machine has not been added to the site yet
     if !Path::new(DESIRED).exists() {
@@ -161,13 +154,14 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     {
         messages.push(m);
     }
-    // The mesh service carries the TLS transport
+    // The mesh service carries the TLS transport, and the services log to the system log only
     if launchd::remove_transport_service().map_err(anyhow::Error::msg)? {
         messages.push(
             "Removed the transport service of nett 0.3.11 and its account _nett-transport."
                 .to_owned(),
         );
     }
+    launchd::remove_old_logs().map_err(anyhow::Error::msg)?;
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
     }
@@ -233,50 +227,67 @@ mod passwd {
     }
 }
 
+/// `sudo nett uninstall` (design/release.md section 8): removes the services, the program and
+/// everything else nett placed, and keeps this machine's identity.
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
-    remove_services()?;
-    println!(
-        "Removed the services. Keys, the desired state, the trust store and the Hub configuration remain in {DIR}."
-    );
+    remove_installation()?;
+    // Only nett's own copy: a link or another installer's file stays (design/release.md section 6)
+    if nett_node::upgrade::own_command(Path::new(COMMAND)) {
+        crate::install::remove_file(COMMAND)?;
+    }
+    if crate::install::remove_if_empty(DIR)? {
+        println!("Removed nett. Nothing of it remains on this machine.");
+    } else {
+        println!(
+            "Removed nett. This machine's identity stays in {DIR}: `sudo nett install` brings it back \
+             as the same member, and `sudo rm -r '{DIR}'` deletes it."
+        );
+    }
     Ok(())
 }
 
-/// `sudo nett leave` (design/hub.md section 7): tells the Hub, deletes the services, deletes the
-/// keys and configuration. The utun interface belongs to the mesh process and disappears when it
-/// exits.
+/// `sudo nett leave` (design/hub.md section 7): tells the Hub, removes the services and the
+/// identity. The utun interface belongs to the mesh process and disappears when it exits; the `nett`
+/// command stays.
 pub fn leave() -> anyhow::Result<()> {
     require_root()?;
     crate::install::tell_hub(DIR)?;
-    remove_services()?;
+    remove_installation()?;
     crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
-    // The names of this site no longer resolve here
-    match std::fs::remove_file(nett_mesh::macos::RESOLVER_FILE) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            return Err(e).with_context(|| format!("removing {}", nett_mesh::macos::RESOLVER_FILE));
-        }
-    }
+    crate::install::remove_if_empty(DIR)?;
     println!(
         "Left the site: removed the services, deleted the keys, the desired state, the trust store \
-         and the Hub configuration."
+         and the Hub configuration. `sudo nett uninstall` removes the nett command too."
     );
     Ok(())
 }
 
-fn remove_services() -> anyhow::Result<()> {
+/// Everything `sudo nett install` and the services placed, except the identity and the command:
+/// the services and their copy of the program, the files of the running mesh, the upgrade records,
+/// and what earlier releases placed.
+fn remove_installation() -> anyhow::Result<()> {
     launchd::remove_transport_service().map_err(anyhow::Error::msg)?;
     stop(&NODE)?;
     stop(&MESH)?;
-    for path in [NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
-        match fs::remove_file(path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {path}")),
-        }
+    let previous = Path::new(BINARY).with_file_name("nett.previous");
+    let new = Path::new(BINARY).with_file_name("nett.new");
+    for path in [
+        NODE.plist,
+        MESH.plist,
+        BINARY,
+        &previous.to_string_lossy(),
+        &new.to_string_lossy(),
+        // The names of this site no longer resolve here
+        nett_mesh::macos::RESOLVER_FILE,
+    ] {
+        crate::install::remove_file(path)?;
     }
-    Ok(())
+    if let Some(run) = Path::new(nett_mesh::status::DEFAULT_SOCKET).parent() {
+        crate::install::remove_tree(&run.to_string_lossy())?;
+    }
+    crate::install::forget_upgrades(DIR)?;
+    launchd::remove_old_logs().map_err(anyhow::Error::msg)
 }
 
 #[cfg(test)]

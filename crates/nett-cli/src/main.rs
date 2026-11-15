@@ -170,12 +170,49 @@ fn main() -> ExitCode {
     // starts; where unsupported, memory is only a bit higher
     #[cfg(target_os = "linux")]
     rustix::thread::disable_transparent_huge_pages(true).ok();
+    #[cfg(target_os = "macos")]
+    let service = system_log::for_service();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("nett: {e:#}");
+            #[cfg(target_os = "macos")]
+            if service {
+                system_log::error(&format!("nett: {e:#}"));
+            }
             ExitCode::FAILURE
         }
+    }
+}
+
+/// On macOS launchd gives the services no standard error, so what ends one, an error or a panic,
+/// goes to the system log as everything else they log does (design/userspace.md section 6.3).
+#[cfg(target_os = "macos")]
+mod system_log {
+    use std::io::IsTerminal as _;
+
+    /// Whether this process is one of the services, run by launchd; when it is, panics are sent to
+    /// the system log from here on.
+    pub fn for_service() -> bool {
+        let service = matches!(
+            std::env::args_os()
+                .nth(1)
+                .as_deref()
+                .and_then(|a| a.to_str()),
+            Some("mesh" | "node")
+        ) && !std::io::stderr().is_terminal();
+        if service {
+            let default = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                error(&format!("nett: {info}"));
+                default(info);
+            }));
+        }
+        service
+    }
+
+    pub fn error(line: &str) {
+        nett_mesh::macos::SystemLog::open().write(tracing::Level::ERROR, line);
     }
 }
 

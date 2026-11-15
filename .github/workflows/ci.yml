@@ -80,6 +80,10 @@ jobs:
             sleep 0.5
           done
           sudo launchctl print system/io.gotry.nett.mesh | grep 'state = running'
+          # Logs go to the system log only: no log files, no stderr path (design/release.md section 8)
+          test ! -e /Library/Logs/nett
+          test ! -e /etc/newsyslog.d/nett.conf
+          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.mesh.plist; then exit 1; fi
           # Local status (design/status.md): readable by root, and ordinary users get a hint
           for _ in $(seq 20); do
             sudo test -S /var/run/nett/mesh.sock && break
@@ -122,9 +126,12 @@ jobs:
             | sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p')
           sudo lsof -nP -a -p "$mesh_pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
           [ "$(sudo stat -f %Lp /var/run/nett)" = 700 ]
-          # What nett 0.3.11 left on a Mac, its transport service with an account and a group of
-          # its own, is removed by the next install. The directory service refuses an ID another
-          # record has, and macOS uses the IDs just below 400, so the copy takes one far above
+          # What earlier releases left on a Mac is removed by the next install: the start-up failure
+          # logs with their rotation, and the transport service of 0.3.11 with an account and a group
+          # of its own. The directory service refuses an ID another record has, and macOS uses the
+          # IDs just below 400, so the copy takes one far above
+          sudo mkdir -p /Library/Logs/nett
+          sudo touch /Library/Logs/nett/mesh.log /etc/newsyslog.d/nett.conf
           sudo dscl . -create /Users/_nett-transport UniqueID 3999
           sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
           sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
@@ -137,8 +144,17 @@ jobs:
           if test -e /Library/LaunchDaemons/io.gotry.nett.transport.plist; then exit 1; fi
           if dscl . -read /Users/_nett-transport 2>/dev/null; then exit 1; fi
           if dscl . -read /Groups/_nett-transport 2>/dev/null; then exit 1; fi
-          sudo "$nett" uninstall
+          test ! -e /Library/Logs/nett
+          test ! -e /etc/newsyslog.d/nett.conf
+          # Uninstalling removes nett and keeps the identity (design/release.md section 8)
+          sudo "$nett" uninstall | tee uninstall.log
+          grep -F "This machine's identity stays in /Library/Application Support/nett" uninstall.log
           if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
+          for path in /Library/LaunchDaemons/io.gotry.nett.mesh.plist \
+            '/Library/Application Support/nett/nett' /etc/resolver/nett.internal /var/run/nett; do
+            if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
+          done
+          sudo test -f '/Library/Application Support/nett/mesh.key'
       # design/hub.md sections 3.5, 7: an existing member joins the Hub. The Hub terminates TLS
       # locally with a test certificate, verified by fingerprint
       - name: sudo nett install <token> (join the Hub, needs root)
@@ -165,7 +181,16 @@ jobs:
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
           sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
-          # nett-node removes what nett 0.3.11 left when it starts, as after an upgrade
+          # nett-node brings the launchd configuration up to its program when it starts, as after an
+          # upgrade: it reloads the mesh service with it, and removes the log files of earlier
+          # releases and what nett 0.3.11 left
+          sudo /usr/libexec/PlistBuddy \
+            -c 'Add :StandardErrorPath string /Library/Logs/nett/mesh.log' \
+            /Library/LaunchDaemons/io.gotry.nett.mesh.plist
+          sudo mkdir -p /Library/Logs/nett
+          sudo launchctl bootout system/io.gotry.nett.mesh
+          sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.mesh.plist
+          sudo launchctl print system/io.gotry.nett.mesh | grep -F 'stderr path'
           sudo dscl . -create /Users/_nett-transport UniqueID 3999
           sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
           sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
@@ -182,6 +207,12 @@ jobs:
           if sudo launchctl print system/io.gotry.nett.transport 2>/dev/null; then exit 1; fi
           if dscl . -read /Users/_nett-transport 2>/dev/null; then exit 1; fi
           if dscl . -read /Groups/_nett-transport 2>/dev/null; then exit 1; fi
+          for _ in $(seq 40); do test -e /Library/Logs/nett || break; sleep 0.5; done
+          test ! -e /Library/Logs/nett
+          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.mesh.plist; then exit 1; fi
+          mesh=$(sudo launchctl print system/io.gotry.nett.mesh)
+          grep 'state = running' <<< "$mesh"
+          if grep -F 'stderr path' <<< "$mesh"; then exit 1; fi
           # On a machine joined to the Hub, the desired state is written only by nett-node
           if sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json; then exit 1; fi
           sudo "$nett" uninstall
@@ -207,6 +238,13 @@ jobs:
           sudo "$nett" install "$token" | grep -F 'This machine has already joined the site through the Hub.'
           sudo "$nett" leave
           if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
+          # After leaving and uninstalling, nothing of nett remains (design/release.md section 8)
+          sudo "$nett" uninstall | grep -F 'Nothing of it remains on this machine.'
+          for path in '/Library/Application Support/nett' /Library/LaunchDaemons/io.gotry.nett.mesh.plist \
+            /Library/LaunchDaemons/io.gotry.nett.node.plist /etc/resolver/nett.internal /var/run/nett \
+            /Library/Logs/nett /etc/newsyslog.d/nett.conf; do
+            if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
+          done
 
 
   # Linux with real systemd (design/hub.md section 7, design/release.md section 7): a new machine
@@ -322,6 +360,11 @@ jobs:
           # The desired state is readable by the mesh service's group only
           test "$(sudo stat -c '%a %G' /etc/nett/desired.json)" = "640 nett"
           test "$(sudo stat -c '%a %G' /etc/nett)" = "2750 nett"
+          # The relay's and the transport adapter's units exist only while the desired state needs
+          # them (design/release.md section 8)
+          units=/usr/local/lib/systemd/system
+          test ! -e "$units/nett-relay.service"
+          test ! -e "$units/nett-transport.service"
           # The Hub offers 99.0.0, signed by the old backup key: nett-node verifies it, installs it,
           # restarts the mesh service and itself
           wait_for() {
@@ -349,11 +392,36 @@ jobs:
           serve_hub
           wait_for '.online and .nett_version == "99.2.0"'
           sudo journalctl -u nett-node --no-pager | tail -20
+          # A public relay with TLS gives this machine a path over TLS: nett-node writes and starts
+          # the transport adapter's unit, and deletes it when the path goes
+          relay_keys=$("$nett" keys --dir "$RUNNER_TEMP/relay1" \
+            | sed -n 's/^  nett site add <name> --keys "\(.*\)"$/\1/p')
+          "$nett" site add relay1 --keys "$relay_keys" --public --ipv4 198.51.100.7 --yes
+          "$nett" site relay relay1 --fingerprint "sha256:$(printf '%064d' 0)" --yes
+          for _ in $(seq 60); do systemctl is-active --quiet nett-transport.service && break; sleep 1; done
+          systemctl is-active --quiet nett-transport.service
+          test -f "$units/nett-transport.service"
+          "$nett" site remove relay1 --yes
+          for _ in $(seq 60); do test -e "$units/nett-transport.service" || break; sleep 1; done
+          test ! -e "$units/nett-transport.service"
+          if systemctl is-active --quiet nett-transport.service; then exit 1; fi
           sudo nett leave | tee leave.log
           grep -F 'Told the Hub at https://127.0.0.1:8443' leave.log
           if systemctl is-active --quiet nett-mesh.service; then exit 1; fi
           if ip link show nett0 2>/dev/null; then exit 1; fi
           test ! -e /etc/nett/identity.key
+          # After leaving and uninstalling, nothing of nett remains (design/release.md section 8)
+          sudo nett uninstall | tee uninstall.log
+          grep -F 'Nothing of it remains on this machine.' uninstall.log
+          for path in /usr/local/lib/nett /usr/local/bin/nett /etc/nett /var/lib/nett \
+            /var/lib/nett-relay /etc/sysusers.d/nett.conf /run/nett "$units/nett-mesh.service" \
+            "$units/nett-node.service"; do
+            if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
+          done
+          for account in nett nett-relay nett-transport; do
+            if getent passwd "$account" || getent group "$account"; then exit 1; fi
+          done
+          if command -v nft > /dev/null && sudo nft list tables | grep -F nett_; then exit 1; fi
       - name: Logs on failure
         if: failure()
         run: |

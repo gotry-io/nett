@@ -1,14 +1,13 @@
-//! nett's launchd services on macOS (design/userspace.md section 6.3, design/release.md section 4):
-//! their configuration, which `sudo nett install` writes, and the launchctl calls that start and stop
-//! them. Every call is blocking: async callers use a blocking thread.
+//! nett's launchd services on macOS (design/userspace.md section 6.3, design/release.md sections 4
+//! and 7): their configuration, which `sudo nett install` writes and nett-node keeps up with the
+//! program, the launchctl calls that start and stop them, and the removal of what earlier releases
+//! placed. Every call is blocking: async callers use a blocking thread.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::platform::macos::{DIR, LAUNCHCTL, MESH_LABEL, NODE_LABEL, PROGRAM};
 
-pub const LOG_DIR: &str = "/Library/Logs/nett";
-pub const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
 pub const DESIRED: &str = "/Library/Application Support/nett/desired.json";
 pub const KEY: &str = "/Library/Application Support/nett/mesh.key";
 /// Fixed location of the directory service tool (hard rule 9).
@@ -25,7 +24,6 @@ pub struct Service {
     pub plist: &'static str,
     /// Which `nett` command to run.
     pub args: &'static [&'static str],
-    pub log: &'static str,
     /// How it is referred to in help and reports.
     pub what: &'static str,
 }
@@ -34,7 +32,6 @@ pub const MESH: Service = Service {
     label: MESH_LABEL,
     plist: "/Library/LaunchDaemons/io.gotry.nett.mesh.plist",
     args: &["mesh", "--config", DESIRED, "--key", KEY],
-    log: "mesh.log",
     what: "the mesh service",
 };
 
@@ -42,7 +39,6 @@ pub const NODE: Service = Service {
     label: NODE_LABEL,
     plist: "/Library/LaunchDaemons/io.gotry.nett.node.plist",
     args: &["node", "--dir", DIR],
-    log: "node.log",
     what: "nett-node",
 };
 
@@ -53,13 +49,16 @@ const OLD_TRANSPORT: Service = Service {
     label: "io.gotry.nett.transport",
     plist: "/Library/LaunchDaemons/io.gotry.nett.transport.plist",
     args: &["transport"],
-    log: "transport.log",
     what: "the transport service of nett 0.3.11",
 };
 const OLD_TRANSPORT_ACCOUNT: &str = "_nett-transport";
+/// Earlier releases had launchd write each service's start-up failures to a file here, rotated by
+/// [`OLD_NEWSYSLOG`]; the services log only to the system log. [`remove_old_logs`] removes both.
+const OLD_LOG_DIR: &str = "/Library/Logs/nett";
+const OLD_NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
 
 /// launchd configuration: root runs the copy, starts at boot, restarts after exit
-/// (design/userspace.md section 6.3).
+/// (design/userspace.md section 6.3). Logs go to the system log, start-up failures included.
 pub fn plist(service: &Service) -> String {
     let args: String = service
         .args
@@ -69,7 +68,7 @@ pub fn plist(service: &Service) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Written by `sudo nett install`; it rewrites this file on the next run. -->
+<!-- Written by nett; it rewrites this file when nett is installed or upgraded. -->
 <plist version="1.0">
 <dict>
   <key>Label</key>
@@ -91,25 +90,10 @@ pub fn plist(service: &Service) -> String {
   <!-- 077: files the service creates are readable by root only -->
   <key>Umask</key>
   <integer>63</integer>
-  <!-- Logs go to the system log; this file records only start-up failures -->
-  <key>StandardErrorPath</key>
-  <string>{LOG_DIR}/{log}</string>
 </dict>
 </plist>
 "#,
         label = service.label,
-        log = service.log,
-    )
-}
-
-/// Rotation of the start-up failure records: rotates above 1 MB, keeps 5 copies, compresses the old
-/// ones.
-pub fn newsyslog() -> String {
-    format!(
-        "# Written by `sudo nett install`: rotation of the services' start-up failure logs.\n\
-         # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
-         {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n\
-         {LOG_DIR}/node.log    root:wheel     600   5      1024      *     JN\n"
     )
 }
 
@@ -119,6 +103,18 @@ pub fn launchctl(args: &[&str]) -> Result<bool, String> {
 
 pub fn loaded(service: &Service) -> Result<bool, String> {
     launchctl(&["print", &format!("system/{}", service.label)])
+}
+
+/// Loads the service from its configuration file.
+pub fn bootstrap(service: &Service) -> Result<(), String> {
+    if launchctl(&["bootstrap", "system", service.plist])? {
+        Ok(())
+    } else {
+        Err(format!(
+            "launchctl could not start {}; see `log show --last 10m --predicate 'process == \"nett\"'`",
+            service.what
+        ))
+    }
 }
 
 /// Unloads the service, and waits until launchd no longer has it: when bootout returns, the process
@@ -144,6 +140,92 @@ pub fn stop(service: &Service) -> Result<(), String> {
     Ok(())
 }
 
+/// Writes a service's configuration file through a temporary file, mode `0644` whatever the umask
+/// (launchd refuses a file others can write).
+pub fn write_plist(service: &Service, content: &[u8]) -> Result<(), String> {
+    use std::io::Write as _;
+    use std::os::unix::fs::PermissionsExt as _;
+    let io = |e: std::io::Error| format!("writing {}: {e}", service.plist);
+    let tmp = format!("{}.new", service.plist);
+    let _ = std::fs::remove_file(&tmp);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(io)?;
+    file.write_all(content).map_err(io)?;
+    file.sync_all().map_err(io)?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).map_err(io)?;
+    std::fs::rename(&tmp, service.plist).map_err(io)
+}
+
+/// The configuration file's content when it exists and differs from this program's.
+fn outdated(service: &Service) -> Option<Vec<u8>> {
+    let on_disk = std::fs::read(service.plist).ok()?;
+    (on_disk != plist(service).as_bytes()).then_some(on_disk)
+}
+
+/// After an upgrade the launchd configuration may have changed with the program (design/release.md
+/// section 7). Rewrites the mesh service's and reloads the service with it; when the new one does
+/// not load, the previous one goes back, so the mesh keeps running. Rewrites nett-node's own, which
+/// launchd reads the next time it loads nett-node. Then removes the start-up failure logs of earlier
+/// releases once no loaded service writes them.
+pub fn refresh() -> Result<(), String> {
+    if let Some(previous) = outdated(&MESH) {
+        write_plist(&MESH, plist(&MESH).as_bytes())?;
+        if let Err(e) = stop(&MESH).and_then(|()| bootstrap(&MESH)) {
+            write_plist(&MESH, &previous)?;
+            if !loaded(&MESH)? {
+                bootstrap(&MESH)?;
+            }
+            return Err(format!("{e}; kept the previous configuration"));
+        }
+        tracing::info!("the mesh service runs with its configuration from this program");
+    }
+    if outdated(&NODE).is_some() {
+        write_plist(&NODE, plist(&NODE).as_bytes())?;
+        tracing::info!("nett-node's configuration updated; launchd reads it when it next loads it");
+    }
+    if !writes_old_log() {
+        remove_old_logs()?;
+    }
+    Ok(())
+}
+
+/// Whether this process's standard error is the start-up failure log of an earlier release: launchd
+/// still has nett-node's earlier configuration loaded.
+fn writes_old_log() -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    let (Ok(stderr), Ok(log)) = (
+        std::fs::metadata("/dev/fd/2"),
+        std::fs::metadata(format!("{OLD_LOG_DIR}/node.log")),
+    ) else {
+        return false;
+    };
+    stderr.is_file() && stderr.ino() == log.ino()
+}
+
+/// Removes the start-up failure logs of earlier releases and their rotation configuration. Only once
+/// the services are loaded with this program's configuration, which has no log file.
+pub fn remove_old_logs() -> Result<(), String> {
+    match std::fs::remove_file(OLD_NEWSYSLOG) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("removing {OLD_NEWSYSLOG}: {e}")),
+    }
+    match std::fs::remove_dir_all(OLD_LOG_DIR) {
+        Ok(()) => {
+            tracing::info!(
+                dir = OLD_LOG_DIR,
+                "removed the log files of earlier releases"
+            );
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("removing {OLD_LOG_DIR}: {e}")),
+    }
+}
+
 /// Removes the transport service of nett 0.3.11 and its account and group where they exist: stops
 /// the service, deletes the account and the group, then its log and its configuration. The
 /// configuration goes last, so a step that fails is tried again the next time. Returns whether there
@@ -165,7 +247,7 @@ pub fn remove_transport_service() -> Result<bool, String> {
         }
     }
     for path in [
-        format!("{LOG_DIR}/{}", OLD_TRANSPORT.log),
+        format!("{OLD_LOG_DIR}/transport.log"),
         OLD_TRANSPORT.plist.to_owned(),
     ] {
         match std::fs::remove_file(&path) {
@@ -193,8 +275,11 @@ mod tests {
             let text = plist(&service);
             assert!(text.contains(&format!("<string>{PROGRAM}</string>")));
             assert!(text.contains(&format!("<string>{}</string>", service.label)));
-            assert!(text.contains(&format!("{LOG_DIR}/{}", service.log)));
             assert!(!text.contains("UserName"), "every service starts as root");
+            assert!(
+                !text.contains("StandardErrorPath"),
+                "logs go to the system log only"
+            );
             let path = dir.path().join(format!("{}.plist", service.label));
             std::fs::write(&path, &text).expect("write");
             let lint = std::process::Command::new("/usr/bin/plutil")
@@ -215,16 +300,5 @@ mod tests {
             !mesh.contains("homebrew"),
             "the service never runs the Homebrew copy"
         );
-    }
-
-    #[test]
-    fn every_log_is_rotated() {
-        let conf = newsyslog();
-        for service in [MESH, NODE] {
-            assert!(
-                conf.contains(&format!("{LOG_DIR}/{}", service.log)),
-                "{conf}"
-            );
-        }
     }
 }

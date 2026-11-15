@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
 /// The state directory of the relay service (`StateDirectory=nett-relay`).
-const STATE_DIR: &str = "/var/lib/nett-relay";
+const STATE_DIR: &str = nett_node::platform::linux::RELAY_STATE_DIR;
 
 pub const USAGE: &str = "usage: nett relay [--socket <helpers.sock>] [--state <dir>]\n\n\
 Started by systemd on a machine that runs a relay (`nett site relay`).";

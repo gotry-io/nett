@@ -652,7 +652,10 @@ fn ufw_drops_the_mesh(conf: &str, defaults: &str, rules: &[String]) -> bool {
 
 fn service_log_hint(systemd: &str, launchd: &str) -> String {
     if cfg!(target_os = "macos") && launchd != "-" {
-        format!("see `sudo launchctl print system/{launchd}` and /var/log/nett/")
+        format!(
+            "see `sudo launchctl print system/{launchd}` and \
+             `log show --last 1h --predicate 'process == \"nett\"'`"
+        )
     } else {
         format!("see `journalctl -u {systemd}` and `systemctl status {systemd}`")
     }

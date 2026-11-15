@@ -313,26 +313,106 @@ pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
 }
 
 /// Last step of `nett leave`: deletes the keys, the desired state, the Hub configuration and the
-/// trust store (design/auth.md section 8.3).
+/// copy of the Hub's backup, the upgrade records and the trust store (design/auth.md section 8.3).
 pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
-    for name in [
-        "mesh.key",
-        "identity.key",
-        "desired.json",
-        nett_node::config::HUB_FILE,
-        nett_node::upgrade::STATE_FILE,
-        nett_node::upgrade::MARKER_FILE,
-    ] {
-        let path = Path::new(dir).join(name);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e).with_context(|| format!("removing {}", path.display())),
-        }
+    remove_files(
+        dir,
+        &[
+            "mesh.key",
+            "identity.key",
+            "desired.json",
+            nett_node::config::HUB_FILE,
+            nett_node::session::BACKUP_FILE,
+        ],
+    )?;
+    forget_upgrades(dir)?;
+    remove_tree(state_dir)
+}
+
+/// Deletes the upgrade records next to the identity (design/release.md section 8).
+pub fn forget_upgrades(dir: &str) -> anyhow::Result<()> {
+    remove_files(
+        dir,
+        &[
+            nett_node::upgrade::STATE_FILE,
+            nett_node::upgrade::MARKER_FILE,
+        ],
+    )
+}
+
+/// Deletes the named files in `dir`; a missing one is fine.
+pub fn remove_files(dir: &str, names: &[&str]) -> anyhow::Result<()> {
+    for name in names {
+        remove_file(&Path::new(dir).join(name).to_string_lossy())?;
     }
-    match fs::remove_dir_all(state_dir) {
+    Ok(())
+}
+
+/// Deletes a file; a missing one is fine.
+pub fn remove_file(path: &str) -> anyhow::Result<()> {
+    match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("removing {state_dir}")),
+        Err(e) => Err(e).with_context(|| format!("removing {path}")),
+    }
+}
+
+/// Deletes a directory with everything in it; a missing one is fine.
+pub fn remove_tree(path: &str) -> anyhow::Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {path}")),
+    }
+}
+
+/// Deletes a directory when it is empty; returns whether it is gone.
+pub fn remove_if_empty(path: &str) -> anyhow::Result<bool> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("removing {path}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Leaving deletes the identity and the upgrade records and nothing else; a directory goes only
+    /// when nothing is left in it
+    #[test]
+    fn forgetting_deletes_the_identity_and_leaves_empty_directories_to_go() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let dir = tmp.path().join("nett");
+        let state = dir.join("state");
+        fs::create_dir_all(&state).expect("dirs");
+        for name in [
+            "mesh.key",
+            "identity.key",
+            "desired.json",
+            nett_node::config::HUB_FILE,
+            nett_node::session::BACKUP_FILE,
+            nett_node::upgrade::STATE_FILE,
+            "nett",
+        ] {
+            fs::write(dir.join(name), b"x").expect("write");
+        }
+        fs::write(state.join("trust.json"), b"{}").expect("write");
+        let (dir_s, state_s) = (dir.to_string_lossy(), state.to_string_lossy());
+        forget(&dir_s, &state_s).expect("forget");
+        assert!(!state.exists());
+        let left: Vec<_> = fs::read_dir(&dir)
+            .expect("read")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(left, ["nett"], "the program is not part of the identity");
+        assert!(!remove_if_empty(&dir_s).expect("not empty"));
+        remove_file(&dir.join("nett").to_string_lossy()).expect("remove");
+        remove_file(&dir.join("nett").to_string_lossy()).expect("a missing file is fine");
+        assert!(remove_if_empty(&dir_s).expect("empty"));
+        assert!(!dir.exists());
+        assert!(remove_if_empty(&dir_s).expect("a missing directory is gone"));
     }
 }

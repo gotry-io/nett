@@ -4,6 +4,20 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `sudo nett uninstall` removes everything nett placed on the machine except its identity, and says
+  where that is: the services, the program, nett's own copy of the command, the upgrade records, the
+  files of the running mesh, `/etc/resolver/nett.internal` on macOS, and on Linux also the `nett0`
+  interface with nett's nftables tables and the system users with `/etc/sysusers.d/nett.conf`. The
+  identity on Linux is given to root first. `sudo nett leave` also deletes the copy of the Hub's backup
+  and the relay's certificate key. After both, nothing of nett remains. design/release.md section 8
+  lists what nett places on each platform.
+- Linux: the relay's and the transport adapter's units exist only while the desired state needs them;
+  nett-node writes one when it starts the service and deletes it when it stops it.
+- macOS: the services log only to the system log, an error that ends one and a panic included, so
+  `/Library/Logs/nett` and `/etc/newsyslog.d/nett.conf` go. nett-node brings the launchd configuration
+  up to the new program after an upgrade and reloads the mesh service with it; its own takes effect
+  the next time launchd loads it, and the old log files go then.
+
 ## [0.3.12] - 2026-11-15
 
 - macOS: the mesh service carries paths over TLS itself, as Tailscale does on macOS, so nett adds no
