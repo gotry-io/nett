@@ -20,8 +20,8 @@ use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{MAX_MESSAGE, Responder, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
-    AckResult, Backup, DesiredState, Envelope, Error as ProtoError, ErrorCode, Hello, Partition,
-    PartitionKind, PathSwitch, Pong, Welcome,
+    AckResult, Backup, DesiredState, Envelope, Error as ProtoError, ErrorCode, Goodbye, Hello,
+    Partition, PartitionKind, PathSwitch, Pong, Welcome,
 };
 use nett_site::state::{AddressSource, Learned, LearnedIp};
 use prost::Message as _;
@@ -32,6 +32,8 @@ use crate::tls::TlsListener;
 
 /// Handshake time limit.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long saying goodbye to a node may take when the Hub stops.
+const GOODBYE_TIMEOUT: Duration = Duration::from_secs(1);
 /// A node sends a Ping every 25 seconds (protocol.md section 8); the connection is closed after
 /// this long with no message at all.
 const KEEPALIVE_SECS: u32 = 25;
@@ -469,6 +471,12 @@ async fn serve(
             }
             () = replaced.notified() => return Ok(()),
             () = &mut idle => return Err("no message within the keepalive window".into()),
+            () = hub.stopping() => {
+                let reason = "the Hub is stopping";
+                let goodbye = Body::Goodbye(Goodbye { reason: reason.to_owned() });
+                let _ = tokio::time::timeout(GOODBYE_TIMEOUT, out.send(socket, goodbye)).await;
+                return Err(reason.into());
+            }
         }
     }
 }

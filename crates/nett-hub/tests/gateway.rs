@@ -13,7 +13,7 @@ use axum::http::StatusCode;
 use nett_hub::hub::Hub;
 use nett_mesh::config::DesiredMeshDoc;
 use nett_node::config::HubConfig;
-use nett_node::session::{Node, SessionError};
+use nett_node::session::{Exit, Node, SessionError};
 use nett_proto::token::Bytes32;
 use nett_proto::v1::ErrorCode;
 use x25519_dalek::{PublicKey, StaticSecret};
@@ -347,5 +347,60 @@ async fn switch_messages_pass_between_connected_members() {
             .await
             .is_err(),
         "not passed on between members the site does not connect"
+    );
+}
+
+/// A stopping Hub says goodbye to each connected machine and records when it was last seen and the
+/// disconnection before it exits.
+#[tokio::test]
+async fn a_stopping_hub_says_goodbye_and_records_the_disconnection() {
+    let (hub, app, token, _site, state, _linked_tmp) =
+        linked("gateway-stop", "https://127.0.0.1").await;
+    let (status, _) = push(&app, &token, &state).await;
+    assert_eq!(status, StatusCode::OK);
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let (url, hub_task) = serve_until(hub.clone(), async move {
+        stopped.await.ok();
+    })
+    .await;
+    let mac = state
+        .machine(&name("mac"))
+        .expect("mac")
+        .node_id
+        .to_string();
+    let (_dir_tmp, dir) = temp_dir("gateway-stop-mac");
+    let agent = node(&url, &mac, identity(2), &dir);
+    let session = tokio::spawn(async move {
+        let (coordination, _sent, _received) = coordination();
+        agent.session(&mut None, &coordination).await
+    });
+    acked(&hub, &mac, 1).await;
+    // Seen long ago: the Hub must record the end of the session
+    hub.db.seen(&mac, 0, "0.0.0").await.expect("seen");
+    let stopped_at = nett_hub::now();
+
+    stop.send(()).ok();
+    let ended = tokio::time::timeout(Duration::from_secs(5), session)
+        .await
+        .expect("the session ends")
+        .expect("no panic");
+    assert!(matches!(ended, Ok(Exit::Shutdown)), "{ended:?}");
+    tokio::time::timeout(nett_hub::SHUTDOWN_GRACE + Duration::from_secs(1), hub_task)
+        .await
+        .expect("the Hub stops")
+        .expect("no panic");
+    let row = hub
+        .db
+        .nodes()
+        .await
+        .expect("nodes")
+        .into_iter()
+        .find(|r| r.node_id == mac)
+        .expect("mac");
+    assert!(row.last_seen >= stopped_at, "last seen {}", row.last_seen);
+    let events = hub.db.events(&mac, 1).await.expect("events");
+    assert_eq!(
+        (events[0].kind.as_str(), events[0].detail.as_str()),
+        ("disconnected", "the Hub is stopping")
     );
 }

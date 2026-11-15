@@ -187,7 +187,8 @@ Machines that were already members before joining keep the public keys registere
 - When run natively it runs as a dedicated low-privilege user, and it can also run in a container (the Hub does not need access to the host); it listens only locally and is exposed by the reverse proxy (architecture.md section 4);
 - Storage: the site model and signed artifacts, each node's identity public key and generation, each machine's latest status, recent events (100 per machine, kept for 30 days), one-time tokens (hashes only). SQLite explicitly sets cache and mmap limits;
 - Resources: stable operation ≤ 30-50 MB (hard rule 14); each node's connections, messages and queues have limits (protocol.md section 11);
-- Backup and rebuild: section 8.2.
+- Backup and rebuild: section 8.2;
+- Stopping: the Hub stops taking connections, sends each connected node `Goodbye` (protocol.md section 5), and waits up to 5 seconds for each session to record when its machine was last seen and the disconnection event; the nodes try to connect again after about a second.
 
 Commands on the Hub host (command line conventions as in architecture.md section 14.3):
 

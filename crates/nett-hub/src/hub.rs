@@ -78,6 +78,8 @@ pub struct Hub {
     /// Node connections and handshakes in progress (protocol.md section 11).
     pub connections: Arc<tokio::sync::Semaphore>,
     pub handshakes: Arc<tokio::sync::Semaphore>,
+    /// Set when the Hub stops: every node session then says goodbye and ends.
+    stopping: watch::Sender<bool>,
     /// Where the database snapshot for a backup is made; no backups without it.
     data: Option<std::path::PathBuf>,
     /// The latest sealed backup (design/hub.md section 8.2).
@@ -162,6 +164,7 @@ impl Hub {
             release: watch::channel(None).0,
             connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES)),
+            stopping: watch::channel(false).0,
             data,
             backup: Mutex::new(None),
         }))
@@ -268,6 +271,26 @@ impl Hub {
             old.replaced.notify_one();
         }
         (replaced, rx)
+    }
+
+    /// Completes once the Hub is stopping.
+    pub async fn stopping(&self) {
+        // The sender lives as long as the Hub, so this waits for the value alone
+        let _ = self.stopping.subscribe().wait_for(|s| *s).await;
+    }
+
+    /// Ends every node session with a `Goodbye` (protocol.md section 5), and waits at most `grace`
+    /// until each has recorded when its machine was last seen and the disconnection.
+    pub async fn shut_down(&self, grace: std::time::Duration) {
+        self.stopping.send_replace(true);
+        // A session holds its connection permit until it has finished recording
+        let all = u32::try_from(MAX_CONNECTIONS).expect("the connection limit fits in u32");
+        if tokio::time::timeout(grace, self.connections.acquire_many(all))
+            .await
+            .is_err()
+        {
+            tracing::warn!("node sessions were still ending when the Hub stopped");
+        }
     }
 
     pub async fn disconnected(&self, node: &NodeId, notify: &Arc<Notify>) {
