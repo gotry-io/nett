@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.13] - 2026-11-15
+
 - `sudo nett uninstall` removes everything nett placed on the machine except its identity, and says
   where that is: the services, the program, nett's own copy of the command, the upgrade records, the
   files of the running mesh, `/etc/resolver/nett.internal` on macOS, and on Linux also the `nett0`
