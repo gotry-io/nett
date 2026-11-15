@@ -97,7 +97,7 @@ jobs:
           done
           [ "$(dig +short +time=1 +tries=1 @"$v4" ci.nett.internal)" = "$v4" ]
           dscacheutil -q host -a name ci.nett.internal | grep -F "$v4"
-          ! "$nett" status 2> status.err
+          if "$nett" status 2> status.err; then exit 1; fi
           grep -F 'run with sudo' status.err
           sudo "$nett" install | grep -F 'The services are running. Nothing changed.'
           # The desired state changed (same content, different bytes): reload over the local
@@ -164,9 +164,9 @@ jobs:
           done
           sudo launchctl print system/io.gotry.nett.transport | grep 'state = running'
           # On a machine joined to the Hub, the desired state is written only by nett-node
-          ! sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json
+          if sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json; then exit 1; fi
           sudo "$nett" uninstall
-          ! sudo launchctl print system/io.gotry.nett.node 2>/dev/null
+          if sudo launchctl print system/io.gotry.nett.node 2>/dev/null; then exit 1; fi
           # After leaving, the same Mac joins via the Hub as a new machine (design/hub.md sections
           # 3.3, 6), then leaves again
           sudo "$nett" leave | tee leave.log
@@ -184,9 +184,9 @@ jobs:
           "$nett" site status | tee site-status.log
           grep -E '^ci-new +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
           # A token can be used only once
-          ! sudo "$nett" install "$token"
+          if sudo "$nett" install "$token"; then exit 1; fi
           sudo "$nett" leave
-          ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
+          if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
 
 
   # Linux with real systemd (design/hub.md section 7, design/release.md section 7): a new machine
@@ -220,7 +220,8 @@ jobs:
         run: |
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
             cargo build --locked -p nett-cli -p nett-hub
-          export NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/new-primary.pub" "$RUNNER_TEMP/new-backup.pub")"
+          NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/new-primary.pub" "$RUNNER_TEMP/new-backup.pub")"
+          export NETT_RELEASE_PUBLIC_KEYS
           next="$RUNNER_TEMP/next"
           mkdir -p "$next" "$RUNNER_TEMP/site/dl"
           tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C "$next"
@@ -330,8 +331,8 @@ jobs:
           sudo journalctl -u nett-node --no-pager | tail -20
           sudo nett leave | tee leave.log
           grep -F 'Told the Hub at https://127.0.0.1:8443' leave.log
-          ! systemctl is-active --quiet nett-mesh.service
-          ! ip link show nett0 2>/dev/null
+          if systemctl is-active --quiet nett-mesh.service; then exit 1; fi
+          if ip link show nett0 2>/dev/null; then exit 1; fi
           test ! -e /etc/nett/identity.key
       - name: Logs on failure
         if: failure()
