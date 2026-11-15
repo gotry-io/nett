@@ -4,6 +4,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A pair whose relay still answers but no longer reaches the other machine moves to another relay. It
+  went back and forth between that relay's UDP and TLS paths, which share the broken leg, and stayed
+  disconnected. A machine also reports a relay it has never reached as lost, so the other end does not
+  move back to it.
+
 ## [0.3.9] - 2026-11-15
 
 - The relay on a machine reaches that machine's WireGuard on loopback after an upgrade from 0.3.7. It kept

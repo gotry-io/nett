@@ -1,0 +1,38 @@
+# Scenario 26: a is behind a cone NAT (dial-only), b is on the "public network"; between them there
+# are only paths through relays: r1 over UDP and over TLS, and r2 over TLS. The scenario cuts the UDP
+# between the relay in use and b, while that relay still answers a's probes.
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "nat-a"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[node]]
+name = "r1"
+reachability = "public"
+roles = ["relay"]
+
+[[node]]
+name = "r2"
+reachability = "public"
+roles = ["relay"]
+
+[[router]]
+name = "nat-a"
+nat = "cone"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["relay:r1", "relay-tls:r1", "relay-tls:r2"]
+
+[[allow]]
+from = ["a", "b"]
+to = ["a", "b"]

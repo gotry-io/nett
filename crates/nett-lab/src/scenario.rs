@@ -1571,6 +1571,8 @@ pub fn failover(
 pub enum RelayFault {
     Loss,
     Restart,
+    /// The relay's UDP with b is cut while it still answers a (scenario 26).
+    FarLeg,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1670,6 +1672,7 @@ fn nett_relay_fault_once(
         .iter()
         .find(|n| n.name == "b")
         .context("node b")?;
+    let b_ip = lab.underlay.egress_ipv4("b").context("b's address")?;
     let relays: Vec<&LabNode> = ["r1", "r2"]
         .iter()
         .filter_map(|r| generated.nodes.iter().find(|n| n.name == *r))
@@ -1695,6 +1698,7 @@ fn nett_relay_fault_once(
                 &crate::fault::Netem::loss(100.0),
             ),
             RelayFault::Restart => lab.restart_relay(relays[i], nett),
+            RelayFault::FarLeg => crate::fault::block_udp_with(&relays[i].name, &[b_ip.into()]),
         },
     );
     let run = run.map_err(|e| e.context(diagnose(&lab, &generated.nodes)))?;
@@ -1758,6 +1762,8 @@ fn tailscale_relay_fault_once(
                 Ok(())
             }
             RelayFault::Restart => ts.borrow_mut().restart_derp(i + 1),
+            // DERP reaches both ends over TCP: there is no UDP leg to cut
+            RelayFault::FarLeg => Err(anyhow::anyhow!("relay-far-leg has no Tailscale comparison")),
         },
     )?;
     drop(ts);
@@ -1780,6 +1786,7 @@ pub fn relay_fault(
     let name = match kind {
         RelayFault::Loss => "2-relay-loss",
         RelayFault::Restart => "3-relay-restart",
+        RelayFault::FarLeg => "26-relay-far-leg",
     };
     let mut report = Report::new(name);
     let mut runs = Vec::new();
@@ -1823,7 +1830,7 @@ pub fn relay_fault(
         n.2 == 0,
         format!("{} of {repeat} runs reset the connection", n.2),
     );
-    if kind == RelayFault::Loss {
+    if kind != RelayFault::Restart {
         let moved = runs
             .iter()
             .filter(|r| r.system == "nett")

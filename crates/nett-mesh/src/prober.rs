@@ -29,13 +29,13 @@ use crate::punch::{Observations, Punch, PunchEvent};
 /// (each state machine decides loss itself). In-tunnel probes are kept for [`LATE_HORIZON`]: late
 /// replies that queued for a few seconds must also be handed to the path selection state machine
 /// (design/mesh.md section 7).
-const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
+pub(crate) const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
 /// Upper limit of the lookup table: fewer than 20 in-tunnel probes within 10 seconds for each peer with
 /// traffic, plus probes of candidates and relays.
 const MAX_OUTSTANDING: usize = 4096;
 /// Interval at which the follower measures relays: only to provide the decider with the "relay -> this
 /// machine" leg.
-const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Window for judging whether there is traffic (design/mesh.md section 7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
 /// Bytes a second, both directions together (2 Mbit/s), above which a pair is busy: it stays on, or
@@ -1055,13 +1055,12 @@ impl Prober {
                 };
                 if let Some(peer) = self.peers.get_mut(&sender) {
                     for r in reports {
-                        peer.reports.insert(
-                            r.relay,
-                            (
-                                Duration::from_millis(u64::from(r.rtt_ms)),
-                                f64::from(r.loss_permille) / 1000.0,
-                            ),
-                        );
+                        let loss = f64::from(r.loss_permille) / 1000.0;
+                        peer.reports
+                            .insert(r.relay, (Duration::from_millis(u64::from(r.rtt_ms)), loss));
+                        if let Some(paths) = peer.paths.as_mut() {
+                            paths.on_relay_report(r.relay, loss, at);
+                        }
                     }
                 }
                 if let Some((owner, Pending::Tunnel { local }, _)) = self.outstanding.remove(&wire)
@@ -1460,11 +1459,14 @@ impl Prober {
         self.relay_stats
             .iter()
             .filter_map(|(relay, stats)| {
-                let rtt = stats.rtt_ms()?;
+                // A relay that never replied has no round-trip time, and is reported fully lost
+                let loss = stats.measured_loss()?;
                 Some(RelayReport {
                     relay: *relay,
-                    rtt_ms: rtt.round().clamp(0.0, f64::from(u16::MAX)) as u16,
-                    loss_permille: (stats.loss_rate() * 1000.0).round() as u16,
+                    rtt_ms: stats
+                        .rtt_ms()
+                        .map_or(0, |rtt| rtt.round().clamp(0.0, f64::from(u16::MAX)) as u16),
+                    loss_permille: (loss * 1000.0).round() as u16,
                 })
             })
             .take(probe::MAX_RELAY_REPORTS)
@@ -1772,6 +1774,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// B, which follows, probes the relay without any reply: it reports the relay fully lost through the
+    /// tunnel, so A knows the path through it is down (design/mesh.md section 7.2).
+    #[test]
+    fn a_relay_that_never_answered_is_reported_lost() {
+        let mut net = Net::new();
+        net.relay_up = false;
+        net.run(Duration::from_secs(30));
+        let relay = KeyId::of(node_id(9).as_str().as_bytes());
+        let heard = net
+            .a
+            .prober
+            .peers
+            .get(&net.b.id)
+            .and_then(|p| p.reports.get(&relay))
+            .copied();
+        assert_eq!(heard.map(|(_, loss)| loss), Some(1.0));
     }
 
     #[test]
