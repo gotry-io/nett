@@ -400,7 +400,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | `nett status` | State of this machine and its peers (design/status.md) |
 | `nett reload` | Asks the mesh process to re-read the desired state file and shows whether it was accepted (design/status.md section 4.1) |
 | `nett install` | Sets this machine up as a member: generates keys, installs services, imports the desired state (macOS, design/release.md section 4); with an enrollment token, enrolls with the Hub (design/hub.md section 6) |
-| `nett uninstall` | Stops and removes the services, keeping the keys and the desired state; running `install` again restores it |
+| `nett uninstall` | Removes nett from this machine and keeps its identity; running `install` again restores it (design/release.md section 8) |
 | `nett keys` | Only generates this machine's keys and prints the line needed by `nett site add --keys`: for container members and machines whose service configuration is written by hand |
 | `nett leave` | Leaves this network (root): notifies the Hub, tears down the mesh interface, deletes this machine's keys, trust anchors and desired state, and uninstalls the services; the machine can then join any network (design/auth.md section 8.3) |
 | `nett doctor` | Automatic diagnosis, with plain-language explanations and suggested fixes |
