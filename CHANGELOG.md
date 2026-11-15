@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.14] - 2026-11-15
+
 - Linux: one directory and one account. The trust store moves to `/etc/nett/state` and the relay's
   certificate to `/etc/nett/relay`, next to the keys, so `/var/lib/nett` and `/var/lib/nett-relay` go;
   the relay and the transport adapter run as users systemd allocates while they run, so the system
