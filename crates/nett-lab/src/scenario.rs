@@ -171,6 +171,18 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
                     p.rtt_ms,
                     p.last_handshake.map(|t| t.to_string())
                 ));
+                // What the path layer chose from: a scenario that waits for a switch fails on these
+                for c in &p.candidates {
+                    out.push_str(&format!(
+                        "\n      {:?} {:?} via {:?}: {:?}, rtt {:?}, loss {:?}",
+                        c.kind,
+                        c.endpoint,
+                        c.relay.as_ref().map(|r| r.id.to_string()),
+                        c.state,
+                        c.rtt_ms,
+                        c.loss
+                    ));
+                }
             }
             for problem in &doc.problems {
                 out.push_str(&format!(
