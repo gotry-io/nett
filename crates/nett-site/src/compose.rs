@@ -12,6 +12,7 @@ use nett_mesh::config::{
     Candidate, DesiredMesh, DesiredMeshDoc, PathDoc, ProbeToken, Reachability, RelayDoc,
     RelayMemberDoc,
 };
+use nett_mesh::prober::is_decider;
 use nett_trust::revocation::Revocation;
 
 use crate::SiteError;
@@ -62,13 +63,16 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
 }
 
 /// Candidate paths from this machine to a peer (design/site.md section 6): the direct ones first,
-/// then the paths through relays.
+/// then the paths through relays other than this machine's own.
 pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     let mut out = direct(state, me, peer);
     let Some(key) = &state.relay_key else {
         return out;
     };
-    for path in relay_paths(state, me, peer) {
+    for path in relay_paths(state, me, peer)
+        .into_iter()
+        .filter(|p| p.relay.node_id != me.node_id)
+    {
         let token = token(key, &path.relay.node_id, &me.node_id);
         let relay = path.relay.node_id.clone();
         out.push(match path.tls {
@@ -99,9 +103,10 @@ pub struct RelayPath<'a> {
 }
 
 /// The paths of the connection between `a` and `b` through relays (design/site.md section 6):
-/// every relay other than the two ends that has joined and has a public address, in the order of
-/// their node IDs, first over UDP and then over TLS, while the connection has room for candidates.
-/// The result is the same for both ends.
+/// the relay on one end over TLS when the other end decides the path, then every relay other than
+/// the two ends that has joined and has a public address, in the order of their node IDs, first
+/// over UDP and then over TLS, while the connection has room for candidates. The result is the
+/// same for both ends.
 pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayPath<'a>> {
     if a.policy.is_none() || b.policy.is_none() {
         return Vec::new();
@@ -122,6 +127,29 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
         })
         .collect();
     relays.sort_by(|x, y| x.0.node_id.cmp(&y.0.node_id));
+    // The relay hands the packets to WireGuard on its own machine, so the two stay connected when
+    // only TCP passes between them (design/mesh.md section 5.1); only the deciding end can use it
+    let own = [(a, b), (b, a)].into_iter().filter_map(|(host, other)| {
+        if !is_decider(
+            &other.node_id,
+            other.reachability,
+            &host.node_id,
+            host.reachability,
+        ) {
+            return None;
+        }
+        let r = state.by_id(&host.node_id)?;
+        let ip = r
+            .public_ipv4()
+            .map(IpAddr::V4)
+            .or_else(|| r.public_ipv6().map(IpAddr::V6))?;
+        Some(RelayPath {
+            relay: r,
+            ip,
+            port: r.relay?.tls_port?,
+            tls: Some(r.relay_fingerprint()?),
+        })
+    });
     let udp = relays.iter().map(|(r, ip, role)| RelayPath {
         relay: r,
         ip: *ip,
@@ -136,7 +164,7 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
             tls: Some(r.relay_fingerprint()?),
         })
     });
-    udp.chain(tls).take(room).collect()
+    own.chain(udp).chain(tls).take(room).collect()
 }
 
 /// The probe token between a member and a relay (design/mesh.md section 5.2): HMAC-SHA256 of the

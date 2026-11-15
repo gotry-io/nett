@@ -886,10 +886,17 @@ fn connections_go_through_every_relay_udp_first() {
     let mut pair = [id("mac"), id("nas")];
     pair.sort();
     assert!(relay.links.contains(&pair));
-    assert!(
-        relay.links.iter().all(|l| !l.contains(&id("r2"))),
-        "no link through a relay to itself"
-    );
+    // Links to r2 itself are those whose other end reaches it over TLS: the dial-only machines
+    let mut own: Vec<nett_core::id::NodeId> = relay
+        .links
+        .iter()
+        .filter(|l| l.contains(&id("r2")))
+        .flat_map(|l| l.iter().filter(|n| **n != id("r2")).cloned())
+        .collect();
+    own.sort();
+    let mut dial_only = vec![id("mac"), id("nas")];
+    dial_only.sort();
+    assert_eq!(own, dial_only);
     let mac_on_r2 = relay
         .members
         .iter()
@@ -934,6 +941,97 @@ fn connections_go_through_every_relay_udp_first() {
             .relay
             .is_none()
     );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A machine that decides the path to a relay's machine also reaches it through that relay over
+/// TLS, which hands the packets to WireGuard there: the two stay connected when only TCP passes
+/// between them (design/mesh.md section 5.1).
+#[test]
+fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay_over_tls() {
+    let (_dir_tmp, dir) = temp_dir("relay-own");
+    let (_site, state) = relay_site(&dir);
+    let id = |n: &str| state.machine(&name(n)).expect("machine").node_id.clone();
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
+    let through = |c: &[Candidate]| -> Vec<(String, bool)> {
+        c.iter()
+            .filter_map(|c| match c {
+                Candidate::Relay { relay, .. } => Some((state.name_of(relay)?.to_string(), false)),
+                Candidate::RelayTls { relay, .. } => {
+                    Some((state.name_of(relay)?.to_string(), true))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    // mac is dial-only and decides: r2's own relay over TLS comes before the other relays
+    let r = |n: &str, tls| (n.to_owned(), tls);
+    assert_eq!(
+        through(path(&mac, &state, "r2")),
+        [r("r2", true), r("r1", false)]
+    );
+    let own = path(&mac, &state, "r2")
+        .iter()
+        .find_map(|c| match c {
+            Candidate::RelayTls { relay, token, .. } if *relay == id("r2") => Some(token.clone()),
+            _ => None,
+        })
+        .expect("mac's candidate through r2's own relay");
+    // r2 follows, and never gets a path through itself
+    assert_eq!(through(path(&r2, &state, "mac")), [r("r1", false)]);
+    // r2's relay carries the link, with the token in mac's candidate
+    let relay = r2.relay.as_ref().expect("r2 runs a relay");
+    let mut pair = [id("mac"), id("r2")];
+    pair.sort();
+    assert!(relay.links.contains(&pair));
+    let mac_on_r2 = relay
+        .members
+        .iter()
+        .find(|m| m.node == id("mac"))
+        .expect("mac is a member of r2's relay");
+    assert_eq!(mac_on_r2.token, own);
+    // r1 serves no TLS: mac reaches it only through r2
+    assert_eq!(
+        through(path(&mac, &state, "r1")),
+        [r("r2", false), r("r2", true)]
+    );
+    // Between two public machines the one with the smaller node ID decides: once both serve TLS and
+    // a rule connects them, r1 reaches r2 through r2's relay, and r2 does not use r1's
+    assert!(id("r1") < id("r2"));
+    let mut state = state.clone();
+    let role = crate::state::RelayRole {
+        port: 41822,
+        tls_port: Some(443),
+        fingerprint: Some(
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                .parse()
+                .expect("fingerprint"),
+        ),
+    };
+    let key = state.relay_key.expect("relay key");
+    state
+        .set_relay(&name("r1"), Some(role), key)
+        .expect("r1 serves TLS");
+    state
+        .allow(&["r1".into()], &["r2".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&_site, &mut state);
+    let r1 = desired(&state, &name("r1")).expect("ok").expect("signed");
+    let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
+    let through = |c: &[Candidate]| -> Vec<(String, bool)> {
+        c.iter()
+            .filter_map(|c| match c {
+                Candidate::Relay { relay, .. } => Some((state.name_of(relay)?.to_string(), false)),
+                Candidate::RelayTls { relay, .. } => {
+                    Some((state.name_of(relay)?.to_string(), true))
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(through(path(&r1, &state, "r2")), [r("r2", true)]);
+    assert!(through(path(&r2, &state, "r1")).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }
 
