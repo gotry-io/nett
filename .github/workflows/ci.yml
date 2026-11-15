@@ -183,8 +183,9 @@ jobs:
           done
           "$nett" site status | tee site-status.log
           grep -E '^ci-new +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
-          # A token can be used only once
-          if sudo "$nett" install "$token"; then exit 1; fi
+          # The same machine retrying its token completes as usual (design/hub.md section 6); another
+          # machine using it is refused, which the Hub's enrollment tests cover
+          sudo "$nett" install "$token" | grep -F 'This machine has already joined the site through the Hub.'
           sudo "$nett" leave
           if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
 
