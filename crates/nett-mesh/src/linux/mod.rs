@@ -44,7 +44,12 @@ impl crate::clock::Clock for SystemClock {
 
 /// Effective user ID of the peer process of a Unix socket (design/status.md section 3).
 pub(crate) fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<u32> {
-    sys::peer_uid(fd)
+    sys::peer_cred(fd).map(|(_, uid)| uid)
+}
+
+/// Process ID (0 outside this PID namespace) and effective user ID of a Unix socket's peer.
+pub(crate) fn peer_cred(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<(u32, u32)> {
+    sys::peer_cred(fd)
 }
 
 /// Tears down what the mesh process leaves in the system (`nett leave`, design/auth.md section 8.3): the

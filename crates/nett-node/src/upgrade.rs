@@ -90,16 +90,25 @@ impl Services for ServiceManager {
             .iter()
             .map(|u| u.name)
             .collect();
-        if units.is_empty() {
-            return;
+        if !units.is_empty() {
+            let mut args = vec!["try-restart"];
+            args.extend(&units);
+            if !crate::platform::run(systemctl, &args, SERVICE_TIMEOUT).unwrap_or(false) {
+                tracing::warn!(
+                    ?units,
+                    "restarting the helper services on the new program failed"
+                );
+            }
         }
-        let mut args = vec!["try-restart"];
-        args.extend(&units);
-        if !crate::platform::run(systemctl, &args, SERVICE_TIMEOUT).unwrap_or(false) {
-            tracing::warn!(
-                ?units,
-                "restarting the helper services on the new program failed"
-            );
+        // What the layout of 0.3.13 left goes in the privileged start step of nett-node's unit,
+        // which runs once the upgrade has settled (design/release.md section 8)
+        #[cfg(target_os = "linux")]
+        if crate::layout::old_remains(&crate::layout::Layout::system()) {
+            tracing::info!("restarting nett-node to remove what nett 0.3.13 left");
+            let args = ["--no-block", "restart", crate::platform::linux::NODE_UNIT];
+            if !crate::platform::run(systemctl, &args, SERVICE_TIMEOUT).unwrap_or(false) {
+                tracing::warn!("restarting nett-node to tidy up failed");
+            }
         }
     }
 }

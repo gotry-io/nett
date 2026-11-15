@@ -1,5 +1,6 @@
 //! The relay's own TLS certificate (design/mesh.md section 5.3): an Ed25519 key and a self-signed
-//! certificate created the first time the relay starts, kept in its state directory. Clients check the
+//! certificate, created by nett-node in this machine's identity directory before it first enables the
+//! relay, and handed to the relay by systemd. Clients check the
 //! certificate by its SHA-256 fingerprint, so its names and validity carry no meaning; the certificate
 //! is still well-formed X.509 so that TLS libraries accept it.
 
@@ -11,7 +12,7 @@ use nett_core::transport::CertFingerprint;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
-/// File names in the state directory.
+/// File names in the certificate's directory.
 pub const CERT_FILE: &str = "tls-cert.der";
 pub const KEY_FILE: &str = "tls-key.pk8";
 
@@ -43,6 +44,10 @@ pub enum CertError {
         "the TLS key in {0} is not a valid Ed25519 key; delete it and the certificate to create new ones"
     )]
     BadKey(String),
+    #[error(
+        "{0} has no TLS certificate and key; nett-node creates them before it starts the relay"
+    )]
+    Missing(String),
     #[error("the system random number generator failed")]
     Random,
 }
@@ -59,22 +64,26 @@ impl RelayCert {
         &self.key
     }
 
+    /// Loads the certificate from `dir`, where it must exist.
+    pub fn load(dir: &Path) -> Result<Self, CertError> {
+        let (cert_path, key_path) = (dir.join(CERT_FILE), dir.join(KEY_FILE));
+        if !(key_path.exists() && cert_path.exists()) {
+            return Err(CertError::Missing(dir.display().to_string()));
+        }
+        let key =
+            zeroize::Zeroizing::new(std::fs::read(&key_path).map_err(io("reading", &key_path))?);
+        Ed25519KeyPair::from_pkcs8(&key)
+            .map_err(|_| CertError::BadKey(key_path.display().to_string()))?;
+        let cert = std::fs::read(&cert_path).map_err(io("reading", &cert_path))?;
+        Ok(Self { cert, key })
+    }
+
     /// Loads the certificate from `dir`, creating the key and certificate when there are none. The key
     /// file is `0600`.
     pub fn load_or_create(dir: &Path) -> Result<Self, CertError> {
         let (cert_path, key_path) = (dir.join(CERT_FILE), dir.join(KEY_FILE));
-        let io = |what, path: &Path| {
-            let path = path.display().to_string();
-            move |source| CertError::Io { what, path, source }
-        };
         if key_path.exists() && cert_path.exists() {
-            let key = zeroize::Zeroizing::new(
-                std::fs::read(&key_path).map_err(io("reading", &key_path))?,
-            );
-            Ed25519KeyPair::from_pkcs8(&key)
-                .map_err(|_| CertError::BadKey(key_path.display().to_string()))?;
-            let cert = std::fs::read(&cert_path).map_err(io("reading", &cert_path))?;
-            return Ok(Self { cert, key });
+            return Self::load(dir);
         }
         let rng = SystemRandom::new();
         let key = zeroize::Zeroizing::new(
@@ -93,6 +102,11 @@ impl RelayCert {
         write_new(&cert_path, &cert).map_err(io("writing", &cert_path))?;
         Ok(Self { cert, key })
     }
+}
+
+fn io(what: &'static str, path: &Path) -> impl FnOnce(std::io::Error) -> CertError {
+    let path = path.display().to_string();
+    move |source| CertError::Io { what, path, source }
 }
 
 /// Writes a new file with mode `0600` through a temporary name.

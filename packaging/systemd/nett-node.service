@@ -9,11 +9,15 @@ After=network-online.target nett-mesh.service
 Wants=network-online.target
 
 [Service]
+# With full privileges, before nett-node starts: removes what the layout of nett 0.3.13 and earlier
+# left (the old trust store and relay directories, and the users the relay and the transport adapter
+# ran as) once an upgrade has settled. A failure here does not keep nett-node from starting
+ExecStartPre=-+/usr/local/lib/nett/nett node --dir /etc/nett --tidy
 ExecStart=/usr/local/lib/nett/nett node --dir /etc/nett
 # Runs as root to write the desired state, replace the program and refresh nett's units after an
 # upgrade; CAP_DAC_OVERRIDE lets it reach the mesh service's socket in /run/nett. It listens on no
 # port; the only program it runs is systemctl, to restart services after an upgrade and to start or
-# stop the relay and the transport adapter.
+# stop the relay and the transport adapter. It creates the relay's certificate in /etc/nett/relay.
 CapabilityBoundingSet=CAP_DAC_OVERRIDE
 NoNewPrivileges=yes
 ProtectSystem=strict

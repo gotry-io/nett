@@ -1335,6 +1335,7 @@ dependencies = [
  "nett-core",
  "nett-mesh",
  "nett-proto",
+ "nett-relay",
  "nett-site",
  "nett-transport",
  "nett-trust",

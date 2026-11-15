@@ -19,23 +19,29 @@ pub const DEFAULT_DIR: &str = "/etc/nett";
 #[cfg(target_os = "macos")]
 pub const DEFAULT_DIR: &str = "/Library/Application Support/nett";
 
-pub const USAGE: &str = "usage: nett node [--dir <directory>] [--socket <path>]\n\n\
+pub const USAGE: &str = "usage: nett node [--dir <directory>] [--socket <path>] [--tidy]\n\n\
 Connects this machine to its Hub and hands the desired state to the mesh service. Started by\n\
 systemd or launchd after `sudo nett install <token>`. The directory holds hub.json,\n\
 identity.key and desired.json; it defaults to /etc/nett on Linux and\n\
-/Library/Application Support/nett on macOS.";
+/Library/Application Support/nett on macOS. --tidy, run by systemd with full privileges before\n\
+nett-node starts on Linux, removes what nett 0.3.13 and earlier left once an upgrade has settled.";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut dir = PathBuf::from(DEFAULT_DIR);
     let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
+    let mut tidy = false;
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("dir") => dir = PathBuf::from(parser.value()?),
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
+            lexopt::Arg::Long("tidy") => tidy = true,
             other => return Err(other.unexpected().into()),
         }
     }
     crate::mesh::init_logging();
+    if tidy {
+        return tidy_up(&dir);
+    }
     let config = HubConfig::load(&dir)
         .map_err(anyhow::Error::msg)?
         .with_context(|| {
@@ -140,4 +146,24 @@ fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader>
         }),
         mesh_start: nett_node::upgrade::MESH_START,
     })
+}
+
+/// `nett node --tidy` (design/release.md section 8): the second step of the move from the layout of
+/// 0.3.13, which deletes what the rollback of an upgrade would still need, so not while an upgrade
+/// has not settled.
+fn tidy_up(dir: &std::path::Path) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        if dir.join(nett_node::upgrade::MARKER_FILE).exists() {
+            return Ok(());
+        }
+        let done = nett_node::layout::tidy(&nett_node::layout::Layout::system())
+            .map_err(anyhow::Error::msg)?;
+        for what in done {
+            tracing::info!(%what, "removed what nett 0.3.13 left");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = dir;
+    Ok(())
 }

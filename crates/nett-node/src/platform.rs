@@ -14,8 +14,8 @@ pub mod linux {
     pub const LINK: &str = "/usr/local/bin/nett";
     pub const MESH_UNIT: &str = "nett-mesh.service";
     pub const NODE_UNIT: &str = "nett-node.service";
-    pub const RELAY_UNIT: &str = "nett-relay.service";
-    pub const TRANSPORT_UNIT: &str = "nett-transport.service";
+    pub const RELAY_UNIT: &str = nett_mesh::helper::RELAY_UNIT;
+    pub const TRANSPORT_UNIT: &str = nett_mesh::helper::TRANSPORT_UNIT;
     /// Where `sudo nett install` writes the units and nett-node refreshes them after an upgrade:
     /// the directory for units of locally installed software (files of the same name in
     /// `/etc/systemd/system` override them).
@@ -61,8 +61,16 @@ pub mod linux {
     /// The units whose files exist only while the desired state needs them (design/release.md
     /// section 8).
     pub const OPTIONAL: [Unit; 2] = [RELAY, TRANSPORT];
-    /// The relay's state directory (`StateDirectory=nett-relay`): its TLS certificate key.
-    pub const RELAY_STATE_DIR: &str = "/var/lib/nett-relay";
+    /// The trust store, in the identity directory; the mesh service writes it (design/release.md
+    /// section 8).
+    pub const STATE_DIR: &str = "/etc/nett/state";
+    /// The relay's TLS certificate, root only: systemd hands it to the relay.
+    pub const RELAY_CERT_DIR: &str = "/etc/nett/relay";
+    /// Where 0.3.13 and earlier kept the trust store and the relay's certificate and bindings, and
+    /// the system users the relay and the transport adapter ran as (design/release.md section 8).
+    pub const OLD_STATE_DIR: &str = "/var/lib/nett";
+    pub const OLD_RELAY_DIR: &str = "/var/lib/nett-relay";
+    pub const OLD_ACCOUNTS: [&str; 2] = ["nett-relay", "nett-transport"];
 
     /// The optional units installed now.
     pub fn installed_optional() -> Vec<Unit> {

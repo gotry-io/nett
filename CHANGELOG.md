@@ -4,6 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Linux: one directory and one account. The trust store moves to `/etc/nett/state` and the relay's
+  certificate to `/etc/nett/relay`, next to the keys, so `/var/lib/nett` and `/var/lib/nett-relay` go;
+  the relay and the transport adapter run as users systemd allocates while they run, so the system
+  users `nett-relay` and `nett-transport` go. The mesh process knows each helper by its systemd unit.
+  The relay keeps its bindings in `/run/nett-relay` across restarts of the service. nett-node moves a
+  machine to this layout after its upgrade: it copies first and keeps the old files until the upgrade
+  has settled, then restarts once to remove them.
+
 ## [0.3.13] - 2026-11-15
 
 - `sudo nett uninstall` removes everything nett placed on the machine except its identity, and says

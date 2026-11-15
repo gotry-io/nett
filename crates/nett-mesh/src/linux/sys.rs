@@ -8,10 +8,11 @@ use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 use std::time::Duration;
 
-/// Effective user ID of the peer process of a Unix socket (design/status.md section 3). The kernel reports
-/// the PID of a peer outside this process's PID namespace (another container) as 0, which rustix's
-/// `socket_peercred` cannot represent; reading `ucred` directly keeps the user ID in that case.
-pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
+/// Process ID and effective user ID of the peer process of a Unix socket (design/status.md section 3).
+/// The kernel reports the PID of a peer outside this process's PID namespace (another container) as 0,
+/// which rustix's `socket_peercred` cannot represent; reading `ucred` directly keeps the user ID in
+/// that case.
+pub(crate) fn peer_cred(fd: BorrowedFd<'_>) -> io::Result<(u32, u32)> {
     let mut cred = libc::ucred {
         pid: 0,
         uid: 0,
@@ -38,7 +39,7 @@ pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
             "the kernel returned incomplete peer credentials",
         ));
     }
-    Ok(cred.uid)
+    Ok((u32::try_from(cred.pid).unwrap_or(0), cred.uid))
 }
 
 /// Associates an opened `/dev/net/tun` with the TUN interface named `name` (created if it does not

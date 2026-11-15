@@ -552,8 +552,11 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     Ok(report)
 }
 
-/// nett-relay in service mode on a relay node.
+/// nett-relay in service mode on a relay node, with its certificate created beforehand as nett-node
+/// does (design/mesh.md section 5.3).
 fn spawn_relay(nett: &Path, ns: &str, node: &LabNode) -> anyhow::Result<std::process::Child> {
+    let cert = node.dir.join("relay");
+    nett_relay::cert::RelayCert::load_or_create(&cert).context("the relay's certificate")?;
     spawn_in(
         ns,
         nett,
@@ -561,8 +564,10 @@ fn spawn_relay(nett: &Path, ns: &str, node: &LabNode) -> anyhow::Result<std::pro
             "relay".as_ref(),
             "--socket".as_ref(),
             node.dir.join("helpers.sock").as_os_str(),
+            "--cert".as_ref(),
+            cert.as_os_str(),
             "--state".as_ref(),
-            node.dir.join("relay").as_os_str(),
+            node.dir.join("relay-state.json").as_os_str(),
         ],
         &node.dir.join("relay.log"),
     )

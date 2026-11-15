@@ -56,15 +56,25 @@ struct LabArgs {
     userspace: bool,
 }
 
-pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>] [--state <dir>]\n\n\
-Started by systemd, launchd or a container; to install the service on macOS, use `sudo nett install`.";
+pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>] [--state <dir>]\n\
+       nett mesh --prepare-state <dir>\n\n\
+Started by systemd, launchd or a container; to install the service on macOS, use `sudo nett install`.\n\
+--prepare-state, run by systemd with full privileges before the service starts on Linux, gives the\n\
+trust store's directory to the service's user and moves the trust store of nett 0.3.13 into it.";
 pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
 Existing keys are kept and the same line is printed again. On macOS, `sudo nett install` does this.";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
 [--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
 
-fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
+/// What `nett mesh` was asked to do.
+enum Parsed {
+    Run(Args),
+    /// Ready the trust store's directory (design/release.md section 8).
+    PrepareState(PathBuf),
+}
+
+fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Parsed> {
     let (mut config, mut key) = (None, None);
     let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
     let mut state = PathBuf::from(nett_mesh::store::DEFAULT_STATE_DIR);
@@ -76,6 +86,9 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
             lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
             lexopt::Arg::Long("state") => state = PathBuf::from(parser.value()?),
+            lexopt::Arg::Long("prepare-state") => {
+                return Ok(Parsed::PrepareState(PathBuf::from(parser.value()?)));
+            }
             #[cfg(feature = "lab")]
             lexopt::Arg::Long(name) => {
                 let name = name.to_owned();
@@ -87,14 +100,14 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
         }
     }
     match (config, key) {
-        (Some(config), Some(key)) => Ok(Args {
+        (Some(config), Some(key)) => Ok(Parsed::Run(Args {
             config,
             key,
             socket,
             state,
             #[cfg(feature = "lab")]
             lab,
-        }),
+        })),
         #[cfg(feature = "lab")]
         _ => bail!("{USAGE}\n{LAB_USAGE}"),
         #[cfg(not(feature = "lab"))]
@@ -278,7 +291,10 @@ fn node_id(config: &Path) -> anyhow::Result<NodeId> {
 }
 
 pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
-    let args = parse(parser)?;
+    let args = match parse(parser)? {
+        Parsed::Run(args) => args,
+        Parsed::PrepareState(dir) => return prepare_state(dir),
+    };
     init_logging();
 
     // Read the trust store first, then the desired state (design/mesh.md section 4.2)
@@ -421,4 +437,27 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         tracing::info!("mesh process stopped; the interface stays up");
         anyhow::Ok(())
     })
+}
+
+/// `nett mesh --prepare-state <dir>` (design/release.md section 8): with full privileges, gives the
+/// trust store's directory to the user the service runs as and copies the trust store of 0.3.13
+/// and earlier into it. Only systemd runs it, on Linux.
+fn prepare_state(dir: PathBuf) -> anyhow::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        let layout = nett_node::layout::Layout {
+            state: dir,
+            ..nett_node::layout::Layout::system()
+        };
+        let owner = nett_node::layout::mesh_owner()
+            .context("the user the mesh service runs as is not in /etc/passwd")?;
+        layout
+            .prepare_state(Some(owner))
+            .map_err(anyhow::Error::msg)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = dir;
+        anyhow::bail!("--prepare-state is only used by the Linux service")
+    }
 }
