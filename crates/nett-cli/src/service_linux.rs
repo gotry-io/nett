@@ -175,6 +175,13 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
             ));
         }
     }
+    // Running helpers keep the old program until they restart; try-restart leaves stopped ones alone
+    if binary_changed && !systemctl(&["try-restart", RELAY.name, TRANSPORT.name])? {
+        messages.push(format!(
+            "Restarting {} and {} on the new program failed.",
+            RELAY.what, TRANSPORT.what
+        ));
+    }
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
     }
