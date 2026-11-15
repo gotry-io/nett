@@ -10,7 +10,7 @@ use rustls::DigitallySignedStruct;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::WebPkiSupportedAlgorithms;
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 use tokio_tungstenite::WebSocketStream;
@@ -115,13 +115,15 @@ pub fn connector(fingerprint: CertFingerprint) -> Result<TlsConnector, ConnectEr
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
-/// Connects to the TLS relay and completes the WebSocket handshake.
+/// Connects to the TLS relay and completes the WebSocket handshake; the TCP connection is bound to
+/// `interface` when the mesh process names one (design/userspace.md section 6.2).
 pub async fn connect(
     addr: SocketAddr,
+    interface: Option<u32>,
     connector: &TlsConnector,
 ) -> Result<RelayStream, ConnectError> {
     let attempt = async {
-        let tcp = TcpStream::connect(addr)
+        let tcp = tcp(addr, interface)
             .await
             .map_err(|source| ConnectError::Tcp { addr, source })?;
         drop(tcp.set_nodelay(true));
@@ -148,4 +150,56 @@ pub async fn connect(
     tokio::time::timeout(CONNECT_TIMEOUT, attempt)
         .await
         .map_err(|_| ConnectError::Timeout(addr))?
+}
+
+/// A TCP connection to `addr`, bound to `interface` when given.
+async fn tcp(addr: SocketAddr, interface: Option<u32>) -> std::io::Result<TcpStream> {
+    let Some(index) = interface else {
+        return TcpStream::connect(addr).await;
+    };
+    let socket = if addr.is_ipv4() {
+        TcpSocket::new_v4()?
+    } else {
+        TcpSocket::new_v6()?
+    };
+    bind_to_interface(&socket, index, addr.is_ipv6())?;
+    socket.connect(addr).await
+}
+
+#[cfg(target_os = "macos")]
+fn bind_to_interface(socket: &TcpSocket, index: u32, v6: bool) -> std::io::Result<()> {
+    use std::os::fd::AsFd as _;
+    nett_mesh::macos::bind_to_interface(socket.as_fd(), index, v6)
+}
+
+/// Only the macOS mesh process names an interface.
+#[cfg(not(target_os = "macos"))]
+fn bind_to_interface(_socket: &TcpSocket, _index: u32, _v6: bool) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "binding a connection to an interface is only done on macOS",
+    ))
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// Index of the loopback interface, `lo0`, on macOS.
+    const LOOPBACK: u32 = 1;
+
+    /// A connection bound to an interface reaches what that interface reaches
+    #[tokio::test]
+    async fn a_bound_connection_reaches_its_interface() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listen");
+        let addr = listener.local_addr().expect("address");
+        let accepted = tokio::spawn(async move { listener.accept().await.map(|(_, from)| from) });
+        let stream = tcp(addr, Some(LOOPBACK)).await.expect("connected");
+        assert_eq!(
+            accepted.await.expect("task").expect("accepted"),
+            stream.local_addr().expect("local")
+        );
+    }
 }

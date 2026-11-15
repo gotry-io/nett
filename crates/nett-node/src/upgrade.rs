@@ -77,7 +77,11 @@ impl Services for ServiceManager {
     }
 
     fn restart_helpers(&self) {
-        // macOS runs neither helper
+        // macOS runs only the transport adapter
+        #[cfg(target_os = "macos")]
+        if let Err(e) = crate::launchd::restart(&crate::launchd::TRANSPORT) {
+            tracing::warn!(error = %e, "restarting the transport adapter on the new program failed");
+        }
         let Some(systemctl) =
             crate::platform::linux::systemctl().filter(|_| cfg!(target_os = "linux"))
         else {

@@ -1,5 +1,6 @@
 //! macOS system calls rustix does not provide (design/userspace.md section 6): utun, interface addresses
-//! and MTU, binding sockets to interfaces, interface names and numbers, the routing table, clock error.
+//! and MTU, binding sockets to interfaces, interface names and numbers, the routing table, clock error,
+//! and the accounts of the directory service.
 //! `unsafe` is used only here (CLAUDE.md "Code rules"): it hands the kernel pointers to local data, and
 //! the kernel reads and writes them only during the call.
 #![allow(unsafe_code)]
@@ -361,4 +362,92 @@ pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
     // SAFETY: both pointers point to local integers, and the kernel writes them only during the call
     check(unsafe { libc::getpeereid(fd.as_raw_fd(), &raw mut uid, &raw mut gid) })?;
     Ok(uid)
+}
+
+/// Far larger than an account record; a record that does not fit counts as not found (ERANGE).
+const ACCOUNT_BUFFER: usize = 4096;
+
+/// The user and group IDs of an account, from the directory service: accounts that `dscl` creates
+/// are not in `/etc/passwd`. `None` when there is no such account.
+pub(crate) fn account_ids(name: &str) -> io::Result<Option<(u32, u32)>> {
+    let name = CString::new(name).map_err(|_| io::Error::other("an account name with a NUL"))?;
+    let mut entry = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut buffer = vec![0 as c_char; ACCOUNT_BUFFER];
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    // SAFETY: name is NUL-terminated; entry, buffer and result are memory this function holds, and
+    // the real length of buffer is passed in
+    let rc = unsafe {
+        libc::getpwnam_r(
+            name.as_ptr(),
+            entry.as_mut_ptr(),
+            buffer.as_mut_ptr(),
+            buffer.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 && rc != libc::ERANGE {
+        return Err(io::Error::from_raw_os_error(rc));
+    }
+    if rc != 0 || result.is_null() {
+        return Ok(None);
+    }
+    // SAFETY: with 0 returned and result non-null, entry is filled in
+    let entry = unsafe { entry.assume_init() };
+    Ok(Some((entry.pw_uid, entry.pw_gid)))
+}
+
+/// Whether an account or a group already has this ID.
+pub(crate) fn id_in_use(id: u32) -> bool {
+    let mut user = std::mem::MaybeUninit::<libc::passwd>::uninit();
+    let mut group = std::mem::MaybeUninit::<libc::group>::uninit();
+    let mut buffer = vec![0 as c_char; ACCOUNT_BUFFER];
+    let mut found_user: *mut libc::passwd = std::ptr::null_mut();
+    let mut found_group: *mut libc::group = std::ptr::null_mut();
+    // SAFETY: as in account_ids; each call writes only into the memory passed to it
+    let (user_rc, group_rc) = unsafe {
+        (
+            libc::getpwuid_r(
+                id,
+                user.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut found_user,
+            ),
+            libc::getgrgid_r(
+                id,
+                group.as_mut_ptr(),
+                buffer.as_mut_ptr(),
+                buffer.len(),
+                &mut found_group,
+            ),
+        )
+    };
+    // A lookup that fails says nothing: the ID counts as taken
+    user_rc != 0 || group_rc != 0 || !found_user.is_null() || !found_group.is_null()
+}
+
+/// Runs the rest of this process as `uid` and `gid` only: no supplementary groups, then the group,
+/// then the user. Afterwards it cannot become root again, which is checked.
+pub(crate) fn switch_ids(uid: u32, gid: u32) -> io::Result<()> {
+    if uid == 0 || gid == 0 {
+        return Err(io::Error::other("refusing to switch to root"));
+    }
+    // SAFETY: the pointer points to one local gid_t, and the count is 1
+    check(unsafe { libc::setgroups(1, &raw const gid) })?;
+    // SAFETY: plain system calls with integer arguments
+    check(unsafe { libc::setgid(gid) })?;
+    // SAFETY: as above
+    check(unsafe { libc::setuid(uid) })?;
+    // SAFETY: as above; this must fail now
+    if unsafe { libc::setuid(0) } == 0 {
+        return Err(io::Error::other("the process could become root again"));
+    }
+    // SAFETY: plain system calls with no arguments
+    let (euid, egid) = unsafe { (libc::geteuid(), libc::getegid()) };
+    if euid != uid || egid != gid {
+        return Err(io::Error::other(
+            "the process did not take the account's IDs",
+        ));
+    }
+    Ok(())
 }

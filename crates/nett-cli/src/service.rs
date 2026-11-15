@@ -9,7 +9,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use nett_node::config::HubConfig;
@@ -18,131 +17,21 @@ use crate::install::{
     InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
 };
 
-use nett_node::platform::macos::{DIR, LAUNCHCTL, MESH_LABEL, NODE_LABEL, PROGRAM as BINARY};
-
-const DESIRED: &str = "/Library/Application Support/nett/desired.json";
-const KEY: &str = "/Library/Application Support/nett/mesh.key";
-const LOG_DIR: &str = "/Library/Logs/nett";
-const NEWSYSLOG: &str = "/etc/newsyslog.d/nett.conf";
-/// Upper bound for waiting for launchctl to unload a service.
-const UNLOAD_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// A launchd service.
-struct Service {
-    label: &'static str,
-    plist: &'static str,
-    /// Which `nett` command to run.
-    args: &'static [&'static str],
-    log: &'static str,
-    /// How it is referred to in help and reports.
-    what: &'static str,
-}
-
-const MESH: Service = Service {
-    label: MESH_LABEL,
-    plist: "/Library/LaunchDaemons/io.gotry.nett.mesh.plist",
-    args: &["mesh", "--config", DESIRED, "--key", KEY],
-    log: "mesh.log",
-    what: "the mesh service",
+use nett_node::launchd::{
+    self, DESIRED, LOG_DIR, MESH, NEWSYSLOG, NODE, Service, TRANSPORT, newsyslog, plist,
 };
-
-const NODE: Service = Service {
-    label: NODE_LABEL,
-    plist: "/Library/LaunchDaemons/io.gotry.nett.node.plist",
-    args: &["node", "--dir", DIR],
-    log: "node.log",
-    what: "nett-node",
-};
-
-/// launchd configuration: root runs the copy, starts at boot, restarts after exit
-/// (design/userspace.md section 6.3).
-fn plist(service: &Service) -> String {
-    let args: String = service
-        .args
-        .iter()
-        .map(|a| format!("\n    <string>{a}</string>"))
-        .collect();
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Written by `sudo nett install`; it rewrites this file on the next run. -->
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>{label}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>{BINARY}</string>{args}
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <!-- After a crash, restart at most every 5 seconds -->
-  <key>ThrottleInterval</key>
-  <integer>5</integer>
-  <!-- No timer coalescing: path switching runs on a 100 ms tick -->
-  <key>ProcessType</key>
-  <string>Interactive</string>
-  <!-- 077: files the service creates are readable by root only -->
-  <key>Umask</key>
-  <integer>63</integer>
-  <!-- Logs go to the system log; this file records only start-up failures -->
-  <key>StandardErrorPath</key>
-  <string>{LOG_DIR}/{log}</string>
-</dict>
-</plist>
-"#,
-        label = service.label,
-        log = service.log,
-    )
-}
-
-/// Rotation of the startup failure record: rotates above 1 MB, keeps 5 copies, compresses the old
-/// ones.
-fn newsyslog() -> String {
-    format!(
-        "# Written by `sudo nett install`: rotation of the services' start-up failure logs.\n\
-         # logfilename              [owner:group]  mode  count  size(KB)  when  flags\n\
-         {LOG_DIR}/mesh.log    root:wheel     600   5      1024      *     JN\n\
-         {LOG_DIR}/node.log    root:wheel     600   5      1024      *     JN\n"
-    )
-}
-
-fn launchctl(args: &[&str]) -> anyhow::Result<bool> {
-    crate::install::run(LAUNCHCTL, args)
-}
+use nett_node::platform::macos::{DIR, PROGRAM as BINARY};
 
 fn loaded(service: &Service) -> anyhow::Result<bool> {
-    launchctl(&["print", &format!("system/{}", service.label)])
-}
-
-/// When bootout returns, the process may still be exiting (launchctl print shows `SIGTERMed`).
-/// Waits until launchd no longer has the service, then deletes the copy and reports stopped; a
-/// reinstall right after does not meet an old service that has not exited yet.
-fn wait_unloaded(service: &Service) -> anyhow::Result<()> {
-    let deadline = Instant::now() + UNLOAD_TIMEOUT;
-    while loaded(service)? {
-        if Instant::now() >= deadline {
-            bail!(
-                "{} did not stop within {} seconds",
-                service.label,
-                UNLOAD_TIMEOUT.as_secs()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    Ok(())
+    launchd::loaded(service).map_err(anyhow::Error::msg)
 }
 
 fn stop(service: &Service) -> anyhow::Result<()> {
-    if loaded(service)? {
-        if !launchctl(&["bootout", &format!("system/{}", service.label)])? {
-            bail!("launchctl could not stop {}", service.label);
-        }
-        wait_unloaded(service)?;
-    }
-    Ok(())
+    launchd::stop(service).map_err(anyhow::Error::msg)
+}
+
+fn launchctl(args: &[&str]) -> anyhow::Result<bool> {
+    launchd::launchctl(args).map_err(anyhow::Error::msg)
 }
 
 /// Makes the service run with the new configuration and program: loads it when not loaded; when the
@@ -272,6 +161,17 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     {
         messages.push(m);
     }
+    // Without a Hub the transport adapter follows the imported desired state; with one, nett-node
+    // starts and stops it
+    if !linked && let Some(doc) = read_doc() {
+        messages.extend(nett_node::services::reconcile(
+            nett_node::services::Wants::of(&doc),
+        ));
+    }
+    // A running adapter keeps the old program until it restarts
+    if binary_changed {
+        launchd::restart(&TRANSPORT).map_err(anyhow::Error::msg)?;
+    }
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
     }
@@ -369,10 +269,16 @@ pub fn leave() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn read_doc() -> Option<nett_mesh::config::DesiredMeshDoc> {
+    let bytes = std::fs::read(DESIRED).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
 fn remove_services() -> anyhow::Result<()> {
+    stop(&TRANSPORT)?;
     stop(&NODE)?;
     stop(&MESH)?;
-    for path in [NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
+    for path in [TRANSPORT.plist, NODE.plist, MESH.plist, NEWSYSLOG, BINARY] {
         match fs::remove_file(path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -387,45 +293,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_configuration_names_the_root_copy() {
-        let p = plist(&MESH);
-        assert!(p.contains(&format!("<string>{BINARY}</string>")));
-        assert!(p.contains(&format!("<string>{DESIRED}</string>")));
-        assert!(plist(&NODE).contains("<string>node</string>"));
-        assert!(
-            !p.contains("homebrew"),
-            "the service never runs the Homebrew copy"
-        );
-        assert!(newsyslog().contains(&format!("{LOG_DIR}/mesh.log")));
-        assert!(newsyslog().contains(&format!("{LOG_DIR}/node.log")));
-    }
-
-    #[test]
     fn finds_the_home_of_a_user() {
         let home = passwd::home(rustix::process::getuid().as_raw()).expect("own entry");
         assert!(home.is_dir(), "{}", home.display());
         // nobody on macOS is -2 (uid_t::MAX - 1); pick an unassigned uid
         assert!(passwd::home(3_999_999).is_none());
-    }
-
-    #[test]
-    fn plist_is_valid() {
-        let dir_tmp = tempfile::Builder::new()
-            .prefix("nett-plist-")
-            .tempdir()
-            .expect("temp dir");
-        let dir = dir_tmp.path().join("dir");
-        fs::create_dir_all(&dir).expect("dir");
-        let file = dir.join("p.plist");
-        for service in [&MESH, &NODE] {
-            fs::write(&file, plist(service)).expect("write");
-            let status = std::process::Command::new("/usr/bin/plutil")
-                .args(["-lint", "-s"])
-                .arg(&file)
-                .status()
-                .expect("plutil");
-            assert!(status.success(), "{}", service.label);
-        }
-        let _ = fs::remove_dir_all(&dir);
     }
 }

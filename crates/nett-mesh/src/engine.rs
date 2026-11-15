@@ -621,7 +621,10 @@ impl<D: DataPlane> Engine<D> {
 
     /// The transport adapter fetches its configuration.
     pub fn transport_config(&self) -> Option<TransportConfig> {
-        self.transport.clone()
+        self.transport.clone().map(|config| TransportConfig {
+            interface: self.dataplane.underlay_interface(),
+            ..config
+        })
     }
 
     /// nett-node reports whether its Hub session is up (design/status.md section 4.2).
@@ -1234,6 +1237,21 @@ mod tests {
             Some(DIAL_ONLY_KEEPALIVE_SECS)
         );
         assert!(events.0.contains(&Event::PeersApplied { peers: 2 }));
+    }
+
+    /// The transport adapter's configuration names the interface the underlay sockets are bound to
+    /// at the time it fetches it, so its TLS connections take the same way out (design/userspace.md
+    /// section 6.2).
+    #[test]
+    fn the_transport_config_carries_the_underlay_interface() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc), &mut VecSink::default())
+            .expect("accepted");
+        assert_eq!(e.transport_config().map(|c| c.interface), Some(None));
+        e.dataplane.underlay_interface = Some(7);
+        assert_eq!(e.transport_config().map(|c| c.interface), Some(Some(7)));
     }
 
     /// The relay on this machine reaches this machine's WireGuard on loopback, so a peer that reaches

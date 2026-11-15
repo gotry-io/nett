@@ -49,6 +49,10 @@ mod dataplane {
         /// A dual-stack socket toward the underlying network: the WireGuard port and probes to relays
         /// ([`DataPlane::bind_underlay`]).
         fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket>;
+        /// The interface the underlay sockets are bound to now ([`DataPlane::underlay_interface`]).
+        fn underlay_interface(&self) -> Option<u32> {
+            None
+        }
         /// A socket bound to this machine's mesh address that sends and receives only through the mesh
         /// interface.
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket>;
@@ -288,6 +292,10 @@ mod dataplane {
 
         fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket> {
             self.platform.bind_underlay(port)
+        }
+
+        fn underlay_interface(&self) -> Option<u32> {
+            self.platform.underlay_interface()
         }
     }
 

@@ -105,8 +105,32 @@ jobs:
           python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json
           sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
           sudo "$nett" reload | grep -F 'Reloaded the desired state.'
+          # A public relay with TLS gives this machine a path over TLS: the transport adapter runs as
+          # its own account and fetches its configuration from the mesh process
+          relay_keys=$("$nett" keys --dir "$RUNNER_TEMP/relay1" \
+            | sed -n 's/^  nett site add <name> --keys "\(.*\)"$/\1/p')
+          test -n "$relay_keys"
+          "$nett" site add relay1 --keys "$relay_keys" --public --ipv4 198.51.100.7 --yes
+          "$nett" site relay relay1 --fingerprint "sha256:$(printf '%064d' 0)" --yes
+          sudo "$nett" install
+          for _ in $(seq 20); do
+            sudo launchctl print system/io.gotry.nett.transport | grep -q 'state = running' && break
+            sleep 0.5
+          done
+          transport=$(sudo launchctl print system/io.gotry.nett.transport)
+          grep 'state = running' <<< "$transport"
+          pid=$(sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p' <<< "$transport")
+          [ "$(ps -o user= -p "$pid" | tr -d ' ')" = _nett-transport ]
+          dscl . -read /Users/_nett-transport UserShell | grep -F /usr/bin/false
+          for _ in $(seq 20); do
+            log show --last 2m --predicate 'process == "nett"' | grep -q 'transport config applied' && break
+            sleep 1
+          done
+          log show --last 2m --predicate 'process == "nett"' | grep -F 'transport config applied'
           sudo "$nett" uninstall
-          ! sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null
+          if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
+          if sudo launchctl print system/io.gotry.nett.transport 2>/dev/null; then exit 1; fi
+          if test -e /Library/LaunchDaemons/io.gotry.nett.transport.plist; then exit 1; fi
       # design/hub.md sections 3.5, 7: an existing member joins the Hub. The Hub terminates TLS
       # locally with a test certificate, verified by fingerprint
       - name: sudo nett install <token> (join the Hub, needs root)
@@ -133,6 +157,12 @@ jobs:
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
           sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
+          # With a Hub, nett-node starts the transport adapter for the path over TLS
+          for _ in $(seq 20); do
+            sudo launchctl print system/io.gotry.nett.transport | grep -q 'state = running' && break
+            sleep 0.5
+          done
+          sudo launchctl print system/io.gotry.nett.transport | grep 'state = running'
           # On a machine joined to the Hub, the desired state is written only by nett-node
           ! sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json
           sudo "$nett" uninstall

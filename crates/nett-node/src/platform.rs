@@ -79,6 +79,7 @@ pub mod macos {
     pub const LAUNCHCTL: &str = "/bin/launchctl";
     pub const MESH_LABEL: &str = "io.gotry.nett.mesh";
     pub const NODE_LABEL: &str = "io.gotry.nett.node";
+    pub const TRANSPORT_LABEL: &str = "io.gotry.nett.transport";
 }
 
 /// Runs a service manager command (hard rule 9: a fixed absolute path, arguments as an array, no

@@ -4,6 +4,12 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- macOS: paths over TLS work. The transport adapter runs as the launchd service
+  `io.gotry.nett.transport` under its own hidden account, `_nett-transport`, which nett creates, and only
+  while the machine has a path over TLS. Its connections leave through the physical interface like the
+  mesh's own packets, so a proxy app's tunnel does not carry them. A Mac whose UDP to a relay is blocked
+  now reaches it over TLS.
+
 ## [0.3.10] - 2026-11-15
 
 - A pair whose relay still answers but no longer reaches the other machine moves to another relay. It

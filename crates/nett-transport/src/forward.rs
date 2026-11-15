@@ -136,7 +136,7 @@ pub async fn run(
                     .targets
                     .iter()
                     .cloned()
-                    .map(|t| tokio::spawn(target_or_log(t, wireguard)))
+                    .map(|t| tokio::spawn(target_or_log(t, wireguard, config.interface)))
                     .collect();
                 current = Some((config, tasks));
             }
@@ -150,9 +150,9 @@ pub async fn run(
     Ok(())
 }
 
-async fn target_or_log(target: TlsTarget, wireguard: SocketAddr) {
+async fn target_or_log(target: TlsTarget, wireguard: SocketAddr, interface: Option<u32>) {
     let listen = target.listen;
-    if let Err(error) = target_loop(target, wireguard).await {
+    if let Err(error) = target_loop(target, wireguard, interface).await {
         tracing::error!(%listen, %error, "TLS transport for this relay stopped");
     }
 }
@@ -174,7 +174,11 @@ struct Link {
     authenticated: bool,
 }
 
-async fn target_loop(target: TlsTarget, wireguard: SocketAddr) -> std::io::Result<()> {
+async fn target_loop(
+    target: TlsTarget,
+    wireguard: SocketAddr,
+    interface: Option<u32>,
+) -> std::io::Result<()> {
     let udp = UdpSocket::bind(target.listen).await?;
     let connector = client::connector(target.fingerprint).map_err(std::io::Error::other)?;
     let (events_tx, mut events) = mpsc::channel(EVENT_QUEUE);
@@ -212,6 +216,7 @@ async fn target_loop(target: TlsTarget, wireguard: SocketAddr) -> std::io::Resul
                             connecting = true;
                             tokio::spawn(connection(
                                 target.connect,
+                                interface,
                                 connector.clone(),
                                 events_tx.clone(),
                             ));
@@ -269,8 +274,13 @@ fn flush(link: &Link, held: &mut VecDeque<Vec<u8>>) {
 
 /// One connection to a relay: after connecting, hands received binary messages to the forwarding
 /// task, and writes the forwarding task's packets to the connection.
-async fn connection(addr: SocketAddr, connector: TlsConnector, events: mpsc::Sender<Event>) {
-    let ws = match client::connect(addr, &connector).await {
+async fn connection(
+    addr: SocketAddr,
+    interface: Option<u32>,
+    connector: TlsConnector,
+    events: mpsc::Sender<Event>,
+) {
+    let ws = match client::connect(addr, interface, &connector).await {
         Ok(ws) => ws,
         Err(error) => {
             tracing::warn!(%error, "TLS relay connection failed");

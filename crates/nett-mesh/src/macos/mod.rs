@@ -38,6 +38,31 @@ pub(crate) fn peer_uid(fd: BorrowedFd<'_>) -> io::Result<u32> {
     sys::peer_uid(fd)
 }
 
+/// The user and group IDs of a system account such as the transport adapter's (design/userspace.md
+/// section 6.3); `None` when there is no such account.
+pub fn account_ids(name: &str) -> io::Result<Option<(u32, u32)>> {
+    sys::account_ids(name)
+}
+
+/// Whether an account or a group already has this ID.
+pub fn id_in_use(id: u32) -> bool {
+    sys::id_in_use(id)
+}
+
+/// Runs the rest of this process as the system account `name` only (design/userspace.md section
+/// 6.3): call it before starting any thread.
+pub fn switch_to_account(name: &str) -> io::Result<()> {
+    let (uid, gid) = sys::account_ids(name)?
+        .ok_or_else(|| io::Error::other(format!("there is no account {name}")))?;
+    sys::switch_ids(uid, gid)
+}
+
+/// Binds a socket to an interface (`IP_BOUND_IF`, or `IPV6_BOUND_IF` for an IPv6 socket); index 0
+/// removes the binding (design/userspace.md section 6.2).
+pub fn bind_to_interface(fd: BorrowedFd<'_>, index: u32, v6: bool) -> io::Result<()> {
+    sys::bind_to_interface(fd, index, v6)
+}
+
 /// System clock; the error is the maximum error reported by the kernel (`ntp_gettime`).
 pub struct SystemClock;
 
@@ -334,6 +359,11 @@ impl Platform for MacTun {
         Ok(socket)
     }
 
+    fn underlay_interface(&self) -> Option<u32> {
+        let underlay = self.underlay.lock().unwrap_or_else(PoisonError::into_inner);
+        underlay.index.map(u32::from)
+    }
+
     fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let socket = UdpSocket::bind(addr)?;
         sys::bind_to_interface(socket.as_fd(), self.index, addr.is_ipv6())?;
@@ -398,6 +428,29 @@ pub fn point_resolver(ipv4: std::net::Ipv4Addr) {
 mod tests {
     use super::*;
     use crate::dataplane::MESH_MTU;
+
+    /// Accounts are looked up in the directory service, which has the system's own accounts
+    #[test]
+    fn accounts_come_from_the_directory_service() {
+        assert_eq!(account_ids("root").expect("lookup"), Some((0, 0)));
+        let www = account_ids("_www")
+            .expect("lookup")
+            .expect("_www exists on macOS");
+        assert!(id_in_use(www.0));
+        assert_eq!(account_ids("_nett-no-such-account").expect("lookup"), None);
+        assert!(!id_in_use(4_000_000_000));
+    }
+
+    /// Switching needs root; as anyone else it fails, and the process keeps its IDs
+    #[test]
+    fn only_root_switches_accounts() {
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        assert!(switch_to_account("_www").is_err());
+        assert!(switch_to_account("_nett-no-such-account").is_err());
+        assert!(!rustix::process::geteuid().is_root());
+    }
 
     #[test]
     fn underlay_follows_the_physical_interface_for_ipv4_too() {

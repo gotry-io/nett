@@ -6,6 +6,8 @@ pub mod config;
 pub mod coord;
 pub mod http;
 pub mod join;
+#[cfg(target_os = "macos")]
+pub mod launchd;
 pub mod platform;
 pub mod services;
 pub mod session;
