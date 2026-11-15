@@ -189,6 +189,8 @@ jobs:
             /Library/LaunchDaemons/io.gotry.nett.mesh.plist
           sudo mkdir -p /Library/Logs/nett
           sudo launchctl bootout system/io.gotry.nett.mesh
+          # bootout returns before launchd has let the service go, and loading it again meanwhile fails
+          for _ in $(seq 40); do sudo launchctl print system/io.gotry.nett.mesh > /dev/null 2>&1 || break; sleep 0.5; done
           sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.mesh.plist
           sudo launchctl print system/io.gotry.nett.mesh | grep -F 'stderr path'
           sudo dscl . -create /Users/_nett-transport UniqueID 3999
