@@ -27,16 +27,16 @@ Status comes from the mesh process's local interface. This is the local interfac
 
 ### 3.1 Helper socket
 
-On Linux nett-relay and the transport adapter run as their own low-privilege users and fetch their configuration from the mesh process (ADR 0013) over a second socket, `helpers.sock` next to `mesh.sock`. The directory is `0711` (others can reach a known name but not list it), `mesh.sock` stays `0600`, and `helpers.sock` is `0666`: the mesh process checks the caller's identity on every connection and accepts only the system users `nett-relay` and `nett-transport`, each for its own query. macOS runs neither helper and has no helper socket. One query per connection, as in section 4, at most 1 KiB:
+On Linux nett-relay and the transport adapter run as users systemd allocates and fetch their configuration from the mesh process (ADR 0013) over a second socket, `helpers.sock` next to `mesh.sock`. The directory is `0711` (others can reach a known name but not list it), `mesh.sock` stays `0600`, and `helpers.sock` is `0666`: the mesh process checks the caller on every connection: root, or a process of the systemd unit the query belongs to (`nett-relay.service` or `nett-transport.service`), each for its own query. The two run as users systemd allocates (release.md section 8), so a caller is known by its unit: the peer's process ID (`SO_PEERCRED`) leads to `/proc/<pid>/cgroup`, where only root can place a process in a unit, and the user ID in `/proc/<pid>/status` must equal the peer's, so a process ID reused after the caller exited does not pass. Where `/proc` hides other users' processes, the helpers are refused. macOS runs neither helper and has no helper socket. One query per connection, as in section 4, at most 1 KiB:
 
 ```json
 {"v": 1, "query": "relay", "fingerprint": "sha256:…"}
 {"v": 1, "query": "transport"}
 ```
 
-- `relay` (only from `nett-relay`): the reply is the relay assignment of mesh.md section 5.2 with each member's mesh public key resolved, or `null` when this machine is not a relay. The request carries the fingerprint of the relay's TLS certificate, which the mesh process shows in status (section 6);
-- `transport` (only from `nett-transport`): the reply is the transport adapter's configuration (mesh.md section 5.3): the WireGuard port, and for each TLS relay its loopback port, address and certificate fingerprint;
-- Both helpers ask again every 5 seconds and when they start, and apply the reply only when it changed. The replies hold probe tokens, which is why each query is limited to its own user.
+- `relay` (only from `nett-relay.service`): the reply is the relay assignment of mesh.md section 5.2 with each member's mesh public key resolved, or `null` when this machine is not a relay. The request carries the fingerprint of the relay's TLS certificate, which the mesh process shows in status (section 6);
+- `transport` (only from `nett-transport.service`): the reply is the transport adapter's configuration (mesh.md section 5.3): the WireGuard port, and for each TLS relay its loopback port, address and certificate fingerprint;
+- Both helpers ask again every 5 seconds and when they start, and apply the reply only when it changed. The replies hold probe tokens, which is why each query is limited to its own unit.
 
 ## 4. Messages and versions
 
