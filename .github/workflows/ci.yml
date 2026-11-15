@@ -123,9 +123,10 @@ jobs:
           sudo lsof -nP -a -p "$mesh_pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
           [ "$(sudo stat -f %Lp /var/run/nett)" = 700 ]
           # What nett 0.3.11 left on a Mac, its transport service with an account and a group of
-          # its own, is removed by the next install
-          sudo dscl . -create /Users/_nett-transport UniqueID 399
-          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 399
+          # its own, is removed by the next install. The directory service refuses an ID another
+          # record has, and macOS uses the IDs just below 400, so the copy takes one far above
+          sudo dscl . -create /Users/_nett-transport UniqueID 3999
+          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
           sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
             -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /bin/sleep' \
             -c 'Add :ProgramArguments:1 string 3600' -c 'Add :RunAtLoad bool true' \
@@ -165,8 +166,8 @@ jobs:
           grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
           sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
           # nett-node removes what nett 0.3.11 left when it starts, as after an upgrade
-          sudo dscl . -create /Users/_nett-transport UniqueID 399
-          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 399
+          sudo dscl . -create /Users/_nett-transport UniqueID 3999
+          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
           sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
             -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /bin/sleep' \
             -c 'Add :ProgramArguments:1 string 3600' -c 'Add :RunAtLoad bool true' \
