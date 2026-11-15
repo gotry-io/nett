@@ -49,6 +49,8 @@ rustix = { workspace = true, features = ["thread", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
+# The transport adapter runs on macOS too (design/userspace.md section 6.3)
+nett-transport.workspace = true
 rustix = { workspace = true, features = ["process"] }
 
 [dev-dependencies]

@@ -30,7 +30,7 @@ mod service_linux;
 mod site;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod status;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod transport;
 
 /// One command: name, group in the help, one-line description and usage. The usage text lives in
@@ -154,7 +154,7 @@ const COMMANDS: &[Command] = &[
         summary: "Points names under nett.internal at this machine's responder",
         usage: resolver::USAGE,
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
         name: "transport",
         group: Group::Service,
@@ -233,7 +233,7 @@ fn run() -> anyhow::Result<()> {
         "node" => node::run(parser),
         #[cfg(target_os = "linux")]
         "relay" => relay::run(parser),
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         "transport" => transport::run(parser),
         #[cfg(target_os = "linux")]
         "resolver" => resolver::run(parser),

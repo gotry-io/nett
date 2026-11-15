@@ -25,8 +25,12 @@ pub const SOCKET_NAME: &str = "helpers.sock";
 pub const FETCH_INTERVAL: Duration = Duration::from_secs(5);
 /// The system user nett-relay runs as.
 pub const RELAY_USER: &str = "nett-relay";
-/// The system user the transport adapter runs as.
+/// The system user the transport adapter runs as; macOS names daemon accounts with a leading
+/// underscore (design/userspace.md section 6.3).
+#[cfg(not(target_os = "macos"))]
 pub const TRANSPORT_USER: &str = "nett-transport";
+#[cfg(target_os = "macos")]
+pub const TRANSPORT_USER: &str = "_nett-transport";
 
 /// The helper socket next to the status socket at `status`.
 pub fn socket_path(status: &Path) -> PathBuf {
@@ -164,7 +168,18 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
     out.write_all(&bytes)
 }
 
+/// The user ID of a system user, from the directory service on macOS (accounts created with `dscl`
+/// are not in `/etc/passwd`); `None` when there is no such user.
+#[cfg(target_os = "macos")]
+fn system_uid(name: &str) -> Option<u32> {
+    crate::macos::account_ids(name)
+        .ok()
+        .flatten()
+        .map(|(uid, _)| uid)
+}
+
 /// The user ID of a system user, from `/etc/passwd`; `None` when there is no such user.
+#[cfg(not(target_os = "macos"))]
 fn system_uid(name: &str) -> Option<u32> {
     let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
     passwd.lines().find_map(|line| {
@@ -272,7 +287,7 @@ mod tests {
     }
 
     #[test]
-    fn system_users_are_read_from_passwd() {
+    fn system_users_are_found_by_name() {
         assert_eq!(system_uid("root"), Some(0));
         assert_eq!(system_uid("no-such-user-of-nett"), None);
     }

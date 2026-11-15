@@ -23,6 +23,11 @@ pub struct TransportConfig {
     /// this port on the loopback address.
     pub wireguard_port: u16,
     pub targets: Vec<TlsTarget>,
+    /// Index of the interface the TLS connections are bound to: on macOS the physical interface
+    /// that carries the default route, so a proxy app's tunnel does not carry them (design/
+    /// userspace.md section 6.2). Absent where the routing table decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<u32>,
 }
 
 /// One TLS relay.
@@ -162,6 +167,7 @@ mod tests {
         let ok = TransportConfig {
             wireguard_port: 41820,
             targets: vec![target("127.0.0.1:41830"), target("127.0.0.1:41831")],
+            interface: None,
         };
         assert_eq!(ok.validate(), Ok(()));
         let public = TransportConfig {
@@ -180,5 +186,28 @@ mod tests {
             twice.validate(),
             Err(TransportConfigError::DuplicateListen(_))
         ));
+    }
+
+    /// The interface is written only where there is one, so configurations without it read the
+    /// same as before
+    #[test]
+    fn the_interface_is_written_only_when_there_is_one() {
+        let config = TransportConfig {
+            wireguard_port: 41820,
+            targets: vec![],
+            interface: None,
+        };
+        let json = serde_json::to_string(&config).expect("json");
+        assert_eq!(json, r#"{"wireguard_port":41820,"targets":[]}"#);
+        let bound = TransportConfig {
+            interface: Some(4),
+            ..config
+        };
+        let json = serde_json::to_string(&bound).expect("json");
+        assert!(json.contains(r#""interface":4"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<TransportConfig>(&json).expect("parse"),
+            bound
+        );
     }
 }

@@ -103,7 +103,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [ ] Hostname aliases (`hostnames`) and names for devices
 - [ ] HTTPS CONNECT proxy in nett-relay (HTTP/2 only on entry nodes)
 - [ ] On entry nodes the reverse proxy hands the TLS transport and CONNECT to nett-relay by domain name, and members verify that relay by CA certificates and domain name; the Hub's Compose example with Caddy includes this section
-- [ ] TLS transport on macOS (the transport adapter)
+- [x] TLS transport on macOS (the transport adapter)
 
 ### 8. Home gateways and more platforms
 

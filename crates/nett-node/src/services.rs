@@ -1,17 +1,15 @@
-//! nett's services on a Linux machine set up by `sudo nett install` (design/hub.md section 5,
-//! design/release.md section 7): the relay and the transport adapter run only while the desired state
-//! needs them, and the units follow the program through upgrades. Every call is blocking (it runs
-//! systemctl): async callers use a blocking thread.
+//! nett's services on a machine set up by `sudo nett install` (design/hub.md section 5, design/
+//! release.md section 7): the relay and the transport adapter run only while the desired state needs
+//! them, and on Linux the units follow the program through upgrades. macOS runs no relay, and its
+//! transport adapter is a launchd service (design/userspace.md section 6.3). Every call is blocking
+//! (it runs systemctl or launchctl): async callers use a blocking thread.
 
 use std::path::Path;
-use std::time::Duration;
 
 use nett_mesh::config::{Candidate, DesiredMeshDoc};
 
-use crate::platform::linux::{self, MESH, RELAY, TRANSPORT, UNITS, Unit};
-
-/// Time limit of one systemctl call (hard rule 14).
-const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(target_os = "macos"))]
+pub use systemd::{reconcile, refresh_units};
 
 /// The optional services a desired state needs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -35,105 +33,146 @@ impl Wants {
     }
 }
 
-/// Whether nett's services on this machine are systemd units that `sudo nett install` wrote.
+/// Whether nett's services on this machine are the ones `sudo nett install` set up: systemd units
+/// on Linux, launchd services on macOS.
 pub fn managed() -> bool {
-    cfg!(target_os = "linux")
-        && Path::new(linux::PROGRAM).exists()
-        && Path::new(&MESH.path()).exists()
-        && linux::systemctl().is_some()
-}
-
-fn systemctl(args: &[&str]) -> Result<bool, String> {
-    let program = linux::systemctl().ok_or("systemctl is not on this machine")?;
-    crate::platform::run(program, args, SYSTEMCTL_TIMEOUT)
+    #[cfg(target_os = "macos")]
+    return Path::new(crate::platform::macos::PROGRAM).exists()
+        && Path::new(crate::launchd::MESH.plist).exists();
+    #[cfg(not(target_os = "macos"))]
+    {
+        use crate::platform::linux;
+        cfg!(target_os = "linux")
+            && Path::new(linux::PROGRAM).exists()
+            && Path::new(&linux::MESH.path()).exists()
+            && linux::systemctl().is_some()
+    }
 }
 
 /// Enables and starts, or stops and disables, the relay and the transport adapter to match `wants`.
 /// Returns what it could not do.
+#[cfg(target_os = "macos")]
 pub fn reconcile(wants: Wants) -> Vec<String> {
-    let mut problems = Vec::new();
-    for (unit, want) in [(RELAY, wants.relay), (TRANSPORT, wants.transport)] {
-        if let Err(e) = set_running(unit, want) {
-            tracing::warn!(unit = unit.name, error = %e, "changing an optional service");
-            problems.push(e);
+    match crate::launchd::set_transport(wants.transport) {
+        Ok(()) => Vec::new(),
+        Err(e) => {
+            tracing::warn!(error = %e, "changing the transport adapter");
+            vec![e]
         }
     }
-    problems
 }
 
-fn set_running(unit: Unit, want: bool) -> Result<(), String> {
-    let active = systemctl(&["is-active", "--quiet", unit.name])?;
-    let enabled = systemctl(&["is-enabled", "--quiet", unit.name])?;
-    let action = match (want, active && enabled, active || enabled) {
-        (true, false, _) => "enable",
-        (false, _, true) => "disable",
-        _ => return Ok(()),
-    };
-    if systemctl(&[action, "--now", unit.name])? {
-        tracing::info!(unit = unit.name, action, "optional service changed");
-        Ok(())
-    } else {
-        Err(format!(
-            "systemctl could not {action} {}; see `journalctl -u {}`",
-            unit.what, unit.name
-        ))
-    }
-}
-
-/// After an upgrade the units may have changed with the program (design/release.md section 7):
-/// rewrites the ones that differ from the embedded copies, reloads systemd, and restarts the changed
-/// services that are running. Returns whether nett-node's own unit changed: it then exits, and
-/// systemd starts it again with the new unit.
+/// On macOS the transport adapter's configuration is rewritten when it is next started or
+/// reconciled, so there is nothing to refresh at start-up.
+#[cfg(target_os = "macos")]
 pub fn refresh_units() -> Result<bool, String> {
-    let mut changed = Vec::new();
-    for unit in UNITS {
-        let path = unit.path();
-        if std::fs::read(&path).ok().as_deref() == Some(unit.content.as_bytes()) {
-            continue;
-        }
-        write_unit(&path, unit.content).map_err(|e| format!("writing {path}: {e}"))?;
-        changed.push(unit);
-    }
-    if changed.is_empty() {
-        return Ok(false);
-    }
-    if !systemctl(&["daemon-reload"])? {
-        return Err("systemctl daemon-reload failed".into());
-    }
-    let mut own = false;
-    for unit in changed {
-        tracing::info!(unit = unit.name, "unit updated with the program");
-        if unit.name == linux::NODE_UNIT {
-            own = true;
-        } else if !systemctl(&["try-restart", unit.name])? {
-            tracing::warn!(
-                unit = unit.name,
-                "restarting a service with its new unit failed"
-            );
-        }
-    }
-    Ok(own)
+    Ok(false)
 }
 
-/// Writes a unit through a temporary file, mode `0644`.
-fn write_unit(path: &str, content: &str) -> std::io::Result<()> {
-    use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt as _;
-    let tmp = format!("{path}.new");
-    let _ = std::fs::remove_file(&tmp);
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o644)
-        .open(&tmp)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
-    std::fs::rename(&tmp, path)
+/// systemd units on Linux.
+#[cfg(not(target_os = "macos"))]
+mod systemd {
+    use std::time::Duration;
+
+    use super::Wants;
+    use crate::platform::linux::{self, RELAY, TRANSPORT, UNITS, Unit};
+
+    /// Time limit of one systemctl call (hard rule 14).
+    const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
+
+    fn systemctl(args: &[&str]) -> Result<bool, String> {
+        let program = linux::systemctl().ok_or("systemctl is not on this machine")?;
+        crate::platform::run(program, args, SYSTEMCTL_TIMEOUT)
+    }
+
+    /// Enables and starts, or stops and disables, the relay and the transport adapter to match `wants`.
+    /// Returns what it could not do.
+    pub fn reconcile(wants: Wants) -> Vec<String> {
+        let mut problems = Vec::new();
+        for (unit, want) in [(RELAY, wants.relay), (TRANSPORT, wants.transport)] {
+            if let Err(e) = set_running(unit, want) {
+                tracing::warn!(unit = unit.name, error = %e, "changing an optional service");
+                problems.push(e);
+            }
+        }
+        problems
+    }
+
+    fn set_running(unit: Unit, want: bool) -> Result<(), String> {
+        let active = systemctl(&["is-active", "--quiet", unit.name])?;
+        let enabled = systemctl(&["is-enabled", "--quiet", unit.name])?;
+        let action = match (want, active && enabled, active || enabled) {
+            (true, false, _) => "enable",
+            (false, _, true) => "disable",
+            _ => return Ok(()),
+        };
+        if systemctl(&[action, "--now", unit.name])? {
+            tracing::info!(unit = unit.name, action, "optional service changed");
+            Ok(())
+        } else {
+            Err(format!(
+                "systemctl could not {action} {}; see `journalctl -u {}`",
+                unit.what, unit.name
+            ))
+        }
+    }
+
+    /// After an upgrade the units may have changed with the program (design/release.md section 7):
+    /// rewrites the ones that differ from the embedded copies, reloads systemd, and restarts the changed
+    /// services that are running. Returns whether nett-node's own unit changed: it then exits, and
+    /// systemd starts it again with the new unit.
+    pub fn refresh_units() -> Result<bool, String> {
+        let mut changed = Vec::new();
+        for unit in UNITS {
+            let path = unit.path();
+            if std::fs::read(&path).ok().as_deref() == Some(unit.content.as_bytes()) {
+                continue;
+            }
+            write_unit(&path, unit.content).map_err(|e| format!("writing {path}: {e}"))?;
+            changed.push(unit);
+        }
+        if changed.is_empty() {
+            return Ok(false);
+        }
+        if !systemctl(&["daemon-reload"])? {
+            return Err("systemctl daemon-reload failed".into());
+        }
+        let mut own = false;
+        for unit in changed {
+            tracing::info!(unit = unit.name, "unit updated with the program");
+            if unit.name == linux::NODE_UNIT {
+                own = true;
+            } else if !systemctl(&["try-restart", unit.name])? {
+                tracing::warn!(
+                    unit = unit.name,
+                    "restarting a service with its new unit failed"
+                );
+            }
+        }
+        Ok(own)
+    }
+
+    /// Writes a unit through a temporary file, mode `0644`.
+    fn write_unit(path: &str, content: &str) -> std::io::Result<()> {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let tmp = format!("{path}.new");
+        let _ = std::fs::remove_file(&tmp);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&tmp)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&tmp, path)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::linux::{RELAY, TRANSPORT, UNITS};
 
     #[test]
     fn services_follow_the_desired_state() {

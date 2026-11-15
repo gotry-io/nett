@@ -246,6 +246,8 @@ pub struct FakeDataPlane {
     /// absent).
     pub traffic: std::collections::HashMap<X25519PublicKey, (u64, u64)>,
     pub handshakes: std::collections::HashMap<X25519PublicKey, std::time::SystemTime>,
+    /// The interface the underlay sockets are bound to.
+    pub underlay_interface: Option<u32>,
 }
 
 impl FakeDataPlane {
@@ -262,6 +264,7 @@ impl FakeDataPlane {
             edge: None,
             ingress: None,
             routes: Vec::new(),
+            underlay_interface: None,
             fail_filter: None,
             calls: Vec::new(),
             traffic: std::collections::HashMap::new(),
@@ -393,6 +396,10 @@ impl DataPlane for FakeDataPlane {
         Err(std::io::Error::other(
             "no tunnel sockets in the fake data plane",
         ))
+    }
+
+    fn underlay_interface(&self) -> Option<u32> {
+        self.underlay_interface
     }
 
     fn bind_underlay(&self, _port: u16) -> std::io::Result<std::net::UdpSocket> {

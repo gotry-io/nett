@@ -203,6 +203,12 @@ pub trait DataPlane: Send {
     /// section 6.2).
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
 
+    /// Index of the interface the underlay sockets are bound to now; `None` where the routing table
+    /// decides. The transport adapter binds its TLS connections to it (design/userspace.md section 6.2).
+    fn underlay_interface(&self) -> Option<u32> {
+        None
+    }
+
     /// The names this machine's own DNS queries are answered from when they reach the data plane
     /// instead of the responder's socket (design/userspace.md section 4). Only the userspace data
     /// plane sees them; elsewhere they go to the responder over the loopback path.

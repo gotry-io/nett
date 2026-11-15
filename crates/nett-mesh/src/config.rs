@@ -272,11 +272,13 @@ impl DesiredMesh {
     }
 
     /// Configuration handed to the transport adapter: the WireGuard port is the port the interface actually
-    /// listens on (possibly assigned by the system).
+    /// listens on (possibly assigned by the system); the data plane fills in the interface when it hands
+    /// the configuration out.
     pub fn transport(&self, wireguard_port: u16) -> TransportConfig {
         TransportConfig {
             wireguard_port,
             targets: self.tls_targets.clone(),
+            interface: None,
         }
     }
 

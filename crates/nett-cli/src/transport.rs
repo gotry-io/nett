@@ -1,8 +1,8 @@
 //! `nett transport`: the transport adapter (design/mesh.md section 5.3). It fetches its configuration
 //! from the mesh process over the helper socket; the lab build can instead read a local file the mesh
-//! process writes (`--config`). Exits on `SIGTERM` or `SIGINT`.
+//! process writes (`--config`). On macOS launchd starts it as root, and it switches to its own account
+//! before anything else (design/userspace.md section 6.3). Exits on `SIGTERM` or `SIGINT`.
 
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -10,7 +10,7 @@ use nett_transport::forward::ConfigSource;
 use tokio::signal::unix::{SignalKind, signal};
 
 pub const USAGE: &str = "usage: nett transport [--socket <helpers.sock>]\n\n\
-Started by systemd while this machine has a path over TLS.";
+Started by the service manager while this machine has a path over TLS.";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut source = ConfigSource::Helper(nett_mesh::helper::socket_path(std::path::Path::new(
@@ -28,11 +28,19 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
-    tracing_subscriber::fmt()
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_writer(std::io::stderr)
-        .init();
+    // Before any thread exists, so that every thread runs as the account
+    #[cfg(target_os = "macos")]
+    if rustix::process::geteuid().is_root() {
+        nett_mesh::macos::switch_to_account(nett_mesh::helper::TRANSPORT_USER).with_context(
+            || {
+                format!(
+                    "switching to the account {}",
+                    nett_mesh::helper::TRANSPORT_USER
+                )
+            },
+        )?;
+    }
+    crate::mesh::init_logging();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
