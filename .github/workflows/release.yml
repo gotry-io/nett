@@ -1,5 +1,6 @@
 # Releases when a v* tag is pushed (design/release.md section 3, ADR 0020): builds nett for each
-# platform, signs with the primary key in the release environment,
+# platform, signs the macOS program with the Developer ID in the apple environment and has Apple
+# notarize it, signs everything with the primary key in the release environment,
 # publishes the GitHub Release, and updates the formula in gotry-io/homebrew-tap. v* tags are
 # protected by a ruleset, and the primary private key is visible only to them.
 # Third-party actions are pinned to commit hashes; downloaded tools are pinned to versions and
@@ -76,14 +77,106 @@ jobs:
           fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: dist-${{ matrix.target }}
+          # The macOS files go to the Apple signing job first
+          name: ${{ runner.os == 'macOS' && 'unsigned' || 'dist' }}-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
-  # Receives only the archives produced by the build: no checkout, no other dependencies installed,
-  # so the build job cannot get the private key
-  sign:
+  # Receives only the macOS files produced by the build and runs only the tools that come with macOS:
+  # no checkout, no other dependencies installed, so the build job cannot get the certificate
+  apple:
     needs: build
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment: apple
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: unsigned-*
+          merge-multiple: true
+          path: unsigned
+      - name: Import the Developer ID certificate into a keychain of this job
+        env:
+          APPLE_DEVELOPER_ID_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          APPLE_DEVELOPER_ID_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+        run: |
+          umask 077
+          keychain="$RUNNER_TEMP/apple.keychain-db"
+          password=$(openssl rand -hex 24)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 2700 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$APPLE_DEVELOPER_ID_P12" | base64 --decode > "$RUNNER_TEMP/id.p12"
+          security import "$RUNNER_TEMP/id.p12" -k "$keychain" -f pkcs12 \
+            -P "$APPLE_DEVELOPER_ID_PASSWORD" -T /usr/bin/codesign > /dev/null
+          rm -f "$RUNNER_TEMP/id.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain"
+          # The chain to Apple's root must verify, or codesign fails later with less to go on
+          security find-identity -v -p codesigning "$keychain" | grep -q '1 valid identities found' \
+            || { echo "the keychain holds no valid Developer ID Application identity" >&2; exit 1; }
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+      - name: Sign
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir notarize
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            name="nett-$version-$target"
+            mkdir "$target"
+            tar -xzf "unsigned/$name.tar.gz" -C "$target"
+            # The archive and the bare program carry the same build
+            cmp "$target/nett" "unsigned/$name"
+            codesign --force --sign "Developer ID Application" --keychain "$KEYCHAIN" \
+              --identifier io.gotry.nett --options runtime --timestamp "$target/nett"
+            codesign --verify --strict --verbose=2 "$target/nett"
+            codesign -dv "$target/nett" 2>&1 | grep -E '^(Identifier|Authority|TeamIdentifier|Timestamp|CodeDirectory)'
+            cp "$target/nett" "notarize/$name"
+          done
+      - name: Notarize
+        env:
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/notary.p8"
+          trap 'rm -f "$key"' EXIT
+          printf '%s\n' "$APPLE_NOTARY_KEY" > "$key"
+          auth=(--key "$key" --key-id "$APPLE_NOTARY_KEY_ID" --issuer "$APPLE_NOTARY_ISSUER_ID")
+          ditto -c -k --keepParent notarize notarize.zip
+          xcrun notarytool submit notarize.zip "${auth[@]}" --wait --timeout 40m \
+            --output-format json > notary.json
+          status=$(plutil -extract status raw -o - notary.json)
+          echo "notarization: $status"
+          if [ "$status" != Accepted ]; then
+            xcrun notarytool log "$(plutil -extract id raw -o - notary.json)" "${auth[@]}" >&2
+            exit 1
+          fi
+      - name: Pack the signed program
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            name="nett-$version-$target"
+            cp "$target/nett" "dist/$name"
+            COPYFILE_DISABLE=1 tar --no-xattrs -czf "dist/$name.tar.gz" \
+              -C "$target" nett LICENSE-MIT LICENSE-APACHE
+          done
+      - name: Remove the keychain
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN"; fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-apple-darwin
+          path: dist/*
+          if-no-files-found: error
+
+  # Receives only the archives produced by the build and the Apple signing: no checkout, no other
+  # dependencies installed, so the build job cannot get the private key
+  sign:
+    needs: [build, apple]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: release

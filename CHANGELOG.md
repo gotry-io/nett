@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- macOS: `nett` is signed with a Developer ID and notarized by Apple. macOS knows it as the same program
+  across versions, so its firewall keeps letting other members reach the mesh process after an upgrade,
+  and Gatekeeper accepts it.
+
 ## [0.3.5] - 2026-11-12
 
 - On Linux, nett-relay and the transport adapter move to a new version once its upgrade has settled. They

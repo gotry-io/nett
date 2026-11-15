@@ -26,6 +26,7 @@ nett is an open-source project: anyone can compile it themselves, and those who 
   - Third-party actions in the workflow are pinned to commit hashes, and each job is granted only the minimum permissions it needs;
   - The release page publishes the hash and signature of every file;
   - Version tags are protected; the maintainers' code hosting accounts have two-step verification enabled (hardware key or passkey).
+- **macOS programs also carry an Apple Developer ID signature**: the macOS programs are signed with the maintainer's Developer ID certificate and notarized by Apple, so macOS knows them as the same program across versions (design/release.md section 2). This signature identifies the program to macOS only; nodes trust an upgrade by the release signature alone. The certificate and the notarization key live in a separate `apple` environment that only `v*` tags may use, and only a separate job on a macOS runner uses them; like the signing job, it receives only the build's macOS files and runs only the tools that come with macOS.
 - **Offline backup**: the primary private key also has a local offline backup; the backup private key is kept only offline and never enters CI.
 - The two public keys are placed in the repository's `keys/` directory and also published on the project homepage, so users can compare them.
 - **First installation trusts the project website**: a new machine installs `nett` with the install script on the project website `nett.gotry.io` (design/release.md section 6); the script checks the archive against the stated hash, but does not check the release signature: the machine does not yet have a trusted verification tool. The website is deployed by the release workflow and is not on the Hub, so a compromised Hub cannot replace the installed program. Every later upgrade checks the release signature as usual.
@@ -37,6 +38,7 @@ nett is an open-source project: anyone can compile it themselves, and those who 
 - Releases are fully automatic with no human involved (the user's choice); the signing job is separate from the build, so a compromised build dependency cannot get the private key;
 - The backup key never enters CI: after the primary key in CI is leaked, keys can still be replaced and nodes do not need to be reinstalled;
 - Automatic upgrades by default let fixes reach all nodes promptly (the user's choice).
+- The ad-hoc signature the linker gives every build makes each version a new program to macOS: its application firewall then holds the packets other members send to the mesh process until someone answers a prompt, which on an unattended Mac happens after every automatic upgrade. A Developer ID signature stays the same across versions, and macOS lets signed downloaded software receive by default.
 
 ## Alternatives considered
 
@@ -44,10 +46,12 @@ nett is an open-source project: anyone can compile it themselves, and those who 
 - **Sigstore keyless signing**: no private key to keep, but verification depends on Sigstore's certificate chain and public log, the verification code is heavy, and it is hard to guarantee in regions with restricted networks; a stolen code hosting account can also sign.
 - **Require the user to approve every version by default** (install only with project signature plus user signature): even a stolen project key could not reach the user's machines, but every upgrade needs a signature, and without approval the node stays on the old version. The user chose automatic by default.
 - **Embed only one public key**: when it is leaked or lost, machines can only be reinstalled one by one.
+- **Register the program with the macOS firewall after each install and upgrade** (`socketfilterfw`): needs no Apple account, but nett would change a system security setting by itself, with one more external command run as root, and Gatekeeper would still reject the program.
 
 ## Consequences
 
 - **Residual risk**: if a maintainer's code hosting account is stolen, or someone can push protected version tags or change the release workflow, they can use the primary key to sign a version that all nodes with automatic upgrade enabled will install, until a new version signed by the backup key replaces the primary key. An optional "upgrades need user approval" mode can be added later;
 - **Residual risk of the first installation**: if the project website, its DNS or its hosting account is compromised, machines newly installed in that period are taken over; machines already installed are unaffected. These accounts also have two-step verification enabled;
+- The Developer ID signature of the macOS programs carries the maintainer's name. People who build nett themselves sign it with their own identity, or keep the ad-hoc signature and grant the macOS firewall permission again after each upgrade;
 - The build script accepts the release public keys as parameters; the release handbook documents the configuration of the release workflow and the steps for replacing keys with the backup key;
 - The Home Assistant OS add-on is upgraded by HA and does not go through this mechanism (ADR 0017).
