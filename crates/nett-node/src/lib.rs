@@ -8,6 +8,8 @@ pub mod http;
 pub mod join;
 #[cfg(target_os = "macos")]
 pub mod launchd;
+#[cfg(target_os = "linux")]
+pub mod layout;
 pub mod platform;
 pub mod services;
 pub mod session;

@@ -99,6 +99,10 @@ mod systemd {
 
     fn set_running(unit: Unit, want: bool) -> Result<(), String> {
         let path = unit.path();
+        #[cfg(target_os = "linux")]
+        if want && unit == RELAY {
+            crate::layout::ensure_relay_cert(&crate::layout::Layout::system())?;
+        }
         if want {
             if std::fs::read(&path).ok().as_deref() != Some(unit.content.as_bytes()) {
                 write_unit(&path, unit.content).map_err(|e| format!("writing {path}: {e}"))?;
@@ -144,6 +148,11 @@ mod systemd {
     /// they exist. Returns whether nett-node's own unit changed: it then exits, and systemd starts it
     /// again with the new unit.
     pub fn refresh_units() -> Result<bool, String> {
+        // The relay's unit of this program takes its certificate from the identity directory: copy it
+        // there from the layout of 0.3.13 first; the mesh service's unit copies the trust store
+        // itself (design/release.md section 8)
+        #[cfg(target_os = "linux")]
+        crate::layout::Layout::system().copy_old_relay()?;
         let mut changed = Vec::new();
         for unit in UNITS {
             let path = unit.path();
@@ -298,8 +307,9 @@ mod tests {
                 unit.name
             );
         }
-        assert!(RELAY.content.contains("\nUser=nett-relay\n"));
-        assert!(TRANSPORT.content.contains("\nUser=nett-transport\n"));
+        // Users systemd allocates while they run (design/release.md section 8)
+        assert!(RELAY.content.contains("\nDynamicUser=yes\n"));
+        assert!(TRANSPORT.content.contains("\nDynamicUser=yes\n"));
         assert!(TRANSPORT.content.contains("\nCapabilityBoundingSet=\n"));
         assert!(
             crate::platform::linux::NODE

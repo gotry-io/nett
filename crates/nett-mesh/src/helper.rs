@@ -1,7 +1,7 @@
 //! The helper socket (design/status.md section 3.1): on Linux nett-relay and the transport adapter run
-//! as their own low-privilege users and fetch their configuration from the mesh process here (ADR
-//! 0013). Each query is answered only for the system user it belongs to (and root), because the
-//! replies hold probe tokens.
+//! as users systemd allocates and fetch their configuration from the mesh process here (ADR 0013).
+//! Each query is answered only for a process of the systemd unit it belongs to (and root), because
+//! the replies hold probe tokens.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::SocketAddr;
@@ -23,10 +23,9 @@ use crate::status::{
 pub const SOCKET_NAME: &str = "helpers.sock";
 /// How often the helpers ask again.
 pub const FETCH_INTERVAL: Duration = Duration::from_secs(5);
-/// The system user nett-relay runs as.
-pub const RELAY_USER: &str = "nett-relay";
-/// The system user the transport adapter runs as.
-pub const TRANSPORT_USER: &str = "nett-transport";
+/// The systemd units of nett-relay and the transport adapter: a caller is known by its unit.
+pub const RELAY_UNIT: &str = "nett-relay.service";
+pub const TRANSPORT_UNIT: &str = "nett-transport.service";
 
 /// The helper socket next to the status socket at `status`.
 pub fn socket_path(status: &Path) -> PathBuf {
@@ -128,16 +127,16 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
             ),
         );
     }
-    let allowed = |user: &str| uid == 0 || system_uid(user) == Some(uid);
+    let allowed = |unit: &str| uid == 0 || caller_unit(stream).as_deref() == Some(unit);
     let busy = || reply_error(stream, "busy", "the mesh process is busy; try again");
     let bytes = match request.query.as_str() {
-        "relay" if allowed(RELAY_USER) => {
+        "relay" if allowed(RELAY_UNIT) => {
             let Some(relay) = source.relay(request.fingerprint) else {
                 return busy();
             };
             serde_json::to_vec(&RelayReply { v: VERSION, relay })
         }
-        "transport" if allowed(TRANSPORT_USER) => {
+        "transport" if allowed(TRANSPORT_UNIT) => {
             let Some(transport) = source.transport() else {
                 return busy();
             };
@@ -150,7 +149,7 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
             return reply_error(
                 stream,
                 "permission_denied",
-                "this query is answered only for its own system user",
+                "this query is answered only for its own service",
             );
         }
         other => {
@@ -164,15 +163,50 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
     out.write_all(&bytes)
 }
 
-/// The user ID of a system user, from `/etc/passwd`; `None` when there is no such user.
-fn system_uid(name: &str) -> Option<u32> {
-    let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
-    passwd.lines().find_map(|line| {
-        let mut fields = line.split(':');
-        (fields.next()? == name)
-            .then(|| fields.nth(1)?.parse().ok())
-            .flatten()
+/// The systemd system unit the peer process runs in, when its user ID is still the peer's: a process
+/// ID reused after the caller exited does not pass. Only root can place a process in a unit of the
+/// system manager; where `/proc` hides other users' processes there is no answer.
+#[cfg(target_os = "linux")]
+fn caller_unit(stream: &UnixStream) -> Option<String> {
+    use std::os::fd::AsFd as _;
+    let (pid, uid) = crate::linux::peer_cred(stream.as_fd()).ok()?;
+    if pid == 0 {
+        return None;
+    }
+    let cgroup = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    (status_uid(&status)? == uid)
+        .then(|| system_unit(&cgroup).map(str::to_owned))
+        .flatten()
+}
+
+/// Only Linux runs nett-relay and the transport adapter as services.
+#[cfg(not(target_os = "linux"))]
+fn caller_unit(_stream: &UnixStream) -> Option<String> {
+    None
+}
+
+/// The unit in a `/proc/<pid>/cgroup` listing when the process is in a service of the system manager
+/// (`/system.slice/<name>.service`), from the unified hierarchy or the systemd one; a user's own
+/// services live elsewhere and never match.
+#[cfg(any(target_os = "linux", test))]
+fn system_unit(cgroup: &str) -> Option<&str> {
+    cgroup.lines().find_map(|line| {
+        let mut fields = line.splitn(3, ':');
+        let (hierarchy, controllers, path) = (fields.next()?, fields.next()?, fields.next()?);
+        if !(hierarchy == "0" && controllers.is_empty() || controllers == "name=systemd") {
+            return None;
+        }
+        let unit = path.strip_prefix("/system.slice/")?;
+        (unit.ends_with(".service") && !unit.contains('/')).then_some(unit)
     })
+}
+
+/// The effective user ID in a `/proc/<pid>/status` listing.
+#[cfg(any(target_os = "linux", test))]
+fn status_uid(status: &str) -> Option<u32> {
+    let line = status.lines().find_map(|l| l.strip_prefix("Uid:"))?;
+    line.split_whitespace().nth(1)?.parse().ok()
 }
 
 /// nett-relay: fetches its assignment, reporting the fingerprint of its TLS certificate.
@@ -271,9 +305,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A caller is known by its system service; a user's own service of the same name is not it
     #[test]
-    fn system_users_are_read_from_passwd() {
-        assert_eq!(system_uid("root"), Some(0));
-        assert_eq!(system_uid("no-such-user-of-nett"), None);
+    fn callers_are_known_by_their_system_unit() {
+        assert_eq!(
+            system_unit("0::/system.slice/nett-relay.service\n"),
+            Some(RELAY_UNIT)
+        );
+        let hybrid = "12:pids:/system.slice/nett-transport.service\n\
+                      1:name=systemd:/system.slice/nett-transport.service\n\
+                      0::/system.slice/nett-transport.service\n";
+        assert_eq!(system_unit(hybrid), Some(TRANSPORT_UNIT));
+        for other in [
+            "0::/user.slice/user-1000.slice/user@1000.service/app.slice/nett-relay.service\n",
+            "0::/system.slice/nett-relay.service/extra\n",
+            "0::/system.slice/nett-relay.scope\n",
+            "0::/\n",
+            "",
+        ] {
+            assert_eq!(system_unit(other), None, "{other}");
+        }
+        let status = "Name:\tnett\nUid:\t61184\t61185\t61184\t61184\nGid:\t0\t0\t0\t0\n";
+        assert_eq!(status_uid(status), Some(61185));
+        assert_eq!(status_uid("Name:\tnett\n"), None);
     }
 }

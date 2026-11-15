@@ -9,9 +9,8 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/lib/nett/nett transport
-# A dedicated system user without capabilities
-User=nett-transport
-Group=nett-transport
+# A user systemd allocates while the service runs, without capabilities
+DynamicUser=yes
 CapabilityBoundingSet=
 NoNewPrivileges=yes
 ProtectSystem=strict

@@ -1,7 +1,8 @@
 //! `nett relay`: the relay service (design/mesh.md section 5.2). It fetches its assignment from the
-//! mesh process over the helper socket and keeps its TLS certificate in its state directory; the lab
-//! build can instead read the assignment from a local file (`--config`). Exits on `SIGTERM` or
-//! `SIGINT`, and when the assignment changes its ports (the service manager starts it again).
+//! mesh process over the helper socket, takes its TLS certificate from `--cert` (systemd's
+//! credentials) and saves its bindings to `--state`; the lab build can instead read the assignment
+//! from a local file (`--config`). Exits on `SIGTERM` or `SIGINT`, and when the assignment changes its
+//! ports (the service manager starts it again).
 
 use std::io::IsTerminal as _;
 use std::path::PathBuf;
@@ -9,10 +10,12 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
-/// The state directory of the relay service (`StateDirectory=nett-relay`).
-const STATE_DIR: &str = nett_node::platform::linux::RELAY_STATE_DIR;
+/// Where the units of 0.3.13 and earlier kept the certificate and the bindings, which they start the
+/// relay without paths for (design/release.md section 8); there the certificate is created when
+/// missing.
+const OLD_DIR: &str = nett_node::platform::linux::OLD_RELAY_DIR;
 
-pub const USAGE: &str = "usage: nett relay [--socket <helpers.sock>] [--state <dir>]\n\n\
+pub const USAGE: &str = "usage: nett relay [--socket <helpers.sock>] [--cert <dir>] [--state <file>]\n\n\
 Started by systemd on a machine that runs a relay (`nett site relay`).";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-state.json>] reads its assignment from a file";
@@ -20,12 +23,13 @@ const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-s
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut socket =
         nett_mesh::helper::socket_path(std::path::Path::new(nett_mesh::status::DEFAULT_SOCKET));
-    let mut state = None;
+    let (mut cert, mut state) = (None, None);
     #[cfg(feature = "lab")]
     let mut config = None;
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
+            lexopt::Arg::Long("cert") => cert = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("state") => state = Some(PathBuf::from(parser.value()?)),
             #[cfg(feature = "lab")]
             lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
@@ -56,8 +60,14 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         if let Some(config) = config {
             return lab(config, state, shutdown).await;
         }
-        let state = state.unwrap_or_else(|| PathBuf::from(STATE_DIR));
-        let ended = nett_relay::service::run(socket, state, shutdown)
+        let cert = match cert {
+            Some(dir) => nett_relay::cert::RelayCert::load(&dir),
+            None => nett_relay::cert::RelayCert::load_or_create(std::path::Path::new(OLD_DIR)),
+        }
+        .context("the relay's TLS certificate")?;
+        let state = state
+            .unwrap_or_else(|| std::path::Path::new(OLD_DIR).join(nett_relay::service::STATE_FILE));
+        let ended = nett_relay::service::run(socket, cert, state, shutdown)
             .await
             .context("relay")?;
         if ended == nett_relay::service::Ended::PortsChanged {

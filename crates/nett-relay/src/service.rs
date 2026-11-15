@@ -1,6 +1,6 @@
-//! nett-relay as a service (design/mesh.md section 5.2): it creates its TLS certificate once, fetches its
-//! assignment from the mesh process over the helper socket (design/status.md section 3.1) when it starts
-//! and every 5 seconds, and applies changes in place. It does not depend on nett-node.
+//! nett-relay as a service (design/mesh.md section 5.2): with the TLS certificate it is given, it fetches
+//! its assignment from the mesh process over the helper socket (design/status.md section 3.1) when it
+//! starts and every 5 seconds, and applies changes in place. It does not depend on nett-node.
 
 use std::future::Future;
 use std::net::{Ipv6Addr, SocketAddr};
@@ -16,7 +16,7 @@ use crate::server::{
     ASSIGNMENT_QUEUE, Assignment, TlsIngress, TlsSetupError, cert_acceptor, serve, tls_listener,
 };
 
-/// File holding the index table and bindings in the state directory.
+/// File holding the index table and bindings, in the relay's runtime directory.
 pub const STATE_FILE: &str = "relay-state.json";
 
 #[derive(Debug, thiserror::Error)]
@@ -47,13 +47,14 @@ pub enum Ended {
     PortsChanged,
 }
 
-/// Runs the relay until `shutdown` completes or the assignment changes its ports.
+/// Runs the relay until `shutdown` completes or the assignment changes its ports. `state` is the file
+/// the bindings are saved to and restored from.
 pub async fn run(
     helpers: PathBuf,
-    state_dir: PathBuf,
+    cert: RelayCert,
+    state: PathBuf,
     shutdown: impl Future<Output = ()>,
 ) -> Result<Ended, ServiceError> {
-    let cert = RelayCert::load_or_create(&state_dir)?;
     let fingerprint = cert.fingerprint();
     tracing::info!(%fingerprint, "relay TLS certificate");
     tokio::pin!(shutdown);
@@ -113,15 +114,7 @@ pub async fn run(
             Some(()) = ports_changed.recv() => ended = Ended::PortsChanged,
         }
     };
-    let served = serve(
-        udp,
-        tls,
-        relay,
-        Some(state_dir.join(STATE_FILE)),
-        Some(rx),
-        stop,
-    )
-    .await;
+    let served = serve(udp, tls, relay, Some(state), Some(rx), stop).await;
     fetcher.abort();
     served?;
     Ok(ended)

@@ -249,10 +249,10 @@ jobs:
           done
 
 
-  # Linux with real systemd (design/hub.md section 7, design/release.md section 7): a new machine
-  # joins through the Hub with `sudo nett install <token>`, upgrades itself to a newer release that
-  # a local website serves (signed with a key generated for this test and built into both
-  # versions), and leaves again
+  # Linux with real systemd (design/hub.md section 7, design/release.md sections 7 and 8): a new
+  # machine joins through the Hub with `sudo nett install <token>` from 0.3.13, the last release with
+  # the earlier layout, upgrades itself to this version and then a newer one that a local website
+  # serves (signed with keys generated for this test and built into each version), and leaves again
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -276,10 +276,16 @@ jobs:
           for key in old-primary old-backup new-primary new-backup; do
             minisign-linux/x86_64/minisign -G -W -p "$RUNNER_TEMP/$key.pub" -s "$RUNNER_TEMP/$key.key"
           done
-      - name: Build this version with the old keys, and 99.0.0 and 99.2.0 with the new ones
+      - name: Build 0.3.13 and this version with the old keys, and 99.0.0 and 99.2.0 with the new ones
         run: |
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
             cargo build --locked -p nett-cli -p nett-hub
+          # The machine starts on 0.3.13, the last release with the earlier layout
+          git fetch --depth 1 origin tag v0.3.13
+          git worktree add "$RUNNER_TEMP/previous" v0.3.13
+          (cd "$RUNNER_TEMP/previous" \
+            && NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
+              CARGO_TARGET_DIR="$RUNNER_TEMP/previous-target" cargo build --locked -p nett-cli)
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/new-primary.pub" "$RUNNER_TEMP/new-backup.pub")"
           export NETT_RELEASE_PUBLIC_KEYS
           next="$RUNNER_TEMP/next"
@@ -355,8 +361,11 @@ jobs:
           "$nett" site link "$code" | grep -F 'Linked to https://127.0.0.1:8443'
           "$nett" site add ci --yes | tee add.log
           token=$(grep -o 'nett_enr_[A-Za-z0-9_-]*' add.log)
-          sudo "$nett" install "$token" | tee install.log
+          sudo "$RUNNER_TEMP/previous-target/debug/nett" install "$token" | tee install.log
           grep -F 'Joining the site through the Hub at https://127.0.0.1:8443' install.log
+          # The layout of 0.3.13: the trust store in /var/lib/nett, users for the helpers
+          sudo test -f /var/lib/nett/trust.json
+          getent passwd nett-relay nett-transport
           test "$(readlink /usr/local/bin/nett)" = /usr/local/lib/nett/nett
           systemctl is-active --quiet nett-mesh.service
           # The desired state is readable by the mesh service's group only
@@ -382,6 +391,26 @@ jobs:
           grep -E '^ci +100\.88\.[0-9.]+ +online +99\.0\.0 ' site-status.log
           test -f /usr/local/lib/nett/nett.previous
           systemctl is-active --quiet nett-mesh.service nett-node.service
+          # The upgrade moves the machine to one directory and one account (design/release.md
+          # section 8): the mesh unit's privileged start step copies the trust store into
+          # /etc/nett/state, and once the upgrade has settled nett-node's removes the old directory
+          # and users
+          test "$(sudo stat -c '%a %U' /etc/nett/state)" = "700 nett"
+          sudo test -f /etc/nett/state/trust.json
+          grep -F -- '--state /etc/nett/state' /usr/local/lib/systemd/system/nett-mesh.service
+          for _ in $(seq 90); do
+            if ! getent passwd nett-relay > /dev/null && ! sudo test -e /var/lib/nett; then break; fi
+            sleep 1
+          done
+          sudo journalctl -u nett-node --no-pager | grep -F 'removed what nett 0.3.13 left'
+          if sudo test -e /var/lib/nett; then exit 1; fi
+          for account in nett-relay nett-transport; do
+            if getent passwd "$account" || getent group "$account"; then exit 1; fi
+          done
+          if grep -F nett-relay /etc/sysusers.d/nett.conf; then exit 1; fi
+          getent passwd nett
+          systemctl is-active --quiet nett-mesh.service nett-node.service
+          wait_for '.online and .result == "applied"' 
           # 99.0.0 trusts only the new keys: 99.1.0 signed by the old primary key is refused
           sh "$RUNNER_TEMP/offer.sh" 99.1.0 old-primary
           kill "$hub_pid"; wait "$hub_pid" || true
@@ -403,6 +432,14 @@ jobs:
           for _ in $(seq 60); do systemctl is-active --quiet nett-transport.service && break; sleep 1; done
           systemctl is-active --quiet nett-transport.service
           test -f "$units/nett-transport.service"
+          # It runs as a user systemd allocates, and the mesh process knows it by its unit
+          pid=$(systemctl show -p MainPID --value nett-transport.service)
+          [ "$(ps -o uid= -p "$pid" | tr -d ' ')" -ge 61184 ]
+          for _ in $(seq 30); do
+            sudo journalctl -u nett-transport --no-pager | grep -q 'transport config applied' && break
+            sleep 1
+          done
+          sudo journalctl -u nett-transport --no-pager | grep -F 'transport config applied' 
           "$nett" site remove relay1 --yes
           for _ in $(seq 60); do test -e "$units/nett-transport.service" || break; sleep 1; done
           test ! -e "$units/nett-transport.service"
@@ -412,11 +449,30 @@ jobs:
           if systemctl is-active --quiet nett-mesh.service; then exit 1; fi
           if ip link show nett0 2>/dev/null; then exit 1; fi
           test ! -e /etc/nett/identity.key
+          # Joined again as a public machine, it runs a relay: nett-node creates the certificate in
+          # /etc/nett/relay, the relay runs as a user systemd allocates, and the mesh process, which
+          # knows it by its unit, hands it its assignment
+          "$nett" site add ci-relay --public --ipv4 198.51.100.8 --yes | tee add-relay.log
+          token=$(grep -o 'nett_enr_[A-Za-z0-9_-]*' add-relay.log)
+          sudo nett install "$token"
+          "$nett" site relay ci-relay --yes
+          for _ in $(seq 60); do systemctl is-active --quiet nett-relay.service && break; sleep 1; done
+          systemctl is-active --quiet nett-relay.service
+          test "$(sudo stat -c '%a %U' /etc/nett/relay)" = "700 root"
+          sudo test -f /etc/nett/relay/tls-key.pk8
+          pid=$(systemctl show -p MainPID --value nett-relay.service)
+          [ "$(ps -o uid= -p "$pid" | tr -d ' ')" -ge 61184 ]
+          for _ in $(seq 30); do
+            sudo nett status --json | jq -e '.relay.fingerprint' > /dev/null && break
+            sleep 1
+          done
+          sudo nett status --json | jq -e '.relay.fingerprint'
+          sudo nett leave
           # After leaving and uninstalling, nothing of nett remains (design/release.md section 8)
           sudo nett uninstall | tee uninstall.log
           grep -F 'Nothing of it remains on this machine.' uninstall.log
           for path in /usr/local/lib/nett /usr/local/bin/nett /etc/nett /var/lib/nett \
-            /var/lib/nett-relay /etc/sysusers.d/nett.conf /run/nett "$units/nett-mesh.service" \
+            /var/lib/nett-relay /etc/sysusers.d/nett.conf /run/nett /run/nett-relay "$units/nett-mesh.service" \
             "$units/nett-node.service"; do
             if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
           done

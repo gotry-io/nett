@@ -44,6 +44,11 @@ tokio-tungstenite.workspace = true
 tracing.workspace = true
 x25519-dalek.workspace = true
 
+# The relay's certificate, which nett-node creates before it first enables the relay (design/mesh.md
+# section 5.3)
+[target.'cfg(target_os = "linux")'.dependencies]
+nett-relay.workspace = true
+
 [dev-dependencies]
 # Test directories removed when a test ends
 tempfile.workspace = true
