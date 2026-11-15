@@ -11,6 +11,9 @@
 //! - c, on a's LAN behind the same NAT, gets a LAN direct candidate from the addresses both report, and
 //!   the pair moves onto the LAN;
 //! - With all of a's UDP blocked upstream, the pair moves to TLS and stays reachable;
+//! - With all of r1's UDP blocked upstream while TCP passes (as across a border), a reaches r1 through
+//!   r1's own relay over TLS, which hands the packets to WireGuard on r1, and r1 shows its relay as the
+//!   path;
 //! - `nett site relay <relay> --off` takes the relay out of every connection.
 
 use std::path::Path;
@@ -221,12 +224,17 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     let deadline = Instant::now() + LEARN;
     let tls_candidates = loop {
         let doc = desired(&a.dir.join("desired.json"))?;
+        // Relays a reaches over TLS: one per learned fingerprint
         let found = doc
             .paths
             .iter()
             .flat_map(|p| &p.candidates)
-            .filter(|c| matches!(c, Candidate::RelayTls { .. }))
-            .count();
+            .filter_map(|c| match c {
+                Candidate::RelayTls { relay, .. } => Some(relay),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         if found >= 2 || Instant::now() >= deadline {
             break found;
         }
@@ -245,7 +253,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     report.check(
         "relay:fingerprints-learned",
         tls_candidates >= 2,
-        format!("a's desired state has {tls_candidates} TLS candidates"),
+        format!("a reaches {tls_candidates} relays over TLS"),
     );
     let status = h.site_cmd(&["status"]).unwrap_or_else(|e| format!("{e:#}"));
     report.record("site-status", status);
@@ -476,6 +484,47 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         ),
     );
     crate::fault::unblock_udp_upstream(&lab.underlay, "a")?;
+
+    // All of r1's UDP blocked upstream while TCP passes, as across a border: no relay reaches r1 over
+    // UDP, so a reaches it through r1's own relay over TLS, which hands the packets to WireGuard on r1
+    // (design/mesh.md section 5.1)
+    let r1 = relay_node("r1")?;
+    crate::fault::block_udp_upstream(&lab.underlay, "r1")?;
+    let through_r1 = |from: &LabNode, to: &LabNode, wanted: &str| {
+        kind(from, to) == wanted && via(from, to).as_deref() == Some("r1")
+    };
+    let deadline = Instant::now() + FALLBACK;
+    while !through_r1(a, r1, "RelayTls") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    // No rule allows a to reach r1, so the probes through the tunnel show that it carries packets
+    let probed = run_in(
+        &ns("a")?,
+        &nett.display().to_string(),
+        [
+            "ping".as_ref(),
+            "r1".as_ref(),
+            "-c".as_ref(),
+            "3".as_ref(),
+            "--socket".as_ref(),
+            socket_a.as_os_str(),
+        ],
+    );
+    report.check(
+        "tls:own-relay",
+        through_r1(a, r1, "RelayTls")
+            && through_r1(r1, a, "Relay")
+            && probed.as_ref().is_ok_and(|o| o.contains("3 received")),
+        format!(
+            "a -> r1: {} via {:?}; r1 -> a: {} via {:?}; {}",
+            kind(a, r1),
+            via(a, r1),
+            kind(r1, a),
+            via(r1, a),
+            probed.unwrap_or_else(|e| format!("{e:#}"))
+        ),
+    );
+    crate::fault::unblock_udp_upstream(&lab.underlay, "r1")?;
     for (name, child) in &lab.relays {
         report.record(&format!("memory:relay:{name}"), memory(child.id()));
     }

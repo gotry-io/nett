@@ -562,6 +562,12 @@ impl<D: DataPlane> Engine<D> {
     /// public keys from the verified admission material; members that are not admitted are left out with
     /// their links, so the relay forwards only between admitted members (hard rule 4).
     fn update_relay(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        // This machine's WireGuard is reached on loopback: a peer that reaches the relay over TLS
+        // then needs no UDP path to this machine (section 5.1)
+        let own = self
+            .interface
+            .as_ref()
+            .map(|i| SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), i.listen_port));
         let assignment = desired.relay.as_ref().map(|doc| {
             let key = |id: &NodeId| self.members.get(id).map(|m| m.mesh_public_key);
             RelayAssignment {
@@ -573,7 +579,11 @@ impl<D: DataPlane> Engine<D> {
                     .filter_map(|m| {
                         Some(AssignedMember {
                             public_key: key(&m.node)?,
-                            address: m.address,
+                            address: if m.node == self.node_id {
+                                own
+                            } else {
+                                m.address
+                            },
                             token: m.token.clone(),
                         })
                     })
@@ -857,6 +867,11 @@ impl<D: DataPlane> Engine<D> {
                 name: self.names.get(*id).cloned(),
             })
         };
+        // Where WireGuard sees a peer that reaches this machine through the relay on it
+        let own_relay = self
+            .relay
+            .as_ref()
+            .map(|r| SocketAddr::new(std::net::Ipv4Addr::LOCALHOST.into(), r.port));
         let path_status = |route: Route, kind: PathKind, punched: bool| PathStatus {
             kind: kind_doc(kind),
             relay: match &route {
@@ -952,13 +967,19 @@ impl<D: DataPlane> Engine<D> {
                     .find(|c| c.state == CandidateState::Current)
                 {
                     Some(c) => Some(path_status(c.route, c.kind, c.punched)),
-                    // Following through roaming: which of this machine's candidates WireGuard's current endpoint is; when
-                    // it is not among them, it is direct
+                    // Following through roaming: which of this machine's candidates WireGuard's current endpoint is, or
+                    // the relay on this machine (section 5.1); otherwise it is direct
                     None => traffic.and_then(|t| t.endpoint).map(|endpoint| {
                         let (route, kind) = view
                             .as_ref()
                             .and_then(|v| v.routes.iter().find(|(r, _)| r.endpoint() == endpoint))
                             .copied()
+                            .or_else(|| {
+                                (Some(endpoint) == own_relay).then(|| {
+                                    let relay = KeyId::of(self.node_id.as_str().as_bytes());
+                                    (Route::Relay { relay, endpoint }, PathKind::Relay)
+                                })
+                            })
                             .unwrap_or((Route::Direct(endpoint), PathKind::Direct));
                         path_status(route, kind, false)
                     }),
@@ -1213,6 +1234,41 @@ mod tests {
             Some(DIAL_ONLY_KEEPALIVE_SECS)
         );
         assert!(events.0.contains(&Event::PeersApplied { peers: 2 }));
+    }
+
+    /// The relay on this machine reaches this machine's WireGuard on loopback, so a peer that reaches
+    /// the relay over TLS reaches this machine without UDP between them (design/mesh.md section 5.1).
+    #[test]
+    fn the_relay_reaches_this_machine_on_its_wireguard_port_over_loopback() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.relay = Some(crate::config::RelayDoc {
+            port: 41822,
+            tls_port: Some(443),
+            members: [1, 2]
+                .map(|n| crate::config::RelayMemberDoc {
+                    node: node_id(n),
+                    address: Some(SocketAddr::new([192, 0, 2, n].into(), 41820)),
+                    token: crate::config::ProbeToken([n; 32]),
+                })
+                .into(),
+            links: vec![[node_id(1), node_id(2)]],
+        });
+        let mut events = VecSink::default();
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        let assignment = e
+            .relay_assignment(None, Instant::now())
+            .expect("this machine relays");
+        let address = |n: u8| {
+            assignment
+                .members
+                .iter()
+                .find(|m| m.public_key == mesh_key(n))
+                .and_then(|m| m.address)
+        };
+        assert_eq!(address(1), Some("127.0.0.1:41820".parse().expect("addr")));
+        assert_eq!(address(2), Some("192.0.2.2:41820".parse().expect("addr")));
     }
 
     #[test]
@@ -1848,6 +1904,47 @@ mod tests {
             (PathKindDoc::Direct, Some(roamed))
         );
         assert!(st.node.nat.is_none());
+    }
+
+    /// A peer that reaches this machine through the relay on this machine shows that relay as its
+    /// path: WireGuard follows to the relay's port on loopback (design/mesh.md section 5.1).
+    #[test]
+    fn a_follower_reached_through_its_own_relay_shows_that_relay() {
+        use crate::config::{PathDoc, ProbeToken, RelayDoc, RelayMemberDoc};
+        use crate::status::PathKindDoc;
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.reachability = Reachability::Public;
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::DialOnly,
+            candidates: vec![],
+        }];
+        doc.relay = Some(RelayDoc {
+            port: 41822,
+            tls_port: Some(443),
+            members: [1, 2]
+                .map(|n| RelayMemberDoc {
+                    node: node_id(n),
+                    address: None,
+                    token: ProbeToken([n; 32]),
+                })
+                .into(),
+            links: vec![[node_id(1), node_id(2)]],
+        });
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        let relay: SocketAddr = "127.0.0.1:41822".parse().expect("addr");
+        e.dataplane.peers.as_mut().expect("peers")[0].endpoint = Some(relay);
+        let now = Instant::now();
+        e.tick(now, 0, &mut events);
+        let st = e.status(now, SystemTime::now(), Timestamp::now());
+        let path = st.peers[0].path.as_ref().expect("path");
+        assert_eq!(
+            (path.kind, path.relay.as_ref().map(|r| &r.id), path.endpoint),
+            (PathKindDoc::Relay, Some(&node_id(1)), Some(relay))
+        );
     }
 
     /// An engine that shares the trust store with `backend`: constructing a new one is equivalent to a mesh
