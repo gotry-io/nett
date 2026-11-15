@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-11-15
+
 - The relay on a machine reaches that machine's WireGuard on loopback after an upgrade from 0.3.7. It kept
   the machine's public address it had learned, which works only where the cloud's network sends a
   machine's packets for its own public address back to it.
