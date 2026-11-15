@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.12] - 2026-11-15
+
 - macOS: the mesh service carries paths over TLS itself, as Tailscale does on macOS, so nett adds no
   account and no third service to a Mac. nett-node and `sudo nett install` remove the transport service
   of 0.3.11 together with its account and group `_nett-transport`, and the socket directory
