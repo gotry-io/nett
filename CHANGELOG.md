@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.10] - 2026-11-15
+
 - A pair whose relay still answers but no longer reaches the other machine moves to another relay. It
   went back and forth between that relay's UDP and TLS paths, which share the broken leg, and stayed
   disconnected. A machine also reports a relay it has never reached as lost, so the other end does not
