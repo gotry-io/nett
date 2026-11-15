@@ -128,6 +128,9 @@ struct Member {
     key_id: KeyId,
     probe_key: ProbeKey,
     bound: Option<PeerAddr>,
+    /// The relay's own machine, assigned its WireGuard port on loopback (design/mesh.md section
+    /// 5.1): no binding learned or saved before replaces that address.
+    local: bool,
     /// A binding change not yet confirmed by data on the new address: the address before the change
     /// and the time of the change.
     unconfirmed: Option<(Option<PeerAddr>, Instant)>,
@@ -192,6 +195,7 @@ impl Relay {
                     key_id: KeyId::of(m.public_key.as_bytes()),
                     probe_key: ProbeKey::from_token(&m.token),
                     bound: m.address.map(PeerAddr::Udp),
+                    local: m.address.is_some_and(|a| a.ip().is_loopback()),
                     unconfirmed: None,
                     last_change: None,
                 })
@@ -383,7 +387,7 @@ impl Relay {
 
     fn bind(&mut self, member: usize, addr: PeerAddr, now: Instant) {
         let m = &mut self.members[member];
-        if m.bound != Some(addr) {
+        if !m.local && m.bound != Some(addr) {
             m.unconfirmed = Some((m.bound, now));
             m.bound = Some(addr);
             m.last_change = Some(now);
@@ -529,7 +533,9 @@ impl Relay {
             members.iter().position(|m| m.public_key == *key)
         };
         for b in &state.bindings {
-            if let Some(i) = find(&self.members, &b.public_key) {
+            if let Some(i) = find(&self.members, &b.public_key)
+                && !self.members[i].local
+            {
                 self.members[i].bound = Some(PeerAddr::Udp(b.address));
             }
         }
@@ -576,7 +582,7 @@ impl Relay {
             moved.insert(o, i);
             let before = &self.members[o];
             // A binding learned from handshakes is newer than an address in the assignment
-            if before.bound.is_some() {
+            if before.bound.is_some() && !m.local {
                 m.bound = before.bound;
                 m.unconfirmed = before.unconfirmed;
                 m.last_change = before.last_change;
@@ -874,6 +880,58 @@ mod tests {
         assert_eq!(r.table_sizes(), (0, 2));
         r.expire(t0 + SESSION_IDLE);
         assert_eq!(r.table_sizes(), (0, 0));
+    }
+
+    /// The relay's own machine is assigned its WireGuard port on loopback (design/mesh.md section
+    /// 5.1): that address holds over a binding learned or saved before, such as the public address
+    /// an older mesh process assigned.
+    #[test]
+    fn the_relays_own_machine_stays_on_loopback() {
+        let key = X25519PublicKey::from_bytes;
+        let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
+            public_key: key(k),
+            address: a.map(sock),
+            token: [k[0]; 32],
+        };
+        let (public, local) = ("198.51.100.1:41820", "127.0.0.1:41820");
+        let now = Instant::now();
+        let links = [(key(A), key(B))];
+        let mut r =
+            Relay::new(&[member(A, Some(public)), member(B, None)], &links).expect("assignment");
+        let saved = r.snapshot(now);
+        r.reassign(&[member(A, Some(local)), member(B, None)], &links)
+            .expect("reassigned");
+        let b = "203.0.113.5:50000";
+        assert_eq!(
+            r.handle(addr(b), &initiation(11, &A), now, 0),
+            Outcome::Forward(addr(local))
+        );
+        assert_eq!(
+            r.handle(addr(local), &response(22, 11, &B), now, 0),
+            Outcome::Forward(addr(b))
+        );
+        // A handshake that A starts through its public address, back through the cloud's gateway,
+        // is answered there, and A stays on loopback
+        assert_eq!(
+            r.handle(addr(public), &initiation(33, &B), now, 0),
+            Outcome::Forward(addr(b))
+        );
+        assert_eq!(
+            r.handle(addr(b), &response(44, 33, &A), now, 0),
+            Outcome::Forward(addr(public))
+        );
+        assert_eq!(
+            r.handle(addr(b), &data(33), now, 0),
+            Outcome::Forward(addr(local))
+        );
+        // After a restart the saved binding is restored, and A stays on loopback
+        let mut restarted =
+            Relay::new(&[member(A, Some(local)), member(B, None)], &links).expect("assignment");
+        restarted.restore(&saved, now);
+        assert_eq!(
+            restarted.handle(addr("203.0.113.5:50000"), &initiation(12, &A), now, 0),
+            Outcome::Forward(addr(local))
+        );
     }
 
     #[test]
