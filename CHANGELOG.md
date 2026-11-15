@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.11] - 2026-11-15
+
 - macOS: paths over TLS work. The transport adapter runs as the launchd service
   `io.gotry.nett.transport` under its own hidden account, `_nett-transport`, which nett creates, and only
   while the machine has a path over TLS. Its connections leave through the physical interface like the
