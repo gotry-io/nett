@@ -1,8 +1,8 @@
 //! nett's services on a machine set up by `sudo nett install` (design/hub.md section 5, design/
-//! release.md section 7): the relay and the transport adapter run only while the desired state needs
-//! them, and on Linux the units follow the program through upgrades. macOS runs no relay, and its
-//! transport adapter is a launchd service (design/userspace.md section 6.3). Every call is blocking
-//! (it runs systemctl or launchctl): async callers use a blocking thread.
+//! release.md section 7): on Linux the relay and the transport adapter run only while the desired
+//! state needs them, and the units follow the program through upgrades. macOS runs neither: the mesh
+//! process carries the TLS transport itself (ADR 0013). Every call is blocking (it runs systemctl,
+//! launchctl or dscl): async callers use a blocking thread.
 
 use std::path::Path;
 
@@ -49,24 +49,17 @@ pub fn managed() -> bool {
     }
 }
 
-/// Enables and starts, or stops and disables, the relay and the transport adapter to match `wants`.
-/// Returns what it could not do.
+/// macOS has no optional services to follow the desired state.
 #[cfg(target_os = "macos")]
-pub fn reconcile(wants: Wants) -> Vec<String> {
-    match crate::launchd::set_transport(wants.transport) {
-        Ok(()) => Vec::new(),
-        Err(e) => {
-            tracing::warn!(error = %e, "changing the transport adapter");
-            vec![e]
-        }
-    }
+pub fn reconcile(_wants: Wants) -> Vec<String> {
+    Vec::new()
 }
 
-/// On macOS the transport adapter's configuration is rewritten when it is next started or
-/// reconciled, so there is nothing to refresh at start-up.
+/// On macOS the services `sudo nett install` writes are the ones this program runs; the transport
+/// service of nett 0.3.11 and its account are removed. nett-node's own service stays as it is.
 #[cfg(target_os = "macos")]
 pub fn refresh_units() -> Result<bool, String> {
-    Ok(false)
+    crate::launchd::remove_transport_service().map(|_| false)
 }
 
 /// systemd units on Linux.

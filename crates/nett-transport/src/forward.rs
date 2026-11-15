@@ -10,10 +10,12 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use nett_core::transport::{RELAY_PROBE, RELAY_REPLY, TlsTarget, TransportConfig};
+use nett_mesh::helper::HelperSource;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -32,7 +34,8 @@ const MAX_HELD: usize = 64;
 /// task.
 const CONN_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
-/// Interval for checking whether the configuration file has changed.
+/// Interval for checking whether the configuration file, or the mesh process this runs in, has a
+/// new configuration.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
@@ -47,10 +50,13 @@ pub enum ForwardError {
 }
 
 /// Where the configuration comes from (ADR 0013).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ConfigSource {
     /// The helper socket of the mesh process (design/status.md section 3.1), asked every 5 seconds.
     Helper(PathBuf),
+    /// The mesh process this forwarding runs in (macOS, design/mesh.md section 5.3), asked every
+    /// second: each question is a message to its worker thread.
+    Mesh(Arc<dyn HelperSource + Sync>),
     /// A local file written by the mesh process (lab builds), checked every second.
     File(PathBuf),
 }
@@ -59,7 +65,7 @@ impl ConfigSource {
     fn interval(&self) -> Duration {
         match self {
             Self::Helper(_) => nett_mesh::helper::FETCH_INTERVAL,
-            Self::File(_) => CONFIG_POLL,
+            Self::Mesh(_) | Self::File(_) => CONFIG_POLL,
         }
     }
 
@@ -80,6 +86,13 @@ impl ConfigSource {
                         Ok(None)
                     }
                 }
+            }
+            // The worker thread answers within its query timeout; a busy one is asked again
+            Self::Mesh(mesh) => {
+                let mesh = Arc::clone(mesh);
+                tokio::task::spawn_blocking(move || mesh.transport().flatten())
+                    .await
+                    .map_err(|e| ForwardError::Invalid(e.to_string()))
             }
             Self::File(path) => {
                 let owned = path.clone();
@@ -320,4 +333,73 @@ async fn connection(
     tracing::info!(relay = %addr, "TLS relay connection closed");
     drop(sink.close().await);
     drop(events.send(Event::Closed).await);
+}
+
+#[cfg(test)]
+mod tests {
+    use nett_core::transport::CertFingerprint;
+    use nett_mesh::helper::RelayAssignment;
+
+    use super::*;
+
+    /// The mesh process answering for the forwarding that runs inside it.
+    struct Mesh(TransportConfig);
+
+    impl HelperSource for Mesh {
+        fn relay(&self, _: Option<CertFingerprint>) -> Option<Option<RelayAssignment>> {
+            Some(None)
+        }
+
+        fn transport(&self) -> Option<Option<TransportConfig>> {
+            Some(Some(self.0.clone()))
+        }
+    }
+
+    /// Inside the mesh process (macOS) the forwarding takes the mesh process's configuration: a
+    /// packet sent to the loopback port it names makes it connect to that relay
+    #[tokio::test]
+    async fn forwarding_in_the_mesh_process_follows_its_configuration() {
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay");
+        let free = std::net::UdpSocket::bind("127.0.0.1:0").expect("free port");
+        let listen = free.local_addr().expect("address");
+        drop(free);
+        let config = TransportConfig {
+            wireguard_port: 51820,
+            targets: vec![TlsTarget {
+                listen,
+                connect: relay.local_addr().expect("relay address"),
+                fingerprint: CertFingerprint([0; 32]),
+            }],
+            interface: None,
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let forwarding = tokio::spawn(run(
+            ConfigSource::Mesh(Arc::new(Mesh(config))),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
+        let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("sender");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let connected = loop {
+            assert!(
+                Instant::now() < deadline,
+                "the forwarding never connected to the relay"
+            );
+            wireguard
+                .send_to(&[RELAY_PROBE, 1, 2, 3], listen)
+                .await
+                .expect("send");
+            if let Ok(accepted) =
+                tokio::time::timeout(Duration::from_millis(100), relay.accept()).await
+            {
+                break accepted;
+            }
+        };
+        assert!(connected.expect("accepted").1.ip().is_loopback());
+        drop(stop);
+        forwarding.await.expect("task").expect("stopped cleanly");
+    }
 }

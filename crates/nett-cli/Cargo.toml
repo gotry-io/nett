@@ -32,7 +32,7 @@ serde_json.workspace = true
 
 # Mesh process: Linux, and the macOS native member (design/userspace.md)
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
-tokio = { workspace = true, features = ["rt", "signal", "macros", "net", "time"] }
+tokio = { workspace = true, features = ["rt", "signal", "macros", "net", "time", "sync"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 x25519-dalek.workspace = true
@@ -49,7 +49,7 @@ rustix = { workspace = true, features = ["thread", "process"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc.workspace = true
-# The transport adapter runs on macOS too (design/userspace.md section 6.3)
+# The mesh process carries the TLS transport on macOS (ADR 0013)
 nett-transport.workspace = true
 rustix = { workspace = true, features = ["process"] }
 

@@ -1,5 +1,6 @@
 //! The transport adapter `nett transport`: when UDP is unavailable it converts WireGuard packets
-//! into TLS transport and handles only ciphertext (design/mesh.md section 5.3, ADR 0013).
+//! into TLS transport and handles only ciphertext (design/mesh.md section 5.3, ADR 0013). On Linux it
+//! runs as its own low-privilege process; on macOS the mesh process runs the same forwarding itself.
 //!
 //! Each TLS relay has a UDP port on this machine's loopback address: WireGuard and the mesh process
 //! send packets destined for this relay here, and each packet is sent as one binary WebSocket

@@ -4,6 +4,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- macOS: the mesh service carries paths over TLS itself, as Tailscale does on macOS, so nett adds no
+  account and no third service to a Mac. nett-node and `sudo nett install` remove the transport service
+  of 0.3.11 together with its account and group `_nett-transport`, and the socket directory
+  `/var/run/nett` is `0700` again. The TLS code now runs as root in the mesh process (ADR 0013).
+
 ## [0.3.11] - 2026-11-15
 
 - macOS: paths over TLS work. The transport adapter runs as the launchd service

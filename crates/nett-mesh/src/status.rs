@@ -696,20 +696,28 @@ impl Drop for LocalServer {
     }
 }
 
+/// Mode of the directory the sockets are in. On Linux others pass through it to the helper socket
+/// by name but cannot list it (section 3.1); macOS runs no helpers, so the directory is the owner's
+/// only.
+#[cfg(target_os = "linux")]
+const SOCKET_DIR_MODE: u32 = 0o711;
+#[cfg(not(target_os = "linux"))]
+const SOCKET_DIR_MODE: u32 = 0o700;
+
 fn bind(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
     use std::io::{Error, ErrorKind};
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        // 0711: others reach the helper socket by its name but cannot list the directory (section
-        // 3.1). Set after creating, since a service manager's umask narrows the mode given to mkdir;
-        // the default directory is widened too when an older version made it 0700
+        // Set after creating, since a service manager's umask narrows the mode given to mkdir; the
+        // default directory gets its mode whenever it has another one
         let default = Path::new(DEFAULT_SOCKET).parent() == Some(dir);
         if !dir.exists() {
             std::fs::DirBuilder::new().recursive(true).create(dir)?;
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(SOCKET_DIR_MODE))?;
         } else if default
-            && std::fs::metadata(dir).is_ok_and(|m| m.permissions().mode() & 0o777 == 0o700)
+            && std::fs::metadata(dir)
+                .is_ok_and(|m| m.permissions().mode() & 0o777 != SOCKET_DIR_MODE)
         {
-            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o711))?;
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(SOCKET_DIR_MODE))?;
         }
     }
     match std::fs::symlink_metadata(path) {
@@ -1123,12 +1131,20 @@ mod tests {
         }
     }
 
-    /// A short directory for tests (Unix socket paths on macOS are at most 104 bytes), removed with
-    /// everything in it when the returned guard is dropped; keep the guard while the path is used.
-    /// The directory the mesh process makes for its sockets lets the helpers reach theirs by name
-    /// (section 3.1), whatever mode mkdir got
+    /// The mode a socket directory gets on this platform: on Linux the helpers pass through to their
+    /// socket by name (section 3.1); macOS runs none.
+    fn expected_dir_mode() -> u32 {
+        if cfg!(target_os = "linux") {
+            0o711
+        } else {
+            0o700
+        }
+    }
+
+    /// The directory the mesh process makes for its sockets has its platform's mode, whatever mode
+    /// mkdir got
     #[test]
-    fn the_socket_directory_can_be_passed_through() {
+    fn the_socket_directory_has_its_platforms_mode() {
         let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("run").join("nett").join("mesh.sock");
         let _listener = bind(&path, 0o600).expect("bind");
@@ -1136,9 +1152,11 @@ mod tests {
             .expect("directory")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, 0o711);
+        assert_eq!(mode & 0o777, expected_dir_mode());
     }
 
+    /// A short directory for tests (Unix socket paths on macOS are at most 104 bytes), removed with
+    /// everything in it when the returned guard is dropped; keep the guard while the path is used.
     fn temp_dir() -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::Builder::new()
             .prefix("nst-")
@@ -1219,8 +1237,9 @@ mod tests {
         let path = dir.join("mesh.sock");
         let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
-        // Others can pass through to the helper socket, but the status socket is the owner's only
-        assert_eq!(mode(&dir), 0o711);
+        // On Linux others can pass through to the helper socket; the status socket is the owner's
+        // only everywhere
+        assert_eq!(mode(&dir), expected_dir_mode());
         assert_eq!(mode(&path), 0o600);
         assert_eq!(query(&path).expect("query"), sample());
         // The reader ignores fields it does not recognize: fields added in a newer version do not affect an older
