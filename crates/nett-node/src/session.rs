@@ -101,22 +101,23 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
         });
     }
     let mut upgrading: Upgrading = None;
-    let mut backoff = BACKOFF_MIN;
+    let mut backoff = Backoff::new();
     let coordination = crate::coord::Coordination::start(node.socket.clone());
     loop {
+        let started = tokio::time::Instant::now();
         let result = tokio::select! {
             r = node.session(&mut upgrading, &coordination) => r,
             () = &mut shutdown => return Exit::Shutdown,
         };
-        match result {
+        match &result {
             Ok(Exit::Upgraded) => return Exit::Upgraded,
-            Ok(Exit::Shutdown) => backoff = BACKOFF_MIN,
+            Ok(Exit::Shutdown) => {}
             Err(SessionError::Refused { code, message }) => {
                 tracing::error!(?code, %message, "the Hub refused this machine");
-                backoff = BACKOFF_MAX;
             }
             Err(e) => tracing::warn!(error = %e, "Hub connection"),
         }
+        let wait = backoff.after(&result, started.elapsed());
         // An upgrade keeps going while the connection is down
         let finished = async {
             match upgrading.as_mut() {
@@ -125,7 +126,7 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
             }
         };
         tokio::select! {
-            () = tokio::time::sleep(jitter(backoff)) => {}
+            () = tokio::time::sleep(jitter(wait)) => {}
             done = finished => {
                 upgrading = None;
                 if done == Some(Ok(())) {
@@ -134,7 +135,32 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
             }
             () = &mut shutdown => return Exit::Shutdown,
         }
-        backoff = (backoff * 2).min(BACKOFF_MAX);
+    }
+}
+
+/// The wait before connecting to the Hub again (protocol.md section 8).
+struct Backoff {
+    next: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Self { next: BACKOFF_MIN }
+    }
+
+    /// The wait after a session that ended this way and `lasted` this long: it doubles while
+    /// connecting fails, a refused machine waits the longest, and it starts over when the Hub said
+    /// goodbye or a session outlasted the longest wait. A session that keeps breaking sooner, such
+    /// as two machines with one identity replacing each other at the Hub, keeps doubling.
+    fn after(&mut self, ended: &Result<Exit, SessionError>, lasted: Duration) -> Duration {
+        let wait = match ended {
+            Ok(_) => BACKOFF_MIN,
+            Err(SessionError::Broken(_)) if lasted > BACKOFF_MAX => BACKOFF_MIN,
+            Err(SessionError::Refused { .. }) => BACKOFF_MAX,
+            Err(SessionError::Connect(_) | SessionError::Broken(_)) => self.next,
+        };
+        self.next = (wait * 2).min(BACKOFF_MAX);
+        wait
     }
 }
 
@@ -844,6 +870,32 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    #[test]
+    fn reconnecting_starts_over_after_a_lasting_session() {
+        let secs = |d: Duration| d.as_secs();
+        let instant = Duration::from_millis(100);
+        let mut backoff = Backoff::new();
+        let failed = || Err(SessionError::Connect("connection refused".into()));
+        let waits: Vec<u64> = (0..8)
+            .map(|_| secs(backoff.after(&failed(), instant)))
+            .collect();
+        assert_eq!(waits, [1, 2, 4, 8, 16, 32, 60, 60]);
+        // A session that was up for a while and broke: the next attempt is soon, then it doubles
+        let broke = || Err(SessionError::Broken("no answer from the Hub".into()));
+        assert_eq!(secs(backoff.after(&broke(), Duration::from_secs(3600))), 1);
+        assert_eq!(secs(backoff.after(&failed(), instant)), 2);
+        // Sessions that break right away keep doubling
+        assert_eq!(secs(backoff.after(&broke(), Duration::from_secs(3))), 4);
+        assert_eq!(secs(backoff.after(&broke(), Duration::from_secs(5))), 8);
+        let refused = Err(SessionError::Refused {
+            code: ErrorCode::NodeRevoked,
+            message: "removed".into(),
+        });
+        assert_eq!(secs(backoff.after(&refused, instant)), 60);
+        // The Hub said goodbye
+        assert_eq!(secs(backoff.after(&Ok(Exit::Shutdown), instant)), 1);
     }
 
     #[test]
