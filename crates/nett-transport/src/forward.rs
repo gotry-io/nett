@@ -28,6 +28,10 @@ use crate::client::{self, MAX_MESSAGE};
 pub const KEEPALIVE: Duration = Duration::from_secs(25);
 /// After a failed or dropped connection, wait at least this long before reconnecting.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
+/// After a relay's loopback port failed, for example while another process still holds it, it is
+/// opened again after a delay that starts here and doubles up to [`REOPEN_MAX`].
+const REOPEN_DELAY: Duration = Duration::from_secs(1);
+const REOPEN_MAX: Duration = Duration::from_secs(60);
 /// Number of packets held before the connection is authenticated.
 const MAX_HELD: usize = 64;
 /// Send queue of each connection, and the queue of messages a connection hands to the forwarding
@@ -163,10 +167,22 @@ pub async fn run(
     Ok(())
 }
 
+/// Runs one relay's forwarding until the task is aborted with its configuration: a port that fails
+/// is opened again, so the relay stays reachable once the cause goes away.
 async fn target_or_log(target: TlsTarget, wireguard: SocketAddr, interface: Option<u32>) {
     let listen = target.listen;
-    if let Err(error) = target_loop(target, wireguard, interface).await {
-        tracing::error!(%listen, %error, "TLS transport for this relay stopped");
+    let mut delay = REOPEN_DELAY;
+    loop {
+        let started = Instant::now();
+        if let Err(error) = target_loop(target.clone(), wireguard, interface).await {
+            // A port that worked for a while starts over from the shortest delay
+            if started.elapsed() > REOPEN_MAX {
+                delay = REOPEN_DELAY;
+            }
+            tracing::warn!(%listen, %error, retry_in = ?delay, "TLS transport for this relay stopped");
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(REOPEN_MAX);
     }
 }
 
@@ -399,6 +415,56 @@ mod tests {
             }
         };
         assert!(connected.expect("accepted").1.ip().is_loopback());
+        drop(stop);
+        forwarding.await.expect("task").expect("stopped cleanly");
+    }
+
+    /// A loopback port another process still holds, as the separate adapter of an older version
+    /// does during an upgrade, is opened once that process lets it go
+    #[tokio::test]
+    async fn a_port_held_by_another_process_is_opened_once_free() {
+        let relay = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("relay");
+        let holder = std::net::UdpSocket::bind("127.0.0.1:0").expect("holder");
+        let listen = holder.local_addr().expect("address");
+        let config = TransportConfig {
+            wireguard_port: 51820,
+            targets: vec![TlsTarget {
+                listen,
+                connect: relay.local_addr().expect("relay address"),
+                fingerprint: CertFingerprint([0; 32]),
+            }],
+            interface: None,
+        };
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let forwarding = tokio::spawn(run(
+            ConfigSource::Mesh(Arc::new(Mesh(config))),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
+        // The forwarding meets the held port first
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        drop(holder);
+        let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("sender");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "the port was not opened after it was let go"
+            );
+            wireguard
+                .send_to(&[RELAY_PROBE, 1, 2, 3], listen)
+                .await
+                .expect("send");
+            if tokio::time::timeout(Duration::from_millis(100), relay.accept())
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
         drop(stop);
         forwarding.await.expect("task").expect("stopped cleanly");
     }
