@@ -94,6 +94,10 @@ pub const LATE_HORIZON: Duration = Duration::from_secs(10);
 const MAX_LATE: usize = 32;
 /// Sliding window of the loss rate (number of probes).
 const LOSS_WINDOW: usize = 10;
+/// How long after a break beyond a relay the peer's report of its leg to that relay covers the time
+/// since: the peer probes the relay again within this and waits for the reply.
+const REPORT_LAG: Duration =
+    crate::prober::RELAY_MONITOR_INTERVAL.saturating_add(crate::prober::OUTSTANDING_TTL);
 /// Weight of the exponential moving average of the round-trip time.
 const RTT_ALPHA: f64 = 0.25;
 /// Loss penalty in the score: every 1% of loss is equivalent to 5 ms.
@@ -257,6 +261,10 @@ struct Candidate {
     grace_used: bool,
     /// For a relay: the latest reply carried the peer's leg, so the round-trip time covers the whole path.
     far_leg: bool,
+    /// For a relay: when a path through it last broke beyond it, on its leg to the peer. This end's probes
+    /// of the relay say nothing about that leg, so until the peer reports it working the relay is not taken
+    /// as recovered (section 8.2).
+    beyond: Option<Instant>,
 }
 
 impl Candidate {
@@ -274,7 +282,15 @@ impl Candidate {
             healthy_since: None,
             grace_used: false,
             far_leg: false,
+            beyond: None,
         }
+    }
+
+    /// A path through this relay broke beyond it within [`FAILURE_MEMORY`], and the peer has not
+    /// reported its leg to the relay working since.
+    fn broken_beyond(&self, now: Instant) -> bool {
+        self.beyond
+            .is_some_and(|t| now.saturating_duration_since(t) < FAILURE_MEMORY)
     }
 }
 
@@ -783,6 +799,23 @@ impl PeerPaths {
         self.busy = busy;
     }
 
+    /// The peer's measurement of its leg to `relay`, arrived at `at` with an in-tunnel reply. It is over a
+    /// window of probes, so it shows the leg working since a break beyond that relay only when it has no
+    /// loss and came at least [`REPORT_LAG`] after the break.
+    pub fn on_relay_report(&mut self, relay: KeyId, loss: f64, at: Instant) {
+        if loss > 0.0 {
+            return;
+        }
+        for c in &mut self.candidates {
+            if matches!(c.route, Route::Relay { relay: r, .. } if r == relay)
+                && c.beyond
+                    .is_some_and(|t| at.saturating_duration_since(t) >= REPORT_LAG)
+            {
+                c.beyond = None;
+            }
+        }
+    }
+
     /// Result of a candidate probe; `extra` is the round-trip time and loss rate of the other leg of a relay
     /// path (carried by the peer in the in-tunnel reply).
     pub fn on_candidate_reply(
@@ -1131,15 +1164,31 @@ impl PeerPaths {
         reason: SwitchReason,
     ) -> Option<Action> {
         let current = self.current;
-        let best = self
-            .candidates
-            .iter()
-            .enumerate()
-            .filter(|(i, c)| *i != current && c.last_reply.is_some_and(|t| t >= fresh_since))
-            .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, s)))
-            .min_by(|a, b| a.1.total_cmp(&b.1))
-            .map(|(i, _)| i);
-        let target = best?;
+        // The relay still answered this end since the failure began: the break lies beyond it, on its leg to
+        // the peer, which every path through it shares
+        if let Route::Relay { relay, .. } = self.candidates[current].route
+            && self.candidates[current]
+                .last_reply
+                .is_some_and(|t| t >= fresh_since)
+        {
+            for c in &mut self.candidates {
+                if matches!(c.route, Route::Relay { relay: r, .. } if r == relay) {
+                    c.beyond = Some(now);
+                }
+            }
+        }
+        // Paths through such a relay only when nothing else just replied
+        let best = |others: bool| {
+            self.candidates
+                .iter()
+                .enumerate()
+                .filter(|(i, c)| *i != current && c.last_reply.is_some_and(|t| t >= fresh_since))
+                .filter(|(_, c)| !others || !c.broken_beyond(now))
+                .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, s)))
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(i, _)| i)
+        };
+        let target = best(true).or_else(|| best(false))?;
         self.record_failure(now);
         // A candidate with no reply since suspected failure has its earlier run of consecutive replies voided:
         // otherwise probes that have not yet timed out would make a better path that has just gone down look
@@ -1199,6 +1248,7 @@ impl PeerPaths {
         let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
             *i != self.current
                 && c.kind < current_kind
+                && !c.broken_beyond(now)
                 && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                 && c.healthy_since
                     .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
@@ -1219,6 +1269,7 @@ impl PeerPaths {
             .filter(|(i, c)| {
                 *i != self.current
                     && c.kind == current_kind
+                    && !c.broken_beyond(now)
                     && c.last_reply
                         .is_some_and(|t| now.saturating_duration_since(t) <= 2 * CANDIDATE_INTERVAL)
             })
@@ -1274,6 +1325,7 @@ impl PeerPaths {
                 .filter(|(_, c)| {
                     c.kind == PathKind::Relay
                         && c.far_leg
+                        && !c.broken_beyond(now)
                         && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                         && c.last_reply.is_some_and(|t| {
                             now.saturating_duration_since(t) <= 2 * CANDIDATE_INTERVAL
@@ -1428,6 +1480,10 @@ mod tests {
         candidate_probes: usize,
         /// The peer's leg of each relay path, carried with candidate replies (`None`: not reported).
         far_leg: Vec<Option<Duration>>,
+        /// The peer's measurement of its leg to each relay (loss rate), carried with every in-tunnel reply,
+        /// and what this end last heard of it.
+        peer_reports: Vec<(KeyId, f64)>,
+        heard: std::collections::HashMap<KeyId, f64>,
         /// The pair carries more than the busy rate.
         busy: bool,
     }
@@ -1462,6 +1518,8 @@ mod tests {
                 proposals: Vec::new(),
                 candidate_probes: 0,
                 far_leg: vec![None; n],
+                peer_reports: Vec::new(),
+                heard: std::collections::HashMap::new(),
                 busy: false,
             }
         }
@@ -1481,9 +1539,20 @@ mod tests {
                 due.sort_by_key(|f| f.0);
                 for (at, tunnel, index, seq) in due {
                     if tunnel {
+                        for (relay, loss) in self.peer_reports.clone() {
+                            self.heard.insert(relay, loss);
+                            self.paths.on_relay_report(relay, loss, at);
+                        }
                         self.paths.on_tunnel_reply(seq, at);
                     } else {
-                        let extra = self.far_leg[index].map(|d| (d, 0.0));
+                        let heard = match self.paths.candidates[index].route {
+                            Route::Relay { relay, .. } => self.heard.get(&relay).copied(),
+                            Route::Direct(_) => None,
+                        };
+                        let extra = match heard {
+                            Some(loss) if loss >= 1.0 => Some((Duration::ZERO, 1.0)),
+                            _ => self.far_leg[index].map(|d| (d, 0.0)),
+                        };
                         self.paths.on_candidate_reply(index, seq, at, extra);
                     }
                 }
@@ -1581,6 +1650,51 @@ mod tests {
             *n += 1;
             self.up[i] && (self.drop_every[i] == 0 || !n.is_multiple_of(self.drop_every[i]))
         }
+    }
+
+    /// A relay still answers this end's probes but its leg to the peer is down: the relay's other
+    /// transport shares that leg, so the switch goes to another relay even when it is much slower, and
+    /// the peer's report of the leg through the new tunnel keeps the pair there (design/mesh.md
+    /// section 8.2).
+    #[test]
+    fn a_break_beyond_a_relay_moves_to_another_relay() {
+        let tls = |n: u8| Route::Relay {
+            relay: KeyId([n; 8]),
+            endpoint: SocketAddr::new([127, 0, 0, 1].into(), 41829 + u16::from(n)),
+        };
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (tls(1), PathKind::RelayTls),
+            (tls(2), PathKind::RelayTls),
+        ]);
+        sim.rtt = vec![6 * MS, 6 * MS, 200 * MS];
+        sim.run(Duration::from_secs(5));
+        assert_eq!(sim.paths.current, 0);
+        sim.tunnel_broken[0] = true;
+        sim.tunnel_broken[1] = true;
+        sim.fix_on_rehandshake = false;
+        // The peer probes the relay every 5 seconds: its first reports still show the leg as it was
+        // before the break, then its window fills with losses
+        sim.peer_reports = vec![(KeyId([1; 8]), 0.0)];
+        sim.run(Duration::from_secs(6));
+        sim.peer_reports = vec![(KeyId([1; 8]), 0.3)];
+        sim.run(Duration::from_secs(54));
+        assert!(
+            sim.switches.iter().all(|s| s.1 != tls(1)),
+            "{:?}",
+            sim.switches
+        );
+        assert_eq!(sim.paths.current, 2, "{:?}", sim.switches);
+        // The leg comes back, and the peer's report through the tunnel brings the pair back to UDP
+        sim.tunnel_broken[0] = false;
+        sim.tunnel_broken[1] = false;
+        sim.peer_reports = vec![(KeyId([1; 8]), 0.0)];
+        sim.run(Duration::from_secs(30));
+        assert_eq!(sim.paths.current, 0, "{:?}", sim.switches);
+        assert_eq!(
+            sim.switches.last().map(|s| s.3),
+            Some(SwitchReason::BetterType)
+        );
     }
 
     #[test]

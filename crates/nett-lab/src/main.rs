@@ -43,6 +43,8 @@ const USAGE: &str = "usage:
   nett-lab run roaming --topology <file.toml> --nett <path/to/nett> --out <dir> [--duration SECONDS]
   nett-lab run <loss|jitter|flap|alternate> --topology <file.toml> --nett <path/to/nett> --out <dir> [--level N] [--duration SECONDS] [--repeat N] [--with-tailscale]
   nett-lab run <failover|fallback|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
+  nett-lab run relay-far-leg --topology far-leg.toml --nett <path/to/nett> --out <dir> [--repeat N]
+      (the relay in use still answers a, but its UDP with b is cut: the pair moves to the other relay)
   nett-lab run punch --topology <punch-*.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run mtu --topology <mtu4.toml|mtu6.toml> --nett <path/to/nett> --out <dir> [--bytes N]
   nett-lab run <wg-rehandshake|wg-cookie|wg-rekey> --topology relays.toml --nett <path/to/nett> --out <dir> [--repeat N] [--duration SECONDS]
@@ -227,11 +229,11 @@ fn run() -> anyhow::Result<bool> {
                         duration,
                     )?
                 }
-                "relay-loss" | "relay-restart" => {
-                    let kind = if *name == "relay-loss" {
-                        scenario::RelayFault::Loss
-                    } else {
-                        scenario::RelayFault::Restart
+                "relay-loss" | "relay-restart" | "relay-far-leg" => {
+                    let kind = match *name {
+                        "relay-loss" => scenario::RelayFault::Loss,
+                        "relay-restart" => scenario::RelayFault::Restart,
+                        _ => scenario::RelayFault::FarLeg,
                     };
                     scenario::relay_fault(&topology, &nett()?, &out, repeat, with_tailscale, kind)?
                 }
