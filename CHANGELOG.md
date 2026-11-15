@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-11-15
+
 - macOS: `nett` is signed with a Developer ID and notarized by Apple. macOS knows it as the same program
   across versions, so its firewall keeps letting other members reach the mesh process after an upgrade,
   and Gatekeeper accepts it.
