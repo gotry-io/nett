@@ -4,6 +4,8 @@
 //! units and starts them. The units are the files in `packaging/systemd/`, embedded at compile
 //! time, so their content has a single source. Without a Hub, the desired state is imported with
 //! `--config`; with a Hub (a token, or an existing Hub configuration) only nett-node writes it.
+//! `sudo nett uninstall` removes everything but the identity, and `sudo nett leave` the identity
+//! (design/release.md section 8).
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -17,10 +19,17 @@ use crate::install::{
 };
 
 use nett_node::platform::linux::{
-    CONFIG_DIR as DIR, LINK, MESH, NODE, PROGRAM as BINARY, PROGRAM_DIR, RELAY, TRANSPORT, Unit,
+    CONFIG_DIR as DIR, LINK, MESH, NODE, PROGRAM as BINARY, PROGRAM_DIR, RELAY, RELAY_STATE_DIR,
+    TRANSPORT, Unit,
 };
 
 const DESIRED: &str = "/etc/nett/desired.json";
+/// The system users the services run as, and their groups of the same name.
+const SYSUSERS: &str = include_str!("../../../packaging/systemd/nett.sysusers");
+const SYSUSERS_CONF: &str = "/etc/sysusers.d/nett.conf";
+/// Fixed locations of the account tools (hard rule 9).
+const USERDEL: [&str; 2] = ["/usr/sbin/userdel", "/sbin/userdel"];
+const GROUPDEL: [&str; 2] = ["/usr/sbin/groupdel", "/sbin/groupdel"];
 /// Where units of the same name override the ones nett installs.
 const OVERRIDE_DIR: &str = "/etc/systemd/system";
 
@@ -127,11 +136,9 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         |unit: &Unit| replace_if_changed(Path::new(&unit.path()), unit.content.as_bytes(), 0o644);
     let mesh_unit_changed = write(&MESH)?;
     let node_unit_changed = linked && write(&NODE)?;
-    // Enabled only while the desired state needs them (design/hub.md section 5)
-    let optional_changed = write(&RELAY)? | write(&TRANSPORT)?;
-    if (mesh_unit_changed || node_unit_changed || optional_changed)
-        && !systemctl(&["daemon-reload"])?
-    {
+    // The relay's and the transport adapter's are written only while the desired state needs them
+    // (design/release.md section 8)
+    if (mesh_unit_changed || node_unit_changed) && !systemctl(&["daemon-reload"])? {
         bail!("systemctl daemon-reload failed");
     }
 
@@ -176,11 +183,17 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         }
     }
     // Running helpers keep the old program until they restart; try-restart leaves stopped ones alone
-    if binary_changed && !systemctl(&["try-restart", RELAY.name, TRANSPORT.name])? {
-        messages.push(format!(
-            "Restarting {} and {} on the new program failed.",
-            RELAY.what, TRANSPORT.what
-        ));
+    let helpers: Vec<Unit> = nett_node::platform::linux::installed_optional();
+    if binary_changed && !helpers.is_empty() {
+        let mut args = vec!["try-restart"];
+        args.extend(helpers.iter().map(|u| u.name));
+        if !systemctl(&args)? {
+            let what: Vec<&str> = helpers.iter().map(|u| u.what).collect();
+            messages.push(format!(
+                "Restarting {} on the new program failed.",
+                what.join(" and ")
+            ));
+        }
     }
     if messages.is_empty() && !desired_changed {
         messages.push("The services are running. Nothing changed.".to_owned());
@@ -200,14 +213,94 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `sudo nett uninstall` (design/release.md section 8): removes the services, the mesh interface and
+/// filter rules, the program, the accounts and the upgrade records, and keeps this machine's
+/// identity, given to root so that no account created later inherits it.
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
     remove_services()?;
-    println!(
-        "Removed the services. {BINARY}, the keys, the desired state, the trust store and the Hub \
-         configuration remain."
-    );
+    nett_mesh::linux::teardown().context("removing the mesh interface and filter rules")?;
+    for name in ["nett", "nett.previous", "nett.new"] {
+        crate::install::remove_file(&format!("{PROGRAM_DIR}/{name}"))?;
+    }
+    crate::install::remove_if_empty(PROGRAM_DIR)?;
+    if fs::read_link(LINK).is_ok_and(|t| t == Path::new(BINARY)) {
+        crate::install::remove_file(LINK)?;
+    }
+    crate::install::forget_upgrades(DIR)?;
+    let mut kept = Vec::new();
+    for dir in [DIR, nett_mesh::store::DEFAULT_STATE_DIR, RELAY_STATE_DIR] {
+        if !crate::install::remove_if_empty(dir)? {
+            give_to_root(Path::new(dir))?;
+            kept.push(dir);
+        }
+    }
+    remove_accounts()?;
+    if kept.is_empty() {
+        println!("Removed nett. Nothing of it remains on this machine.");
+    } else {
+        println!(
+            "Removed nett. This machine's identity stays in {}: `sudo nett install` brings it back \
+             as the same member, and `sudo rm -r {}` deletes it.",
+            kept.join(", "),
+            kept.join(" ")
+        );
+    }
     Ok(())
+}
+
+/// Gives a directory and everything in it to root, without following links.
+fn give_to_root(path: &Path) -> anyhow::Result<()> {
+    std::os::unix::fs::lchown(path, Some(0), Some(0))
+        .with_context(|| format!("giving {} to root", path.display()))?;
+    if fs::symlink_metadata(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .is_dir()
+    {
+        for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
+            give_to_root(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+/// The users declared in `nett.sysusers`; each has a group of the same name.
+fn accounts() -> impl Iterator<Item = &'static str> {
+    SYSUSERS
+        .lines()
+        .filter_map(|line| line.strip_prefix("u "))
+        .filter_map(|rest| rest.split_whitespace().next())
+}
+
+/// Deletes the system users and groups `sudo nett install` created, and their declaration.
+fn remove_accounts() -> anyhow::Result<()> {
+    let tool = |paths: [&'static str; 2]| paths.into_iter().find(|p| Path::new(p).exists());
+    let passwd = fs::read_to_string("/etc/passwd").context("reading /etc/passwd")?;
+    for name in accounts() {
+        if user_in(&passwd, name) {
+            let userdel = tool(USERDEL).context("userdel is not on this machine")?;
+            if !crate::install::run(userdel, &[name])? {
+                bail!("userdel could not delete the user {name}");
+            }
+        }
+    }
+    // userdel removes a user's own group only on some systems
+    let groups = fs::read_to_string("/etc/group").context("reading /etc/group")?;
+    for name in accounts() {
+        if group_in(&groups, name).is_some() {
+            let groupdel = tool(GROUPDEL).context("groupdel is not on this machine")?;
+            if !crate::install::run(groupdel, &[name])? {
+                bail!("groupdel could not delete the group {name}");
+            }
+        }
+    }
+    crate::install::remove_file(SYSUSERS_CONF)
+}
+
+fn user_in(passwd: &str, name: &str) -> bool {
+    passwd
+        .lines()
+        .any(|line| line.split(':').next() == Some(name))
 }
 
 /// `sudo nett leave` (design/hub.md section 7): tells the Hub, deletes the services, tears down the
@@ -218,9 +311,13 @@ pub fn leave() -> anyhow::Result<()> {
     remove_services()?;
     nett_mesh::linux::teardown().context("removing the mesh interface and filter rules")?;
     crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
+    // The relay's certificate key is part of this machine's identity
+    crate::install::remove_tree(RELAY_STATE_DIR)?;
+    crate::install::remove_if_empty(DIR)?;
     println!(
         "Left the site: removed the services and the mesh interface, deleted the keys, the desired \
-         state, the trust store and the Hub configuration. {BINARY} stays."
+         state, the trust store and the Hub configuration. {BINARY} stays; `sudo nett uninstall` \
+         removes it."
     );
     Ok(())
 }
@@ -270,16 +367,14 @@ pub fn ensure_link(link: &str, target: &str) -> anyhow::Result<bool> {
 /// The system user the mesh service runs as (`packaging/systemd/nett.sysusers`), created with
 /// systemd-sysusers. Returns the group ID of its group.
 fn ensure_user() -> anyhow::Result<u32> {
-    const SYSUSERS: &str = include_str!("../../../packaging/systemd/nett.sysusers");
-    const CONF: &str = "/etc/sysusers.d/nett.conf";
     const PROGRAMS: [&str; 2] = ["/usr/bin/systemd-sysusers", "/bin/systemd-sysusers"];
     ensure_dir("/etc/sysusers.d", 0o755)?;
-    replace_if_changed(Path::new(CONF), SYSUSERS.as_bytes(), 0o644)?;
+    replace_if_changed(Path::new(SYSUSERS_CONF), SYSUSERS.as_bytes(), 0o644)?;
     let program = PROGRAMS
         .into_iter()
         .find(|p| Path::new(p).exists())
         .context("systemd-sysusers is not on this machine")?;
-    if !crate::install::run(program, &[CONF])? {
+    if !crate::install::run(program, &[SYSUSERS_CONF])? {
         bail!("systemd-sysusers could not create the user nett");
     }
     group_id("nett")?.context("systemd-sysusers did not create the group nett")
@@ -312,6 +407,18 @@ mod tests {
         assert_eq!(group_in(groups, "nett"), Some(997));
         assert_eq!(group_in(groups, "nobody"), None);
         assert_eq!(group_in("nett:x:notanumber:\n", "nett"), None);
+    }
+
+    /// Uninstalling deletes exactly the users the installation declares, found by name
+    #[test]
+    fn the_accounts_are_the_declared_users() {
+        assert_eq!(
+            accounts().collect::<Vec<_>>(),
+            ["nett", "nett-relay", "nett-transport"]
+        );
+        let passwd = "root:x:0:0::/root:/bin/sh\nnett-relay:x:996:996::/var/lib/nett-relay:-\n";
+        assert!(user_in(passwd, "nett-relay"));
+        assert!(!user_in(passwd, "nett"));
     }
 
     #[test]

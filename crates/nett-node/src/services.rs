@@ -55,11 +55,14 @@ pub fn reconcile(_wants: Wants) -> Vec<String> {
     Vec::new()
 }
 
-/// On macOS the services `sudo nett install` writes are the ones this program runs; the transport
-/// service of nett 0.3.11 and its account are removed. nett-node's own service stays as it is.
+/// After an upgrade the launchd configuration follows the program, and what earlier releases placed
+/// goes (design/release.md sections 7 and 8). nett-node keeps running: launchd reads its new
+/// configuration the next time it loads it.
 #[cfg(target_os = "macos")]
 pub fn refresh_units() -> Result<bool, String> {
-    crate::launchd::remove_transport_service().map(|_| false)
+    crate::launchd::remove_transport_service()?;
+    crate::launchd::refresh()?;
+    Ok(false)
 }
 
 /// systemd units on Linux.
@@ -67,8 +70,10 @@ pub fn refresh_units() -> Result<bool, String> {
 mod systemd {
     use std::time::Duration;
 
+    use std::path::Path;
+
     use super::Wants;
-    use crate::platform::linux::{self, RELAY, TRANSPORT, UNITS, Unit};
+    use crate::platform::linux::{self, OPTIONAL, RELAY, TRANSPORT, UNITS, Unit};
 
     /// Time limit of one systemctl call (hard rule 14).
     const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -78,8 +83,9 @@ mod systemd {
         crate::platform::run(program, args, SYSTEMCTL_TIMEOUT)
     }
 
-    /// Enables and starts, or stops and disables, the relay and the transport adapter to match `wants`.
-    /// Returns what it could not do.
+    /// Runs the relay and the transport adapter to match `wants`: one that is wanted gets its unit
+    /// and is enabled and started; one that is not is stopped and disabled, and its unit deleted
+    /// (design/release.md section 8). Returns what it could not do.
     pub fn reconcile(wants: Wants) -> Vec<String> {
         let mut problems = Vec::new();
         for (unit, want) in [(RELAY, wants.relay), (TRANSPORT, wants.transport)] {
@@ -92,32 +98,58 @@ mod systemd {
     }
 
     fn set_running(unit: Unit, want: bool) -> Result<(), String> {
+        let path = unit.path();
+        if want {
+            if std::fs::read(&path).ok().as_deref() != Some(unit.content.as_bytes()) {
+                write_unit(&path, unit.content).map_err(|e| format!("writing {path}: {e}"))?;
+                daemon_reload()?;
+            }
+        } else if !Path::new(&path).exists() {
+            return Ok(());
+        }
         let active = systemctl(&["is-active", "--quiet", unit.name])?;
         let enabled = systemctl(&["is-enabled", "--quiet", unit.name])?;
         let action = match (want, active && enabled, active || enabled) {
-            (true, false, _) => "enable",
-            (false, _, true) => "disable",
-            _ => return Ok(()),
+            (true, false, _) => Some("enable"),
+            (false, _, true) => Some("disable"),
+            _ => None,
         };
-        if systemctl(&[action, "--now", unit.name])? {
+        if let Some(action) = action {
+            if !systemctl(&[action, "--now", unit.name])? {
+                return Err(format!(
+                    "systemctl could not {action} {}; see `journalctl -u {}`",
+                    unit.what, unit.name
+                ));
+            }
             tracing::info!(unit = unit.name, action, "optional service changed");
+        }
+        if !want {
+            std::fs::remove_file(&path).map_err(|e| format!("removing {path}: {e}"))?;
+            daemon_reload()?;
+        }
+        Ok(())
+    }
+
+    fn daemon_reload() -> Result<(), String> {
+        if systemctl(&["daemon-reload"])? {
             Ok(())
         } else {
-            Err(format!(
-                "systemctl could not {action} {}; see `journalctl -u {}`",
-                unit.what, unit.name
-            ))
+            Err("systemctl daemon-reload failed".into())
         }
     }
 
     /// After an upgrade the units may have changed with the program (design/release.md section 7):
     /// rewrites the ones that differ from the embedded copies, reloads systemd, and restarts the changed
-    /// services that are running. Returns whether nett-node's own unit changed: it then exits, and
-    /// systemd starts it again with the new unit.
+    /// services that are running. The relay's and the transport adapter's are only rewritten while
+    /// they exist. Returns whether nett-node's own unit changed: it then exits, and systemd starts it
+    /// again with the new unit.
     pub fn refresh_units() -> Result<bool, String> {
         let mut changed = Vec::new();
         for unit in UNITS {
             let path = unit.path();
+            if OPTIONAL.contains(&unit) && !Path::new(&path).exists() {
+                continue;
+            }
             if std::fs::read(&path).ok().as_deref() == Some(unit.content.as_bytes()) {
                 continue;
             }
@@ -127,9 +159,7 @@ mod systemd {
         if changed.is_empty() {
             return Ok(false);
         }
-        if !systemctl(&["daemon-reload"])? {
-            return Err("systemctl daemon-reload failed".into());
-        }
+        daemon_reload()?;
         let mut own = false;
         for unit in changed {
             tracing::info!(unit = unit.name, "unit updated with the program");

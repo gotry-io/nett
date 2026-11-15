@@ -84,12 +84,17 @@ impl Services for ServiceManager {
             return;
         };
         // They run the same program and, unrestarted, keep the old one until the machine reboots;
-        // try-restart leaves helpers that are not running alone
-        let units = [
-            crate::platform::linux::RELAY.name,
-            crate::platform::linux::TRANSPORT.name,
-        ];
-        let args = ["try-restart", units[0], units[1]];
+        // try-restart leaves helpers that are not running alone. Only installed units are named:
+        // systemctl fails on one that does not exist
+        let units: Vec<&str> = crate::platform::linux::installed_optional()
+            .iter()
+            .map(|u| u.name)
+            .collect();
+        if units.is_empty() {
+            return;
+        }
+        let mut args = vec!["try-restart"];
+        args.extend(&units);
         if !crate::platform::run(systemctl, &args, SERVICE_TIMEOUT).unwrap_or(false) {
             tracing::warn!(
                 ?units,
@@ -383,20 +388,24 @@ fn write_program(path: &Path, bytes: &[u8]) -> Result<(), String> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(io)
 }
 
-/// Replaces the command copy when it is a regular file owned by root in a directory owned by
-/// root: a copy in a directory the user can write (Homebrew) is the user's to upgrade.
-fn replace_command(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Whether the command at `path` is nett's own copy: a regular file owned by root in a directory
+/// owned by root that others cannot write. A link, or a copy in a directory the user can write
+/// (Homebrew), belongs to another installer.
+pub fn own_command(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
-    let Ok(meta) = std::fs::symlink_metadata(path) else {
-        return Ok(());
+    let (Ok(meta), Some(Ok(dir))) = (
+        std::fs::symlink_metadata(path),
+        path.parent().map(std::fs::metadata),
+    ) else {
+        return false;
     };
-    let dir = path.parent().ok_or("no directory")?;
-    let dir_meta = std::fs::metadata(dir).map_err(|e| e.to_string())?;
-    if !meta.file_type().is_file()
-        || meta.uid() != 0
-        || dir_meta.uid() != 0
-        || dir_meta.mode() & 0o022 != 0
-    {
+    meta.file_type().is_file() && meta.uid() == 0 && dir.uid() == 0 && dir.mode() & 0o022 == 0
+}
+
+/// Replaces the command copy when it is nett's own ([`own_command`]): another installer's is the
+/// user's to upgrade.
+fn replace_command(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if !own_command(path) {
         return Ok(());
     }
     let new = path.with_file_name(".nett.new");

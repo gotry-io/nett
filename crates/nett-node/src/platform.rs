@@ -58,6 +58,19 @@ pub mod linux {
         what: "the transport adapter",
     };
     pub const UNITS: [Unit; 4] = [MESH, NODE, RELAY, TRANSPORT];
+    /// The units whose files exist only while the desired state needs them (design/release.md
+    /// section 8).
+    pub const OPTIONAL: [Unit; 2] = [RELAY, TRANSPORT];
+    /// The relay's state directory (`StateDirectory=nett-relay`): its TLS certificate key.
+    pub const RELAY_STATE_DIR: &str = "/var/lib/nett-relay";
+
+    /// The optional units installed now.
+    pub fn installed_optional() -> Vec<Unit> {
+        OPTIONAL
+            .into_iter()
+            .filter(|u| std::path::Path::new(&u.path()).exists())
+            .collect()
+    }
     /// Fixed locations of systemctl (hard rule 9): most distributions use the former, older ones
     /// the latter.
     pub const SYSTEMCTL: [&str; 2] = ["/usr/bin/systemctl", "/bin/systemctl"];
