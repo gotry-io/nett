@@ -69,6 +69,9 @@ impl HubLab<'_> {
 
     pub(super) fn start_hub(&mut self) -> anyhow::Result<()> {
         let listen = format!("{}:{HUB_PORT}", self.hub_ip);
+        // The log continues after the previous start's: only what this start writes counts
+        let log = self.hub_dir.join("hub.log");
+        let from = std::fs::metadata(&log).map_or(0, |m| m.len());
         let child = spawn_in(
             &self.hub_ns,
             &self.hub_bin,
@@ -86,13 +89,19 @@ impl HubLab<'_> {
                 "--releases".as_ref(),
                 "off".as_ref(),
             ],
-            &self.hub_dir.join("hub.log"),
+            &log,
         )?;
         self.hub = Some(child);
-        // Wait for it to start listening: each start writes its log from the beginning
-        let log = self.hub_dir.join("hub.log");
+        let listening = || {
+            std::fs::read(&log).is_ok_and(|t| {
+                let new = t
+                    .get(usize::try_from(from).unwrap_or(usize::MAX)..)
+                    .unwrap_or_default();
+                String::from_utf8_lossy(new).contains("Hub listening")
+            })
+        };
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !std::fs::read_to_string(&log).is_ok_and(|t| t.contains("Hub listening")) {
+        while !listening() {
             if Instant::now() >= deadline {
                 bail!("nett-hub did not start listening; see {}", log.display());
             }
