@@ -233,7 +233,10 @@ jobs:
             -e "s/@SHA256_X86_64_DARWIN@/$(sha x86_64-apple-darwin)/" \
             -e "s/@SHA256_AARCH64_DARWIN@/$(sha aarch64-apple-darwin)/" \
             packaging/install.sh > site/install.sh
-          ! grep -q '@[A-Z0-9_]*@' site/install.sh
+          if grep -q '@[A-Z0-9_]*@' site/install.sh; then
+            echo "install.sh keeps a placeholder" >&2
+            exit 1
+          fi
           cp packaging/site/index.html site/index.html
       - name: Deploy to Cloudflare (static-files-only Worker, packaging/site/wrangler.jsonc)
         env:
