@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A stopping Hub says goodbye to every machine, which tries to connect again after about a second, and records
+  when each was last seen and its disconnection. `nett site status` showed a machine that was online until
+  the Hub restarted as last seen when it had connected, possibly hours before.
+
 ## [0.3.6] - 2026-11-15
 
 - macOS: `nett` is signed with a Developer ID and notarized by Apple. macOS knows it as the same program

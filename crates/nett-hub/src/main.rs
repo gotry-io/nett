@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 use lexopt::ValueExt as _;
-use nett_hub::{api, db, hub, now, random, sha256, tls};
+use nett_hub::{db, hub, now, random, sha256, tls};
 use nett_mesh::key::PrivateKey;
 use nett_proto::token::{Bytes32, LinkCode};
 
@@ -308,39 +308,22 @@ async fn serve(
     .await
     .map_err(anyhow::Error::msg)?;
     follow_releases(hub.clone(), releases.to_owned());
-    let app = api::router(hub);
+    let acceptor = tls
+        .map(|(cert, key)| tls::acceptor(&cert, &key))
+        .transpose()?;
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("listening on {listen}"))?;
-    tracing::info!(%listen, tls = tls.is_some(), "Hub listening");
-    let shutdown = async {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("installing the SIGTERM handler");
+    tracing::info!(%listen, tls = acceptor.is_some(), "Hub listening");
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .context("installing the SIGTERM handler")?;
+    let shutdown = async move {
         tokio::select! {
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
         }
+        tracing::info!("Hub stopping");
     };
-    match tls {
-        // Peer address: the Hub learns the public address of a `public` machine from it
-        // (design/hub.md section 5)
-        None => {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
-            )
-            .with_graceful_shutdown(shutdown)
-            .await?
-        }
-        Some((cert, key)) => {
-            let acceptor = tls::acceptor(&cert, &key)?;
-            axum::serve(
-                tls::TlsListener::new(listener, acceptor),
-                app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
-            )
-            .with_graceful_shutdown(shutdown)
-            .await?;
-        }
-    }
+    nett_hub::serve(listener, acceptor, hub, shutdown).await?;
     Ok(())
 }

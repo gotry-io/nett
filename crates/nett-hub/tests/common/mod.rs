@@ -214,6 +214,15 @@ pub fn cert_fingerprint() -> [u8; 32] {
 
 /// Starts the Hub's HTTPS service and returns its address.
 pub async fn serve(hub: Arc<Hub>) -> String {
+    serve_until(hub, std::future::pending()).await.0
+}
+
+/// Starts the Hub's HTTPS service until `stop` completes; returns its address, and the task that
+/// ends when the Hub has stopped.
+pub async fn serve_until(
+    hub: Arc<Hub>,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind");
@@ -223,16 +232,12 @@ pub async fn serve(hub: Arc<Hub>) -> String {
         &Path::new(DATA).join("test-key.pem"),
     )
     .expect("tls");
-    let app = nett_hub::api::router(hub);
-    tokio::spawn(async move {
-        axum::serve(
-            nett_hub::tls::TlsListener::new(listener, acceptor),
-            app.into_make_service_with_connect_info::<nett_hub::gateway::Peer>(),
-        )
-        .await
-        .ok();
+    let task = tokio::spawn(async move {
+        nett_hub::serve(listener, Some(acceptor), hub, stop)
+            .await
+            .expect("the Hub serves");
     });
-    format!("https://127.0.0.1:{port}")
+    (format!("https://127.0.0.1:{port}"), task)
 }
 
 /// The Hub's identity public key (the private key used by `hub()` is `[200; 32]`).
