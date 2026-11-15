@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-15
+
 - A machine that decides the path to a relay's machine also reaches it through that relay over TLS, which
   hands the packets to WireGuard there. The two stay connected when only TCP passes between them, for
   example when UDP across a border is blocked; before, every path between them crossed that UDP.
