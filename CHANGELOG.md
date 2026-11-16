@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.15] - 2026-11-16
+
 - A member measures its leg to a UDP relay from its WireGuard port, as the tunnel through that relay
   uses it. On a network that drops WireGuard's port toward a relay while other ports pass, the leg
   now shows as down, and the peer no longer moves onto that relay and back every minute or two.
