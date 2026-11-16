@@ -9,6 +9,7 @@ use nett_trust::keys::X25519PublicKey;
 use serde::{Deserialize, Serialize};
 
 use crate::relay::{AssignedMember, AssignmentError, Relay};
+use crate::server::Assignment;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -42,16 +43,22 @@ pub struct MemberDoc {
 
 impl RelayConfig {
     pub fn relay(&self) -> Result<Relay, AssignmentError> {
-        let members: Vec<AssignedMember> = self
-            .members
-            .iter()
-            .map(|m| AssignedMember {
-                public_key: m.public_key,
-                address: m.address,
-                token: m.token,
-            })
-            .collect();
-        let connections: Vec<_> = self.connections.iter().map(|[a, b]| (*a, *b)).collect();
-        Relay::new(&members, &connections)
+        let assignment = self.assignment();
+        Relay::new(&assignment.members, &assignment.connections)
+    }
+
+    pub fn assignment(&self) -> Assignment {
+        Assignment {
+            members: self
+                .members
+                .iter()
+                .map(|m| AssignedMember {
+                    public_key: m.public_key,
+                    address: m.address,
+                    token: m.token,
+                })
+                .collect(),
+            connections: self.connections.iter().map(|[a, b]| (*a, *b)).collect(),
+        }
     }
 }
