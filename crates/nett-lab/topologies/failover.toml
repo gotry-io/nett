@@ -1,5 +1,5 @@
-# Scenarios 1 and 8: a is behind a cone NAT (dial-only) and connects directly to b (public), with
-# additional candidates via the two relays r1 and r2
+# Scenarios 1, 8, 25 and 28: a is behind a cone NAT (dial-only) and connects directly to b
+# (public), with additional candidates via the two relays r1 and r2
 
 [mesh]
 ipv4 = "100.88.0.0/16"

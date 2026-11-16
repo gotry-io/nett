@@ -4,12 +4,16 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A pair that left a path because it was losing packets returns to it only once the path loses
+  almost nothing for about a minute. A lossy path still answers most probes, and a pair went back
+  to it after two replies, often within a second, and left again at the next burst of loss: tens
+  of switches an hour, with most of the time spent on the lossy path.
+
 ## [0.3.16] - 2026-11-16
 
 - A pair moves to a better path, or to a relay much faster than its direct path, after the usual
   30 seconds even when two candidates of the same quality take turns at being the best; each turn
   started the 30 seconds again, so the pair could stay on the worse path.
-
 - `nett status <peer>` shows the current path's round-trip time and loss as the tunnel measures them
   now; for a relay path the candidate table showed the values from before the switch.
 

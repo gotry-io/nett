@@ -48,6 +48,11 @@ const DIRECT_RETURN_RATIO: f64 = 0.85;
 /// to be sustained for [`LOSSY_HOLD`] (ADR 0021).
 const LOSSY_LOSSES: usize = 2;
 const LOSSY_HOLD: Duration = Duration::from_secs(5);
+/// A path of a better type left while losing packets is taken back once at least this many of its
+/// probes since then have results, with at most [`LOSS_RETURN_LOSSES`] lost among the latest of
+/// them: about a minute at one probe a second (section 8.2).
+const LOSS_RETURN_PROBES: u32 = 60;
+const LOSS_RETURN_LOSSES: u32 = 2;
 /// Probe interval of candidates: every 15 seconds when there is traffic; when the current path is not of
 /// the best type, every 1 second for better types; when the current path has clearly degraded, every 3
 /// seconds for candidates of the same type; every 5 minutes when idle.
@@ -265,6 +270,29 @@ struct Candidate {
     /// of the relay say nothing about that leg, so until the peer reports it working the relay is not taken
     /// as recovered (section 8.2).
     beyond: Option<Instant>,
+    /// Left while losing packets: the results of its probes since. A lossy path still answers most
+    /// probes, so a run of replies says nothing about its loss rate (section 8.2).
+    left_for_loss: Option<LossRecord>,
+}
+
+/// Results of a candidate's probes, the latest in the lowest bit (set: lost).
+#[derive(Debug, Clone, Copy, Default)]
+struct LossRecord {
+    lost: u64,
+    results: u32,
+}
+
+impl LossRecord {
+    fn push(&mut self, ok: bool) {
+        self.lost = (self.lost << 1) | u64::from(!ok);
+        self.results = self.results.saturating_add(1);
+    }
+
+    /// Enough results, and few of the latest lost.
+    fn low(&self) -> bool {
+        let latest = self.lost & ((1u64 << LOSS_RETURN_PROBES) - 1);
+        self.results >= LOSS_RETURN_PROBES && latest.count_ones() <= LOSS_RETURN_LOSSES
+    }
 }
 
 impl Candidate {
@@ -283,7 +311,29 @@ impl Candidate {
             grace_used: false,
             far_leg: false,
             beyond: None,
+            left_for_loss: None,
         }
+    }
+
+    fn record_reply(&mut self, rtt: Duration, now: Instant) {
+        self.stats.record_reply(rtt);
+        self.last_reply = Some(now);
+        self.healthy_since.get_or_insert(now);
+        if let Some(r) = &mut self.left_for_loss {
+            r.push(true);
+        }
+    }
+
+    fn record_loss(&mut self) {
+        self.stats.record_loss();
+        if let Some(r) = &mut self.left_for_loss {
+            r.push(false);
+        }
+    }
+
+    /// Not left while losing packets, or its loss has been measured low since.
+    fn loss_recovered(&self) -> bool {
+        self.left_for_loss.is_none_or(|r| r.low())
     }
 
     /// A path through this relay broke beyond it within [`FAILURE_MEMORY`], and the peer has not
@@ -844,21 +894,18 @@ impl PeerPaths {
         // will not later time out and interrupt the run of consecutive replies
         for _ in 0..pos {
             c.outstanding.pop_front();
-            c.stats.record_loss();
+            c.record_loss();
         }
         let (_, sent) = c.outstanding.pop_front().expect("position is in range");
         c.far_leg = extra.is_some();
         let (extra_rtt, extra_loss) = extra.unwrap_or((Duration::ZERO, 0.0));
         if extra_loss >= 1.0 {
             // The other leg is down: the relay path as a whole is down
-            c.stats.record_loss();
+            c.record_loss();
             c.healthy_since = None;
             return;
         }
-        c.stats
-            .record_reply(now.saturating_duration_since(sent) + extra_rtt);
-        c.last_reply = Some(now);
-        c.healthy_since.get_or_insert(now);
+        c.record_reply(now.saturating_duration_since(sent) + extra_rtt, now);
     }
 
     /// Called about every 100 ms. `active` means this peer has had traffic in the last 30 seconds.
@@ -992,6 +1039,7 @@ impl PeerPaths {
     fn fast_recovery(&self, index: usize, now: Instant) -> bool {
         let c = &self.candidates[index];
         c.kind < self.current_kind()
+            && c.left_for_loss.is_none()
             && c.left_at
                 .is_some_and(|t| now.saturating_duration_since(t) < FAST_RECOVERY_WINDOW)
             && backoff(&c.failures, now).is_zero()
@@ -1019,7 +1067,7 @@ impl PeerPaths {
             } else {
                 FAST_RECOVERY_INTERVAL
             }
-        } else if better && first_reply {
+        } else if better && first_reply && c.left_for_loss.is_none() {
             // A better-type candidate just got a reply: probe once more soon to confirm, without waiting for the
             // next interval
             CONFIRM_INTERVAL
@@ -1068,7 +1116,7 @@ impl PeerPaths {
                     break;
                 }
                 c.outstanding.pop_front();
-                c.stats.record_loss();
+                c.record_loss();
                 c.healthy_since = None;
             }
         }
@@ -1253,7 +1301,8 @@ impl PeerPaths {
                     .zip(current_score)
                     .is_some_and(|(direct, relay)| direct * DIRECT_RETURN_RATIO <= relay)
         };
-        // Better type: 2 consecutive replies, and the backoff after failure is satisfied
+        // Better type: 2 consecutive replies, the backoff after failure is satisfied, and a path left
+        // while losing packets has measured low loss since
         let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
             *i != self.current
                 && c.kind < current_kind
@@ -1261,6 +1310,7 @@ impl PeerPaths {
                 && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                 && c.healthy_since
                     .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
+                && c.loss_recovered()
                 && returns(c)
         });
         if let Some((i, _)) = better_type {
@@ -1369,7 +1419,15 @@ impl PeerPaths {
         let from = self.candidates[self.current].route;
         let to = self.candidates[target].route;
         let old_rtt_ms = self.tunnel.rtt_ms();
+        // Left because of its loss, whichever rule chose the new path: a better score held on a path
+        // losing probes includes their penalty
+        let losing = self.tunnel.loss_rate() > 0.0;
+        if reason == SwitchReason::HighLoss || (reason == SwitchReason::BetterScore && losing) {
+            self.candidates[self.current].left_for_loss = Some(LossRecord::default());
+        }
         self.current = target;
+        // Its loss is measured in the tunnel from here on
+        self.candidates[target].left_for_loss = None;
         // The new path's loss is counted from scratch: the candidate's window may still hold the loss from
         // during its failure; the round-trip time carries over from the candidate's measurement as the
         // starting point
@@ -1458,6 +1516,9 @@ mod tests {
         one_way: Vec<bool>,
         /// In-tunnel probes and candidate probes each drop 1 in every n (0 means no drops).
         drop_every: Vec<u32>,
+        /// Probes of both kinds are lost at random with this probability, from a fixed seed.
+        loss: Vec<f64>,
+        rng: u64,
         sent: Vec<u32>,
         /// Counts of in-tunnel probes and candidate probes on each path, used to drop packets per `drop_every`.
         sent_by_kind: Vec<[u32; 2]>,
@@ -1508,6 +1569,8 @@ mod tests {
                 queue: vec![Duration::ZERO; n],
                 one_way: vec![false; n],
                 drop_every: vec![0; n],
+                loss: vec![0.0; n],
+                rng: 0x9e37_79b9_7f4a_7c15,
                 sent: vec![0; n],
                 sent_by_kind: vec![[0; 2]; n],
                 tunnel_broken: vec![false; n],
@@ -1653,7 +1716,16 @@ mod tests {
             self.sent[i] += 1;
             let n = &mut self.sent_by_kind[i][usize::from(tunnel)];
             *n += 1;
-            self.up[i] && (self.drop_every[i] == 0 || !n.is_multiple_of(self.drop_every[i]))
+            let dropped = self.drop_every[i] != 0 && n.is_multiple_of(self.drop_every[i]);
+            self.up[i] && !dropped && !(self.loss[i] > 0.0 && self.random() < self.loss[i])
+        }
+
+        /// xorshift64: uniform in [0, 1).
+        fn random(&mut self) -> f64 {
+            self.rng ^= self.rng << 13;
+            self.rng ^= self.rng >> 7;
+            self.rng ^= self.rng << 17;
+            (self.rng >> 11) as f64 / (1u64 << 53) as f64
         }
     }
 
@@ -1742,6 +1814,55 @@ mod tests {
         // window after about 7 seconds, then another 3 seconds
         let took = at.saturating_duration_since(lossy);
         assert!(took <= Duration::from_secs(12), "took {took:?}");
+    }
+
+    /// A direct path losing 15% at random goes over the failure rate now and then. It still answers
+    /// most probes, so it is taken back only once its loss has been low for a minute of probes, not
+    /// after two replies in a row (design/mesh.md section 8.2).
+    #[test]
+    fn a_path_left_for_loss_returns_once_its_loss_is_low() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(10));
+        sim.loss[0] = 0.15;
+        sim.run(Duration::from_secs(20 * 60));
+        let reasons: Vec<_> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(
+            reasons,
+            [(relay(1), SwitchReason::HighLoss)],
+            "{:?}",
+            sim.switches
+        );
+        let clean = sim.now;
+        sim.loss[0] = 0.0;
+        sim.run(Duration::from_secs(120));
+        let back = sim.switches.last().expect("switches");
+        assert_eq!((back.1, back.3), (direct(), SwitchReason::BetterType));
+        let took = back.0.saturating_duration_since(clean);
+        assert!(took <= Duration::from_secs(70), "took {took:?}");
+    }
+
+    /// With both legs of the relay reported, the loss also makes direct score far worse than the
+    /// relay, and the rule for a much faster relay may leave it first; the way back is held the same.
+    #[test]
+    fn a_path_left_for_a_faster_relay_while_lossy_is_held_too() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.far_leg[1] = Some(Duration::ZERO);
+        sim.run(Duration::from_secs(10));
+        sim.loss[0] = 0.15;
+        sim.run(Duration::from_secs(20 * 60));
+        let left = sim.switches.first().expect("left direct");
+        assert_eq!(left.1, relay(1), "{:?}", sim.switches);
+        assert!(
+            !sim.switches.iter().any(|s| s.1 == direct()),
+            "{:?}",
+            sim.switches
+        );
     }
 
     #[test]
