@@ -27,6 +27,10 @@ pub const PUNCH_PROPOSAL: u8 = 0x86;
 pub const PUNCH_ACK: u8 = 0x87;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 
+/// Probe messages that arrive on the WireGuard port (design/mesh.md section 7.1): a peer's direct probe
+/// and the replies to this machine's direct and UDP relay probes, each [`OUTER_LEN`] bytes long.
+pub const WG_PORT_MESSAGES: [u8; 3] = [DIRECT_PROBE, DIRECT_REPLY, RELAY_REPLY];
+
 /// WireGuard's cookie reply: type and length (WireGuard protocol). The mesh process gets a copy of it from
 /// the WireGuard port, and from it learns that the peer is under load and WireGuard will retry with the
 /// cookie (design/mesh.md section 8.4).

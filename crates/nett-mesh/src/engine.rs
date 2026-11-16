@@ -233,7 +233,7 @@ impl<D: DataPlane> Engine<D> {
         &self.members
     }
 
-    /// Opens the sockets used for probing through the data plane at runtime ([`DataPlane::direct_probes`],
+    /// Opens the sockets used for probing through the data plane at runtime ([`DataPlane::wg_port_probes`],
     /// [`DataPlane::bind_tunnel`]).
     pub fn dataplane_mut(&mut self) -> &mut D {
         &mut self.dataplane

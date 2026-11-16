@@ -97,24 +97,24 @@ pub enum DataPlaneError {
     Worker(&'static str),
 }
 
-/// Sends direct probes with the WireGuard port as the source port (design/mesh.md section 7.1), going
-/// through WireGuard's own NAT mapping.
-pub trait DirectSend: Send {
+/// Sends probes with the WireGuard port as the source port (design/mesh.md section 7.1): direct probes
+/// and probes of UDP relays, going through WireGuard's own NAT mapping.
+pub trait WgPortSend: Send {
     fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()>;
 }
 
-/// Copies of direct probes and cookie replies received on the WireGuard port.
-pub trait DirectRecv: Send {
+/// Copies of probe messages and cookie replies received on the WireGuard port.
+pub trait WgPortRecv: Send {
     /// A batch of (source address, UDP payload). Waits at most half a second and returns empty on timeout:
     /// the caller uses this to periodically check whether it should exit.
     fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>>;
 }
 
-/// Direct probes on the WireGuard port: the sending end goes to the thread that hosts the engine, the
+/// Probes on the WireGuard port: the sending end goes to the thread that hosts the engine, the
 /// receiving end goes to the receive thread.
-pub struct DirectProbes {
-    pub send: Box<dyn DirectSend>,
-    pub recv: Box<dyn DirectRecv>,
+pub struct WgPortProbes {
+    pub send: Box<dyn WgPortSend>,
+    pub recv: Box<dyn WgPortRecv>,
 }
 
 /// Current state of a peer on the interface.
@@ -190,17 +190,17 @@ pub trait DataPlane: Send {
     /// (design/mesh.md section 10).
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
 
-    /// Opens sending and receiving of direct probes on the WireGuard port. Called once after the interface is
+    /// Opens sending and receiving of probes on the WireGuard port. Called once after the interface is
     /// ready.
-    fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError>;
+    fn wg_port_probes(&mut self, listen_port: u16) -> Result<WgPortProbes, DataPlaneError>;
 
     /// A socket bound to this machine's mesh address that sends and receives only through the mesh interface
     /// (in-tunnel probes, design/mesh.md section 7).
     fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket>;
 
-    /// A dual-stack socket toward the underlying network (probes to relays). On macOS it binds the physical
-    /// interface carrying the default route and does not go through the proxy app's TUN (design/userspace.md
-    /// section 6.2).
+    /// A dual-stack socket toward the underlying network (probes to TLS relays through the transport's
+    /// loopback ports). On macOS it binds the physical interface carrying the default route and does not go
+    /// through the proxy app's TUN (design/userspace.md section 6.2).
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
 
     /// Index of the interface the underlay sockets are bound to now; `None` where the routing table

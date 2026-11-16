@@ -4,9 +4,9 @@
 //! one measurement).
 //!
 //! Sockets: the probe port on the mesh address (sends and receives only packets that pass through the
-//! mesh interface); probes to relays are sent from the mesh process's own port; direct probes are sent
-//! and received with the WireGuard port as the source port, provided by the data plane
-//! ([`DataPlane::direct_probes`]).
+//! mesh interface); probes to TLS relays are sent from the mesh process's own port to the transport's
+//! loopback ports; direct probes and probes of UDP relays are sent and received with the WireGuard port
+//! as the source port, provided by the data plane ([`DataPlane::wg_port_probes`]).
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::coord::{Coordinator, Inbound};
-use crate::dataplane::{DataPlane, DirectProbes, DirectSend};
+use crate::dataplane::{DataPlane, WgPortProbes, WgPortSend};
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
 use crate::path::FAST_RECOVERY_INTERVAL;
@@ -263,8 +263,8 @@ impl Runtime {
 struct Sockets {
     tunnel_v4: UdpSocket,
     tunnel_v6: UdpSocket,
-    relay: UdpSocket,
-    direct: Box<dyn DirectSend>,
+    transport: UdpSocket,
+    wg_port: Box<dyn WgPortSend>,
 }
 
 /// Queries local status through the background thread's queue, and triggers a re-read through the party
@@ -406,18 +406,18 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         };
         let tunnel_v4 = tunnel(addrs.iter().find(|a| a.is_ipv4()))?;
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;
-        let relay = dataplane.bind_underlay(0)?;
-        let DirectProbes {
-            send: direct,
+        let transport = dataplane.bind_underlay(0)?;
+        let WgPortProbes {
+            send: wg_port,
             recv: mut log,
         } = dataplane
-            .direct_probes(listen_port)
+            .wg_port_probes(listen_port)
             .map_err(std::io::Error::other)?;
 
         for (socket, kind) in [
             (tunnel_v4.try_clone()?, Incoming::Tunnel),
             (tunnel_v6.try_clone()?, Incoming::Tunnel),
-            (relay.try_clone()?, Incoming::Relay),
+            (transport.try_clone()?, Incoming::Transport),
         ] {
             socket.set_read_timeout(Some(RECV_TIMEOUT))?;
             let (tx, stop, dropped) = (self.tx.clone(), self.stop.clone(), self.dropped.clone());
@@ -435,7 +435,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
             while !stop.load(Ordering::Relaxed) {
                 if let Ok(probes) = log.recv() {
                     for (from, data) in probes {
-                        forward(&tx, &dropped, Incoming::Direct, from, data);
+                        forward(&tx, &dropped, Incoming::WgPort, from, data);
                     }
                 }
             }
@@ -443,8 +443,8 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         Ok(Sockets {
             tunnel_v4,
             tunnel_v6,
-            relay,
-            direct,
+            transport,
+            wg_port,
         })
     }
 
@@ -464,8 +464,10 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                     };
                     socket.send_to(&data, to).map(drop)
                 }
-                Outgoing::Relay { to, data } => s.relay.send_to(&data, map_v6(to)).map(drop),
-                Outgoing::Direct { to, data } => s.direct.send(to, &data),
+                Outgoing::Transport { to, data } => {
+                    s.transport.send_to(&data, map_v6(to)).map(drop)
+                }
+                Outgoing::WgPort { to, data } => s.wg_port.send(to, &data),
                 Outgoing::Hub { peer, data } => {
                     self.coordinator.send(&peer, &data);
                     Ok(())

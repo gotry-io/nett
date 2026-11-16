@@ -17,7 +17,7 @@ use super::Tun;
 use super::plane::{Action, Plane, UnknownPeer};
 use super::session::{Sessions, TIMER_TICK};
 use crate::access::FilterSpec;
-use crate::dataplane::{DataPlaneError, DirectRecv, DirectSend, PeerSpec, PeerStat};
+use crate::dataplane::{DataPlaneError, PeerSpec, PeerStat, WgPortRecv, WgPortSend};
 
 /// Upper limit of the control command queue.
 const COMMANDS: usize = 64;
@@ -28,10 +28,10 @@ const COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const BATCH: usize = 64;
 /// Receive buffer: the maximum length of a UDP datagram or IP packet.
 const MAX_PACKET: usize = 65_535;
-/// Upper limit of the queue of direct probes handed to the engine; when full they are dropped (affecting
+/// Upper limit of the queue of probe messages handed to the engine; when full they are dropped (affecting
 /// only one measurement).
 const PROBES: usize = 256;
-/// Upper limit on the wait of [`DirectRecv::recv`].
+/// Upper limit on the wait of [`WgPortRecv::recv`].
 const PROBE_WAIT: Duration = Duration::from_millis(500);
 
 pub(super) enum Command {
@@ -58,7 +58,7 @@ pub(super) struct Worker {
 }
 
 impl Worker {
-    /// Starts the data plane thread. `socket` is the WireGuard port's socket (non-blocking); direct probes and
+    /// Starts the data plane thread. `socket` is the WireGuard port's socket (non-blocking); probe messages and
     /// cookie copies are put into the returned receiver.
     pub(super) fn spawn<S, T>(
         plane: Plane<S>,
@@ -127,10 +127,10 @@ impl Drop for Worker {
     }
 }
 
-/// Direct probes and cookie copies the data plane thread hands to the engine.
+/// Probe messages and cookie copies the data plane thread hands to the engine.
 pub(super) struct ProbeQueue(Receiver<(SocketAddr, Vec<u8>)>);
 
-impl DirectRecv for ProbeQueue {
+impl WgPortRecv for ProbeQueue {
     fn recv(&mut self) -> io::Result<Vec<(SocketAddr, Vec<u8>)>> {
         let first = match self.0.recv_timeout(PROBE_WAIT) {
             Ok(first) => first,
@@ -148,12 +148,12 @@ impl DirectRecv for ProbeQueue {
     }
 }
 
-/// Sends direct probes from the WireGuard port: shares the same socket with the data plane thread.
+/// Sends probes from the WireGuard port: shares the same socket with the data plane thread.
 pub(super) struct ProbeSender {
     pub(super) socket: UdpSocket,
 }
 
-impl DirectSend for ProbeSender {
+impl WgPortSend for ProbeSender {
     fn send(&self, to: SocketAddr, data: &[u8]) -> io::Result<()> {
         let v6 = self.socket.local_addr()?.is_ipv6();
         self.socket.send_to(data, outgoing(to, v6)).map(drop)

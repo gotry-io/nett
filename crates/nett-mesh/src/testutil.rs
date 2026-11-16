@@ -17,7 +17,7 @@ use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
 use crate::dataplane::{
-    DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
+    DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, PeerSpec, PeerStat, WgPortProbes,
 };
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
@@ -386,7 +386,7 @@ impl DataPlane for FakeDataPlane {
         Ok(())
     }
 
-    fn direct_probes(&mut self, _listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
+    fn wg_port_probes(&mut self, _listen_port: u16) -> Result<WgPortProbes, DataPlaneError> {
         Err(DataPlaneError::Unsupported(
             "direct probes in the fake data plane",
         ))

@@ -1,6 +1,7 @@
-# Scenario 26: a is behind a cone NAT (dial-only), b is on the "public network"; between them there
-# are only paths through relays: r1 over UDP and over TLS, and r2 over TLS. The scenario cuts the UDP
-# between the relay in use and b, while that relay still answers a's probes.
+# Scenarios 26 and 27: a is behind a cone NAT (dial-only), b is on the "public network"; between them
+# there are only paths through relays: r1 over UDP and over TLS, and r2 over TLS. Scenario 26 cuts the
+# UDP between the relay in use and b, while that relay still answers a's probes; scenario 27 drops
+# what leaves b's WireGuard port toward r1, while b's other ports reach it.
 
 [mesh]
 ipv4 = "100.88.0.0/16"
