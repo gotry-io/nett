@@ -235,11 +235,35 @@ pub fn connect(to: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How long the senders of the long-lived connection and the bulk transfer keep trying to connect.
+/// Scenarios start them once the mesh has configured the peer, which can be seconds before the path
+/// carries traffic; each attempt waits [`CONNECT_ATTEMPT`], so a new SYN goes out every attempt
+/// instead of at TCP's doubling retransmission intervals.
+const CONNECT_LIMIT: Duration = Duration::from_secs(90);
+const CONNECT_ATTEMPT: Duration = Duration::from_secs(2);
+
+/// Connects to `to`, trying again until `limit` has passed.
+fn connect_retrying(to: SocketAddr, limit: Duration) -> anyhow::Result<TcpStream> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        let started = std::time::Instant::now();
+        match TcpStream::connect_timeout(&to, CONNECT_ATTEMPT) {
+            Ok(stream) => return Ok(stream),
+            Err(e) if started + CONNECT_ATTEMPT >= deadline => {
+                return Err(e).with_context(|| format!("connecting to {to} for {limit:?}"));
+            }
+            // A refusal or a missing route returns at once: wait out the attempt
+            Err(_) => std::thread::sleep(
+                (started + CONNECT_ATTEMPT).saturating_duration_since(std::time::Instant::now()),
+            ),
+        }
+    }
+}
+
 /// Sender of the long-lived connection: keeps writing after connecting, until an error occurs or
 /// the process is killed. On error it exits non-zero and writes the reason to standard error.
 pub fn tcp_source(to: SocketAddr) -> anyhow::Result<()> {
-    let mut stream =
-        TcpStream::connect_timeout(&to, Duration::from_secs(10)).context("connecting")?;
+    let mut stream = connect_retrying(to, CONNECT_LIMIT)?;
     stream.set_nodelay(true)?;
     let chunk = vec![0x5au8; TCP_CHUNK];
     let mut next = std::time::Instant::now();
@@ -314,8 +338,7 @@ fn bulk_fill(offset: u64, buf: &mut [u8]) {
 /// Sender of the bulk transfer: after connecting, writes `bytes` bytes, closes the write direction,
 /// and waits for the receiver to close the connection.
 pub fn bulk_send(to: SocketAddr, bytes: u64) -> anyhow::Result<()> {
-    let mut stream =
-        TcpStream::connect_timeout(&to, Duration::from_secs(10)).context("connecting")?;
+    let mut stream = connect_retrying(to, CONNECT_LIMIT)?;
     let mut buf = vec![0u8; BULK_CHUNK];
     let mut sent: u64 = 0;
     while sent < bytes {
@@ -445,6 +468,20 @@ pub fn tcp_stats(file: &Path, from_ms: u64, to_ms: u64) -> anyhow::Result<TcpSta
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sender_connects_once_its_receiver_appears() {
+        let addr = TcpListener::bind("127.0.0.1:0")
+            .and_then(|l| l.local_addr())
+            .expect("free port");
+        let receiver = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2500));
+            let listener = TcpListener::bind(addr).expect("binding the receiver");
+            listener.accept().map(drop)
+        });
+        assert!(connect_retrying(addr, Duration::from_secs(20)).is_ok());
+        receiver.join().expect("receiver").expect("accepted");
+    }
 
     #[test]
     fn bulk_content_does_not_depend_on_chunking() {
