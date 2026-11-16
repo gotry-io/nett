@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.17] - 2026-11-16
+
 - A pair that left a path because it was losing packets returns to it only once the path loses
   almost nothing for about a minute. A lossy path still answers most probes, and a pair went back
   to it after two replies, often within a second, and left again at the next burst of loss: tens
