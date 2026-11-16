@@ -552,11 +552,18 @@ impl PeerPaths {
     }
 
     /// Measurements and state of each candidate path, including the current one (design/status.md section 6).
+    /// The current one shows the tunnel's measurement: a relay carrying the tunnel is no longer probed as a
+    /// candidate.
     pub fn candidate_views(&self, now: Instant) -> Vec<CandidateView> {
         self.candidates
             .iter()
             .enumerate()
             .map(|(i, c)| {
+                let stats = if i == self.current {
+                    &self.tunnel
+                } else {
+                    &c.stats
+                };
                 let state = if i == self.current {
                     CandidateState::Current
                 } else if c.first_probe.is_none() {
@@ -571,8 +578,8 @@ impl PeerPaths {
                 CandidateView {
                     route: c.route,
                     kind: c.kind,
-                    rtt_ms: c.stats.rtt_ms(),
-                    loss: c.stats.measured_loss(),
+                    rtt_ms: stats.rtt_ms(),
+                    loss: stats.measured_loss(),
                     state,
                     punched: self.punched == Some(i),
                 }
@@ -1656,6 +1663,29 @@ mod tests {
     /// transport shares that leg, so the switch goes to another relay even when it is much slower, and
     /// the peer's report of the leg through the new tunnel keeps the pair there (design/mesh.md
     /// section 8.2).
+    /// The current path's row in status shows what the tunnel measures on it now: a relay is no
+    /// longer probed as a candidate once it carries the tunnel, so its candidate measurement would
+    /// stay at the value from before the switch (design/status.md section 6).
+    #[test]
+    fn the_current_candidate_shows_the_tunnels_measurement() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.rtt = vec![10 * MS, 50 * MS];
+        sim.run(Duration::from_secs(5));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        assert_eq!(sim.paths.current, 1, "{:?}", sim.switches);
+        sim.rtt[1] = 150 * MS;
+        sim.run(Duration::from_secs(30));
+        let view = &sim.paths.candidate_views(sim.now)[1];
+        assert_eq!(view.state, CandidateState::Current);
+        let rtt = view.rtt_ms.expect("measured");
+        assert!((140.0..=170.0).contains(&rtt), "{rtt}");
+        assert_eq!(view.loss, Some(0.0));
+    }
+
     #[test]
     fn a_break_beyond_a_relay_moves_to_another_relay() {
         let tls = |n: u8| Route::Relay {
