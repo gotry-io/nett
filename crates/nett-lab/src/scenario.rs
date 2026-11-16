@@ -17,11 +17,13 @@ use crate::topology::Topology;
 mod faster_relay;
 mod hub;
 mod hub_relay;
+mod lossy_direct;
 mod port_block;
 mod throughput;
 pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;
+pub use lossy_direct::lossy_direct;
 pub use port_block::relay_port_block;
 pub use throughput::throughput;
 
@@ -210,6 +212,18 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
         }
     }
     out
+}
+
+/// The path switches a node reported from `from_ms` on: `(to, reason)`.
+fn switches_since(node: &LabNode, from_ms: u64) -> Vec<(String, String)> {
+    events(node)
+        .into_iter()
+        .filter(|e| e["event"] == "path_switched" && e["at_ms"].as_u64() >= Some(from_ms))
+        .map(|e| {
+            let text = |key: &str| e[key].as_str().unwrap_or_default().to_owned();
+            (text("to"), text("reason"))
+        })
+        .collect()
 }
 
 fn count(events: &[Value], kind: &str) -> usize {

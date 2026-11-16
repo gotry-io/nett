@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::Context as _;
 
 use super::{
-    LabNode, PathMonitor, Report, count, diagnose, events, settle_on_relay, start, start_workload,
+    PathMonitor, Report, count, diagnose, settle_on_relay, start, start_workload, switches_since,
     wait_for, write_report,
 };
 use crate::material;
@@ -20,18 +20,6 @@ use crate::topology::Topology;
 /// that looks healthy is tried again within seconds of leaving it, and more slowly after each
 /// failure; this window holds several such attempts.
 const WATCH: Duration = Duration::from_secs(90);
-
-/// The path switches a reported from `from_ms` on: `(to, reason)`.
-fn switches_since(node: &LabNode, from_ms: u64) -> Vec<(String, String)> {
-    events(node)
-        .into_iter()
-        .filter(|e| e["event"] == "path_switched" && e["at_ms"].as_u64() >= Some(from_ms))
-        .map(|e| {
-            let text = |key: &str| e[key].as_str().unwrap_or_default().to_owned();
-            (text("to"), text("reason"))
-        })
-        .collect()
-}
 
 pub fn relay_port_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
