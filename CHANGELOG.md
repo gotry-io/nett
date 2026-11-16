@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.16] - 2026-11-16
+
 - A pair moves to a better path, or to a relay much faster than its direct path, after the usual
   30 seconds even when two candidates of the same quality take turns at being the best; each turn
   started the 30 seconds again, so the pair could stay on the worse path.
