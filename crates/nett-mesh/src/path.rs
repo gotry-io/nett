@@ -443,9 +443,11 @@ pub struct PeerPaths {
     /// The number of rounds waited because of a cookie reply since switching to the current path.
     cookie_rounds: u32,
     high_loss_since: Option<Instant>,
-    better_since: Option<(usize, Instant)>,
-    /// A UDP relay much faster than the current direct path, and since when (section 8.2).
-    faster_since: Option<(usize, Instant)>,
+    /// Since when a better path of the same type has existed without a break (section 8.2).
+    better_since: Option<Instant>,
+    /// Since when a UDP relay much faster than the current direct path has existed without a break
+    /// (section 8.2).
+    faster_since: Option<Instant>,
     /// The current relay was chosen for being much faster than direct: it returns to direct by its own
     /// rule, not as soon as direct answers.
     on_faster_relay: bool,
@@ -1286,26 +1288,27 @@ impl PeerPaths {
             })
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(i, _)| i);
-        match (better, self.better_since) {
-            (Some(i), Some((j, since))) if i == j => {
-                // The current path has noticeable loss and the candidate replies consecutively: no need to wait 30
-                // seconds
-                let hold = if self.lossy()
-                    && self.candidates[i].stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
-                {
-                    LOSSY_HOLD
-                } else {
-                    SAME_TYPE_HOLD
-                };
-                if now.saturating_duration_since(since) >= hold {
-                    let faster = self.on_faster_relay;
-                    let action = self.decide(i, SwitchReason::BetterScore, now);
-                    self.on_faster_relay = faster;
-                    return Some(action);
-                }
-            }
-            (Some(i), _) => self.better_since = Some((i, now)),
-            (None, _) => self.better_since = None,
+        // The hold is on the improvement: candidates of the same quality take turns at being the best, and the
+        // switch goes to the best one when the hold ends
+        let Some(i) = better else {
+            self.better_since = None;
+            return None;
+        };
+        let since = *self.better_since.get_or_insert(now);
+        // The current path has noticeable loss and the candidate replies consecutively: no need to wait 30
+        // seconds
+        let hold = if self.lossy()
+            && self.candidates[i].stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
+        {
+            LOSSY_HOLD
+        } else {
+            SAME_TYPE_HOLD
+        };
+        if now.saturating_duration_since(since) >= hold {
+            let faster = self.on_faster_relay;
+            let action = self.decide(i, SwitchReason::BetterScore, now);
+            self.on_faster_relay = faster;
+            return Some(action);
         }
         None
     }
@@ -1345,24 +1348,19 @@ impl PeerPaths {
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(i, _)| i)
         });
-        match (faster, self.faster_since) {
-            (Some(i), Some((j, since)))
-                if i == j && now.saturating_duration_since(since) >= FASTER_RELAY_HOLD =>
-            {
-                let action = self.decide(i, SwitchReason::BetterScore, now);
-                self.on_faster_relay = true;
-                Some(action)
-            }
-            (Some(i), Some((j, _))) if i == j => None,
-            (Some(i), _) => {
-                self.faster_since = Some((i, now));
-                None
-            }
-            (None, _) => {
-                self.faster_since = None;
-                None
-            }
+        // Held while some relay qualifies, whichever is the fastest at the moment (relays of the same quality
+        // take turns); the switch goes to the fastest when the hold ends
+        let Some(i) = faster else {
+            self.faster_since = None;
+            return None;
+        };
+        let since = *self.faster_since.get_or_insert(now);
+        if now.saturating_duration_since(since) < FASTER_RELAY_HOLD {
+            return None;
         }
+        let action = self.decide(i, SwitchReason::BetterScore, now);
+        self.on_faster_relay = true;
+        Some(action)
     }
 
     fn switch_to(&mut self, target: usize, reason: SwitchReason, now: Instant) -> Action {
@@ -2215,6 +2213,57 @@ mod tests {
         // Direct still answers, but it is not close enough to win back the pair
         sim.run(Duration::from_secs(60));
         assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+    }
+
+    /// Two relays of the same quality take turns at being the fastest by a fraction of a millisecond:
+    /// the hold is on the condition, so the pair still moves after it, to whichever is fastest then
+    /// (design/prototype.md scenario 25, which two equal relays failed now and then).
+    #[test]
+    fn two_equally_fast_relays_do_not_restart_the_hold() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+        ]);
+        sim.rtt = vec![250 * MS, 146 * MS, 144 * MS];
+        sim.far_leg = vec![None, Some(Duration::ZERO), Some(Duration::ZERO)];
+        // Relay candidates are probed every 15 seconds, and each round the two averages cross, with
+        // the same jitter: 146 / 144 ms, then 144 / 146, then 146 / 144 ...
+        for second in 0..90 {
+            let (a, b) = match second / 15 {
+                0 => (146, 144),
+                w if w % 2 == 1 => (138, 152),
+                _ => (152, 138),
+            };
+            sim.rtt[1] = a * MS;
+            sim.rtt[2] = b * MS;
+            sim.run(Duration::from_secs(1));
+        }
+        let (_, to, _, reason) = *sim.switches.first().expect("moved to a relay");
+        assert!(to == relay(1) || to == relay(2), "{to:?}");
+        assert_eq!(reason, SwitchReason::BetterScore);
+    }
+
+    /// Two candidates of the current type are both much better and take turns at being the best:
+    /// the 30-second hold is on the improvement, not on one of them.
+    #[test]
+    fn two_equally_better_paths_do_not_restart_the_hold() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay(2), PathKind::Relay),
+            (relay(3), PathKind::Relay),
+        ]);
+        sim.run(Duration::from_secs(20));
+        sim.rtt[0] = 80 * MS;
+        for second in 0..90 {
+            let (a, b) = if second % 2 == 0 { (2, 3) } else { (3, 2) };
+            sim.rtt[1] = a * MS;
+            sim.rtt[2] = b * MS;
+            sim.run(Duration::from_secs(1));
+        }
+        let (_, to, _, reason) = *sim.switches.first().expect("moved to a better relay");
+        assert!(to == relay(2) || to == relay(3), "{to:?}");
+        assert_eq!(reason, SwitchReason::BetterScore);
     }
 
     #[test]
