@@ -17,6 +17,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo deny --locked check
+scripts/check-failure-classes.sh
 ```
 
 - The Hub's SQL queries are checked at compile time against the offline data in `.sqlx/`. After changing a query or a migration, regenerate it with `cargo sqlx prepare --workspace` against a database created from `crates/nett-hub/migrations/`.
@@ -32,7 +33,7 @@ cargo deny --locked check
 
 ## Pull requests
 
-- One change per pull request, with tests for changed behavior; a bug fix starts with a test that reproduces the bug.
+- One change per pull request, with tests for changed behavior; a bug fix starts with a test that reproduces the bug, and lists it under the bug's class in [docs/failure-classes.md](docs/failure-classes.md).
 - Commit messages: `type(scope): description` (types `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `build`, `ci`, `chore`; scopes such as `hub`, `node`, `mesh`, `cli`, `proto`).
 - New dependencies need a reason, a note on binary size and, for code that runs on nodes, memory use. Allowed licenses are listed in `deny.toml`.
 - Everything in the repository is written in English.

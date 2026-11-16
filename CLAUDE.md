@@ -109,6 +109,7 @@ A bug, an error log line, slowness or a piece of feedback: understand it first, 
 4. **Its class**: the mechanism behind it, and every other place that shares the mechanism (other platform backends, other transports).
 5. **Fix it once at the root**: remove the whole class with one general mechanism; if a dependency can be removed, remove it instead of handling it; check against the hard rules and "each piece of knowledge has one source".
 6. **Then change it**: explain the problem, cause, class, the options and a recommendation, with evidence; changes that affect the design get the user's confirmation first.
+7. **Record it in its class**: the test that reproduced the problem stays, and is listed under the problem's class in `docs/failure-classes.md` (a new class only when no class's mechanism covers it); when a class gains a place, check whether one general mechanism can replace its places. What happened (machines, symptoms, timeline, version) goes in `private/incidents.md`. Before each minor version, review every class: merge classes that share a mechanism, and give each item not yet guarded a test or a reason. A guard runs in CI, or it does not guard.
 
 ## Working with the user
 
@@ -134,6 +135,7 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-features --locked
 cargo deny --locked check        # licenses, advisories, duplicate dependencies, sources; configured in deny.toml
+scripts/check-failure-classes.sh # every guard in docs/failure-classes.md exists and runs in CI
 ```
 
 Lab scenarios (Linux, needs root; `nett` is built with the `lab` feature; scenarios and pass criteria are in design/prototype.md, all scenarios in `nett-lab --help`):

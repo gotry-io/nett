@@ -43,6 +43,10 @@ jobs:
           git diff --exit-code crates/nett-proto/src/gen
       # Install script for new machines (design/release.md section 6): POSIX sh only
       - run: shellcheck -s sh packaging/install.sh
+      - name: Every guard in docs/failure-classes.md exists and runs in CI
+        run: |
+          shellcheck scripts/check-failure-classes.sh
+          scripts/check-failure-classes.sh
 
   # macOS native member (design/userspace.md section 8): clippy, tests, and the utun smoke test that
   # needs root
