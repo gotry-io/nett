@@ -533,6 +533,7 @@ jobs:
             scenarios: |
               Scenario 20(b)(d): key rotation (short version, the full 30 minutes runs in acceptance) | wg-rekey --duration 150 --topology crates/nett-lab/topologies/relays.toml
               Scenario 18: probing on the WireGuard port | wgport --topology crates/nett-lab/topologies/wgport.toml
+              Scenario 29: a public member's WireGuard port changes while it runs, and after an outage the pair returns to direct on the new port | port-change --topology crates/nett-lab/topologies/failover.toml
           - group: loss
             title: Loss on the direct path
             scenarios: |

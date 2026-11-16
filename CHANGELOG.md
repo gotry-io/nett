@@ -8,6 +8,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   almost nothing for about a minute. A lossy path still answers most probes, and a pair went back
   to it after two replies, often within a second, and left again at the next burst of loss: tens
   of switches an hour, with most of the time spent on the lossy path.
+- Linux: when a `public` member's WireGuard port changes while it runs, the probes on the
+  WireGuard port move to the new port. They stayed on the old one until the mesh service
+  restarted, so its direct path no longer answered probes and its relay legs were measured from
+  a port the tunnel no longer used.
 
 ## [0.3.16] - 2026-11-16
 

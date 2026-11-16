@@ -19,12 +19,14 @@ mod hub;
 mod hub_relay;
 mod lossy_direct;
 mod port_block;
+mod port_change;
 mod throughput;
 pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;
 pub use lossy_direct::lossy_direct;
 pub use port_block::relay_port_block;
+pub use port_change::port_change;
 pub use throughput::throughput;
 
 /// Maximum wait for connectivity checks.

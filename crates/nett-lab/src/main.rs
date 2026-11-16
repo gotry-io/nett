@@ -49,6 +49,8 @@ const USAGE: &str = "usage:
       (what leaves b's WireGuard port toward r1 is dropped: the pair settles on r2 and stays there)
   nett-lab run lossy-direct --topology failover.toml --nett <path/to/nett> --out <dir>
       (the direct path loses 20% for five minutes: the pair leaves it once and returns when the loss ends)
+  nett-lab run port-change --topology failover.toml --nett <path/to/nett> --out <dir>
+      (b's WireGuard port changes while it runs: after an outage the pair returns to direct on the new port)
   nett-lab run punch --topology <punch-*.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run mtu --topology <mtu4.toml|mtu6.toml> --nett <path/to/nett> --out <dir> [--bytes N]
   nett-lab run <wg-rehandshake|wg-cookie|wg-rekey> --topology relays.toml --nett <path/to/nett> --out <dir> [--repeat N] [--duration SECONDS]
@@ -209,6 +211,7 @@ fn run() -> anyhow::Result<bool> {
                 "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
                 "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
                 "lossy-direct" => scenario::lossy_direct(&topology, &nett()?, &out)?,
+                "port-change" => scenario::port_change(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,
