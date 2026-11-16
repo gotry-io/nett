@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.18] - 2026-11-16
+
 - When a `public` member's WireGuard port or address changes, relays forward to the new one as
   soon as their assignment carries it. A relay kept the address it had bound before, also across
   its restarts, and learned the new one only from a handshake the member starts through it, which
