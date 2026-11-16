@@ -45,6 +45,8 @@ const USAGE: &str = "usage:
   nett-lab run <failover|fallback|relay-loss|relay-restart> --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run relay-far-leg --topology far-leg.toml --nett <path/to/nett> --out <dir> [--repeat N]
       (the relay in use still answers a, but its UDP with b is cut: the pair moves to the other relay)
+  nett-lab run relay-port-block --topology far-leg.toml --nett <path/to/nett> --out <dir>
+      (what leaves b's WireGuard port toward r1 is dropped: the pair settles on r2 and stays there)
   nett-lab run punch --topology <punch-*.toml> --nett <path/to/nett> --out <dir> [--repeat N] [--with-tailscale]
   nett-lab run mtu --topology <mtu4.toml|mtu6.toml> --nett <path/to/nett> --out <dir> [--bytes N]
   nett-lab run <wg-rehandshake|wg-cookie|wg-rekey> --topology relays.toml --nett <path/to/nett> --out <dir> [--repeat N] [--duration SECONDS]
@@ -203,6 +205,7 @@ fn run() -> anyhow::Result<bool> {
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
                 "throughput" => scenario::throughput(&topology, &nett()?, &out, duration_s)?,
                 "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
+                "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(
                     &topology,
                     &nett()?,

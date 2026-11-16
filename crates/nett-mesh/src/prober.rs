@@ -71,10 +71,11 @@ const RANDOM_RETRY_MAX: Duration = Duration::from_secs(15);
 pub enum Outgoing {
     /// Sent through `nett0` to the probe port on the peer's mesh address.
     Tunnel { to: SocketAddr, data: Vec<u8> },
-    /// Sent from the mesh process's own port to the relay.
-    Relay { to: SocketAddr, data: Vec<u8> },
-    /// Sent from the WireGuard port (section 7.1).
-    Direct { to: SocketAddr, data: Vec<u8> },
+    /// Sent from the mesh process's own port to a TLS relay's loopback port, which the TLS transport
+    /// carries to the relay (section 5.3).
+    Transport { to: SocketAddr, data: Vec<u8> },
+    /// Sent from the WireGuard port (section 7.1): direct probes, and probes of UDP relays.
+    WgPort { to: SocketAddr, data: Vec<u8> },
     /// Handed to nett-node, which relays it through the Hub to the peer's nett-node (section 8.4).
     Hub { peer: NodeId, data: Vec<u8> },
 }
@@ -84,10 +85,10 @@ pub enum Outgoing {
 pub enum Incoming {
     /// The probe port on the mesh address.
     Tunnel,
-    /// The socket the mesh process uses to send to relays.
-    Relay,
+    /// The socket the mesh process uses to send to TLS relays' loopback ports.
+    Transport,
     /// The copy on the WireGuard port.
-    Direct,
+    WgPort,
 }
 
 /// How a peer's path selection state appears in local status (design/status.md section 6).
@@ -244,6 +245,18 @@ pub struct Prober {
     observations: Observations,
     /// Events to be reported by the caller.
     events: Vec<Event>,
+}
+
+/// A probe of a relay. Over UDP it leaves from the WireGuard port, so it measures the addresses the
+/// tunnel through that relay uses: a network that treats WireGuard's port differently from other
+/// ports (a NAT mapping, a firewall or a block keyed on the port) shows in the measurement (design/mesh.md
+/// section 7.1). Over TLS it goes through the transport's loopback port, as the tunnel does.
+fn relay_probe(tls: bool, to: SocketAddr, data: Vec<u8>) -> Outgoing {
+    if tls {
+        Outgoing::Transport { to, data }
+    } else {
+        Outgoing::WgPort { to, data }
+    }
 }
 
 /// The role of this side in this pair (design/mesh.md sections 8.3 and 8.4); `None` means the side that
@@ -692,23 +705,23 @@ impl Prober {
                                         seq: wire,
                                         sent_ms: now_ms,
                                     };
-                                    out.push(Outgoing::Direct {
+                                    out.push(Outgoing::WgPort {
                                         to,
                                         data: probe.encode(key).to_vec(),
                                     });
                                 }
                             }
-                            (CandidateMeta::Relay { key, .. }, Route::Relay { endpoint, .. }) => {
+                            (
+                                CandidateMeta::Relay { key, tls, .. },
+                                Route::Relay { endpoint, .. },
+                            ) => {
                                 let probe = OuterProbe {
                                     kind: RELAY_PROBE,
                                     key_id: self.own_key_id,
                                     seq: wire,
                                     sent_ms: now_ms,
                                 };
-                                out.push(Outgoing::Relay {
-                                    to: endpoint,
-                                    data: probe.encode(key).to_vec(),
-                                });
+                                out.push(relay_probe(*tls, endpoint, probe.encode(key).to_vec()));
                             }
                             _ => {}
                         }
@@ -762,10 +775,7 @@ impl Prober {
                     seq: wire,
                     sent_ms: now_ms,
                 };
-                out.push(Outgoing::Relay {
-                    to: *endpoint,
-                    data: probe.encode(key).to_vec(),
-                });
+                out.push(relay_probe(tls, *endpoint, probe.encode(key).to_vec()));
             }
         }
         (out, switches)
@@ -1089,7 +1099,7 @@ impl Prober {
                 };
                 self.on_switch_message(&sender, from, message, at)
             }
-            (Incoming::Direct, Some(DIRECT_PROBE)) => {
+            (Incoming::WgPort, Some(DIRECT_PROBE)) => {
                 let Some(head) = OuterProbe::peek(data) else {
                     return vec![];
                 };
@@ -1130,18 +1140,18 @@ impl Prober {
                 {
                     punch.on_probe_from(from, paths.role() == Role::FollowTogether);
                 }
-                vec![Outgoing::Direct {
+                vec![Outgoing::WgPort {
                     to: from,
                     data: reply.to_vec(),
                 }]
             }
-            (Incoming::Direct, Some(probe::WG_COOKIE_REPLY))
+            (Incoming::WgPort, Some(probe::WG_COOKIE_REPLY))
                 if data.len() == probe::WG_COOKIE_LEN =>
             {
                 self.on_cookie_reply(from, at);
                 vec![]
             }
-            (Incoming::Direct, Some(DIRECT_REPLY)) => {
+            (Incoming::WgPort, Some(DIRECT_REPLY)) => {
                 let Some(key_id) = OuterReply::peek(data) else {
                     return vec![];
                 };
@@ -1177,8 +1187,12 @@ impl Prober {
                 }
                 vec![]
             }
-            (Incoming::Relay, Some(probe::RELAY_REPLY)) => {
-                self.on_relay_reply(data, at);
+            (Incoming::Transport, Some(probe::RELAY_REPLY)) => {
+                self.on_relay_reply(data, at, true);
+                vec![]
+            }
+            (Incoming::WgPort, Some(probe::RELAY_REPLY)) => {
+                self.on_relay_reply(data, at, false);
                 vec![]
             }
             _ => vec![],
@@ -1402,7 +1416,7 @@ impl Prober {
                 seq: wire,
                 sent_ms: now_ms,
             };
-            out.push(Outgoing::Direct {
+            out.push(Outgoing::WgPort {
                 to: target,
                 data: probe.encode(&key).to_vec(),
             });
@@ -1410,7 +1424,9 @@ impl Prober {
         out
     }
 
-    fn on_relay_reply(&mut self, data: &[u8], at: Instant) {
+    /// A relay's reply, which comes back the way its probe went: through the TLS transport
+    /// (`over_tls`) or to the WireGuard port.
+    fn on_relay_reply(&mut self, data: &[u8], at: Instant, over_tls: bool) {
         // The number in the reply is this machine's; look up which probe it was by sequence number, then
         // authenticate with that relay's token
         let Some(head) = OuterReply::peek(data) else {
@@ -1436,7 +1452,7 @@ impl Prober {
             }
             Pending::Tunnel { .. } | Pending::Punch => return,
         };
-        if OuterReply::verify(data, key).is_none() {
+        if tls != over_tls || OuterReply::verify(data, key).is_none() {
             return;
         }
         self.outstanding.remove(&seq);
@@ -1557,6 +1573,9 @@ mod tests {
         relay: SocketAddr,
         direct_up: bool,
         relay_up: bool,
+        /// Packets from B's WireGuard port reach R. `false` stands in for a network that drops what
+        /// leaves B's WireGuard port toward R while B's other ports get through.
+        b_wg_to_relay: bool,
         /// In-tunnel packets from B to A are additionally queued this long (B's uplink is filled, the queue is
         /// deep).
         tunnel_queue: Duration,
@@ -1660,6 +1679,7 @@ mod tests {
                 relay,
                 direct_up: true,
                 relay_up: true,
+                b_wg_to_relay: true,
                 tunnel_queue: Duration::ZERO,
                 queued: Vec::new(),
                 now: Instant::now(),
@@ -1688,7 +1708,7 @@ mod tests {
 
         fn current_up(&self) -> bool {
             match self.a.prober.desired_endpoint(&self.b.id) {
-                Some(e) if e == self.relay => self.relay_up,
+                Some(e) if e == self.relay => self.relay_up && self.b_wg_to_relay,
                 _ => self.direct_up,
             }
         }
@@ -1719,23 +1739,26 @@ mod tests {
                         }
                     }
                 }
-                Outgoing::Direct { data, .. } if self.direct_up => {
-                    for reply in dst
-                        .prober
-                        .on_packet(Incoming::Direct, src.wg, &data, now, 0)
-                    {
-                        if let Outgoing::Direct { data, .. } = reply {
-                            src.prober
-                                .on_packet(Incoming::Direct, dst.wg, &data, now, 0);
-                        }
-                    }
-                }
-                Outgoing::Relay { data, .. } if self.relay_up => {
+                Outgoing::WgPort { to, data } if to == self.relay => {
                     let wg = src.wg;
-                    if let Some(reply) = self.relay_reply(&data, wg) {
+                    if self.relay_up
+                        && (from_a || self.b_wg_to_relay)
+                        && let Some(reply) = self.relay_reply(&data, wg)
+                    {
                         let src = if from_a { &mut self.a } else { &mut self.b };
                         src.prober
-                            .on_packet(Incoming::Relay, self.relay, &reply, now, 0);
+                            .on_packet(Incoming::WgPort, self.relay, &reply, now, 0);
+                    }
+                }
+                Outgoing::WgPort { data, .. } if self.direct_up => {
+                    for reply in dst
+                        .prober
+                        .on_packet(Incoming::WgPort, src.wg, &data, now, 0)
+                    {
+                        if let Outgoing::WgPort { data, .. } = reply {
+                            src.prober
+                                .on_packet(Incoming::WgPort, dst.wg, &data, now, 0);
+                        }
                     }
                 }
                 _ => {}
@@ -1792,6 +1815,29 @@ mod tests {
             .and_then(|p| p.reports.get(&relay))
             .copied();
         assert_eq!(heard.map(|(_, loss)| loss), Some(1.0));
+    }
+
+    /// B's WireGuard port cannot reach R while its other ports can: B's measurement of R shares the
+    /// addresses WireGuard uses, so it reports R lost, and A never moves onto a relay path the
+    /// tunnel cannot cross (design/mesh.md section 7.1).
+    #[test]
+    fn a_relay_the_followers_wireguard_port_cannot_reach_is_not_used() {
+        let mut net = Net::new();
+        net.b_wg_to_relay = false;
+        net.run(Duration::from_secs(10));
+        let broke = net.now;
+        net.direct_up = false;
+        net.run(Duration::from_secs(120));
+        let relay = KeyId::of(node_id(9).as_str().as_bytes());
+        let heard = net.a.prober.peers[&net.b.id].reports.get(&relay).copied();
+        assert_eq!(heard.map(|(_, loss)| loss), Some(1.0));
+        let onto_relay: Vec<_> = net
+            .switches
+            .iter()
+            .filter(|(at, s)| *at >= broke && s.to.endpoint() == net.relay)
+            .map(|(_, s)| s.reason)
+            .collect();
+        assert!(onto_relay.is_empty(), "{onto_relay:?}");
     }
 
     #[test]
@@ -1888,14 +1934,14 @@ mod tests {
         assert!(
             net.b
                 .prober
-                .on_packet(Incoming::Direct, net.a.wg, &forged, now, 0)
+                .on_packet(Incoming::WgPort, net.a.wg, &forged, now, 0)
                 .is_empty()
         );
         // Arbitrary bytes
         assert!(
             net.b
                 .prober
-                .on_packet(Incoming::Direct, net.a.wg, &[0x82; 64], now, 0)
+                .on_packet(Incoming::WgPort, net.a.wg, &[0x82; 64], now, 0)
                 .is_empty()
         );
     }
@@ -2095,7 +2141,7 @@ mod tests {
                         }
                     }
                 }
-                Outgoing::Relay { to, data } => {
+                Outgoing::WgPort { to, data } if self.relays.contains(&to) => {
                     let Some(i) = self.relays.iter().position(|r| *r == to) else {
                         return;
                     };
@@ -2114,7 +2160,7 @@ mod tests {
                                 observed: src.wg,
                             };
                             src.prober.on_packet(
-                                Incoming::Relay,
+                                Incoming::WgPort,
                                 to,
                                 &reply.encode(&key),
                                 now,
@@ -2146,7 +2192,7 @@ mod tests {
                         }
                     }
                 }
-                Outgoing::Direct { to, data } => {
+                Outgoing::WgPort { to, data } => {
                     let (src, dst) = if from_a { (0, 1) } else { (1, 0) };
                     self.direct_sent[src] += 1;
                     // Sending opens a mapping to this address on this machine's NAT
@@ -2163,14 +2209,14 @@ mod tests {
                     let replies =
                         receiver
                             .prober
-                            .on_packet(Incoming::Direct, from, &data, now, now_ms);
+                            .on_packet(Incoming::WgPort, from, &data, now, now_ms);
                     for reply in replies {
-                        if let Outgoing::Direct { to, data } = reply
+                        if let Outgoing::WgPort { to, data } = reply
                             && to == from
                             && self.opened[src].contains(&self.mapped[dst])
                         {
                             sender.prober.on_packet(
-                                Incoming::Direct,
+                                Incoming::WgPort,
                                 self.mapped[dst],
                                 &data,
                                 now,
@@ -2179,6 +2225,8 @@ mod tests {
                         }
                     }
                 }
+                // No TLS relays in this network
+                Outgoing::Transport { .. } => {}
             }
         }
 
@@ -2272,21 +2320,23 @@ mod tests {
             let (out, _) = prober.tick(Instant::now(), 1_700_000_000_000);
             out.into_iter()
                 .filter_map(|o| match o {
-                    Outgoing::Relay { to, .. } => Some(to),
+                    Outgoing::Transport { to, .. } => Some((true, to)),
+                    Outgoing::WgPort { to, .. } => Some((false, to)),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
         };
-        // Node 2 follows node 1 (the smaller node ID decides)
+        // Node 2 follows node 1 (the smaller node ID decides). The TLS relay is probed through its
+        // loopback port, the UDP relay from the WireGuard port
         let (b_priv, _) = keypair(2);
         let follower = probes_to(2, &b_priv, &b_pub);
-        assert!(follower.contains(&loopback), "{follower:?}");
+        assert!(follower.contains(&(true, loopback)), "{follower:?}");
         assert!(
-            follower.contains(&addr("198.51.100.9:41822")),
+            follower.contains(&(false, addr("198.51.100.9:41822"))),
             "{follower:?}"
         );
         let decider = probes_to(1, &a_priv, &a_pub);
-        assert!(decider.contains(&loopback), "{decider:?}");
+        assert!(decider.contains(&(true, loopback)), "{decider:?}");
     }
 
     /// A direct probe from a LAN address reached this machine on its LAN: it is answered only when this
@@ -2339,7 +2389,7 @@ mod tests {
         }
         .encode(&key);
         let mut answered = |from: &str| {
-            !a.on_packet(Incoming::Direct, addr(from), &probe, Instant::now(), now_ms)
+            !a.on_packet(Incoming::WgPort, addr(from), &probe, Instant::now(), now_ms)
                 .is_empty()
         };
         assert!(

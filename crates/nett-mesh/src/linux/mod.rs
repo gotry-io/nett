@@ -23,8 +23,8 @@ use self::wg::PeerChange;
 use self::wgport::WgPort;
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::dataplane::{
-    DataPlane, DataPlaneError, DirectProbes, DirectRecv, DirectSend, INTERFACE_NAME, InterfaceSpec,
-    InterfaceState, PeerSpec, PeerStat, automatic_port,
+    DataPlane, DataPlaneError, INTERFACE_NAME, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
+    WgPortProbes, WgPortRecv, WgPortSend, automatic_port,
 };
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
@@ -380,15 +380,17 @@ impl DataPlane for KernelWireGuard {
             .map_err(kernel("re-handshake peer"))
     }
 
-    fn direct_probes(&mut self, listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
+    fn wg_port_probes(&mut self, listen_port: u16) -> Result<WgPortProbes, DataPlaneError> {
         let os = |op| move |source| DataPlaneError::Os { op, source };
-        let send = WgPort::open(listen_port).map_err(os("open raw sockets for direct probes"))?;
+        let send = WgPort::open(listen_port)
+            .map_err(os("open raw sockets for probes from the WireGuard port"))?;
         // The log group is the WireGuard port number: one per mesh process on the same host
-        nft::install_probe_copy(listen_port, listen_port)
-            .map_err(kernel("install the nftables rules that copy direct probes"))?;
+        nft::install_probe_copy(listen_port, listen_port).map_err(kernel(
+            "install the nftables rules that copy probes on the WireGuard port",
+        ))?;
         let log = nft::ProbeLog::bind(listen_port, listen_port)
-            .map_err(kernel("subscribe to copied direct probes"))?;
-        Ok(DirectProbes {
+            .map_err(kernel("subscribe to copied probes"))?;
+        Ok(WgPortProbes {
             send: Box::new(send),
             recv: Box::new(log),
         })
@@ -407,13 +409,13 @@ impl DataPlane for KernelWireGuard {
     }
 }
 
-impl DirectSend for WgPort {
+impl WgPortSend for WgPort {
     fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()> {
         WgPort::send(self, to, data)
     }
 }
 
-impl DirectRecv for nft::ProbeLog {
+impl WgPortRecv for nft::ProbeLog {
     fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>> {
         nft::ProbeLog::recv(self).map_err(std::io::Error::other)
     }

@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A member measures its leg to a UDP relay from its WireGuard port, as the tunnel through that relay
+  uses it. On a network that drops WireGuard's port toward a relay while other ports pass, the leg
+  now shows as down, and the peer no longer moves onto that relay and back every minute or two.
+
 ## [0.3.14] - 2026-11-15
 
 - Linux: one directory and one account. The trust store moves to `/etc/nett/state` and the relay's

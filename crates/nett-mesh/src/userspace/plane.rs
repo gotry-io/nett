@@ -20,7 +20,7 @@ use super::session::{Output, Sessions};
 use crate::access::FilterSpec;
 use crate::dataplane::{PeerSpec, PeerStat};
 use crate::dns::NameTable;
-use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY};
+use crate::probe::{OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY, WG_PORT_MESSAGES};
 
 /// The maximum number of handshake messages per source IP per second that enter the session layer
 /// (design/userspace.md section 4.1). It is higher than the threshold at which the session layer replies
@@ -83,7 +83,7 @@ pub enum Action {
     Udp { to: SocketAddr, datagram: Vec<u8> },
     /// Write to the TUN, handing it to this machine's protocol stack.
     Tun(Vec<u8>),
-    /// Hand to the engine ([`crate::prober::Incoming::Direct`]): direct probe messages, and copies of cookie
+    /// Hand to the engine ([`crate::prober::Incoming::WgPort`]): probe messages, and copies of cookie
     /// replies.
     Probe { from: SocketAddr, data: Vec<u8> },
 }
@@ -240,7 +240,7 @@ impl<S: Sessions> Plane<S> {
                 }
             }
             Some(3 | 4) => {}
-            Some(&kind) if (DIRECT_PROBE..=DIRECT_REPLY).contains(&kind) => {
+            Some(kind) if WG_PORT_MESSAGES.contains(kind) => {
                 if datagram.len() == OUTER_LEN {
                     out.push(Action::Probe {
                         from,
@@ -396,6 +396,7 @@ mod tests {
     use super::*;
     use crate::access::{FilterRule, Match};
     use crate::key::PrivateKey;
+    use crate::probe::{DIRECT_PROBE, RELAY_PROBE, RELAY_REPLY};
     use crate::userspace::packet::build;
     use crate::userspace::session::Gotatun;
     use std::net::Ipv4Addr;
@@ -612,6 +613,10 @@ mod tests {
         probe.truncate(OUTER_LEN - 1);
         b.plane.from_udp(from, &probe, now, &mut out);
         b.plane.from_udp(from, &[0x80; OUTER_LEN], now, &mut out);
+        b.plane
+            .from_udp(from, &[RELAY_PROBE; OUTER_LEN], now, &mut out);
+        b.plane
+            .from_udp(from, &[RELAY_REPLY; OUTER_LEN], now, &mut out);
         b.plane.from_udp(from, &[], now, &mut out);
         let mut cookie = vec![0u8; WG_COOKIE_LEN];
         cookie[0] = WG_COOKIE_REPLY;
@@ -622,6 +627,10 @@ mod tests {
                 Action::Probe {
                     from,
                     data: vec![DIRECT_PROBE; OUTER_LEN]
+                },
+                Action::Probe {
+                    from,
+                    data: vec![RELAY_REPLY; OUTER_LEN]
                 },
                 Action::Probe { from, data: cookie }
             ]

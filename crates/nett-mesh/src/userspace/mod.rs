@@ -27,7 +27,7 @@ mod dataplane {
     use super::worker::{Command, ProbeQueue, ProbeSender, Worker};
     use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
     use crate::dataplane::{
-        DataPlane, DataPlaneError, DirectProbes, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
+        DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, PeerSpec, PeerStat, WgPortProbes,
         automatic_port,
     };
     use crate::key::PrivateKey;
@@ -264,15 +264,14 @@ mod dataplane {
             self.platform.sync_routes(routes)
         }
 
-        fn direct_probes(&mut self, _listen_port: u16) -> Result<DirectProbes, DataPlaneError> {
+        fn wg_port_probes(&mut self, _listen_port: u16) -> Result<WgPortProbes, DataPlaneError> {
             let running = self
                 .running
                 .as_mut()
                 .ok_or(DataPlaneError::Worker("the interface is not up yet"))?;
-            let recv = running
-                .probes
-                .take()
-                .ok_or(DataPlaneError::Worker("direct probes are already open"))?;
+            let recv = running.probes.take().ok_or(DataPlaneError::Worker(
+                "probes on the WireGuard port are already open",
+            ))?;
             let socket = running
                 .socket
                 .try_clone()
@@ -280,7 +279,7 @@ mod dataplane {
                     op: "share the WireGuard socket",
                     source,
                 })?;
-            Ok(DirectProbes {
+            Ok(WgPortProbes {
                 send: Box::new(ProbeSender { socket }),
                 recv: Box::new(recv),
             })
@@ -474,9 +473,9 @@ mod dataplane {
         #[test]
         fn direct_probes_share_the_wireguard_port() {
             let (mut a, mut b) = (node("100.88.0.1"), node("100.88.0.2"));
-            let probes_a = a.plane.direct_probes(0).expect("probes");
-            let mut probes_b = b.plane.direct_probes(0).expect("probes");
-            assert!(b.plane.direct_probes(0).is_err(), "opened once");
+            let probes_a = a.plane.wg_port_probes(0).expect("probes");
+            let mut probes_b = b.plane.wg_port_probes(0).expect("probes");
+            assert!(b.plane.wg_port_probes(0).is_err(), "opened once");
             let probe = vec![DIRECT_PROBE; OUTER_LEN];
             probes_a.send.send(b.at, &probe).expect("send");
             let got = probes_b.recv.recv().expect("recv");

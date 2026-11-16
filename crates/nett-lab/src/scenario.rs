@@ -17,10 +17,12 @@ use crate::topology::Topology;
 mod faster_relay;
 mod hub;
 mod hub_relay;
+mod port_block;
 mod throughput;
 pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;
+pub use port_block::relay_port_block;
 pub use throughput::throughput;
 
 /// Maximum wait for connectivity checks.

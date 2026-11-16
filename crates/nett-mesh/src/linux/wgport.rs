@@ -1,4 +1,4 @@
-//! Sends direct probes with the in-kernel WireGuard port as the source port (design/mesh.md section 7.1),
+//! Sends probes with the in-kernel WireGuard port as the source port (design/mesh.md section 7.1),
 //! going through WireGuard's own NAT mapping. Reception is by nftables rules that copy only probe
 //! packets ([`super::nft`]).
 //!

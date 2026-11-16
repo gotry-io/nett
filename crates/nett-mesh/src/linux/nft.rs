@@ -2,8 +2,8 @@
 //! copied by rules through nfnetlink_log. The mesh process does not call the `nft` command (hard rule 1).
 //!
 //! There are two chains here: one hands the mesh process a copy of UDP packets sent to the WireGuard port
-//! whose first payload byte is a direct probe type (design/mesh.md section 7.1); other packets only incur
-//! one extra rule match and are not copied; `log` only copies and does not affect connection tracking.
+//! whose first payload byte is a probe type (design/mesh.md section 7.1); other packets only incur a few
+//! extra rule matches and are not copied; `log` only copies and does not affect connection tracking.
 //! The other drops packets entering the WireGuard port from idle TLS loopback ports (section 5.3).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -12,7 +12,7 @@ use std::time::Duration;
 use rustix::net::netlink::NETFILTER;
 
 use super::netlink::{Message, NLM_F_ACK, NLM_F_CREATE, NlError, Socket, attrs, split_message};
-use crate::probe::{DIRECT_PROBE, DIRECT_REPLY, WG_COOKIE_LEN, WG_COOKIE_REPLY};
+use crate::probe::{WG_COOKIE_LEN, WG_COOKIE_REPLY, WG_PORT_MESSAGES};
 
 /// The table holding the probe rules, separate from the access control rules so it can be rebuilt as a
 /// whole.
@@ -168,9 +168,9 @@ pub(super) fn tables() -> [&'static str; 4] {
     ]
 }
 
-/// Rebuilds the probe rules (IPv4 and IPv6): `udp dport <port> @th,64,8 0x82-0x83 log group <group>`, and
-/// WireGuard's cookie reply `udp dport <port> udp length 72 @th,64,8 3 log group <group>` (design/mesh.md
-/// section 7.1).
+/// Rebuilds the probe rules (IPv4 and IPv6): `udp dport <port> @th,64,8 <type> log group <group>` for
+/// each probe type that arrives on the WireGuard port, and WireGuard's cookie reply `udp dport <port>
+/// udp length 72 @th,64,8 3 log group <group>` (design/mesh.md section 7.1).
 pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     let mut sock = Socket::open(Some(NETFILTER))?;
     // Delete the old table first (ignored when it does not exist), then rebuild in one transaction
@@ -205,10 +205,11 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
     chain.attr_str(NFTA_CHAIN_TYPE, "filter");
 
     // The first byte after the 8-byte UDP header is the message type
-    let probes = copy_rule(port, group, |rule| {
-        load_transport(rule, 8, 1);
-        cmp(rule, NFT_CMP_GTE, &[DIRECT_PROBE]);
-        cmp(rule, NFT_CMP_LTE, &[DIRECT_REPLY]);
+    let probes = WG_PORT_MESSAGES.map(|kind| {
+        copy_rule(port, group, |rule| {
+            load_transport(rule, 8, 1);
+            cmp(rule, NFT_CMP_EQ, &[kind]);
+        })
     });
     let udp_len = u16::try_from(8 + WG_COOKIE_LEN).expect("cookie reply fits in a UDP datagram");
     let cookies = copy_rule(port, group, |rule| {
@@ -218,14 +219,10 @@ pub(crate) fn install_probe_copy(port: u16, group: u16) -> Result<(), NlError> {
         cmp(rule, NFT_CMP_EQ, &[WG_COOKIE_REPLY]);
     });
 
-    sock.request_batch(vec![
-        batch(NFNL_MSG_BATCH_BEGIN),
-        table,
-        chain,
-        probes,
-        cookies,
-        batch(NFNL_MSG_BATCH_END),
-    ])
+    let mut messages = vec![batch(NFNL_MSG_BATCH_BEGIN), table, chain];
+    messages.extend(probes);
+    messages.extend([cookies, batch(NFNL_MSG_BATCH_END)]);
+    sock.request_batch(messages)
 }
 
 /// A copy of UDP packets sent to the WireGuard port that also satisfy `matches` is handed to log group
