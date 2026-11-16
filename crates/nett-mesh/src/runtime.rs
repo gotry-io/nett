@@ -6,7 +6,8 @@
 //! Sockets: the probe port on the mesh address (sends and receives only packets that pass through the
 //! mesh interface); probes to TLS relays are sent from the mesh process's own port to the transport's
 //! loopback ports; direct probes and probes of UDP relays are sent and received with the WireGuard port
-//! as the source port, provided by the data plane ([`DataPlane::wg_port_probes`]).
+//! as the source port, provided by the data plane ([`DataPlane::wg_port_probes`]) and opened again
+//! when the WireGuard port changes.
 
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -264,7 +265,15 @@ struct Sockets {
     tunnel_v4: UdpSocket,
     tunnel_v6: UdpSocket,
     transport: UdpSocket,
-    wg_port: Box<dyn WgPortSend>,
+    wg_port: WgPortSockets,
+}
+
+/// Probes on the WireGuard port, for the port they were opened on.
+struct WgPortSockets {
+    port: u16,
+    send: Box<dyn WgPortSend>,
+    /// Stops this port's receive thread once the port has changed.
+    stop: Arc<AtomicBool>,
 }
 
 /// Queries local status through the background thread's queue, and triggers a re-read through the party
@@ -342,19 +351,34 @@ struct Worker<D, E> {
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
-    /// Creates the probe sockets and receive threads once the mesh interface is ready (only once).
+    /// Creates the probe sockets and receive threads once the mesh interface is ready, and the probes
+    /// on the WireGuard port again when the port changes: probes from the old port would measure a
+    /// path WireGuard no longer uses, and replies to the new one would not reach this process.
     fn ensure_sockets(&mut self) {
         let Some(interface) = self.engine.interface() else {
             return;
         };
         let addrs: Vec<IpAddr> = interface.spec.addresses.iter().map(|a| a.addr).collect();
-        if self.sockets.is_none() {
-            match self.open(&addrs, interface.listen_port) {
+        let listen_port = interface.listen_port;
+        match self.sockets.as_ref().map(|s| s.wg_port.port) {
+            None => match self.open(&addrs, listen_port) {
                 Ok(sockets) => self.sockets = Some(sockets),
                 Err(e) => self.events.emit(Event::DataPlaneFailed {
                     reason: format!("opening probe sockets: {e}"),
                 }),
-            }
+            },
+            Some(port) if port != listen_port => match self.open_wg_port(listen_port) {
+                Ok(next) => {
+                    if let Some(s) = &mut self.sockets {
+                        let old = std::mem::replace(&mut s.wg_port, next);
+                        old.stop.store(true, Ordering::Relaxed);
+                    }
+                }
+                Err(e) => self.events.emit(Event::DataPlaneFailed {
+                    reason: format!("opening probes on WireGuard port {listen_port}: {e}"),
+                }),
+            },
+            Some(_) => {}
         }
         // The DNS responder on the mesh addresses (design/names-and-diagnostics.md section 2): if the
         // port cannot be bound, names do not resolve and the mesh works as before
@@ -407,12 +431,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         let tunnel_v4 = tunnel(addrs.iter().find(|a| a.is_ipv4()))?;
         let tunnel_v6 = tunnel(addrs.iter().find(|a| a.is_ipv6()))?;
         let transport = dataplane.bind_underlay(0)?;
-        let WgPortProbes {
-            send: wg_port,
-            recv: mut log,
-        } = dataplane
-            .wg_port_probes(listen_port)
-            .map_err(std::io::Error::other)?;
+        let wg_port = self.open_wg_port(listen_port)?;
 
         for (socket, kind) in [
             (tunnel_v4.try_clone()?, Incoming::Tunnel),
@@ -430,9 +449,30 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 }
             }));
         }
+        Ok(Sockets {
+            tunnel_v4,
+            tunnel_v6,
+            transport,
+            wg_port,
+        })
+    }
+
+    fn open_wg_port(&mut self, port: u16) -> std::io::Result<WgPortSockets> {
+        let WgPortProbes {
+            send,
+            recv: mut log,
+        } = self
+            .engine
+            .dataplane_mut()
+            .wg_port_probes(port)
+            .map_err(std::io::Error::other)?;
+        // The thread of a previous port has ended or ends within its receive timeout
+        self.receivers.retain(|r| !r.is_finished());
+        let own = Arc::new(AtomicBool::new(false));
         let (tx, stop, dropped) = (self.tx.clone(), self.stop.clone(), self.dropped.clone());
+        let thread_stop = own.clone();
         self.receivers.push(std::thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::Relaxed) && !thread_stop.load(Ordering::Relaxed) {
                 if let Ok(probes) = log.recv() {
                     for (from, data) in probes {
                         forward(&tx, &dropped, Incoming::WgPort, from, data);
@@ -440,11 +480,10 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 }
             }
         }));
-        Ok(Sockets {
-            tunnel_v4,
-            tunnel_v6,
-            transport,
-            wg_port,
+        Ok(WgPortSockets {
+            port,
+            send,
+            stop: own,
         })
     }
 
@@ -467,7 +506,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 Outgoing::Transport { to, data } => {
                     s.transport.send_to(&data, map_v6(to)).map(drop)
                 }
-                Outgoing::WgPort { to, data } => s.wg_port.send(to, &data),
+                Outgoing::WgPort { to, data } => s.wg_port.send.send(to, &data),
                 Outgoing::Hub { peer, data } => {
                     self.coordinator.send(&peer, &data);
                     Ok(())
