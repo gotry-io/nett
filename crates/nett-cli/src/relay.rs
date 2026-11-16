@@ -18,7 +18,7 @@ const OLD_DIR: &str = nett_node::platform::linux::OLD_RELAY_DIR;
 pub const USAGE: &str = "usage: nett relay [--socket <helpers.sock>] [--cert <dir>] [--state <file>]\n\n\
 Started by systemd on a machine that runs a relay (`nett site relay`).";
 #[cfg(feature = "lab")]
-const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-state.json>] reads its assignment from a file";
+const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-state.json>] reads its assignment from a file, again on SIGHUP";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut socket =
@@ -78,18 +78,21 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 }
 
 /// The lab build: the assignment comes from a file written by `nett-lab` (design/prototype.md
-/// section 3).
+/// section 3). `SIGHUP` reads the file again and applies it in place, as the service applies each
+/// assignment it fetches.
 #[cfg(feature = "lab")]
 async fn lab(
-    config: PathBuf,
+    path: PathBuf,
     state: Option<PathBuf>,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> anyhow::Result<()> {
     use nett_relay::lab::RelayConfig;
-    use nett_relay::server::{TlsIngress, serve, tls_acceptor, tls_listener};
-    let text = std::fs::read(&config).with_context(|| format!("reading {}", config.display()))?;
-    let config: RelayConfig =
-        serde_json::from_slice(&text).context("parsing the relay assignment")?;
+    use nett_relay::server::{ASSIGNMENT_QUEUE, TlsIngress, serve, tls_acceptor, tls_listener};
+    fn read(path: &std::path::Path) -> anyhow::Result<RelayConfig> {
+        let text = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+        serde_json::from_slice(&text).context("parsing the relay assignment")
+    }
+    let config = read(&path)?;
     let relay = config.relay().context("relay assignment")?;
     let udp = tokio::net::UdpSocket::bind(config.listen)
         .await
@@ -109,7 +112,24 @@ async fn lab(
         members = config.members.len(),
         "relay started ({LAB_USAGE})"
     );
-    serve(udp, tls, relay, state, None, shutdown)
-        .await
-        .context("relay socket")
+    let (updates, received) = tokio::sync::mpsc::channel(ASSIGNMENT_QUEUE);
+    let mut hangup = signal(SignalKind::hangup()).context("installing the SIGHUP handler")?;
+    let reload = tokio::spawn(async move {
+        while hangup.recv().await.is_some() {
+            match read(&path) {
+                Ok(config) => {
+                    if updates.send(config.assignment()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    error = format!("{error:#}"),
+                    "relay assignment not reloaded"
+                ),
+            }
+        }
+    });
+    let served = serve(udp, tls, relay, state, Some(received), shutdown).await;
+    reload.abort();
+    served.context("relay socket")
 }

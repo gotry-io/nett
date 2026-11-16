@@ -62,6 +62,10 @@ pub struct RelayState {
 pub struct Binding {
     pub public_key: X25519PublicKey,
     pub address: SocketAddr,
+    /// The member's address in the assignment when this was saved: the binding is restored only
+    /// while the assignment still gives that address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assigned: Option<SocketAddr>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -127,6 +131,8 @@ struct Member {
     mac1: Mac1Key,
     key_id: KeyId,
     probe_key: ProbeKey,
+    /// The address of a `public` member in the assignment.
+    assigned: Option<SocketAddr>,
     bound: Option<PeerAddr>,
     /// The relay's own machine, assigned its WireGuard port on loopback (design/mesh.md section
     /// 5.1): no binding learned or saved before replaces that address.
@@ -194,6 +200,7 @@ impl Relay {
                     mac1: Mac1Key::for_public_key(m.public_key.as_bytes()),
                     key_id: KeyId::of(m.public_key.as_bytes()),
                     probe_key: ProbeKey::from_token(&m.token),
+                    assigned: m.address,
                     bound: m.address.map(PeerAddr::Udp),
                     local: m.address.is_some_and(|a| a.ip().is_loopback()),
                     unconfirmed: None,
@@ -506,6 +513,7 @@ impl Relay {
                     Some(PeerAddr::Udp(addr)) => Some(Binding {
                         public_key: m.public_key,
                         address: addr,
+                        assigned: m.assigned,
                     }),
                     _ => None,
                 })
@@ -523,7 +531,8 @@ impl Relay {
         }
     }
 
-    /// Restores saved state. Only members still in the allocation are restored; expired or
+    /// Restores saved state. Only members still in the allocation are restored, and their bindings
+    /// only while the allocation gives the address it gave when they were saved; expired or
     /// conflicting entries are dropped.
     pub fn restore(&mut self, state: &RelayState, now: Instant) {
         if state.v != STATE_V1 {
@@ -535,6 +544,7 @@ impl Relay {
         for b in &state.bindings {
             if let Some(i) = find(&self.members, &b.public_key)
                 && !self.members[i].local
+                && self.members[i].assigned == b.assigned
             {
                 self.members[i].bound = Some(PeerAddr::Udp(b.address));
             }
@@ -561,7 +571,8 @@ impl Relay {
 
     /// Applies a changed assignment in place (design/mesh.md section 5.2): members that remain keep
     /// their binding and their sessions, members that are gone lose theirs, and handshakes still
-    /// pending are dropped (WireGuard retries them). An invalid assignment leaves the relay as it was.
+    /// pending are dropped (WireGuard retries them). A member whose assigned address changed is bound
+    /// to the new one. An invalid assignment leaves the relay as it was.
     pub fn reassign(
         &mut self,
         members: &[AssignedMember],
@@ -581,8 +592,11 @@ impl Relay {
             };
             moved.insert(o, i);
             let before = &self.members[o];
-            // A binding learned from handshakes is newer than an address in the assignment
-            if before.bound.is_some() && !m.local {
+            // A binding learned from handshakes is newer than an address in the assignment, unless
+            // the assignment changed that address since: the member moved (section 5.5), and the
+            // relay would learn its new address only from a handshake it starts through this
+            // relay, which a member that only answers never does
+            if before.bound.is_some() && !m.local && before.assigned == m.assigned {
                 m.bound = before.bound;
                 m.unconfirmed = before.unconfirmed;
                 m.last_change = before.last_change;
@@ -931,6 +945,97 @@ mod tests {
         assert_eq!(
             restarted.handle(addr("203.0.113.5:50000"), &initiation(12, &A), now, 0),
             Outcome::Forward(addr(local))
+        );
+    }
+
+    /// A `public` member that moves (design/mesh.md section 5.5) is bound where the new assignment
+    /// puts it: it answers the handshakes forwarded to it, so no handshake would teach the relay
+    /// its new address.
+    #[test]
+    fn a_member_whose_assigned_address_changed_is_bound_there() {
+        let key = X25519PublicKey::from_bytes;
+        let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
+            public_key: key(k),
+            address: a.map(sock),
+            token: [k[0]; 32],
+        };
+        let links = [(key(A), key(B))];
+        let mut r = relay();
+        let now = Instant::now();
+        let b = "203.0.113.5:50000";
+        handshake(&mut r, b, now, 11, 22);
+        // A starts a handshake from another address, which the relay learns
+        let gateway = "198.51.100.9:41820";
+        assert_eq!(
+            r.handle(addr(gateway), &initiation(33, &B), now, 0),
+            Outcome::Forward(addr(b))
+        );
+        assert_eq!(
+            r.handle(addr(b), &response(44, 33, &A), now, 0),
+            Outcome::Forward(addr(gateway))
+        );
+        // The same assigned address keeps what was learned
+        r.reassign(
+            &[member(A, Some("198.51.100.1:41820")), member(B, None)],
+            &links,
+        )
+        .expect("reassigned");
+        assert_eq!(
+            r.handle(addr(b), &data(33), now, 0),
+            Outcome::Forward(addr(gateway))
+        );
+        // A's WireGuard port moves: its sessions and the handshakes for it go to the new port
+        let moved = "198.51.100.1:41850";
+        r.reassign(&[member(A, Some(moved)), member(B, None)], &links)
+            .expect("reassigned");
+        assert_eq!(
+            r.handle(addr(b), &data(33), now, 0),
+            Outcome::Forward(addr(moved))
+        );
+        assert_eq!(
+            r.handle(addr(b), &initiation(55, &A), now, 0),
+            Outcome::Forward(addr(moved))
+        );
+        assert_eq!(
+            r.handle(addr(moved), &response(66, 55, &B), now, 0),
+            Outcome::Forward(addr(b))
+        );
+        // B's binding, learned, stays
+        assert_eq!(
+            r.handle(addr(moved), &data(11), now, 0),
+            Outcome::Forward(addr(b))
+        );
+    }
+
+    /// A binding saved before the member moved is not restored over its new assigned address.
+    #[test]
+    fn a_saved_binding_yields_to_a_changed_assignment() {
+        let key = X25519PublicKey::from_bytes;
+        let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
+            public_key: key(k),
+            address: a.map(sock),
+            token: [k[0]; 32],
+        };
+        let mut r = relay();
+        let now = Instant::now();
+        let b = "203.0.113.5:50000";
+        handshake(&mut r, b, now, 11, 22);
+        let saved = r.snapshot(now);
+        let moved = "198.51.100.1:41850";
+        let mut restarted = Relay::new(
+            &[member(A, Some(moved)), member(B, None)],
+            &[(key(A), key(B))],
+        )
+        .expect("assignment");
+        restarted.restore(&saved, now);
+        assert_eq!(
+            restarted.handle(addr(b), &data(22), now, 0),
+            Outcome::Forward(addr(moved))
+        );
+        assert_eq!(
+            restarted.handle(addr(moved), &data(11), now, 0),
+            Outcome::Forward(addr(b)),
+            "B's binding is restored"
         );
     }
 
