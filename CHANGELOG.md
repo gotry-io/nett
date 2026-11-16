@@ -4,6 +4,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `nett status <peer>` shows the current path's round-trip time and loss as the tunnel measures them
+  now; for a relay path the candidate table showed the values from before the switch.
+
 ## [0.3.15] - 2026-11-16
 
 - A member measures its leg to a UDP relay from its WireGuard port, as the tunnel through that relay
