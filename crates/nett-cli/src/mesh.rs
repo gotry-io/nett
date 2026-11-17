@@ -342,29 +342,41 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(not(feature = "lab"))]
     let clock = SystemClock;
-    // Linux uses kernel WireGuard by default; macOS is a native member and uses the userspace data
-    // plane (design/userspace.md)
+    // Linux uses kernel WireGuard when the kernel has it and the userspace data plane otherwise
+    // (Synology DSM, old kernels; design/dsm.md section 5); macOS is a native member and uses the
+    // userspace data plane (design/userspace.md)
     #[cfg(all(target_os = "linux", feature = "lab"))]
     let userspace = args.lab.userspace;
     #[cfg(all(target_os = "linux", not(feature = "lab")))]
     let userspace = false;
     #[cfg(target_os = "linux")]
-    let worker = if userspace {
-        let dataplane = UserspaceDataPlane::new(LinuxTun::open()?);
-        Runtime::spawn(
-            Engine::new(node_id, key, dataplane).with_trust_store(trust),
-            sink,
-            clock,
-            nett_mesh::dns::PORT,
-        )
+    let kernel = if userspace {
+        None
     } else {
-        let dataplane = KernelWireGuard::open()?;
-        Runtime::spawn(
+        match KernelWireGuard::open() {
+            Ok(dataplane) => Some(dataplane),
+            Err(nett_mesh::dataplane::DataPlaneError::Unsupported(what)) => {
+                tracing::info!("{what} is not in this kernel; using the userspace data plane");
+                None
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    #[cfg(target_os = "linux")]
+    let worker = match kernel {
+        Some(dataplane) => Runtime::spawn(
             Engine::new(node_id, key, dataplane).with_trust_store(trust),
             sink,
             clock,
             nett_mesh::dns::PORT,
-        )
+        ),
+        None => Runtime::spawn(
+            Engine::new(node_id, key, UserspaceDataPlane::new(LinuxTun::open()?))
+                .with_trust_store(trust),
+            sink,
+            clock,
+            nett_mesh::dns::PORT,
+        ),
     };
     #[cfg(target_os = "macos")]
     let worker = Runtime::spawn(

@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Linux: when the kernel has no WireGuard, the mesh process uses the userspace data plane instead
+  of failing to start.
 - When a data plane update fails, the mesh process applies the desired state again after 1 second,
   then after twice as long each time up to 30 seconds, until it succeeds, and the failure stays in
   `nett status` and `nett site status` while it lasts. An interface that could not be created when
