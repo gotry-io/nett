@@ -4,6 +4,12 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Synology DSM 7 joins as a member: the install script and `sudo nett install <token>` as on
+  other Linux machines. DSM's systemd is too old for nett's usual units, so nett writes units for
+  it that run as root with bounded capabilities, and a Task Scheduler boot task starts them; the
+  mesh process uses userspace WireGuard and carries the TLS transport itself (design/dsm.md).
+  DSM loads the kernel's TUN driver only for packages that need it, so `nett install` loads it
+  before it starts the services.
 - Linux: when the kernel has no WireGuard, the mesh process uses the userspace data plane instead
   of failing to start.
 - When a data plane update fails, the mesh process applies the desired state again after 1 second,

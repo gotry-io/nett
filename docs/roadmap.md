@@ -93,6 +93,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [ ] Measurements on real machines: full-speed direct paths across the public internet against native WireGuard and Tailscale, the maximum forwarding throughput of a 1 vCPU relay, a Mac laptop changing networks and waking from sleep, coexistence with a proxy-style VPN app's enhanced mode
 - [x] Release key rotation: a release signed by the backup key (CI, `linux` job)
 - [x] Troubleshooting manual, including how to run alongside proxy-style VPN apps ([troubleshooting.md](troubleshooting.md))
+- [ ] Synology DSM member ([design/dsm.md](design/dsm.md)): the userspace data plane chosen when the kernel has no WireGuard, units for systemd 219 started by a boot task, the TLS transport in the mesh process; verified on a Virtual DSM, then services on a NAS reached by an Edge through the mesh
 
 ### 7. Phones and restricted networks
 
@@ -109,9 +110,8 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 
 [design/mesh.md](design/mesh.md) section 10; ADR 0017.
 
-- [ ] LAN smart gateway: subnet router with source NAT by source class
+- [ ] LAN smart gateway: subnet router with source NAT by source class, on Linux and DSM
 - [ ] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`), before userspace members that are reachable from outside (design/userspace.md section 9)
-- [ ] Synology DSM: the userspace data plane, packaging and boot tasks
 - [ ] Home Assistant OS add-on, which can act as a smart gateway, and its add-on repository
 
 ### 9. Several signing devices

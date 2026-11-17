@@ -61,6 +61,77 @@ pub mod linux {
     /// The units whose files exist only while the desired state needs them (design/release.md
     /// section 8).
     pub const OPTIONAL: [Unit; 2] = [RELAY, TRANSPORT];
+
+    /// The units on Synology DSM (design/dsm.md section 6): same names, written for its systemd 219,
+    /// running as root with bounded capabilities and started by the boot task.
+    pub const DSM_MESH: Unit = Unit {
+        name: MESH_UNIT,
+        content: include_str!("../../../packaging/systemd/dsm/nett-mesh.service"),
+        what: "the mesh service",
+    };
+    pub const DSM_NODE: Unit = Unit {
+        name: NODE_UNIT,
+        content: include_str!("../../../packaging/systemd/dsm/nett-node.service"),
+        what: "nett-node",
+    };
+    /// Files that exist on Synology DSM and nowhere else; `os_name` and the other keys have moved
+    /// between DSM versions, the files have not.
+    pub const DSM_MARKERS: [&str; 2] = ["/etc.defaults/VERSION", "/etc.defaults/synoinfo.conf"];
+
+    /// Which systemd nett's units are written for.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Flavor {
+        /// systemd as current distributions ship it (design/release.md section 5).
+        Systemd,
+        /// Synology DSM: systemd 219, no system accounts, a boot task (design/dsm.md section 6).
+        Dsm,
+    }
+
+    impl Flavor {
+        pub fn detect() -> Self {
+            if DSM_MARKERS.iter().all(|p| std::path::Path::new(p).exists()) {
+                Self::Dsm
+            } else {
+                Self::Systemd
+            }
+        }
+
+        pub fn mesh(self) -> Unit {
+            match self {
+                Self::Systemd => MESH,
+                Self::Dsm => DSM_MESH,
+            }
+        }
+
+        pub fn node(self) -> Unit {
+            match self {
+                Self::Systemd => NODE,
+                Self::Dsm => DSM_NODE,
+            }
+        }
+
+        /// Every unit this flavor installs.
+        pub fn units(self) -> &'static [Unit] {
+            match self {
+                Self::Systemd => &UNITS,
+                Self::Dsm => &[DSM_MESH, DSM_NODE],
+            }
+        }
+
+        /// The units that follow the desired state. DSM has none: the mesh process carries the TLS
+        /// transport there, and relays run elsewhere (design/dsm.md sections 2 and 7).
+        pub fn optional(self) -> &'static [Unit] {
+            match self {
+                Self::Systemd => &OPTIONAL,
+                Self::Dsm => &[],
+            }
+        }
+
+        /// Whether the mesh process carries the TLS transport itself (ADR 0013).
+        pub fn mesh_carries_tls(self) -> bool {
+            self == Self::Dsm
+        }
+    }
     /// The trust store, in the identity directory; the mesh service writes it (design/release.md
     /// section 8).
     pub const STATE_DIR: &str = "/etc/nett/state";
@@ -74,8 +145,10 @@ pub mod linux {
 
     /// The optional units installed now.
     pub fn installed_optional() -> Vec<Unit> {
-        OPTIONAL
-            .into_iter()
+        Flavor::detect()
+            .optional()
+            .iter()
+            .copied()
             .filter(|u| std::path::Path::new(&u.path()).exists())
             .collect()
     }
@@ -100,6 +173,56 @@ pub mod macos {
     pub const LAUNCHCTL: &str = "/bin/launchctl";
     pub const MESH_LABEL: &str = "io.gotry.nett.mesh";
     pub const NODE_LABEL: &str = "io.gotry.nett.node";
+}
+
+/// The most of a command's standard output nett reads (hard rule 14).
+const OUTPUT_LIMIT: u64 = 256 * 1024;
+
+/// Like [`run`], and also returns what the program wrote to standard output, up to
+/// [`OUTPUT_LIMIT`]; the rest is read and dropped, so the program never blocks on a full pipe.
+pub fn run_output(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<(bool, String), String> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("running {program} {}: {e}", args.join(" ")))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("reading the output of {program}"))?;
+    let reader = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut out = Vec::new();
+        let _ = (&mut stdout).take(OUTPUT_LIMIT).read_to_end(&mut out);
+        let _ = std::io::copy(&mut stdout, &mut std::io::sink());
+        out
+    });
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|e| format!("waiting for {program}: {e}"))?
+        {
+            let out = reader.join().unwrap_or_default();
+            return Ok((status.success(), String::from_utf8_lossy(&out).into_owned()));
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            return Err(format!(
+                "{program} {} did not finish in time",
+                args.join(" ")
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// Runs a service manager command (hard rule 9: a fixed absolute path, arguments as an array, no
@@ -129,5 +252,115 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Result<bool, Stri
             ));
         }
         std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::linux::{DSM_MESH, DSM_NODE, Flavor, MESH, NODE, PROGRAM, Unit};
+
+    /// `Section.Directive` for each setting in a unit file.
+    fn directives(unit: &Unit) -> Vec<String> {
+        let mut section = String::new();
+        let mut found = Vec::new();
+        for line in unit.content.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+                section = name.to_owned();
+                continue;
+            }
+            let key = line.split('=').next().unwrap_or_default().trim();
+            found.push(format!("{section}.{key}"));
+        }
+        found
+    }
+
+    /// DSM's systemd accepts a directive it does not implement with only a warning, so a unit
+    /// could look confined and not be (design/dsm.md section 3)
+    #[test]
+    fn dsm_units_use_only_what_systemd_219_implements() {
+        let known: Vec<&str> = include_str!("systemd-219.txt")
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .collect();
+        for unit in [&DSM_MESH, &DSM_NODE] {
+            for directive in directives(unit) {
+                assert!(
+                    known.contains(&directive.as_str()),
+                    "{}: {directive} is not implemented by systemd 219",
+                    unit.name
+                );
+            }
+        }
+        // The check bites: the unit for current systemd uses what 219 lacks
+        assert!(
+            directives(&MESH)
+                .iter()
+                .any(|d| !known.contains(&d.as_str()))
+        );
+        for missing in [
+            "Service.AmbientCapabilities",
+            "Service.DynamicUser",
+            "Service.LoadCredential",
+            "Service.ReadWritePaths",
+            "Service.MemoryMax",
+            "Service.RestrictAddressFamilies",
+        ] {
+            assert!(!known.contains(&missing), "{missing}");
+        }
+    }
+
+    /// The boot task starts them, root with bounded capabilities, the file system read-only but for
+    /// their own directories (design/dsm.md section 6.1)
+    #[test]
+    fn dsm_units_are_root_with_bounded_capabilities() {
+        for unit in [&DSM_MESH, &DSM_NODE] {
+            assert!(!unit.content.contains("[Install]"), "{}", unit.name);
+            assert!(!unit.content.contains("\nUser="), "{}", unit.name);
+            assert!(
+                unit.content.contains("\nNoNewPrivileges=yes\n"),
+                "{}",
+                unit.name
+            );
+            assert!(
+                unit.content.contains("\nReadOnlyDirectories=/\n"),
+                "{}",
+                unit.name
+            );
+            assert!(
+                unit.content.contains(&format!("\nExecStart={PROGRAM} ")),
+                "{}",
+                unit.name
+            );
+        }
+        assert!(
+            DSM_MESH.content.contains(
+                "\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE\n"
+            )
+        );
+        assert!(DSM_MESH.content.contains("--key /etc/nett/mesh.key"));
+        assert!(
+            DSM_MESH
+                .content
+                .contains("\nReadWriteDirectories=/etc/nett/state /run/nett\n")
+        );
+        assert!(
+            DSM_NODE
+                .content
+                .contains("\nCapabilityBoundingSet=CAP_DAC_OVERRIDE\n")
+        );
+    }
+
+    #[test]
+    fn flavors_share_unit_names() {
+        for flavor in [Flavor::Systemd, Flavor::Dsm] {
+            assert_eq!(flavor.mesh().name, MESH.name);
+            assert_eq!(flavor.node().name, NODE.name);
+        }
+        assert!(Flavor::Dsm.optional().is_empty());
+        assert_eq!(Flavor::Dsm.units(), &[DSM_MESH, DSM_NODE]);
+        assert!(Flavor::Dsm.mesh_carries_tls() && !Flavor::Systemd.mesh_carries_tls());
     }
 }

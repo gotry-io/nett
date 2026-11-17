@@ -399,12 +399,17 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             None
         }
     };
-    // On macOS this process carries the TLS transport itself and asks its worker thread for the
-    // configuration (ADR 0013)
+    // On macOS and Synology DSM this process carries the TLS transport itself and asks its worker
+    // thread for the configuration (ADR 0013)
     #[cfg(target_os = "macos")]
-    let transport = nett_transport::forward::ConfigSource::Mesh(std::sync::Arc::new(
-        worker.status_source(reload_tx.clone()),
-    ));
+    let carries_tls = true;
+    #[cfg(target_os = "linux")]
+    let carries_tls = nett_node::platform::linux::Flavor::detect().mesh_carries_tls();
+    let transport = carries_tls.then(|| {
+        nett_transport::forward::ConfigSource::Mesh(std::sync::Arc::new(
+            worker.status_source(reload_tx.clone()),
+        ))
+    });
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
@@ -420,8 +425,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        #[cfg(target_os = "macos")]
-        let (stop_transport, transport) = {
+        let transport = transport.map(|transport| {
             let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
             let task = tokio::spawn(async move {
                 let stopped = async {
@@ -432,12 +436,11 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 }
             });
             (stop, task)
-        };
+        });
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
-        #[cfg(target_os = "macos")]
-        {
-            drop(stop_transport);
-            let _ = transport.await;
+        if let Some((stop, task)) = transport {
+            drop(stop);
+            let _ = task.await;
         }
         drop(status);
         #[cfg(target_os = "linux")]

@@ -15,7 +15,7 @@ The userspace data plane is platform-independent: DSM and older-kernel Linux use
 |---|---|
 | Userspace data plane: WireGuard sessions, peer selection by `AllowedIPs` with source validation, in-process stateful filtering, demultiplexing on the WireGuard port | DNS and `/etc/resolver` (done together with hostnames and DNS) |
 | macOS backend: utun, addresses, routes, binding outbound sockets to the physical interface, network changes | The Edge role and advertised routes on macOS |
-| Linux TUN backend: lab scenarios and CI use it to verify the userspace data plane; it is also the basis for DSM and older kernels | DSM packaging and boot tasks; performance optimizations such as batched I/O and offloads (GSO, GRO) |
+| Linux TUN backend: the data plane on Linux when the kernel has no WireGuard (Synology DSM, older kernels; dsm.md section 5), and in lab scenarios and CI to verify the userspace data plane | Service management on DSM (dsm.md section 6); performance optimizations such as batched I/O and offloads (GSO, GRO) |
 | launchd operation (installation is in design/release.md section 4); macOS nodes in local signing | Dedicated optimization for laptop sleep and frequent network switching (basic network-change handling is in section 6.4) |
 | Measured coexistence with proxy-type VPN apps (Surge enhanced mode) | |
 
