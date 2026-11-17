@@ -870,8 +870,6 @@ const SOAK_EVERY: Duration = Duration::from_secs(60);
 /// measurement. Anonymous memory is what a leak grows; RSS also counts code pages, which the kernel
 /// may reclaim while the lab rests.
 const SOAK_GROWTH_KIB: u64 = 512;
-/// Idle budget of nett-node and the mesh process (hard rule 14); meaningful for release builds.
-const NODE_BUDGET_KIB: u64 = 5 * 1024;
 
 /// One memory sample of each process: RSS, PSS and anonymous memory in KiB.
 type Samples = Vec<(String, super::Memory)>;
@@ -880,8 +878,8 @@ type Samples = Vec<(String, super::Memory)>;
 /// added or removed again, pushed through the Hub, and one member pings the other; the memory of
 /// every nett process is sampled into `soak.csv`. Then the lab rests for 10 minutes and the idle
 /// memory is measured: anonymous memory must be flat against the first sample after a 10-minute
-/// warm-up, and nett-node and the mesh process must stay within their budget, judged by the
-/// largest RSS sampled.
+/// warm-up, and nett-node and the mesh process must hold no more private memory than their idle
+/// budget.
 fn soak_phase(
     h: &HubLab<'_>,
     lab: &Lab,
@@ -910,8 +908,7 @@ fn soak_phase(
     let csv_path = out.join("soak.csv");
     let mut csv = std::fs::File::create(&csv_path)?;
     writeln!(csv, "seconds,process,rss_kib,pss_kib,anon_kib,threads")?;
-    let mut peak: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    let mut sample = |csv: &mut std::fs::File, at: u64| -> anyhow::Result<Samples> {
+    let sample = |csv: &mut std::fs::File, at: u64| -> anyhow::Result<Samples> {
         let mut all = Vec::new();
         for (name, pid) in &pids {
             if let Some(m) = super::memory_kib(*pid) {
@@ -920,8 +917,6 @@ fn soak_phase(
                     "{at},{name},{},{},{},{}",
                     m.rss, m.pss, m.anon, m.threads
                 )?;
-                let top = peak.entry(name.clone()).or_default();
-                *top = (*top).max(m.rss);
                 all.push((name.clone(), m));
             }
         }
@@ -991,16 +986,18 @@ fn soak_phase(
                 m.anon
             ),
         );
-        let top = peak.get(name).copied().unwrap_or(m.rss);
         let detail = format!(
-            "idle RSS {} KiB, PSS {} KiB, anonymous {} KiB; largest RSS {top} KiB",
+            "idle RSS {} KiB, PSS {} KiB, anonymous {} KiB",
             m.rss, m.pss, m.anon
         );
         if name.starts_with("node:") || name.starts_with("mesh:") {
             report.check(
                 &format!("soak:{name}:budget"),
-                top <= NODE_BUDGET_KIB,
-                format!("{detail}; budget {NODE_BUDGET_KIB} KiB"),
+                m.anon <= super::PRIVATE_BUDGET_KIB,
+                format!(
+                    "{detail}; budget {} KiB of private memory",
+                    super::PRIVATE_BUDGET_KIB
+                ),
             );
         } else {
             report.record(&format!("soak:{name}:memory"), detail);

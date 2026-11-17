@@ -34,7 +34,7 @@ Usage:
 
 - Imported with `default-features = false, features = ["ring"]`: only the `noise` layer is used, not its `device`, `socket` or `tun`; AEAD uses the project's existing ring, and aws-lc is not introduced;
 - The session layer is wrapped behind a `Session` trait (encryption, decryption, timers, handshake state); the rest of the data plane does not use gotatun types directly, so replacing the implementation changes one module;
-- When it is introduced, report binary size (`cargo bloat`) and idle RSS on macOS and Linux.
+- When it is introduced, report binary size (`cargo bloat`) and idle memory on macOS and Linux.
 
 ## 4. Data plane structure
 
@@ -124,7 +124,7 @@ The enhanced mode of a proxy app (for example Surge) creates its own utun and ta
 | macOS smoke test | Create a utun, configure addresses and routes, the in-tunnel probe socket, cleanup after exit | macOS, CI |
 | macOS end to end | A native member on a Mac and a Linux member in OrbStack (kernel WireGuard) on the same Mac: handshake, two-way access, access rules, recovery after mesh process restart, network change | Developer's Mac, scripted |
 | Coexistence with proxy app | Surge enhanced mode on and off: the mesh is connected; WireGuard packets use the physical interface; Surge started first and started later; sleep and wake | Developer's Mac |
-| Resources | Idle RSS ≤ 5 MB (hard rule 14); macOS has no PSS, so record RSS and `footprint` | macOS, Linux |
+| Resources | Idle private memory ≤ 5 MB (hard rule 14); macOS has no PSS: the physical footprint (`footprint`) stands for private memory there, and RSS is recorded beside it | macOS, Linux |
 | Performance | Between the Mac and the OrbStack member on the same Mac, compare throughput, latency and CPU with wireguard-go. Record first; judge against the roadmap's criteria in M1 acceptance | Developer's Mac |
 
 ## 9. Open questions

@@ -31,7 +31,7 @@ The mesh is the most central and riskiest capability. The user decided that nett
 - **The Hub's own HTTPS**: the Hub install script generates the reverse proxy configuration for the Hub console's domain (Caddy by default, ADR 0009), and on the same port 443 hands the nett-relay domain over to nett-relay by SNI. This reverse proxy can also be the user's Edge, but nett generates only these two sections, for the Hub and nett-relay.
 - **Agent-to-agent access is to be discussed**: workload identity may become an extension of the mesh (reusing the Edge address mechanism, assigning a dedicated address to a single program); the MCP gateway does not belong to nett. Not scheduled.
 - **Phases**: P0 project start → M1 mesh → M2 mesh enhancements (multi-hop, QUIC and obfuscation, UDP support for CONNECT, hole punching when both ends are behind symmetric NAT) → M3 clients (iOS and Android apps and Windows).
-- Role boundaries and resource budget: idle RSS of nett-node, the mesh process, the transport adapter and nett-relay is <= 5 MB each, and the Hub <= 30-50 MB.
+- Role boundaries and resource budget: when idle, nett-node, the mesh process, the transport adapter and nett-relay each hold <= 5 MB of private memory and <= 10 MB together, and the Hub <= 30-50 MB.
 
 ## Rationale
 

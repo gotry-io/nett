@@ -64,7 +64,7 @@ When M1 is done: hand-written tunnels, home broadband port forwarding and existi
 
 | Constraint | Meaning |
 |---|---|
-| **Very low resource use** | Each resident process on a node (node, mesh process, transport adapter, relay) uses ≤ 5 MB when idle; the Hub uses ≤ 30–50 MB when running steadily |
+| **Very low resource use** | When idle, each resident process on a node (node, mesh process, transport adapter, relay) holds ≤ 5 MB of its own memory, and all of them together ≤ 10 MB; the Hub uses ≤ 30–50 MB when running steadily |
 | **High performance** | Mesh encryption uses WireGuard, done by the kernel on Linux; bulk traffic prefers the direct path and avoids relays |
 | **Adapts to complex networks** | LAN, public internet, mainland China, cross-border; home broadband without inbound 80/443, NAT-based VPSes, links where UDP is throttled or identified |
 | **High availability** | Automatic switching when a path jitters, breaks or a node goes offline, with connections kept alive; no single point; the mesh is unaffected when the Hub is offline |

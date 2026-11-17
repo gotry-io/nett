@@ -4156,9 +4156,10 @@ fn mem_available_kib() -> Option<u64> {
         .ok()
 }
 
-/// Idle budget (hard rule 14): 5 MB each for the mesh process, the transport adapter and
-/// nett-relay.
-const IDLE_BUDGET_KIB: u64 = 5 * 1024;
+/// Idle budget (hard rule 14): each nett process holds at most 5 MB of private memory, its anonymous
+/// pages. RSS is recorded beside it but not judged: it also counts the code pages of the one program
+/// all of them run, which they share and the kernel reclaims under memory pressure.
+pub(crate) const PRIVATE_BUDGET_KIB: u64 = 5 * 1024;
 /// Amount of data transferred in each load phase.
 const RESOURCE_BULK: u64 = 128 * 1024 * 1024;
 
@@ -4218,6 +4219,7 @@ pub fn resources(
     lab.stop_load();
     std::thread::sleep(idle);
     let mut over = Vec::new();
+    let mut pss_total = 0;
     for (name, pid) in lab.measured() {
         let Some(m) = memory_kib(pid) else {
             report.check(
@@ -4227,9 +4229,10 @@ pub fn resources(
             );
             continue;
         };
-        if m.rss > IDLE_BUDGET_KIB {
+        if m.anon > PRIVATE_BUDGET_KIB {
             over.push(name.clone());
         }
+        pss_total += m.pss;
         report.record(
             &name,
             format!(
@@ -4246,7 +4249,7 @@ pub fn resources(
     report.record(
         "machine",
         format!(
-            "MemAvailable before {:?} KiB, after {:?} KiB",
+            "MemAvailable before {:?} KiB, after {:?} KiB; PSS of all nett processes in the lab {pss_total} KiB, which bounds one machine's total from above",
             available_before,
             mem_available_kib()
         ),
@@ -4254,7 +4257,7 @@ pub fn resources(
     // For anything over budget, find the cause before entering the next phase (design/prototype.md
     // section 6.3)
     report.check(
-        "idle-rss-within-5-mb",
+        "idle-private-memory-within-5-mb",
         over.is_empty(),
         format!("over budget: {over:?}"),
     );

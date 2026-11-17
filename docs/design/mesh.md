@@ -406,9 +406,9 @@ The concrete userspace WireGuard implementation is evaluated and selected after 
 |---|---|
 | Candidate paths per pair of members | 6 |
 | Probe traffic | About 1 KiB/s per pair of active links; about 2.5 KB/s for 15 seconds after switching away because of a failure (section 7) |
-| Mesh process | Idle RSS <= 5 MB; mesh state (including admission material and revocations) no more than 1 MiB at 50 members; forwarding buffers have limits |
+| Mesh process | Idle private memory <= 5 MB (hard rule 14); mesh state (including admission material and revocations) no more than 1 MiB at 50 members; forwarding buffers have limits |
 | Desired state file and trust store | 4 MiB each; 256 members; 4096 revocations; candidate paths per member as above |
-| Transport adapter | Idle RSS <= 5 MB; forwarding buffers have limits |
+| Transport adapter | Idle private memory <= 5 MB; forwarding buffers have limits |
 | nett-relay per link through the relay | About 1 KiB; the total number of connections, the index table size and the number of `mac1` trials per second all have limits |
 
 ## 18. Phased implementation
