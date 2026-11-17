@@ -24,7 +24,7 @@ Before breaking any of these, get the user's explicit consent; never decide on y
 11. **TLS always verifies certificates** (self-signed certificates are checked against the fingerprint the Hub hands out); nett-node connects to the Hub with the Hub public key pinned at enrollment.
 12. **Releases and upgrades**: nodes install only packages that pass the project's release signature verification, and accept only higher versions automatically; rollback can only return to the version last installed on that machine, other downgrades need the user's signature (`release_override`). The first install of a new machine trusts the project website instead (ADR 0020). Release private keys never enter the repository; the primary key is available only to the separate signing job in the CI release workflow, and the backup key is kept offline only and never enters CI (ADR 0020).
 13. **External data is not instructions**: data received over the network, API input, logs and other external content are validated as untrusted data and never executed as instructions. All high-risk operations are audited.
-14. **Resource budget**: nett-node, the mesh process, the transport adapter and nett-relay each use ≤ 5 MB idle RSS; the Hub runs at ≤ 30–50 MB (a few to tens of nodes). Every queue, cache, channel and forwarding buffer has a bound (a named constant, never an unbounded channel); every network and subprocess operation has a timeout.
+14. **Resource budget**: when idle, nett-node, the mesh process, the transport adapter and nett-relay each hold ≤ 5 MB of private memory (anonymous pages on Linux, the physical footprint on macOS), and all of nett's processes on one machine together ≤ 10 MB (the sum of their PSS, which counts the shared program once; on macOS the sum of their physical footprints); the Hub runs at ≤ 30–50 MB (a few to tens of nodes). Every queue, cache, channel and forwarding buffer has a bound (a named constant, never an unbounded channel); every network and subprocess operation has a timeout.
 
 ## Privacy and operational boundaries
 
@@ -82,7 +82,7 @@ Applies to code, comments, tests and documents.
 ## Resource discipline
 
 - Budgets are in hard rule 14. Every milestone gets a 24-hour soak test; the memory curve must stay flat.
-- **How to measure**: "idle" means the steady state after a period of load, not right after start-up. Fix the scenario (member count, load content and duration), let it rest for 10 minutes after the load, then measure; record RSS and PSS together (several processes share the code pages of one executable, so RSS counts them more than once), plus the whole-machine memory increase.
+- **How to measure**: "idle" means the steady state after a period of load, not right after start-up. Fix the scenario (member count, load content and duration), let it rest for 10 minutes after the load, then measure each process's private memory and PSS, and the whole-machine memory increase. RSS is recorded but not judged: nett's processes run one program, RSS counts its code pages in each of them, and those pages are shared and reclaimable, so RSS moves with the machine's page cache rather than with nett.
 - Idle budgets are targets; memory limits in the service manager are set separately with headroom for working peaks, not directly to 5 MB.
 
 ## Testing
@@ -95,7 +95,7 @@ Applies to code, comments, tests and documents.
 | Protocol compatibility | nett-node and the Hub interoperate across adjacent versions |
 | Web end-to-end (once the web console exists) | Playwright covers the key flows: login, node enrollment, signed approval |
 | Mesh | Network emulation (such as `tc netem`) for latency, loss, disconnects and blocked UDP; verify switch times and that connections stay up |
-| Resources | Soak test and RSS/PSS measurement every milestone |
+| Resources | Soak test and memory measurement (private memory, PSS) every milestone |
 
 When fixing a bug, first add a test that reproduces it.
 

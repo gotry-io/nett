@@ -165,7 +165,7 @@ Machines that were already members before joining keep the public keys registere
 
 | Process | Identity | Notes |
 |---|---|---|
-| nett-node | root | Writes the mesh process's desired state file and asks it to reload; later also replaces the executable (upgrade). Listens on no port, executes no shell, does not access Docker (hard rules 1, 2, 9); tokio single thread; idle RSS ≤ 5 MB |
+| nett-node | root | Writes the mesh process's desired state file and asks it to reload; later also replaces the executable (upgrade). Listens on no port, executes no shell, does not access Docker (hard rules 1, 2, 9); tokio single thread; idle private memory ≤ 5 MB (hard rule 14) |
 | Mesh process | Unchanged (a dedicated identity on Linux, root on macOS) | Trusts only the desired state it has verified itself; the local status interface accepts only root and itself (status.md section 3), and nett-node connects as root |
 | nett-relay | The system user `nett-relay` (Linux) | Only on relays (site.md section 4.1); may bind ports below 1024, nothing else; fetches its assignment from the mesh process (status.md section 3.1) |
 | Transport adapter | The system user `nett-transport` (Linux) | Only while there is a TLS candidate; no capabilities; fetches its configuration from the mesh process |
@@ -237,7 +237,7 @@ Later: the web console and passkeys (ADR 0024), after the site state moves to th
 | Unit tests | Composition of the site model (byte-for-byte identical to the desired state file written without a Hub); the Hub's verification of artifacts (wrong signature, version going backward, same version with different content); a token usable once, expiry; enrollment: refused when the admission proof is wrongly signed, when the identity public key differs from the handshake's, and when the machine is not waiting to join; applying Hub-side enrollments, departures and addresses to a pushed site gives the same result as applying them to the site directory; the choice of public address (stated, the machine's global address, the one the Hub sees, loopback); the results of reload (`applied` with problems, `rejected`, `busy`) map to `StateAck`; `install` does not modify the desired state file on a machine with a Hub configuration |
 | Hub integration tests | Temporary SQLite, real routes called over HTTP: link, push, permission checks (no token, wrong token) |
 | Lab scenarios | Run the Hub in a lab topology: after a push each member applies, and `nett site status` lists all machines and links; when the Hub stops the mesh runs as usual and catches up after changes resume; when the Hub delivers a peer without admission material or an artifact of an old version, all members reject it (roadmap M1 acceptance); enrollment; after one member runs `nett leave` the other members delete it, the site deletes it and cleans up the rules that reference it, and the same name joining again gets a new node ID |
-| Resources | nett-node idle RSS ≤ 5 MB; the Hub's steady memory in the lab topology |
+| Resources | nett-node idle private memory ≤ 5 MB; the Hub's steady memory in the lab topology |
 | Real machines | One of the user's own `public` hosts as the Hub host; existing members join; then new machines enroll |
 
 ## 11. Open questions
