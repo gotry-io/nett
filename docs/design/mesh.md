@@ -392,6 +392,7 @@ The concrete userspace WireGuard implementation is evaluated and selected after 
 | Member removed | The Hub delivers a revocation, other members delete its public key and permanently reject that node ID, and relay assignments through it are voided |
 | Admission material verification fails | The peer is not configured, and an event is reported |
 | Clock skew | Does not affect WireGuard; affects measurement timestamps, and an event is reported when the skew is too large |
+| A data plane update fails (the interface cannot be created before the system provides its TUN device, the kernel refuses a change) | What the failure left closed stays closed (hard rule 6). The desired state in effect is applied again after 1 second, then after twice as long each time up to 30 seconds, until it succeeds; no new desired state is needed. Probe sockets and the DNS responder that cannot be opened are retried the same way. The failure is listed as a problem while it lasts (status.md section 6) |
 
 ## 16. Observability
 
