@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.19] - 2026-11-17
+
 - Synology DSM 7 joins as a member: the install script and `sudo nett install <token>` as on
   other Linux machines. DSM's systemd is too old for nett's usual units, so nett writes units for
   it that run as root with bounded capabilities, and a Task Scheduler boot task starts them; the
