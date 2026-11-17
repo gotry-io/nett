@@ -19,6 +19,9 @@ use nett_trust::keys::X25519PublicKey;
 use rustix::net::netlink::GENERIC;
 
 use self::netlink::{NlError, Socket};
+
+/// What the kernel answers for a generic netlink family it does not have.
+const ENOENT: i32 = 2;
 use self::wg::PeerChange;
 use self::wgport::WgPort;
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
@@ -60,10 +63,23 @@ pub(crate) fn peer_cred(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<(u32
 pub fn teardown() -> Result<(), DataPlaneError> {
     let mut route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
     rtnl::del_link(&mut route, INTERFACE_NAME).map_err(kernel("delete the mesh interface"))?;
-    for table in nft::tables() {
-        nft::delete_table(table).map_err(kernel("delete an nftables table"))?;
+    if has_nft_tables(KernelWireGuard::open().map(drop))? {
+        for table in nft::tables() {
+            nft::delete_table(table).map_err(kernel("delete an nftables table"))?;
+        }
     }
     Ok(())
+}
+
+/// Whether this machine can hold nett's nftables tables, from whether kernel WireGuard opens: only the
+/// kernel data plane creates them, and the userspace one (Synology DSM, old kernels) filters in the
+/// mesh process. Its kernel may have no nftables at all, and then does not even answer a request.
+fn has_nft_tables(kernel: Result<(), DataPlaneError>) -> Result<bool, DataPlaneError> {
+    match kernel {
+        Ok(()) => Ok(true),
+        Err(DataPlaneError::Unsupported(_)) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 pub struct KernelWireGuard {
@@ -71,6 +87,16 @@ pub struct KernelWireGuard {
     generic: Socket,
     family: u16,
     ifindex: Option<u32>,
+}
+
+/// A kernel without the WireGuard family, and no module to load for it, has no kernel WireGuard: the
+/// userspace data plane takes over (design/dsm.md section 5). Anything else is an error.
+fn family_error(e: NlError) -> DataPlaneError {
+    if e.errno() == Some(ENOENT) {
+        DataPlaneError::Unsupported("kernel WireGuard")
+    } else {
+        kernel("resolve the wireguard netlink family")(e)
+    }
 }
 
 fn kernel(op: &'static str) -> impl FnOnce(NlError) -> DataPlaneError {
@@ -101,9 +127,7 @@ impl KernelWireGuard {
         let route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
         let mut generic =
             Socket::open(Some(GENERIC)).map_err(kernel("open generic netlink socket"))?;
-        let family = wg::resolve_family(&mut generic).map_err(kernel(
-            "resolve the wireguard netlink family (is the wireguard module available?)",
-        ))?;
+        let family = wg::resolve_family(&mut generic).map_err(family_error)?;
         Ok(Self {
             route,
             generic,
@@ -418,5 +442,40 @@ impl WgPortSend for WgPort {
 impl WgPortRecv for nft::ProbeLog {
     fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>> {
         nft::ProbeLog::recv(self).map_err(std::io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kernel_without_the_wireguard_family_means_userspace() {
+        let missing = NlError::Kernel(std::io::Error::from_raw_os_error(ENOENT));
+        assert!(matches!(
+            family_error(missing),
+            DataPlaneError::Unsupported("kernel WireGuard")
+        ));
+        // Anything else, for example missing privileges, stays an error rather than falling back
+        let denied = NlError::Kernel(std::io::Error::from_raw_os_error(1));
+        assert!(matches!(
+            family_error(denied),
+            DataPlaneError::Kernel { .. }
+        ));
+    }
+
+    /// Uninstalling on Synology DSM waited for an answer about nftables its kernel never gives, and
+    /// failed: where kernel WireGuard is missing, nett never made any nftables table
+    #[test]
+    fn teardown_leaves_nftables_alone_without_kernel_wireguard() {
+        assert!(
+            !has_nft_tables(Err(DataPlaneError::Unsupported("kernel WireGuard"))).expect("decided")
+        );
+        assert!(has_nft_tables(Ok(())).expect("decided"));
+        let denied = DataPlaneError::Kernel {
+            op: "resolve the wireguard netlink family",
+            source: std::io::Error::from_raw_os_error(1),
+        };
+        assert!(has_nft_tables(Err(denied)).is_err());
     }
 }
