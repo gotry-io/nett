@@ -4,6 +4,12 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- When a data plane update fails, the mesh process applies the desired state again after 1 second,
+  then after twice as long each time up to 30 seconds, until it succeeds, and the failure stays in
+  `nett status` and `nett site status` while it lasts. An interface that could not be created when
+  the service started, for example because the system provided its TUN device later, stayed down
+  until the next desired state or a restart, and after 5 minutes nothing showed the failure.
+
 ## [0.3.18] - 2026-11-16
 
 - When a `public` member's WireGuard port or address changes, relays forward to the new one as

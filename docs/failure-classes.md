@@ -30,7 +30,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 ## 2. What is derived from a source follows it when it changes
 
-**Holds**: whatever is computed, bound, opened or started from configuration or from the program is redone when that source changes, while running and across restarts. A saved or learned copy never outranks a newer source.
+**Holds**: whatever is computed, bound, opened or started from configuration or from the program is redone when that source changes, while running and across restarts, and redone until it succeeds when setting it up failed: what made it fail, such as a device the system provides later, can pass with no source changing. A saved or learned copy never outranks a newer source.
 
 **Breaks when** something is set up once at startup and the configuration changes later; saved state is restored over an assignment that changed while it was saved; a learned value is preferred to a configured one that has since changed, and the event that would teach the new value never comes; a helper process or a service manager keeps running the program or the unit it started with; a counter goes away with the artifact that carried it.
 
@@ -38,6 +38,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 - A relay binds a `public` member where a changed assignment puts it, and restores a saved binding only while the assignment still gives the address it gave when saved; the relay's own machine stays on loopback over saved and learned bindings (mesh.md sections 5.1 and 5.2);
 - On Linux, the probes on the WireGuard port move with the port when it changes (mesh.md section 5.5);
+- A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way (mesh.md section 15);
 - After an upgrade settles, and after `sudo nett install` brings a new program, the relay and the transport adapter restart on it; a changed launchd configuration is unloaded and loaded again (release.md sections 4 and 7);
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2).
@@ -49,6 +50,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-relay:the_relays_own_machine_stays_on_loopback`
 - `nett-node:a_new_node_that_keeps_exiting_is_rolled_back` (the helpers restart once per settled upgrade)
 - `nett-transport:a_port_held_by_another_process_is_opened_once_free`
+- `nett-mesh:a_failed_interface_comes_up_on_a_retry`
+- `nett-mesh:a_new_desired_state_replaces_a_pending_retry`
 - `nett-site:advertised_routes_keep_counting_after_they_are_removed`
 - `lab:port-change`, `lab:relay-restart`
 
@@ -182,12 +185,14 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - With `--json`, reports go to standard error;
 - `nett doctor` asks the DNS responder for this machine's own name and tells apart the ways a resolver can bypass it (names-and-diagnostics.md section 6);
 - A download over the upgrade limit names the URL and the limit;
-- `sudo nett install` prints the machine's keys only while it has no desired state.
+- `sudo nett install` prints the machine's keys only while it has no desired state;
+- A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6).
 
 **Guards**
 
 - `nett-cli:a_responder_that_does_not_answer_its_own_name_is_a_problem`
 - `nett-cli:a_resolv_conf_past_systemd_resolved_is_named`
+- `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
 - `ci:Full flow of sudo nett install (needs root)`
 
 **Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub; the error for a download over the size limit.

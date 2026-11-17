@@ -65,11 +65,14 @@ pub enum Event {
     NamesUnavailable {
         reason: String,
     },
-    /// A data plane operation failed; the current state is kept and the operation is retried on the next
-    /// desired state.
+    /// A data plane operation failed; what it left closed stays closed. When it failed while a desired
+    /// state was applied, that desired state is applied again after a wait that doubles up to 30 seconds
+    /// (design/mesh.md section 15).
     DataPlaneFailed {
         reason: String,
     },
+    /// Applying the desired state in effect again after a data plane failure succeeded.
+    DataPlaneRecovered,
     /// A new version of the access rule set passed verification (design/mesh.md section 12).
     AccessRulesApplied {
         version: u64,
@@ -181,6 +184,7 @@ pub fn log_event(event: &Event) {
             tracing::warn!(%reason, "names under {} do not resolve", crate::dns::SUFFIX)
         }
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
+        Event::DataPlaneRecovered => tracing::info!("data plane update succeeded on retry"),
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),
         Event::AccessRulesRejected { reason } => {
             tracing::warn!(%reason, "access rules rejected")

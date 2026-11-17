@@ -57,8 +57,9 @@ pub const MAX_PENDING_RELOADS: usize = 4;
 const MAX_EVENTS: usize = 32;
 /// Maximum number of per-node problems (members, advertised prefixes rejected) kept.
 const MAX_NODE_PROBLEMS: usize = 32;
-/// After a data plane operation fails, it is listed as a problem for this long: the failed operation is
-/// retried automatically, and while it keeps failing it stays listed.
+/// After a data plane operation fails, it is listed as a problem for this long, or until a retry of the
+/// application it failed in succeeds: failed applications are retried and failed peer operations are
+/// redone by later ticks, so while either keeps failing it stays listed.
 const DATA_PLANE_WINDOW: Duration = Duration::from_secs(300);
 /// Stack of the thread that accepts connections: it only does small reads, writes and serialization.
 const SERVER_STACK: usize = 256 * 1024;
@@ -512,6 +513,7 @@ impl<E: EventSink> Recorder<E> {
             Event::DataPlaneFailed { reason } => {
                 self.problems.data_plane = Some((Instant::now(), now, reason.clone()));
             }
+            Event::DataPlaneRecovered => self.problems.data_plane = None,
             Event::TrustStoreFailed { reason } => {
                 self.problems.trust_store = Some((now, reason.clone()));
             }
@@ -1366,6 +1368,35 @@ mod tests {
             err,
             QueryError::Connect { ref source, .. } if source.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+
+    /// A failed application is listed while its retries keep failing, also past the window of a
+    /// single failure, and no longer once a retry succeeds
+    #[test]
+    fn a_data_plane_failure_is_listed_until_a_retry_succeeds() {
+        let mut r = Recorder::new(VecSink::default());
+        let names = BTreeMap::new();
+        let listed = |r: &Recorder<VecSink>, at| {
+            r.problems(&node(1), &names, at)
+                .iter()
+                .any(|p| p.kind == ProblemKind::DataPlaneFailed)
+        };
+        r.emit(Event::DataPlaneFailed {
+            reason: "open /dev/net/tun: not found".into(),
+        });
+        let failed_at = Instant::now();
+        assert!(listed(&r, failed_at));
+        assert!(
+            !listed(&r, failed_at + DATA_PLANE_WINDOW),
+            "one failure passes"
+        );
+        // Retries fail at most 30 seconds apart, so the failure stays recent
+        r.emit(Event::DataPlaneFailed {
+            reason: "open /dev/net/tun: not found".into(),
+        });
+        assert!(listed(&r, Instant::now()));
+        r.emit(Event::DataPlaneRecovered);
+        assert!(!listed(&r, Instant::now()));
     }
 
     #[test]

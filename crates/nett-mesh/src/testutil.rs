@@ -229,6 +229,9 @@ pub struct FakeDataPlane {
     pub listen_port: Option<u16>,
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
+    /// How many more interface creations fail, as when the TUN device appears only after the mesh
+    /// process started.
+    pub fail_interface: u32,
     pub rehandshakes: Vec<PeerSpec>,
     /// The idle TLS ports set on each call.
     pub tls_guards: Vec<Vec<u16>>,
@@ -258,6 +261,7 @@ impl FakeDataPlane {
             listen_port: None,
             peers: None,
             fail_peers: false,
+            fail_interface: 0,
             rehandshakes: Vec::new(),
             tls_guards: Vec::new(),
             filter: None,
@@ -283,6 +287,13 @@ impl DataPlane for FakeDataPlane {
         spec: &InterfaceSpec,
         _private_key: &PrivateKey,
     ) -> Result<InterfaceState, DataPlaneError> {
+        if self.fail_interface > 0 {
+            self.fail_interface -= 1;
+            return Err(DataPlaneError::Os {
+                op: "open /dev/net/tun",
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
         self.interfaces.push(spec.clone());
         let listen_port = spec
             .listen_port

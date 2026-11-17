@@ -43,6 +43,32 @@ pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
 /// Interval for reading each peer's state (traffic, endpoint): after an endpoint is changed by roaming it
 /// is corrected within this time (section 8.3).
 const STATS_INTERVAL: Duration = Duration::from_millis(100);
+/// After a data plane update fails, the desired state in effect is applied again after this long,
+/// then after twice as long each time, up to [`RETRY_MAX`] (design/mesh.md section 15).
+pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(1);
+pub(crate) const RETRY_MAX: Duration = Duration::from_secs(30);
+
+/// A desired state whose application hit a data plane failure, to apply again at `due`.
+struct Retry {
+    desired: DesiredMesh,
+    due: Instant,
+    delay: Duration,
+}
+
+/// Passes every event on, and notes whether a data plane operation failed: that application is then
+/// tried again, since the cause (an interface the system has not made available yet, a kernel that
+/// refused a change) can pass without anything in the desired state changing.
+struct FailureWatch<'a, E> {
+    inner: &'a mut E,
+    failed: bool,
+}
+
+impl<E: EventSink> EventSink for FailureWatch<'_, E> {
+    fn emit(&mut self, event: Event) {
+        self.failed |= matches!(event, Event::DataPlaneFailed { .. });
+        self.inner.emit(event);
+    }
+}
 
 /// The mesh interface that is already ready.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +122,9 @@ pub struct Engine<D> {
     /// design/status.md sections 5 and 6).
     names: BTreeMap<NodeId, NodeName>,
     applied_at: Option<Instant>,
+    /// The desired state to apply again after a data plane failure; what the failure left closed stays
+    /// closed until then (hard rule 6).
+    retry: Option<Retry>,
     /// Loopback ports of TLS relays on the transport adapter -> the relay's TLS address: local status shows
     /// the latter.
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
@@ -145,6 +174,7 @@ impl<D: DataPlane> Engine<D> {
             installed_routes: None,
             names: BTreeMap::new(),
             applied_at: None,
+            retry: None,
             tls_relays: BTreeMap::new(),
             trust: TrustStore::in_memory(),
         }
@@ -282,9 +312,51 @@ impl<D: DataPlane> Engine<D> {
         // When the trust store has just been created (the first desired state), the expiry of this machine's
         // node policy is not checked (design/mesh.md section 4.2)
         let now = self.trust.saved().is_some().then(Timestamp::now);
-        self.apply_accepted(desired, now, events);
+        self.applied_at = Some(Instant::now());
+        self.retry = None;
+        if self.apply_watched(desired, now, events) {
+            self.retry = Some(Retry {
+                desired: desired.clone(),
+                due: Instant::now() + RETRY_FIRST,
+                delay: RETRY_FIRST,
+            });
+        }
         self.save_trust(desired, events);
         Ok(())
+    }
+
+    /// Applies an accepted desired state; returns whether a data plane operation failed.
+    fn apply_watched(
+        &mut self,
+        desired: &DesiredMesh,
+        now: Option<Timestamp>,
+        events: &mut impl EventSink,
+    ) -> bool {
+        let mut watch = FailureWatch {
+            inner: events,
+            failed: false,
+        };
+        self.apply_accepted(desired, now, &mut watch);
+        watch.failed
+    }
+
+    /// Applies the desired state in effect again when an earlier application failed and its retry is
+    /// due, doubling the wait after each failure.
+    fn retry_due(&mut self, now: Instant, events: &mut impl EventSink) {
+        let Some(retry) = self.retry.take_if(|r| now >= r.due) else {
+            return;
+        };
+        let policy_now = self.trust.saved().is_some().then(Timestamp::now);
+        if self.apply_watched(&retry.desired, policy_now, events) {
+            let delay = (retry.delay * 2).min(RETRY_MAX);
+            self.retry = Some(Retry {
+                due: now + delay,
+                delay,
+                ..retry
+            });
+        } else {
+            events.emit(Event::DataPlaneRecovered);
+        }
     }
 
     /// The whole desired state file was rejected at startup: uses the last whole desired state accepted in the
@@ -334,7 +406,6 @@ impl<D: DataPlane> Engine<D> {
         events: &mut impl EventSink,
     ) {
         self.names = desired.names.clone();
-        self.applied_at = Some(Instant::now());
         self.tls_relays = desired
             .tls_targets()
             .iter()
@@ -721,6 +792,7 @@ impl<D: DataPlane> Engine<D> {
         now_ms: u64,
         events: &mut impl EventSink,
     ) -> Vec<Outgoing> {
+        self.retry_due(now, events);
         if self.interface.is_none() {
             return Vec::new();
         }
@@ -1372,6 +1444,68 @@ mod tests {
                 .iter()
                 .any(|ev| matches!(ev, Event::DataPlaneFailed { .. }))
         );
+    }
+
+    /// The interface cannot be created when the mesh process starts (on Synology DSM the TUN device
+    /// appeared 32 seconds after it): the desired state in effect is applied again, waiting twice as
+    /// long each time up to 30 seconds, until the interface comes up, with no new desired state
+    #[test]
+    fn a_failed_interface_comes_up_on_a_retry() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        e.dataplane.fail_interface = 7;
+        let mut events = VecSink::default();
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        assert!(e.interface().is_none());
+        let failures = |events: &VecSink| {
+            events
+                .0
+                .iter()
+                .filter(|ev| matches!(ev, Event::DataPlaneFailed { .. }))
+                .count()
+        };
+        assert_eq!(failures(&events), 1);
+
+        // Ticks every 100 ms: attempts after 1, 2, 4, 8, 16, 30 and 30 more seconds
+        let start = Instant::now();
+        let mut attempts = Vec::new();
+        for step in 1..=1200u64 {
+            let at = start + Duration::from_millis(step * 100);
+            let before = failures(&events);
+            let up = e.interface().is_some();
+            e.tick(at, step * 100, &mut events);
+            if !up && (failures(&events) > before || e.interface().is_some()) {
+                attempts.push(at.duration_since(start).as_secs());
+            }
+        }
+        assert_eq!(attempts, [1, 3, 7, 15, 31, 61, 91]);
+        assert!(e.interface().is_some(), "up after the eighth attempt");
+        assert_eq!(peer_keys(&e), [2]);
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|ev| matches!(ev, Event::DataPlaneRecovered))
+        );
+        assert!(e.retry.is_none(), "nothing left to retry");
+    }
+
+    /// A new desired state replaces the one waiting for a retry, and applying it successfully leaves
+    /// nothing to retry
+    #[test]
+    fn a_new_desired_state_replaces_a_pending_retry() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        e.dataplane.fail_interface = 1;
+        let doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        e.apply(&validated(doc.clone()), &mut VecSink::default())
+            .expect("accepted");
+        assert!(e.retry.is_some());
+        e.apply(&validated(doc), &mut VecSink::default())
+            .expect("accepted");
+        assert!(e.interface().is_some());
+        assert!(e.retry.is_none());
     }
 
     #[test]

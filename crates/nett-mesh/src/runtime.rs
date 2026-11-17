@@ -116,6 +116,7 @@ impl Runtime {
                     dns: None,
                     dns_port,
                     names_sent: None,
+                    sockets_retry: None,
                 };
                 let mut last_tick = Instant::now();
                 let mut last_clock_check: Option<Instant> = None;
@@ -225,6 +226,11 @@ impl Runtime {
                             .engine
                             .tick(last_tick, clock.now_ms(), &mut worker.events);
                         worker.send_all(out);
+                        // The interface can come up on a retry, and a socket that failed to open is
+                        // opened again
+                        if worker.sockets_missing() {
+                            worker.ensure_sockets();
+                        }
                     }
                 }
                 worker.stop.store(true, Ordering::Relaxed);
@@ -348,24 +354,58 @@ struct Worker<D, E> {
     dns_port: u16,
     /// The names last handed to the data plane.
     names_sent: Option<crate::dns::NameTable>,
+    /// After opening the probe sockets or the DNS responder failed: when to try again, and the wait
+    /// that led there (doubling like the engine's retries).
+    sockets_retry: Option<(Instant, Duration)>,
 }
 
 impl<D: DataPlane, E: EventSink> Worker<D, E> {
     /// Creates the probe sockets and receive threads once the mesh interface is ready, and the probes
     /// on the WireGuard port again when the port changes: probes from the old port would measure a
     /// path WireGuard no longer uses, and replies to the new one would not reach this process.
+    /// Whether the interface is up and a socket that belongs to it is not open yet.
+    fn sockets_missing(&self) -> bool {
+        self.engine.interface().is_some_and(|interface| {
+            self.sockets
+                .as_ref()
+                .is_none_or(|s| s.wg_port.port != interface.listen_port)
+                || (self.dns.is_none() && self.dns_port != 0)
+        })
+    }
+
     fn ensure_sockets(&mut self) {
         let Some(interface) = self.engine.interface() else {
             return;
         };
         let addrs: Vec<IpAddr> = interface.spec.addresses.iter().map(|a| a.addr).collect();
         let listen_port = interface.listen_port;
+        let now = Instant::now();
+        if self.sockets_retry.is_none_or(|(due, _)| now >= due) {
+            let failed = self.open_sockets(&addrs, listen_port);
+            self.sockets_retry = failed.then(|| {
+                let delay = self
+                    .sockets_retry
+                    .map_or(crate::engine::RETRY_FIRST, |(_, d)| {
+                        (d * 2).min(crate::engine::RETRY_MAX)
+                    });
+                (now + delay, delay)
+            });
+        }
+        self.send_names();
+    }
+
+    /// Opens what is missing of the probe sockets and the DNS responder; returns whether any failed.
+    fn open_sockets(&mut self, addrs: &[IpAddr], listen_port: u16) -> bool {
+        let mut failed = false;
         match self.sockets.as_ref().map(|s| s.wg_port.port) {
-            None => match self.open(&addrs, listen_port) {
+            None => match self.open(addrs, listen_port) {
                 Ok(sockets) => self.sockets = Some(sockets),
-                Err(e) => self.events.emit(Event::DataPlaneFailed {
-                    reason: format!("opening probe sockets: {e}"),
-                }),
+                Err(e) => {
+                    failed = true;
+                    self.events.emit(Event::DataPlaneFailed {
+                        reason: format!("opening probe sockets: {e}"),
+                    });
+                }
             },
             Some(port) if port != listen_port => match self.open_wg_port(listen_port) {
                 Ok(next) => {
@@ -374,16 +414,19 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                         old.stop.store(true, Ordering::Relaxed);
                     }
                 }
-                Err(e) => self.events.emit(Event::DataPlaneFailed {
-                    reason: format!("opening probes on WireGuard port {listen_port}: {e}"),
-                }),
+                Err(e) => {
+                    failed = true;
+                    self.events.emit(Event::DataPlaneFailed {
+                        reason: format!("opening probes on WireGuard port {listen_port}: {e}"),
+                    });
+                }
             },
             Some(_) => {}
         }
         // The DNS responder on the mesh addresses (design/names-and-diagnostics.md section 2): if the
         // port cannot be bound, names do not resolve and the mesh works as before
         if self.dns.is_none() && self.dns_port != 0 {
-            match crate::dns::DnsServer::spawn(&addrs, self.dns_port) {
+            match crate::dns::DnsServer::spawn(addrs, self.dns_port) {
                 Ok(server) => {
                     self.dns = Some(server);
                     self.events.emit(Event::NamesReady);
@@ -394,14 +437,22 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                         crate::macos::point_resolver(*v4);
                     }
                 }
-                Err(e) => self.events.emit(Event::NamesUnavailable {
-                    reason: format!(
-                        "binding UDP port {} on the mesh addresses: {e}",
-                        self.dns_port
-                    ),
-                }),
+                Err(e) => {
+                    failed = true;
+                    self.events.emit(Event::NamesUnavailable {
+                        reason: format!(
+                            "binding UDP port {} on the mesh addresses: {e}",
+                            self.dns_port
+                        ),
+                    });
+                }
             }
         }
+        failed
+    }
+
+    /// Hands the names of the desired state in effect to the DNS responder and the data plane.
+    fn send_names(&mut self) {
         if self.dns_port != 0 {
             let names = self.engine.name_table();
             if self.names_sent.as_ref() != Some(&names) {
