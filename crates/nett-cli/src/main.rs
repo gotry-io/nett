@@ -8,6 +8,8 @@ use std::process::ExitCode;
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod diagnose;
+#[cfg(target_os = "linux")]
+mod dsm;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod hub;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

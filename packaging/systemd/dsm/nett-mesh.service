@@ -1,0 +1,32 @@
+# The nett mesh service on Synology DSM. Installed by `sudo nett install`, started at boot by the
+# Task Scheduler task `nett`, which runs `nett install` again and so also writes this file back when
+# a DSM update removed it.
+# The desired state is /etc/nett/desired.json; the mesh private key is /etc/nett/mesh.key; the
+# trust store is /etc/nett/state. All three stay root only.
+# After the desired state changes, `systemctl reload nett-mesh` applies it without a restart.
+# DSM's systemd ignores directives it does not know, so this unit uses only ones it has.
+[Unit]
+Description=nett mesh
+
+[Service]
+ExecStart=/usr/local/lib/nett/nett mesh --config /etc/nett/desired.json --key /etc/nett/mesh.key --state /etc/nett/state
+ExecReload=/bin/kill -HUP $MAINPID
+# Local sockets in /run/nett: mesh.sock (0600) for root and nett-node. Others can reach a known name
+# in the directory but not list it
+RuntimeDirectory=nett
+RuntimeDirectoryMode=0711
+# Root, kept to the capabilities for the TUN interface and its routes, binding the in-tunnel probe
+# socket to the interface, and the DNS responder on the mesh address (UDP 53). DSM has no system
+# accounts to run it as another user
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+NoNewPrivileges=yes
+# A root process can write any file root owns, so the whole file system is read-only for it except
+# the trust store and its sockets
+ReadOnlyDirectories=/
+ReadWriteDirectories=/etc/nett/state /run/nett
+PrivateTmp=yes
+# Idle use is about 3 MB; the limit leaves room for peaks. The OOM killer picks the mesh late
+MemoryLimit=64M
+OOMScoreAdjust=-500
+Restart=on-failure
+RestartSec=2

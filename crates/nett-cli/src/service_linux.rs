@@ -20,8 +20,8 @@ use crate::install::{
 
 use nett_node::layout::{Layout, SYSUSERS, SYSUSERS_CONF, group_in};
 use nett_node::platform::linux::{
-    CONFIG_DIR as DIR, LINK, MESH, NODE, OLD_ACCOUNTS, PROGRAM as BINARY, PROGRAM_DIR, RELAY,
-    RELAY_CERT_DIR, STATE_DIR, TRANSPORT, Unit,
+    CONFIG_DIR as DIR, Flavor, LINK, MESH, NODE, OLD_ACCOUNTS, PROGRAM as BINARY, PROGRAM_DIR,
+    RELAY, RELAY_CERT_DIR, STATE_DIR, TRANSPORT, Unit,
 };
 
 const DESIRED: &str = "/etc/nett/desired.json";
@@ -38,12 +38,17 @@ fn systemctl(args: &[&str]) -> anyhow::Result<bool> {
     crate::install::run(program, args)
 }
 
-/// Makes the service run with the new units and program: enables and starts it when not running,
-/// restarts it when the unit or program changed. Returns a one-sentence report.
-fn ensure_running(unit: &Unit, restart: bool) -> anyhow::Result<Option<String>> {
+/// Makes the service run with the new units and program: starts it when not running (enabling it,
+/// except on DSM, where the boot task starts it), restarts it when the unit or program changed.
+/// Returns a one-sentence report.
+fn ensure_running(unit: &Unit, restart: bool, flavor: Flavor) -> anyhow::Result<Option<String>> {
+    let start: &[&str] = match flavor {
+        Flavor::Systemd => &["enable", "--now", unit.name],
+        Flavor::Dsm => &["start", unit.name],
+    };
     let (ok, message) = if !systemctl(&["is-active", "--quiet", unit.name])? {
         (
-            systemctl(&["enable", "--now", unit.name])?,
+            systemctl(start)?,
             format!("Started {} ({}).", unit.what, unit.name),
         )
     } else if restart {
@@ -81,13 +86,27 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
             nett_node::platform::linux::UNIT_DIR
         );
     }
-    // The mesh service runs as the system user nett, reads the desired state and writes the trust
-    // store through the directory's group; other users cannot enter it. setgid hands the group to new
-    // files
-    let gid = ensure_user()?;
-    ensure_dir(DIR, 0o2750)?;
-    std::os::unix::fs::chown(DIR, Some(0), Some(gid))
+    let flavor = Flavor::detect();
+    let (mesh, node) = (flavor.mesh(), flavor.node());
+    let gid = match flavor {
+        // The mesh service runs as the system user nett, reads the desired state and writes the
+        // trust store through the directory's group; other users cannot enter it. setgid hands the
+        // group to new files
+        Flavor::Systemd => {
+            let gid = ensure_user()?;
+            ensure_dir(DIR, 0o2750)?;
+            Some(gid)
+        }
+        // Every service runs as root there, so the identity is root's alone (design/dsm.md
+        // section 6.1)
+        Flavor::Dsm => {
+            ensure_dir(DIR, 0o700)?;
+            None
+        }
+    };
+    std::os::unix::fs::chown(DIR, Some(0), Some(gid.unwrap_or(0)))
         .with_context(|| format!("changing the group of {DIR}"))?;
+    let desired_mode = if gid.is_some() { 0o640 } else { 0o600 };
     // The trust store belongs to the mesh service's user, and the one of 0.3.13 and earlier moves
     // here before the token is checked against it (design/release.md section 8)
     let layout = Layout::system();
@@ -104,7 +123,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     let desired_changed = match (token.desired, &args.config, linked) {
         // The first one the Hub sends when a new machine joins (design/hub.md section 6);
         // afterwards only nett-node writes it
-        (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, 0o640)?,
+        (Some(bytes), _, _) => replace_if_changed(Path::new(DESIRED), &bytes, desired_mode)?,
         (None, Some(_), true) => {
             bail!("this machine receives its desired state from its Hub; --config is not used")
         }
@@ -112,16 +131,16 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
             let bytes = crate::site::read_desired(path)?
                 .with_context(|| format!("{} is not a regular file", path.display()))?;
             crate::site::check_desired_for(&bytes, &keys.0)?;
-            replace_if_changed(Path::new(DESIRED), &bytes, 0o640)?
+            replace_if_changed(Path::new(DESIRED), &bytes, desired_mode)?
         }
         (None, None, _) => false,
     };
     // A desired state written before the directory had its group keeps working and stops being
     // readable by everyone
     if Path::new(DESIRED).exists() {
-        std::os::unix::fs::chown(DESIRED, Some(0), Some(gid))
+        std::os::unix::fs::chown(DESIRED, Some(0), Some(gid.unwrap_or(0)))
             .with_context(|| format!("changing the group of {DESIRED}"))?;
-        fs::set_permissions(DESIRED, fs::Permissions::from_mode(0o640))
+        fs::set_permissions(DESIRED, fs::Permissions::from_mode(desired_mode))
             .with_context(|| format!("setting permissions of {DESIRED}"))?;
     }
     ensure_dir(PROGRAM_DIR, 0o755)?;
@@ -132,8 +151,8 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     ensure_dir(nett_node::platform::linux::UNIT_DIR, 0o755)?;
     let write =
         |unit: &Unit| replace_if_changed(Path::new(&unit.path()), unit.content.as_bytes(), 0o644);
-    let mesh_unit_changed = write(&MESH)?;
-    let node_unit_changed = linked && write(&NODE)?;
+    let mesh_unit_changed = write(&mesh)?;
+    let node_unit_changed = linked && write(&node)?;
     // The relay's and the transport adapter's are written only while the desired state needs them
     // (design/release.md section 8)
     if (mesh_unit_changed || node_unit_changed) && !systemctl(&["daemon-reload"])? {
@@ -144,7 +163,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         crate::mesh::print_keys(Path::new(DIR), keys);
         println!(
             "Installed {BINARY} and {}. Not started: {DESIRED} does not exist yet.",
-            MESH.name
+            mesh.name
         );
         println!(
             "Once the machine is in the site, copy its desired state here and run \
@@ -153,7 +172,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut messages = Vec::new();
-    match ensure_running(&MESH, mesh_unit_changed || binary_changed)? {
+    if flavor == Flavor::Dsm {
+        messages.extend(crate::dsm::prepare_tun()?);
+        messages.extend(crate::dsm::ensure_boot_task()?);
+    }
+    match ensure_running(&mesh, mesh_unit_changed || binary_changed, flavor)? {
         Some(m) => messages.push(m),
         None if desired_changed => print!(
             "{}",
@@ -162,7 +185,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         None => {}
     }
     if linked
-        && let Some(m) = ensure_running(&NODE, node_unit_changed || binary_changed || hub_changed)?
+        && let Some(m) = ensure_running(
+            &node,
+            node_unit_changed || binary_changed || hub_changed,
+            flavor,
+        )?
     {
         messages.push(m);
     }
@@ -219,6 +246,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
 /// identity, given to root so that no account created later inherits it.
 pub fn uninstall() -> anyhow::Result<()> {
     require_root()?;
+    remove_boot_task()?;
     remove_services()?;
     nett_mesh::linux::teardown().context("removing the mesh interface and filter rules")?;
     for name in ["nett", "nett.previous", "nett.new"] {
@@ -289,6 +317,7 @@ fn remove_accounts() -> anyhow::Result<()> {
 pub fn leave() -> anyhow::Result<()> {
     require_root()?;
     crate::install::tell_hub(DIR)?;
+    remove_boot_task()?;
     remove_services()?;
     nett_mesh::linux::teardown().context("removing the mesh interface and filter rules")?;
     crate::install::forget(DIR, STATE_DIR)?;
@@ -310,15 +339,32 @@ fn read_doc() -> Option<nett_mesh::config::DesiredMeshDoc> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// On DSM, the boot task goes first, so that a restart in the middle does not start nett again.
+fn remove_boot_task() -> anyhow::Result<()> {
+    if Flavor::detect() == Flavor::Dsm
+        && let Some(m) = crate::dsm::remove_boot_task()?
+    {
+        println!("{m}");
+    }
+    Ok(())
+}
+
 fn remove_services() -> anyhow::Result<()> {
+    // DSM's units are not enabled: the boot task starts them
+    let dsm = Flavor::detect() == Flavor::Dsm;
     for unit in [&TRANSPORT, &RELAY, &NODE, &MESH] {
         let path = unit.path();
         if !Path::new(&path).exists() {
             continue;
         }
+        let stop: &[&str] = if dsm {
+            &["stop", unit.name]
+        } else {
+            &["disable", "--now", unit.name]
+        };
         // If stopping fails, the unit is not deleted: it stays so the user can still handle it with
         // systemctl
-        if !systemctl(&["disable", "--now", unit.name])? {
+        if !systemctl(stop)? {
             bail!("systemctl could not stop {}", unit.name);
         }
         fs::remove_file(&path).with_context(|| format!("removing {path}"))?;

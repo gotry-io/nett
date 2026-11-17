@@ -45,7 +45,7 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 | **Hub** | Stores desired state; aggregates node and link status; public API; distributes the mesh topology; forwards signed policies | Operating machines directly; raising any node's privileges on its own; sitting on the data path | Normal | Exposed through the local reverse proxy (section 4) |
 | **nett-node** | Control agent: enrolls, connects to the Hub; hands signed material to the mesh process and starts and stops the processes; reports inventory and link status; upgrades (section 3) | Listening on public ports; executing arbitrary commands; accessing Docker; running AI logic; deciding privileges on its own | High | No |
 | **Mesh process** | WireGuard configuration, path layer (measurement, path selection, switchover), DNS, access rules and address translation, admission material verification; runs independently of the node (ADR 0013) | Connecting to the Hub; accessing Docker; executing external commands | `CAP_NET_ADMIN`, `CAP_NET_RAW` (probing on the WireGuard port, ADR 0021); TUN permission on userspace platforms | Only the WireGuard port: answers only authenticated probes and, like the kernel implementation, does not respond to unauthenticated packets |
-| **Transport adapter** | TLS transport adaptation; handles ciphertext only (ADR 0013). On macOS the mesh process runs the same forwarding itself | Holding any key; any management function | Low | No (dials out) |
+| **Transport adapter** | TLS transport adaptation; handles ciphertext only (ADR 0013). On macOS and Synology DSM the mesh process runs the same forwarding itself | Holding any key; any management function | Low | No (dials out) |
 | **nett-relay** | Relays encrypted packets; accepts transports such as TCP/TLS; probe responses; per-connection forwarding (CONNECT) | Decrypting mesh traffic; any management function | Low | Yes |
 | **Edge** | A reverse proxy the user runs on the ingress node (any implementation): terminates TLS and forwards requests to services through the mesh by domain name; nett does not generate or manage its configuration (section 8) | Any management function | Low | Yes |
 | **Signing tool** (`nett site`) | Maintains the site on the user's own computer; computes, displays and signs changes that raise privileges (design/site.md) | Running as a daemon; connecting to nodes directly | Holds the recovery key | No |
@@ -353,14 +353,14 @@ At the code level, node, mesh, transport, relay and cli remain separate crates t
 |---|---|---|---|---|
 | `nett-node` | root (replaces the executable on upgrade, starts and stops the other nett processes on the machine); runs directly on the system, not in a container (section 3) | Node identity key | Nothing | All nodes |
 | `nett-mesh` | On Linux, a dedicated user with `CAP_NET_ADMIN` and `CAP_NET_RAW` (plus `CAP_NET_BIND_SERVICE` when DNS needs it); on userspace platforms, an identity that can create a TUN | Mesh private key | Mesh address (DNS, probe responses); on userspace platforms, the WireGuard port | Nodes with the mesh module enabled; starts before nett-node, with its own memory limit and a lower OOM priority |
-| `nett-transport` | A user systemd allocates while it runs (`DynamicUser`), no capabilities | None | Nothing (dials out) | Enabled by nett-node when a TLS transport candidate exists (Linux; on macOS the mesh process carries the TLS transport) |
+| `nett-transport` | A user systemd allocates while it runs (`DynamicUser`), no capabilities | None | Nothing (dials out) | Enabled by nett-node when a TLS transport candidate exists (Linux; on macOS and Synology DSM the mesh process carries the TLS transport) |
 | `nett-relay` | A user systemd allocates while it runs (`DynamicUser`), may bind 443 | The relay's TLS certificate private key; does not hold the mesh private key | Public: one relay UDP port, TLS 443 | The Hub decides whether it is enabled based on node reachability and signed policy; nett-node enables or disables it, and the configuration comes from the mesh process; `dial-only` nodes do not run it |
 | `nett-hub` | A dedicated low-privilege user; can also run in a container (the Hub does not need to access the host) | Hub identity key | Local (exposed through the reverse proxy in front of the Hub) | The Hub host |
 | Reverse proxy in front of the Hub | Low privilege | Private key of the certificate for the Hub domain | Public 80, 443 | The Hub host |
 
 The user's own Edge is not part of nett and is not listed here. The list of public ports is in design/mesh.md section 5.5.
 
-Each service is restarted automatically by the service manager after a crash, without depending on nett-node. Service management: Linux uses systemd (with a memory limit), macOS uses launchd, Synology DSM uses a boot task (a package comes later), and Home Assistant OS uses an add-on (ADR 0017).
+Each service is restarted automatically by the service manager after a crash, without depending on nett-node. Service management: Linux uses systemd (with a memory limit), macOS uses launchd, Synology DSM uses systemd units that a boot task starts (design/dsm.md), and Home Assistant OS uses an add-on (ADR 0017).
 
 ### 13.3 Installation
 
@@ -434,7 +434,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 |---|---|---|---|
 | Linux (Debian, Ubuntu, and other distributions with kernel ≥ 5.6) | systemd, native | Kernel WireGuard | All |
 | Linux (older kernels) | systemd, native | Userspace WireGuard | All |
-| Synology DSM 7.x | Boot task (a package comes later), native | Userspace WireGuard | mesh, relay |
+| Synology DSM 7.x | systemd units started by a boot task, native (design/dsm.md) | Userspace WireGuard | mesh, relay |
 | macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018); container services that need the visitor's real IP use a container member (OrbStack, Docker Desktop, ADR 0016) | mesh, relay |
 | Home Assistant OS | Add-on (ADR 0017) | Kernel WireGuard | mesh (can act as a smart gateway), relay |
 | Phone | A standard WireGuard client, or Surge, mihomo, sing-box (automatic fallback) | — | — |

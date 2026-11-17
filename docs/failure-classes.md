@@ -128,7 +128,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - On macOS, a packet to the machine's own mesh address goes back into the utun with its checksum filled in, and a DNS query to that address is answered in the data plane (userspace.md section 4);
 - On macOS, a dual-stack underlay socket sets only `IPV6_BOUND_IF`, which also binds its IPv4 traffic (userspace.md section 6.2);
 - A key in the service's systemd credentials directory is accepted when others cannot enter that directory;
-- The peer of a local socket in another PID namespace, which the kernel reports with PID 0, is identified by its user ID.
+- The peer of a local socket in another PID namespace, which the kernel reports with PID 0, is identified by its user ID;
+- On Synology DSM the units use only directives its systemd 219 implements, taken from its source, because it accepts any other with a warning and does not apply it (dsm.md section 3);
+- On Synology DSM, which loads the TUN driver only for packages that need it, `nett install` loads it before it starts the services (dsm.md section 6.2);
+- A kernel without the WireGuard family gets the userspace data plane, and tearing down there leaves nftables alone: only the kernel data plane makes nett's tables, and a kernel without nftables may not answer at all (dsm.md section 5).
 
 **Guards**
 
@@ -138,6 +141,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:underlay_follows_the_physical_interface_for_ipv4_too`
 - `nett-mesh:a_group_readable_key_passes_only_in_the_services_credentials_directory`
 - `nett-mesh:a_peer_in_another_pid_namespace_is_identified`
+- `nett-node:dsm_units_use_only_what_systemd_219_implements`
+- `nett-mesh:a_kernel_without_the_wireguard_family_means_userspace`
+- `nett-mesh:teardown_leaves_nftables_alone_without_kernel_wireguard`
+- `nett-cli:tun_is_prepared_before_the_services_start`
 - `ci:utun, addresses and routes (needs root)`
 - `ci:Full flow of sudo nett install (needs root)`
 

@@ -129,8 +129,13 @@ fn regular_files(dir: &Path) -> Result<Vec<PathBuf>, String> {
     Ok(out)
 }
 
-/// The user and group IDs of the user the mesh service runs as, from `/etc/passwd`.
+/// The user and group IDs of the user the mesh service runs as, from `/etc/passwd`. None where it
+/// runs as root: on Synology DSM, whose accounts in `/etc/passwd` are people's DSM accounts
+/// (design/dsm.md section 6.1).
 pub fn mesh_owner() -> Option<(u32, u32)> {
+    if crate::platform::linux::Flavor::detect() == crate::platform::linux::Flavor::Dsm {
+        return None;
+    }
     let passwd = read("/etc/passwd")?;
     let name = accounts().next()?;
     passwd.lines().find_map(|line| {

@@ -73,7 +73,7 @@ mod systemd {
     use std::path::Path;
 
     use super::Wants;
-    use crate::platform::linux::{self, OPTIONAL, RELAY, TRANSPORT, UNITS, Unit};
+    use crate::platform::linux::{self, Flavor, RELAY, TRANSPORT, Unit};
 
     /// Time limit of one systemctl call (hard rule 14).
     const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -87,8 +87,20 @@ mod systemd {
     /// and is enabled and started; one that is not is stopped and disabled, and its unit deleted
     /// (design/release.md section 8). Returns what it could not do.
     pub fn reconcile(wants: Wants) -> Vec<String> {
+        let optional = Flavor::detect().optional();
         let mut problems = Vec::new();
+        // On DSM the mesh process carries the TLS transport, and nothing runs a relay
+        // (design/dsm.md sections 2 and 7)
+        if wants.relay && !optional.contains(&RELAY) {
+            problems.push(
+                "this machine's desired state runs a relay, which nett does not run on Synology DSM"
+                    .to_owned(),
+            );
+        }
         for (unit, want) in [(RELAY, wants.relay), (TRANSPORT, wants.transport)] {
+            if !optional.contains(&unit) {
+                continue;
+            }
             if let Err(e) = set_running(unit, want) {
                 tracing::warn!(unit = unit.name, error = %e, "changing an optional service");
                 problems.push(e);
@@ -153,10 +165,11 @@ mod systemd {
         // itself (design/release.md section 8)
         #[cfg(target_os = "linux")]
         crate::layout::Layout::system().copy_old_relay()?;
+        let flavor = Flavor::detect();
         let mut changed = Vec::new();
-        for unit in UNITS {
+        for &unit in flavor.units() {
             let path = unit.path();
-            if OPTIONAL.contains(&unit) && !Path::new(&path).exists() {
+            if flavor.optional().contains(&unit) && !Path::new(&path).exists() {
                 continue;
             }
             if std::fs::read(&path).ok().as_deref() == Some(unit.content.as_bytes()) {

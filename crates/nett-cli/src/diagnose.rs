@@ -561,7 +561,9 @@ fn check_services(doc: &StatusDoc) -> Vec<Finding> {
         .iter()
         .flat_map(|p| &p.candidates)
         .any(|c| c.kind == PathKindDoc::RelayTls);
-    if tls && !active("nett-transport.service") {
+    // Where the mesh process carries the TLS transport (Synology DSM) there is no adapter to run
+    let adapter = !nett_node::platform::linux::Flavor::detect().mesh_carries_tls();
+    if tls && adapter && !active("nett-transport.service") {
         out.push(Finding::problem(
             "TLS transport",
             "there are paths over TLS but the transport adapter is not running",

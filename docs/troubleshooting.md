@@ -21,6 +21,7 @@ On the computer that holds the site, `nett site status` shows every machine as t
   ```
 
   nett filters `nett0` itself and denies everything the access rules do not allow, so this opens nothing more. `nett doctor` and `sudo nett install` say when ufw is in the way.
+- **DSM's firewall** on a Synology NAS applies to `nett0` too. When it denies what no rule allows, add an allow rule for the mesh prefixes in Control Panel → Security → Firewall; as with ufw, nett's own filter still decides what gets through. `nett doctor` and `sudo nett install` say when DSM's firewall is in the way ([design/dsm.md](design/dsm.md) section 9).
 
 ## Names under nett.internal do not resolve
 
