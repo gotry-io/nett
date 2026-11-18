@@ -21,7 +21,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0013](0013-mesh-and-transport-processes.md) | Mesh process and transport adapter | Accepted |
 | [0014](0014-signed-mesh-membership.md) | The mesh member table consists of signed artifacts | Accepted |
 | [0015](0015-origin-identity-and-lan-default-deny.md) | Origin identity and default deny for LAN prefixes | Accepted |
-| [0016](0016-macos-container-member.md) | Container member on macOS | Accepted |
+| [0016](0016-containers.md) | Containers: one image, one container | Accepted |
 | [0017](0017-home-assistant-os-addon.md) | Run as an add-on on Home Assistant OS | Accepted |
 | [0018](0018-client-platforms.md) | End-user devices: macOS native member, proxy client configs, and client planning | Accepted |
 | [0019](0019-mesh-only.md) | nett only does mesh networking | Accepted |
@@ -31,6 +31,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0023](0023-access-default-deny.md) | Access is denied by default | Accepted |
 | [0024](0024-cli-first-headless-hub.md) | The command line is the operating interface; the Hub ships without a console at first | Accepted |
 | [0025](0025-upgrades-through-the-hub.md) | Upgrades fetch the program through the Hub | Accepted |
+| [0026](0026-upgrades-from-the-state-directory.md) | Programs that cannot replace themselves upgrade from their state directory | Accepted |
 
 Template:
 

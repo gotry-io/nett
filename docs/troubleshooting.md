@@ -45,7 +45,7 @@ If that answers and programs still do not resolve the name, the system resolver 
 ## A Mac with a proxy app in its enhanced (TUN) mode
 
 - **The native member** binds its sockets to the physical interface, so its WireGuard and probe traffic does not enter the proxy app's tunnel; it works with the enhanced mode on.
-- **A container member on that Mac** (Docker, OrbStack) sends its traffic through the Mac's network stack, where the proxy app's tunnel takes it. Its direct paths to other machines then fail, and it falls back to relays. Exclude the public addresses of the machines it connects to from the proxy app's tunnel (in Surge, `tun-excluded-routes`), then reload the proxy app's configuration: the container member moves back to its direct paths.
+- **nett's container on that Mac** (Docker, OrbStack) sends its traffic through the Mac's network stack, where the proxy app's tunnel takes it. Its direct paths to other machines then fail, and it falls back to relays. Exclude the public addresses of the machines it connects to from the proxy app's tunnel (in Surge, `tun-excluded-routes`), then reload the proxy app's configuration: the container moves back to its direct paths.
 
 ## Devices through a mobile gateway
 
@@ -53,13 +53,17 @@ If that answers and programs still do not resolve the name, the system resolver 
 - **A firewall that drops forwarded traffic**: nett adds its accept to the system's `filter FORWARD` chain in nftables, which is where Docker and ufw put theirs. A chain in another nftables table that drops forwarded traffic by default is listed as a problem that names it; accept traffic from `nett0` to `nett0` there. With `iptables-legacy`, which nett cannot read, add `iptables -I FORWARD -i nett0 -o nett0 -j ACCEPT` and keep it across reboots.
 - **A device does not connect**: `sudo nett status` on the gateway lists each device with where it last connected from and its last handshake. No handshake means the device does not reach the gateway's WireGuard port (check the cloud security group) or uses a removed configuration.
 
-## Container members
+## The container
 
-A container member runs three containers from the same image ([packaging/container/compose.example.yaml](../packaging/container/compose.example.yaml)): the mesh process, nett-node next to it, and the transport adapter in the mesh container's network namespace for paths over TLS. Without the transport container, the member has no TLS fallback when UDP is blocked. A container member does not upgrade itself: `nett site status` reports a newer release as available, and the image is upgraded by pulling or building a new one.
+nett's image runs as one container ([packaging/container/compose.example.yaml](../packaging/container/compose.example.yaml), [design/container.md](design/container.md)); `docker compose exec nett nett status` and `nett doctor` work there as on a machine, and `docker logs` shows what its processes log.
+
+- **It stops at the first start**: the volume holds no Hub configuration and `NETT_TOKEN` is missing or already used. `nett site invite <name>` prints a new token.
+- **The service beside it is not reachable**: the service has to share the container's network (`network_mode: service:nett`) and listen on all addresses or the mesh address, and an access rule has to allow the caller (`nett site allow`). When the nett container is recreated or restarted (Docker restarts it when its first process exits), restart the service too, so that it joins the new network; an upgrade does neither.
+- **The mesh interface does not come up**: the container needs `NET_ADMIN` and `NET_RAW`, and `/dev/net/tun` when the host kernel has no WireGuard.
 
 ## Upgrades
 
-Machines installed with `sudo nett install` upgrade themselves to a release the Hub announces, after checking its signature ([design/release.md](design/release.md) section 7). When an upgrade fails, `nett site status` shows the reason and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is.
+Machines installed with `sudo nett install`, containers and the Hub upgrade themselves to a release the Hub announces, after checking its signature ([design/release.md](design/release.md) section 7); the Hub upgrades first. When an upgrade fails, `nett site status` shows the reason (for the Hub on its `hub upgrade` line) and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is. A container or Hub whose new version does not settle goes back to the version before it after three starts, without being recreated.
 
 ## What to collect for a report
 

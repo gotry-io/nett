@@ -16,7 +16,7 @@ In the trust model, the Hub is only a forwarder of signed artifacts, and nodes i
   - Nodes generate their private keys locally with `nett mesh keys`;
   - The production build of `nett mesh --config` reads a local desired state file, which the user copies to the node;
 - The signature format, the verification chain and the desired state format are the same as after joining the Hub, and the mesh process does not distinguish where the desired state came from;
-- This step also implements access control, the Edge address and the container member (as the smart gateway of the container network it lives in; mesh.md sections 10 and 12, ADR 0015, 0016), enough to replace tunnels such as "the Edge on a VPS sending origin traffic through a tunnel to container services on a Mac".
+- This step also implements access control, the Edge address and forwarding Edge traffic to advertised routes (mesh.md sections 10 and 12, ADR 0015), enough to replace tunnels such as "the Edge on a VPS sending origin traffic through a tunnel to container services on a Mac".
 
 ## Rationale
 

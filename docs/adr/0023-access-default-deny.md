@@ -7,11 +7,11 @@
 
 The default of the access rules determines how far a compromised machine can go. The macOS native member (ADR 0018) brings the Mac itself into the mesh, and a Mac often has many services listening on wildcard addresses. If members can reach each other by default, any member that is compromised (for example a VPS that serves traffic externally) can reach those ports.
 
-The Edge address, advertised prefixes and the container member are already default deny (ADR 0015, 0016). Of these, the container member expresses "inbound default deny" through an unsigned local switch in the desired state.
+The Edge address and advertised prefixes are already default deny (ADR 0015).
 
 ## Decision
 
-1. **A new connection that no rule allows is always denied**: connections between nodes, to advertised prefixes, to container members and from the Edge address are all treated the same, with no exception switches;
+1. **A new connection that no rule allows is always denied**: connections between nodes, to advertised prefixes and from the Edge address are all treated the same, with no exception switches;
 2. **The user's devices** (phones and laptops with device credentials) can access all members and the advertised LAN prefixes by default (ADR 0015); a device added as limited, such as a work computer, gets only what rules allow. The signing tool writes this default into the signed rule set, so nodes enforce one rule set with no exception for devices (devices.md section 5);
 3. The mesh's own in-tunnel probes are not affected by access rules; return packets and related packets of established connections are allowed (mesh.md section 12). When there is no rule set, only this rule is in effect.
 
@@ -29,5 +29,4 @@ The Edge address, advertised prefixes and the container member are already defau
 ## Consequences
 
 - The access needed between nodes is written into the access rules one by one, for example SSH from a Mac to a VPS;
-- The container member switch in the desired state is deleted, and the container member uses the same default as other members;
 - Lab topologies state explicitly the access rules between members that a scenario needs.

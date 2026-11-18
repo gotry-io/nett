@@ -12,7 +12,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
   - `nett-mesh`: the mesh process; handles WireGuard, path selection and switching, DNS and access rules
   - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
   - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
-- Status: **M1 in development** ([roadmap](docs/roadmap.md)). A mesh can be deployed with local signing ([design/local-signing.md](docs/design/local-signing.md)) or with a Hub ([design/hub.md](docs/design/hub.md)): Linux uses kernel WireGuard, macOS joins as a native member, and container services on a Mac that need real client IPs use a container member.
+- Status: **M1 in development** ([roadmap](docs/roadmap.md)). A mesh can be deployed with local signing ([design/local-signing.md](docs/design/local-signing.md)) or with a Hub ([design/hub.md](docs/design/hub.md)): Linux uses kernel WireGuard, macOS joins as a native member, and a container joins with nett's image, with its services sharing its network ([design/container.md](docs/design/container.md)).
 - License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
 
 ## Install

@@ -8,7 +8,7 @@
 Laptops and phones are the end devices personal users use most, and the places where gaps compared with Tailscale / Headscale appear most easily:
 
 - An end device must be a **full member** to choose paths on its own, roam with the user, and be reached directly by other members. A full member runs the mesh process on the device, verifies admission material itself, and measures, selects paths and switches;
-- When a Mac joins only as a container member (ADR 0016), it is guaranteed only that other members can reach the container services on the Mac; there is no guarantee for the Mac's own outbound access to the mesh, and laptops that do not run Docker cannot join;
+- A container on a Mac that runs nett's image (ADR 0016) is a member of its own for the services that share its network; it gives the Mac itself no access to the mesh, and laptops that do not run Docker could not join that way;
 - When a phone uses a standard WireGuard client (ADR 0008), it reaches the mesh through the mobile gateway only, and WireGuard takes the phone's only VPN slot, so a proxy app cannot run beside it;
 - Windows is also a common end device.
 
@@ -17,7 +17,7 @@ The user decided: the macOS native member and the proxy client configuration are
 ## Decision
 
 - **macOS native member (M1, the default)**: the mesh process runs on the host as root under launchd, using the Rust userspace WireGuard (one implementation shared with DSM and old-kernel Linux) and a utun interface; filtering is done by the mesh process before forwarding (as on other userspace platforms), and resolution of mesh hostnames is written to `/etc/resolver/<suffix>`; the path layer and admission verification are shared with Linux. The Mac can access the mesh actively, and the laptop can roam with the user (usually `dial-only`);
-- **The container member is kept**: container services on a Mac that need to recognize the visitor's real IP keep using the container member (ADR 0016). The two can coexist, as two node identities;
+- **Containers beside it**: container services on a Mac that need to recognize the visitor's real IP share the network of nett's container (ADR 0016). The two coexist, as two node identities;
 - **Coexistence with proxy-style VPN apps**: whether the macOS native member can coexist with the enhanced mode of a proxy app (which takes over routes and DNS) is measured before M1 rolls out to macOS. If they cannot coexist directly, the configuration for keeping the mesh prefixes out of the proxy is documented for the proxy app;
 - **Proxy client configuration (M1)**: when a device credential is created, in addition to the standard WireGuard configuration, configurations for Surge, mihomo (Clash Meta core) and sing-box are exported: one WireGuard outbound to the mobile gateway, which the mesh prefixes go to (mesh.md section 13). It is used together with the proxy app and does not take up the phone's only VPN slot. The device is still not a full member: it cannot be reached actively by other members;
 - **M3: clients**: iOS and Android apps and a Windows member, all full members, which select their paths themselves, directly to home and to other nodes. iOS runs the userspace WireGuard and path layer in a Network Extension, Android in a VpnService; Windows uses the wireguard-nt kernel driver, with filtering through the Windows firewall (WFP). iOS requires an Apple developer account (paid) and App Store review. A design document is written before M3 starts, including how mobile devices connect to the Hub and battery consumption;
@@ -32,7 +32,7 @@ The user decided: the macOS native member and the proxy client configuration are
 
 ## Alternatives considered
 
-- **Keep only the container member**: laptops and Macs that do not run Docker cannot join, and there is no guarantee for the Mac's own outbound access to the mesh.
+- **Only containers on a Mac**: laptops and Macs that do not run Docker cannot join, and the Mac itself has no access to the mesh.
 - **Build the phone app and Windows in M1 as well**: the first usable version would be delayed too long.
 - **Phones use only the standard WireGuard configuration**: a phone gives up its proxy app while it uses the mesh.
 

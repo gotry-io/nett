@@ -45,7 +45,7 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 | **Hub** | Stores desired state; aggregates node and link status; public API; distributes the mesh topology; forwards signed policies | Operating machines directly; raising any node's privileges on its own; sitting on the data path | Normal | Exposed through the local reverse proxy (section 4) |
 | **nett-node** | Control agent: enrolls, connects to the Hub; hands signed material to the mesh process and starts and stops the processes; reports inventory and link status; upgrades (section 3) | Listening on public ports; executing arbitrary commands; accessing Docker; running AI logic; deciding privileges on its own | High | No |
 | **Mesh process** | WireGuard configuration, path layer (measurement, path selection, switchover), DNS, access rules and address translation, admission material verification; runs independently of the node (ADR 0013) | Connecting to the Hub; accessing Docker; executing external commands | `CAP_NET_ADMIN`, `CAP_NET_RAW` (probing on the WireGuard port, ADR 0021); TUN permission on userspace platforms | Only the WireGuard port: answers only authenticated probes and, like the kernel implementation, does not respond to unauthenticated packets |
-| **Transport adapter** | TLS transport adaptation; handles ciphertext only (ADR 0013). On macOS and Synology DSM the mesh process runs the same forwarding itself | Holding any key; any management function | Low | No (dials out) |
+| **Transport adapter** | TLS transport adaptation; handles ciphertext only (ADR 0013). On macOS, Synology DSM and in the container the mesh process runs the same forwarding itself | Holding any key; any management function | Low | No (dials out) |
 | **nett-relay** | Relays encrypted packets; accepts transports such as TCP/TLS; probe responses; per-connection forwarding (CONNECT) | Decrypting mesh traffic; any management function | Low | Yes |
 | **Edge** | A reverse proxy the user runs on the ingress node (any implementation): terminates TLS and forwards requests to services through the mesh by domain name; nett does not generate or manage its configuration (section 8) | Any management function | Low | Yes |
 | **Signing tool** (`nett site`) | Maintains the site on the user's own computer; computes, displays and signs changes that raise privileges (design/site.md) | Running as a daemon; connecting to nodes directly | Holds the recovery key | No |
@@ -58,7 +58,7 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 
 ## 3. nett-node
 
-A single process on a tokio single-threaded runtime, **running directly on the system, not in a container**: the mesh needs to configure the host's network (the mesh process configures the kernel WireGuard and nftables through netlink), and nett-node has to start and stop the local mesh process, transport adapter and nett-relay, and replace the local executable on upgrade. Putting it in a container would require privileged mode and the host network, which amounts to running natively. The container member on macOS only lets other members reach container services on the Mac, and is an exception (ADR 0016); Home Assistant OS does not allow installing programs directly, so nett runs as an add-on, which is another exception (ADR 0017).
+A single process on a tokio single-threaded runtime, **running directly on the system, not in a container**: the mesh needs to configure the host's network (the mesh process configures the kernel WireGuard and nftables through netlink), and nett-node has to start and stop the local mesh process, transport adapter and nett-relay, and replace the local executable on upgrade. Putting it in a container would require privileged mode and the host network, which amounts to running natively. A container is a member of its own instead, for machines that run only containers and for services that share its network (ADR 0016, design/container.md); Home Assistant OS does not allow installing programs directly, so nett runs as an add-on (ADR 0017).
 
 nett-node is the control agent. It only handles enrollment, connecting to the Hub, keeping local state, upgrades, handing signed material to the mesh process, reporting inventory (platform, capabilities, addresses) and link status, executing mesh actions, and pulling the Hub's encrypted backup (section 12.3); it does not access Docker. It consists of the following parts:
 
@@ -161,7 +161,7 @@ It works like a navigation app: there are multiple candidate paths and multiple 
 Control plane: Hub (addresses, public keys, candidate paths, relay list, link quality matrix)
 ```
 
-- **The session layer uses only WireGuard**: compact code, formally verified, natively supported by the Linux kernel, with standard clients on every platform. WireGuard lets a peer change its address (designed for roaming), so switching paths only requires updating the session's peer address, and upper-layer connections are unaffected. WireGuard configuration, the path layer, and the userspace implementation on platforms without the kernel module are all in the independent mesh process (ADR 0013); macOS joins as a native member (ADR 0018), and container services that need the visitor's real IP use a container member instead (ADR 0016).
+- **The session layer uses only WireGuard**: compact code, formally verified, natively supported by the Linux kernel, with standard clients on every platform. WireGuard lets a peer change its address (designed for roaming), so switching paths only requires updating the session's peer address, and upper-layer connections are unaffected. WireGuard configuration, the path layer, and the userspace implementation on platforms without the kernel module are all in the independent mesh process (ADR 0013); macOS joins as a native member (ADR 0018), and a container joins as a member of its own, with its services sharing its network (ADR 0016).
 - **The transport layer is pluggable**: WireGuard supports only UDP, and its fingerprint is distinctive. When UDP is restricted, encrypted packets are put into a TCP/TLS or QUIC transport, so outsiders see ordinary HTTPS or HTTP/3 traffic.
 - **The path layer is the core of nett**: it decides which path and which transport each pair of nodes uses.
 
@@ -247,8 +247,8 @@ The Edge is a reverse proxy the user runs on the ingress node, and any implement
 | Where the service is | Origin path | Forwarder the service sees |
 |---|---|---|
 | On a mesh member (Linux, container or native process) | Edge → mesh → member's mesh address:port. On Linux, Docker port mapping applies destination NAT to external traffic and preserves the source | The ingress node's Edge address |
+| In a service sharing the network of nett's container (Linux or macOS) | Edge → mesh → the container's mesh address:port (ADR 0016) | The ingress node's Edge address |
 | LAN host behind a smart gateway | Edge → mesh → smart gateway (translation by source class) → LAN host | The smart gateway's ingress address (used only to translate traffic from Edge addresses) |
-| Container in Docker on macOS | Edge → mesh → container member → container network (a published port loses the source, fact 1 in section 17) | The container member's address in that container network (ADR 0016) |
 
 **Services that trust by source**:
 
@@ -351,7 +351,7 @@ At the code level, node, mesh, transport, relay and cli remain separate crates t
 |---|---|---|---|---|
 | `nett-node` | root (replaces the executable on upgrade, starts and stops the other nett processes on the machine); runs directly on the system, not in a container (section 3) | Node identity key | Nothing | All nodes |
 | `nett-mesh` | On Linux, a dedicated user with `CAP_NET_ADMIN` and `CAP_NET_RAW` (plus `CAP_NET_BIND_SERVICE` when DNS needs it); on userspace platforms, an identity that can create a TUN | Mesh private key | Mesh address (DNS, probe responses); on userspace platforms, the WireGuard port | Nodes with the mesh module enabled; starts before nett-node, with its own memory limit and a lower OOM priority |
-| `nett-transport` | A user systemd allocates while it runs (`DynamicUser`), no capabilities | None | Nothing (dials out) | Enabled by nett-node when a TLS transport candidate exists (Linux; on macOS and Synology DSM the mesh process carries the TLS transport) |
+| `nett-transport` | A user systemd allocates while it runs (`DynamicUser`), no capabilities | None | Nothing (dials out) | Enabled by nett-node when a TLS transport candidate exists (Linux; on macOS, Synology DSM and in the container the mesh process carries the TLS transport) |
 | `nett-relay` | A user systemd allocates while it runs (`DynamicUser`), may bind 443 | The relay's TLS certificate private key; does not hold the mesh private key | Public: one relay UDP port, TLS 443 | The Hub decides whether it is enabled based on node reachability and signed policy; nett-node enables or disables it, and the configuration comes from the mesh process; `dial-only` nodes do not run it |
 | `nett-hub` | A dedicated low-privilege user; can also run in a container (the Hub does not need to access the host) | Hub identity key | Local (exposed through the reverse proxy in front of the Hub) | The Hub host |
 | Reverse proxy in front of the Hub | Low privilege | Private key of the certificate for the Hub domain | Public 80, 443 | The Hub host |
@@ -398,12 +398,11 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | `nett reload` | Asks the mesh process to re-read the desired state file and shows whether it was accepted (design/status.md section 4.1) |
 | `nett install` | Sets this machine up as a member: generates keys, installs services, imports the desired state (macOS, design/release.md section 4); with an enrollment token, enrolls with the Hub (design/hub.md section 6) |
 | `nett uninstall` | Removes nett from this machine and keeps its identity; running `install` again restores it (design/release.md section 8) |
-| `nett keys` | Only generates this machine's keys and prints the line needed by `nett site add --keys`: for container members and machines whose service configuration is written by hand |
+| `nett keys` | Only generates this machine's keys and prints the line needed by `nett site add --keys`: for machines whose service configuration is written by hand |
 | `nett leave` | Leaves this network (root): notifies the Hub, tears down the mesh interface, deletes this machine's keys, trust anchors and desired state, and uninstalls the services; the machine can then join any network (design/auth.md section 8.3) |
 | `nett doctor` | Automatic diagnosis, with plain-language explanations and suggested fixes |
 | `nett whois <address>` | Looks up which node, device or Edge a mesh address belongs to, according to the admission material this machine has verified |
 | `nett trust log` | Lists the signed artifacts and revocations this machine has accepted, without going through the Hub (design/auth.md section 2) |
-| `nett upgrade` | Manual upgrade; by default the Hub pushes it through the `release` partition; verifies the release signature, rejects downgrades, then replaces, and rolls back automatically on failure |
 | `nett deny <module>` | Sets a local hard prohibition (section 3) that a signed policy cannot exceed |
 
 `nett-hub` on the Hub host is a separate executable; its commands are in design/hub.md section 8.
@@ -419,7 +418,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | NAT node | A NAT-type VPS | nett-node, mesh process, transport adapter | Kernel WireGuard, `dial-only` | Connects to at least two `public` nodes |
 | Smart gateway | An always-on NAS or small host at home | nett-node, mesh process, optionally nett-relay | Kernel or userspace (in the mesh process) | Advertises the LAN prefix; becomes `public` once the router maps a port |
 | LAN host | Other machines at home | Does not run nett | Through the smart gateway | Add an alias when a name is needed (design/mesh.md section 11) |
-| macOS host | A Mac (including laptops) | Native nett-node, mesh process; optionally a container member | Native member: userspace WireGuard + utun (ADR 0018); container member uses kernel WireGuard (ADR 0016) | With a container member enabled, the same host corresponds to multiple node identities |
+| macOS host | A Mac (including laptops) | Native nett-node, mesh process | Native member: userspace WireGuard + utun (ADR 0018) | A container on it that runs nett's image is a member of its own (ADR 0016) |
 | HAOS device | A device running Home Assistant OS | nett-node and mesh process in the add-on, optionally nett-relay | Kernel WireGuard (ADR 0017) | Can act as a smart gateway |
 | Device | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | Through the mobile gateway (ADR 0008) | Does not run nett; the app arrives in M3 |
 
@@ -432,7 +431,8 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | Linux (Debian, Ubuntu, and other distributions with kernel ≥ 5.6) | systemd, native | Kernel WireGuard | All |
 | Linux (older kernels) | systemd, native | Userspace WireGuard | All |
 | Synology DSM 7.x | systemd units started by a boot task, native (design/dsm.md) | Userspace WireGuard | mesh, relay |
-| macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018); container services that need the visitor's real IP use a container member (OrbStack, Docker Desktop, ADR 0016) | mesh, relay |
+| macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018) | mesh, relay |
+| Docker on Linux or macOS (OrbStack, Docker Desktop) | nett's image, one container (ADR 0016, design/container.md) | Kernel WireGuard, or userspace over TUN | mesh |
 | Home Assistant OS | Add-on (ADR 0017) | Kernel WireGuard | mesh (can act as a smart gateway), relay |
 | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | — | — |
 
@@ -499,7 +499,7 @@ Items 1-7 come from a real deployment: Caddy on a cloud host, over a WireGuard t
 | 4 | Some cloud providers' security groups deny all inbound UDP by default and can only be changed manually in the web console | design/mesh.md section 5.5 |
 | 5 | Caddy in a container can reach a tunnel address directly through the host's WireGuard interface, and Docker's address masquerading rewrites the source to the host's tunnel address | ADR 0015 (matching Edge traffic by container address) |
 | 6 | Caddy overwrites `X-Forwarded-For` with the real source by default and writes `X-Forwarded-Proto: https`, so forged headers are overwritten | Section 8 |
-| 7 | Putting the tunnel endpoint into the container network where the service lives and listening only on the tunnel address lets the service recognize the proxy; this endpoint container uses about 1.6 MiB of idle memory | ADR 0016 |
+| 7 | A tunnel endpoint in the service's own network namespace, listening only on the tunnel address, lets the service see each caller's tunnel address; such an endpoint container uses about 1.6 MiB of idle memory | ADR 0016 |
 | 8 | Cloud hosts in mainland China: a domain that is not filed with that cloud provider cannot be used for website service (a known platform restriction, not measured) | design/mesh.md section 5.3 |
 | 9 | Standard Caddy's reverse proxy can forward HTTP/2 CONNECT tunnels (including TLS inside the tunnel), but cannot route them by Host; an expression matcher of "method is CONNECT and SNI matches" can separate them from websites on the same listening port | design/mesh.md section 5.4; ADR 0011 |
 | 10 | Standard Caddy cannot forward HTTP/1.1 CONNECT tunnels: the request reaches the backend, but Caddy treats the response as an ordinary response and the tunnel cannot be established | design/mesh.md section 5.4; ADR 0011 |
