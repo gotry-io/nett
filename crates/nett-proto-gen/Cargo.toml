@@ -7,12 +7,16 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
-# Generates the Rust types of nett-proto from proto/ (needs protoc in PATH). The generated file is
-# committed to the repository, and CI regenerates it and checks that there is no difference;
-# building nett itself does not need protoc
+# Generates the Rust types of nett-proto from proto/. The generated file is committed to the
+# repository, and CI regenerates it and checks that there is no difference; building nett itself
+# does not run this
 
 [lints]
 workspace = true
 
 [dependencies]
 prost-build = { version = "0.14.4", default-features = false }
+# A Protobuf compiler in Rust, with the well-known types built in: parses proto/ into the
+# descriptors prost-build generates from, so generating needs no protoc installed. Only this tool
+# uses it; nett and nett-hub do not
+protox = { version = "0.10.0", default-features = false }
