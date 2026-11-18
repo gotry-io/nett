@@ -97,7 +97,7 @@ The enhanced mode of a proxy app (for example Surge) creates its own utun and ta
 
 ### 6.3 Operation
 
-- launchd runs the mesh process as root (creating a utun requires root), starts it at boot and restarts it after it exits. `sudo nett install` installs the service (design/release.md section 4): the service runs the copy in the root-only directory, not the program in the Homebrew directory;
+- launchd runs the mesh process as root (creating a utun requires root), starts it at boot and restarts it after it exits. `sudo nett install` installs the service (design/release.md section 4): the service runs the copy in the root-only directory, not the program the installation ran from;
 - Files are placed in `/Library/Application Support/nett/` (owner root, mode `0700`): the copy of the program, the mesh private key and identity private key (`0600`), and the desired state file, all generated and copied by `sudo nett install`;
 - The mesh process carries the TLS transport itself (mesh.md section 5.3, ADR 0013): nett on macOS runs the mesh service and, with a Hub, nett-node (hub.md section 7), and adds no account to the system. The transport service of nett 0.3.11 (`io.gotry.nett.transport`, under the hidden account `_nett-transport`) is removed with its account and group by nett-node when it starts and by `sudo nett install` and `sudo nett uninstall`, and the start-up failure logs of earlier releases (`/Library/Logs/nett`, `/etc/newsyslog.d/nett.conf`) once no loaded service writes them (release.md section 7);
 - Reload: `sudo nett reload`, or `sudo nett install` when the desired state has changed (status.md section 4.1);

@@ -60,7 +60,7 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 [design/userspace.md](design/userspace.md).
 
 - [x] Userspace WireGuard (gotatun) in the mesh process with in-process filtering; a Linux TUN backend runs it in the lab and CI
-- [x] macOS native member: utun, routes, binding to the physical interface, network changes, launchd service, Homebrew
+- [x] macOS native member: utun, routes, binding to the physical interface, network changes, launchd service
 
 ### 4. Hub
 
@@ -73,7 +73,7 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 - [x] H5, first half: the encrypted Hub backup every machine keeps, `nett-hub restore` and the rebuild procedure (design/hub.md section 8.2); the second half is stage 9
 - [x] Site: machines, Edge, advertised routes (denied by default) and access rules maintained with `nett site` commands; connections derived from access rules
 - [x] Authentication: recovery key and backup key, the site's API token, node keys and admission proofs, trust anchors; signing on the user's own computer (ADR 0024)
-- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, Homebrew (macOS), images for container members and the Hub built from `packaging/` with a Compose example, automatic upgrade and rollback
+- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, images for container members and the Hub built from `packaging/` with a Compose example, automatic upgrade and rollback
 - [x] Availability: nett-node and the mesh process apply the locally saved configuration at start-up
 - [x] OpenAPI document of the Hub API (`docs/api/openapi.json`)
 

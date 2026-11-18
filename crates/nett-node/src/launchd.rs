@@ -296,9 +296,5 @@ mod tests {
         assert!(plist(&NODE).contains("<string>node</string>"));
         let mesh = plist(&MESH);
         assert!(mesh.contains(&format!("<string>{DESIRED}</string>")));
-        assert!(
-            !mesh.contains("homebrew"),
-            "the service never runs the Homebrew copy"
-        );
     }
 }
