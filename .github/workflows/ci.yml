@@ -256,7 +256,8 @@ jobs:
   # Linux with real systemd (design/hub.md section 7, design/release.md sections 7 and 8): a new
   # machine joins through the Hub with `sudo nett install <token>` from 0.3.13, the last release with
   # the earlier layout, upgrades itself to this version and then a newer one that a local website
-  # serves (signed with keys generated for this test and built into each version), and leaves again
+  # serves (signed with keys generated for this test and built into each version) and the Hub
+  # mirrors, and leaves again
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -280,10 +281,10 @@ jobs:
           for key in old-primary old-backup new-primary new-backup; do
             minisign-linux/x86_64/minisign -G -W -p "$RUNNER_TEMP/$key.pub" -s "$RUNNER_TEMP/$key.key"
           done
-      - name: Build 0.3.13 and this version with the old keys, and 99.0.0 and 99.2.0 with the new ones
+      - name: Build 0.3.13 and this version with the old keys, and 99.0.0, 99.2.0 and the Hub with the new ones
         run: |
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
-            cargo build --locked -p nett-cli -p nett-hub
+            cargo build --locked -p nett-cli
           # The machine starts on 0.3.13, the last release with the earlier layout
           git fetch --depth 1 origin tag v0.3.13
           git worktree add "$RUNNER_TEMP/previous" v0.3.13
@@ -292,6 +293,9 @@ jobs:
               CARGO_TARGET_DIR="$RUNNER_TEMP/previous-target" cargo build --locked -p nett-cli)
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/new-primary.pub" "$RUNNER_TEMP/new-backup.pub")"
           export NETT_RELEASE_PUBLIC_KEYS
+          # The Hub trusts the keys of 99.x, as one upgraded to a release that carries them: it
+          # mirrors what they signed (ADR 0025) and does not serve the rest
+          cargo build --locked -p nett-hub
           next="$RUNNER_TEMP/next"
           mkdir -p "$next" "$RUNNER_TEMP/site/dl"
           tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C "$next"
@@ -421,11 +425,17 @@ jobs:
           serve_hub
           wait_for '.upgrade_result == "rejected" and (.upgrade_reason | contains("does not trust"))'
           wait_for '.online and .nett_version == "99.0.0"'
-          # ... and 99.2.0 signed by the new primary key is installed
+          # The Hub did not serve it either: the node fetched it from the website
+          grep -F 'the program of the release does not verify' hub.log | grep -F 99.1.0
+          # ... and 99.2.0 signed by the new primary key is installed, fetched through the Hub,
+          # which holds it before it relays the manifest
           sh "$RUNNER_TEMP/offer.sh" 99.2.0 new-primary
           kill "$hub_pid"; wait "$hub_pid" || true
           serve_hub
           wait_for '.online and .nett_version == "99.2.0"'
+          grep -F 'holding the program of the release' hub.log | grep -F 99.2.0
+          sudo journalctl -u nett-node --no-pager | grep -F 'fetched and verified the new version' \
+            | grep -F 99.2.0 | grep -F 'the Hub'
           sudo journalctl -u nett-node --no-pager | tail -20
           # A public relay with TLS gives this machine a path over TLS: nett-node writes and starts
           # the transport adapter's unit, and deletes it when the path goes

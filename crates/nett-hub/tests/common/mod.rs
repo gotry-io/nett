@@ -104,6 +104,17 @@ pub fn resign(site: &SiteDir, state: &mut State) {
     .expect("signed");
 }
 
+/// The release key the Hubs of these tests trust, generated once per test run.
+pub fn release_key() -> &'static nett_trust::signing::ReleaseKeyPair {
+    static KEY: std::sync::OnceLock<nett_trust::signing::ReleaseKeyPair> =
+        std::sync::OnceLock::new();
+    KEY.get_or_init(|| nett_trust::signing::ReleaseKeyPair::generate().expect("release key"))
+}
+
+pub fn release_keys() -> nett_trust::release::ReleaseKeys {
+    nett_trust::release::ReleaseKeys::parse(&release_key().public_key()).expect("release keys")
+}
+
 /// An initialized Hub waiting to be linked (the random secret in the link code is `SECRET`).
 pub async fn hub(dir: &Path, url: &str) -> Arc<Hub> {
     let db = Db::open(&dir.join("hub.db")).await.expect("database");
@@ -117,6 +128,7 @@ pub async fn hub(dir: &Path, url: &str) -> Arc<Hub> {
         StaticSecret::from([200; 32]),
         url.to_owned(),
         Some(dir.to_path_buf()),
+        release_keys(),
     )
     .await
     .expect("hub")

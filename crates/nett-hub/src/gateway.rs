@@ -21,7 +21,7 @@ use nett_proto::noise::{MAX_MESSAGE, Responder, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
     AckResult, Backup, DesiredState, Envelope, Error as ProtoError, ErrorCode, Goodbye, Hello,
-    Partition, PartitionKind, PathSwitch, Pong, Welcome,
+    Partition, PartitionKind, PathSwitch, Pong, ProgramPart, Welcome,
 };
 use nett_site::state::{AddressSource, Learned, LearnedIp};
 use prost::Message as _;
@@ -47,6 +47,8 @@ const MAX_REASON: usize = 1024;
 /// Messages a node may send per second on average, and in a burst (protocol.md section 11).
 const MESSAGES_PER_SECOND: f64 = 50.0;
 const MESSAGE_BURST: f64 = 200.0;
+/// The size of a `ProgramPart` (protocol.md section 5): with its fields it fits in one message.
+const PART_BYTES: u64 = 48 * 1024;
 
 /// A token bucket over the messages of one session.
 struct Budget {
@@ -257,6 +259,41 @@ impl Outbox {
     }
 }
 
+/// The program of a release being sent to a node: one per session (protocol.md section 11), read
+/// from disk part by part as the connection takes them.
+struct Sending {
+    /// The `ProgramFetch` it answers.
+    request: u64,
+    version: String,
+    target: String,
+    file: Arc<std::fs::File>,
+    offset: u64,
+    size: u64,
+}
+
+/// Reads the next part of the program being sent; never finishes while nothing is.
+async fn next_part(sending: Option<(Arc<std::fs::File>, u64, u64)>) -> Result<Vec<u8>, String> {
+    let Some((file, offset, len)) = sending else {
+        return std::future::pending().await;
+    };
+    tokio::task::spawn_blocking(move || {
+        use std::os::unix::fs::FileExt as _;
+        let mut buf = vec![0u8; usize::try_from(len).unwrap_or(0)];
+        file.read_exact_at(&mut buf, offset).map(|()| buf)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+fn not_found(related_id: u64) -> Body {
+    Body::Error(ProtoError {
+        code: ErrorCode::NotFound as i32,
+        message: "the Hub does not hold this program".to_owned(),
+        related_id,
+    })
+}
+
 async fn session(
     hub: Arc<Hub>,
     mut socket: WebSocket,
@@ -417,9 +454,17 @@ async fn serve(
     send_desired(hub, node, socket, &mut out).await?;
     let mut reassembler = Reassembler::default();
     let mut budget = Budget::new();
+    let mut sending: Option<Sending> = None;
     let idle = tokio::time::sleep(IDLE);
     tokio::pin!(idle);
     loop {
+        let next = sending.as_ref().map(|s| {
+            (
+                s.file.clone(),
+                s.offset,
+                (s.size - s.offset).min(PART_BYTES),
+            )
+        });
         tokio::select! {
             message = socket.recv() => {
                 let Some(message) = message else { return Ok(()) };
@@ -441,7 +486,8 @@ async fn serve(
                         }
                         let pt = out.transport.decrypt(&ct).map_err(|e| e.to_string())?;
                         if let Some(env) = reassembler.push(&pt).map_err(|e| e.to_string())?
-                            && !handle(hub, node, socket, &mut out, env, observed).await?
+                            && !handle(hub, node, socket, &mut out, env, observed, &mut sending)
+                                .await?
                         {
                             return Ok(());
                         }
@@ -469,6 +515,34 @@ async fn serve(
                 }))
                 .await?;
             }
+            // One part per turn of the loop, so the session keeps answering while it sends
+            part = next_part(next), if sending.is_some() => {
+                let Some(s) = sending.as_mut() else { continue };
+                match part {
+                    Ok(data) => {
+                        let offset = s.offset;
+                        s.offset += data.len() as u64;
+                        let body = Body::ProgramPart(ProgramPart {
+                            version: s.version.clone(),
+                            target: s.target.clone(),
+                            offset,
+                            size: s.size,
+                            data,
+                        });
+                        if s.offset >= s.size {
+                            tracing::debug!(node_id = %node, version = %s.version, target = %s.target, "program sent");
+                            sending = None;
+                        }
+                        out.send(socket, body).await?;
+                    }
+                    Err(e) => {
+                        tracing::warn!(node_id = %node, error = %e, "reading the program being sent");
+                        let request = s.request;
+                        sending = None;
+                        out.send(socket, not_found(request)).await?;
+                    }
+                }
+            }
             () = replaced.notified() => return Ok(()),
             () = &mut idle => return Err("no message within the keepalive window".into()),
             () = hub.stopping() => {
@@ -489,6 +563,7 @@ async fn handle(
     out: &mut Outbox,
     env: Envelope,
     observed: Option<IpAddr>,
+    sending: &mut Option<Sending>,
 ) -> Result<bool, String> {
     match env.body {
         Some(Body::Ping(_)) => {
@@ -643,6 +718,41 @@ async fn handle(
             Ok(None) => {}
             Err(e) => tracing::warn!(error = %e, "making a Hub backup"),
         },
+        // The program of a release, from the Hub's copy (ADR 0025); a new fetch replaces the one
+        // being sent
+        Some(Body::ProgramFetch(fetch)) => {
+            let held = hub
+                .mirror
+                .as_ref()
+                .and_then(|m| m.get(&fetch.version, &fetch.target));
+            let opened = match held {
+                Some(held) => match tokio::fs::File::open(&held.path).await {
+                    Ok(file) => Some((file.into_std().await, held.size)),
+                    Err(e) => {
+                        tracing::warn!(path = %held.path.display(), error = %e, "opening a program to send");
+                        None
+                    }
+                },
+                None => None,
+            };
+            match opened {
+                Some((file, size)) => {
+                    tracing::info!(node_id = %node, version = %fetch.version, target = %fetch.target, "sending the program of the release");
+                    *sending = Some(Sending {
+                        request: env.id,
+                        version: fetch.version,
+                        target: fetch.target,
+                        file: Arc::new(file),
+                        offset: 0,
+                        size,
+                    });
+                }
+                None => {
+                    *sending = None;
+                    out.send(socket, not_found(env.id)).await?;
+                }
+            }
+        }
         Some(Body::Goodbye(_)) => return Ok(false),
         _ => {}
     }

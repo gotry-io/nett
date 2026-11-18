@@ -21,8 +21,9 @@ use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
     AckResult, BackupFetch, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
-    PartitionAck, PartitionKind, PathSwitch, Ping, StateAck,
+    PartitionAck, PartitionKind, PathSwitch, Ping, ProgramFetch, StateAck,
 };
+use nett_trust::release::Version;
 use prost::Message as _;
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -72,6 +73,8 @@ pub struct Node {
     /// Installs new releases (design/release.md section 7); `None` where this machine does not
     /// upgrade itself.
     pub upgrader: Option<Arc<Upgrader>>,
+    /// How the upgrade fetches the program from whichever session is connected (ADR 0025).
+    pub link: Arc<crate::fetch::HubLink>,
     /// Starts and stops the relay and the transport adapter with the desired state (design/hub.md
     /// section 5); `None` where nett did not install the services. Holds what was last set up.
     pub services: Option<std::sync::Mutex<Option<crate::services::Wants>>>,
@@ -85,8 +88,23 @@ pub enum Exit {
     Upgraded,
 }
 
-/// An upgrade running in the background, and the generation that carried its manifest.
-type Upgrading = Option<(u64, tokio::task::JoinHandle<Result<(), String>>)>;
+/// The upgrade running, which outlives connections (design/release.md section 7).
+pub struct Running {
+    /// The generation of the release partition it answers.
+    generation: u64,
+    version: Version,
+    task: tokio::task::JoinHandle<Result<(), String>>,
+    /// Reported to the Hub as it changes.
+    progress: tokio::sync::watch::Receiver<crate::upgrade::Progress>,
+}
+
+type Upgrading = Option<Running>;
+
+/// What happened to the running upgrade.
+enum UpgradeEvent {
+    Done(u64, Result<Result<(), String>, tokio::task::JoinError>),
+    Progress(u64, crate::upgrade::Progress),
+}
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_rustls::client::TlsStream<TcpStream>>;
 
@@ -121,7 +139,7 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
         // An upgrade keeps going while the connection is down
         let finished = async {
             match upgrading.as_mut() {
-                Some((_, task)) => task.await.ok(),
+                Some(running) => (&mut running.task).await.ok(),
                 None => std::future::pending().await,
             }
         };
@@ -424,6 +442,8 @@ impl Node {
         let mut from_mesh = coordination.from_mesh.lock().await;
         // Messages from before this session are stale: their rounds have passed
         while from_mesh.try_recv().is_ok() {}
+        let mut fetches = self.link.pending.lock().await;
+        let mut fetch: Option<crate::fetch::FetchRequest> = None;
         if let Some(upgrader) = &self.upgrader {
             upgrader.settled();
         }
@@ -446,14 +466,41 @@ impl Node {
         // result: ask it to read again when reading status
         let mut pending: Option<u64> = None;
         loop {
-            let finished = async {
+            let event = async {
                 match upgrading.as_mut() {
-                    Some((generation, task)) => (*generation, task.await),
+                    Some(running) => tokio::select! {
+                        biased;
+                        done = &mut running.task => UpgradeEvent::Done(running.generation, done),
+                        Ok(()) = running.progress.changed() => UpgradeEvent::Progress(
+                            running.generation,
+                            running.progress.borrow_and_update().clone(),
+                        ),
+                    },
                     None => std::future::pending().await,
                 }
             };
             tokio::select! {
-                (generation, done) = finished => {
+                event = event => {
+                    let (generation, done) = match event {
+                        UpgradeEvent::Done(generation, done) => (generation, done),
+                        UpgradeEvent::Progress(generation, progress) => {
+                            let reason = match progress {
+                                crate::upgrade::Progress::Waiting(reason) => reason,
+                                crate::upgrade::Progress::Installing => "installing".to_owned(),
+                                crate::upgrade::Progress::Fetching => continue,
+                            };
+                            let ack = StateAck {
+                                generation,
+                                partitions: vec![PartitionAck {
+                                    kind: PartitionKind::Release as i32,
+                                    result: AckResult::Pending as i32,
+                                    reason,
+                                }],
+                            };
+                            out.send(&mut ws, Body::StateAck(ack)).await?;
+                            continue;
+                        }
+                    };
                     *upgrading = None;
                     match done {
                         Ok(Ok(())) => return Ok(Exit::Upgraded),
@@ -496,6 +543,29 @@ impl Node {
                             // Report status immediately after applying
                             status.reset_immediately();
                         }
+                        Some(Body::ProgramPart(part)) => {
+                            if let Some(request) = fetch.as_ref()
+                                && request.version == part.version
+                                && request.target == part.target
+                            {
+                                let done = part.offset + part.data.len() as u64 >= part.size;
+                                let handed = request.parts.send(crate::fetch::Part::Data {
+                                    offset: part.offset,
+                                    size: part.size,
+                                    data: part.data,
+                                }).await;
+                                if done || handed.is_err() {
+                                    fetch = None;
+                                }
+                            }
+                        }
+                        // The answer to ProgramFetch when the Hub does not hold the program; it does
+                        // not end the session
+                        Some(Body::Error(e)) if e.code == ErrorCode::NotFound as i32 => {
+                            if let Some(request) = fetch.take() {
+                                let _ = request.parts.send(crate::fetch::Part::NotFound).await;
+                            }
+                        }
                         Some(Body::Error(e)) => {
                             return Err(SessionError::Refused {
                                 code: ErrorCode::try_from(e.code).unwrap_or(ErrorCode::Unspecified),
@@ -529,6 +599,17 @@ impl Node {
                 }
                 _ = backups.tick() => {
                     out.send(&mut ws, Body::BackupFetch(BackupFetch { have: self.backup_held() })).await?;
+                }
+                // The upgrade asks for the program from the Hub (ADR 0025); one that gave up
+                // waiting is not asked for
+                Some(request) = fetches.recv() => {
+                    if !request.parts.is_closed() {
+                        out.send(&mut ws, Body::ProgramFetch(ProgramFetch {
+                            version: request.version.clone(),
+                            target: request.target.clone(),
+                        })).await?;
+                        fetch = Some(request);
+                    }
                 }
                 Some(p) = from_mesh.recv() => {
                     out.send(&mut ws, Body::PathSwitch(PathSwitch {
@@ -664,12 +745,29 @@ impl Node {
             ),
             Ok(Plan::Failed(reason)) => (AckResult::Rejected, reason),
             Ok(Plan::Upgrade { version, program }) => {
+                // A newer release replaces an upgrade still fetching its program; one that is installing
+                // finishes, and the new program then upgrades to the newer release
+                if let Some(running) = upgrading.as_ref()
+                    && running.version != version
+                    && *running.progress.borrow() != crate::upgrade::Progress::Installing
+                {
+                    running.task.abort();
+                    *upgrading = None;
+                }
                 if upgrading.is_none() {
                     let task = upgrader.clone();
-                    *upgrading = Some((
+                    let link = self.link.clone();
+                    let (progress, waiting) =
+                        tokio::sync::watch::channel(crate::upgrade::Progress::default());
+                    *upgrading = Some(Running {
                         generation,
-                        tokio::spawn(async move { task.upgrade(version, &program).await }),
-                    ));
+                        version,
+                        task: tokio::spawn(async move {
+                            task.upgrade(version, &program, Some(&link), &progress)
+                                .await
+                        }),
+                        progress: waiting,
+                    });
                 }
                 (AckResult::Pending, format!("upgrading to {version}"))
             }
@@ -1081,6 +1179,7 @@ mod apply_tests {
             // No mesh process answers here
             socket: dir.join("mesh.sock"),
             upgrader: None,
+            link: Arc::new(crate::fetch::HubLink::new()),
             services: None,
         };
         let content = serde_json::to_vec(&doc).expect("json");
@@ -1104,5 +1203,84 @@ mod apply_tests {
             .apply_mesh(&serde_json::to_vec(&other).expect("json"))
             .await;
         assert_eq!(result, AckResult::Rejected, "{reason}");
+    }
+
+    struct NoServices;
+
+    impl crate::upgrade::Services for NoServices {
+        fn restart_mesh(&self) -> Result<(), String> {
+            Err("not in this test".into())
+        }
+        fn mesh_answers(&self) -> bool {
+            false
+        }
+        fn restart_helpers(&self) {}
+    }
+
+    /// A newer release replaces an upgrade that is still fetching its program, and leaves one that is
+    /// installing to finish: its install replaces files on its own thread
+    #[tokio::test(start_paused = true)]
+    async fn a_newer_release_replaces_an_upgrade_only_while_it_fetches() {
+        use crate::upgrade::{Progress, Upgrader};
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-node-newer-")
+            .tempdir()
+            .expect("temp dir");
+        let dir = dir_tmp.path().to_path_buf();
+        let pair = nett_trust::signing::ReleaseKeyPair::generate().expect("key");
+        let target = "x86_64-unknown-linux-musl";
+        let offer = |version: &str| {
+            pair.manifest(
+                version.parse().expect("version"),
+                target,
+                "https://127.0.0.1:9/nett",
+                b"program",
+            )
+        };
+        let node = Node {
+            config: HubConfig {
+                url: "https://hub.example.com".into(),
+                hub_key: Bytes32([5; 32]),
+                node_id: new_node_id().expect("id").to_string(),
+                tls_fingerprint: None,
+            },
+            identity: StaticSecret::from([9; 32]),
+            desired: dir.join("desired.json"),
+            socket: dir.join("mesh.sock"),
+            upgrader: Some(Arc::new(Upgrader {
+                keys: nett_trust::release::ReleaseKeys::parse(&pair.public_key()).expect("keys"),
+                target: target.into(),
+                current: "0.1.0".parse().expect("version"),
+                program: dir.join("nett"),
+                command: None,
+                dir: dir.clone(),
+                services: Arc::new(NoServices),
+                mesh_start: Duration::from_secs(1),
+            })),
+            link: Arc::new(crate::fetch::HubLink::new()),
+            services: None,
+        };
+        let version = |u: &Upgrading| u.as_ref().map(|r| r.version.to_string());
+
+        // Installing: the newer release waits for it
+        let (installing, progress) = tokio::sync::watch::channel(Progress::Installing);
+        let mut upgrading = Some(Running {
+            generation: 1,
+            version: "0.2.0".parse().expect("version"),
+            task: tokio::spawn(std::future::pending()),
+            progress,
+        });
+        let ack = node.apply_release(&offer("0.3.0"), 2, &mut upgrading);
+        assert_eq!(ack.0, AckResult::Pending);
+        assert_eq!(version(&upgrading).as_deref(), Some("0.2.0"));
+
+        // Still fetching: the newer release replaces it
+        installing.send_replace(Progress::Waiting("not fetched yet".into()));
+        node.apply_release(&offer("0.3.0"), 3, &mut upgrading);
+        assert_eq!(version(&upgrading).as_deref(), Some("0.3.0"));
+        assert_eq!(upgrading.as_ref().map(|r| r.generation), Some(3));
+        // The same release again leaves the running upgrade as it is
+        node.apply_release(&offer("0.3.0"), 4, &mut upgrading);
+        assert_eq!(upgrading.as_ref().map(|r| r.generation), Some(3));
     }
 }

@@ -6,6 +6,7 @@ pub mod api;
 pub mod db;
 pub mod gateway;
 pub mod hub;
+pub mod mirror;
 pub mod openapi;
 pub mod tls;
 

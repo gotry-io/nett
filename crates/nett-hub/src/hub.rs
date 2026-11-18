@@ -75,6 +75,9 @@ pub struct Hub {
     /// The latest release manifest (design/release.md section 7), sent to every node as the
     /// `release` partition.
     release: watch::Sender<Option<Arc<Vec<u8>>>>,
+    /// The programs of that release, which nodes fetch over their session (ADR 0025); only with a
+    /// data directory.
+    pub mirror: Option<crate::mirror::Mirror>,
     /// Node connections and handshakes in progress (protocol.md section 11).
     pub connections: Arc<tokio::sync::Semaphore>,
     pub handshakes: Arc<tokio::sync::Semaphore>,
@@ -136,12 +139,14 @@ pub enum EnrollError {
 }
 
 impl Hub {
-    /// Loads the Hub. With a data directory it makes backups there (design/hub.md section 8.2).
+    /// Loads the Hub. With a data directory it makes backups there (design/hub.md section 8.2) and
+    /// keeps the programs of the current release, verified with `release_keys`.
     pub async fn load(
         db: Db,
         key: StaticSecret,
         url: String,
         data: Option<std::path::PathBuf>,
+        release_keys: nett_trust::release::ReleaseKeys,
     ) -> Result<Arc<Self>, String> {
         let site = match db.site().await.map_err(|e| e.to_string())? {
             Some((generation, json)) => {
@@ -162,6 +167,9 @@ impl Hub {
             changes: watch::channel(generation).0,
             live: Mutex::new(HashMap::new()),
             release: watch::channel(None).0,
+            mirror: data
+                .as_deref()
+                .map(|d| crate::mirror::Mirror::new(d, release_keys)),
             connections: Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS)),
             handshakes: Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES)),
             stopping: watch::channel(false).0,
@@ -234,9 +242,15 @@ impl Hub {
         self.release.subscribe()
     }
 
-    /// Takes a newly fetched release manifest; connected nodes get it when it changed.
-    pub fn set_release(&self, manifest: Vec<u8>) -> Result<(), String> {
-        nett_trust::release::Manifest::parse(&manifest).map_err(|e| e.to_string())?;
+    /// Takes a newly fetched release manifest: holds its programs first, so that nodes find them
+    /// when they learn of the release, then sends it to connected nodes when it changed. Returns
+    /// why each program not held could not be; they are fetched again when it is taken again.
+    pub async fn take_release(&self, manifest: Vec<u8>) -> Result<Vec<String>, String> {
+        let parsed = nett_trust::release::Manifest::parse(&manifest).map_err(|e| e.to_string())?;
+        let missing = match &self.mirror {
+            Some(mirror) => mirror.update(&parsed).await,
+            None => Vec::new(),
+        };
         self.release.send_if_modified(|current| {
             if current.as_deref().map(Vec::as_slice) == Some(manifest.as_slice()) {
                 return false;
@@ -244,7 +258,7 @@ impl Hub {
             *current = Some(Arc::new(manifest));
             true
         });
-        Ok(())
+        Ok(missing)
     }
 
     pub async fn site(&self) -> Option<Arc<Site>> {
