@@ -220,7 +220,7 @@ tailscale (Headscale + derper + tailscaled) is an optional fallback: it is used 
 
 ## 7. Phone access
 
-The phone side is compatible with **any standard WireGuard client**: nett exports a standard configuration (a configuration file and a QR code) and does not pin a client; it also exports configurations for Surge, mihomo and sing-box (ADR 0018). The configuration has **one entry, the mobile gateway** (ADR 0008):
+The phone side is compatible with **any standard WireGuard client**: nett exports a standard configuration (a configuration file and a QR code) and does not pin a client; a client that takes WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up from the same fields (ADR 0018). The configuration has **one entry, the mobile gateway** (ADR 0008):
 
 ```
 Phone ── mobile gateway (standard WireGuard) → the nodes, and the LAN prefixes advertised in the mesh;
@@ -231,7 +231,7 @@ Phone ── mobile gateway (standard WireGuard) → the nodes, and the LAN pref
 - The mobile gateway is a WireGuard interface on the Hub host (or another `public` node); the path beyond the gateway is handled by the nett path layer;
 - A device can have multiple credentials (for example, one each for two different client programs), each revocable independently, with permissions granted per device;
 - When UDP is restricted, clients that support an HTTPS proxy can reach internal services through nett-relay's CONNECT proxy;
-- Proxy client configurations send the mesh prefixes to a WireGuard outbound, so they do not use up the phone's only VPN slot;
+- A proxy app's WireGuard outbound set up from the standard configuration carries the mesh prefixes beside the proxy, so the mesh does not take the phone's only VPN slot;
 - The phone app and Windows arrive in M3, when they are full members and choose paths themselves, directly to home and to other nodes (ADR 0018).
 
 ## 8. Origin traffic
@@ -382,7 +382,7 @@ curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-<version>-<target>.tar.g
 - The token is valid once and expires quickly;
 - You can also download manually, verify the signature with minisign, then run `sudo nett install <token>`;
 
-**Phone**: no nett installation is needed. Once device credentials and the mobile gateway are implemented, the `nett site` command generates a standard WireGuard configuration (a configuration file and a QR code, ADR 0008) that any WireGuard client can import; configurations for Surge, mihomo and sing-box can also be exported, which work beside a proxy app.
+**Phone**: no nett installation is needed. Once device credentials and the mobile gateway are implemented, the `nett site` command generates a standard WireGuard configuration (a configuration file and a QR code, ADR 0008) that any WireGuard client can import.
 
 ### 13.4 Commands
 
@@ -420,7 +420,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | LAN host | Other machines at home | Does not run nett | Through the smart gateway | Add an alias when a name is needed (design/mesh.md section 11) |
 | macOS host | A Mac (including laptops) | Native nett-node, mesh process | Native member: userspace WireGuard + utun (ADR 0018) | A container on it that runs nett's image is a member of its own (ADR 0016) |
 | HAOS device | A device running Home Assistant OS | nett-node and mesh process in the add-on, optionally nett-relay | Kernel WireGuard (ADR 0017) | Can act as a smart gateway |
-| Device | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | Through the mobile gateway (ADR 0008) | Does not run nett; the app arrives in M3 |
+| Device | Phone | Any WireGuard client, from the standard configuration | Through the mobile gateway (ADR 0008) | Does not run nett; the app arrives in M3 |
 
 ## 14. Supported platforms and external integrations
 
@@ -434,7 +434,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018) | mesh, relay |
 | Docker on Linux or macOS (OrbStack, Docker Desktop) | nett's image, one container (ADR 0016, design/container.md) | Kernel WireGuard, or userspace over TUN | mesh |
 | Home Assistant OS | Add-on (ADR 0017) | Kernel WireGuard | mesh (can act as a smart gateway), relay |
-| Phone | A standard WireGuard client, or Surge, mihomo, sing-box | — | — |
+| Phone | Any WireGuard client, from the standard configuration | — | — |
 
 - Windows members and the iOS and Android apps arrive in M3 (ADR 0018);
 - Other platforms are marked "untested" and support is not promised; capability detection explains what is missing and what it degrades to;

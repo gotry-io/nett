@@ -23,7 +23,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0015](0015-origin-identity-and-lan-default-deny.md) | Origin identity and default deny for LAN prefixes | Accepted |
 | [0016](0016-containers.md) | Containers: one image, one container | Accepted |
 | [0017](0017-home-assistant-os-addon.md) | Run as an add-on on Home Assistant OS | Accepted |
-| [0018](0018-client-platforms.md) | End-user devices: macOS native member, proxy client configs, and client planning | Accepted |
+| [0018](0018-client-platforms.md) | End-user devices: macOS native member and client planning | Accepted |
 | [0019](0019-mesh-only.md) | nett only does mesh networking | Accepted |
 | [0020](0020-release-signing.md) | Release signing: two keys (primary and backup), the public key is a build parameter | Accepted |
 | [0021](0021-tailscale-parity.md) | Mesh experience is baselined on Tailscale | Accepted |

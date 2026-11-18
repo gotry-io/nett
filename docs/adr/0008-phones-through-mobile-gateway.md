@@ -9,7 +9,7 @@ Phone operating systems only allow network access through the system VPN interfa
 
 ## Decision
 
-- The phone side is compatible with **any standard WireGuard client**; nett exports a standard configuration and does not restrict the client; it also exports Surge, mihomo, and sing-box configurations (ADR 0018);
+- The phone side is compatible with **any standard WireGuard client**; nett exports a standard configuration and does not restrict the client; a client that takes WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up from the same fields (ADR 0018);
 - **One entry, the mobile gateway** (a WireGuard interface on the Hub host or another `public` node): a device's only peer is a mobile gateway, which carries its traffic to the nodes and to the LAN prefixes advertised in the mesh; the path beyond the gateway is handled by the nett path layer;
 - At any one time, each credential of a device belongs to exactly one mobile gateway, which advertises that credential's address to other nodes on its behalf;
 - The exported configuration lists the mobile gateway as its DNS server, so mesh names resolve;
