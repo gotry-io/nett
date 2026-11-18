@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-18
+
 - Devices: a phone or computer that runs no nett joins with a standard WireGuard client or Surge.
   `nett site device add <name> --gateway <machine>` adds it through a public Linux machine, which
   is a mobile gateway while devices come through it, and writes the device's WireGuard and Surge
