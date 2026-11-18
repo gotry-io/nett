@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.20] - 2026-11-18
+
 - Upgrades fetch the new program through the Hub (ADR 0025): the Hub keeps a verified copy of the
   current release's programs and relays a new release only once it holds them, and machines fetch
   the program over their connection to the Hub, falling back to the website when the Hub does not
