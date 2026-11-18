@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.3.21] - 2026-11-18
+
 - macOS: every Mac installs with the install script, the one that holds the site too, and on a
   machine connected to a Hub nett-node upgrades the `nett` command together with the services, so
   the command always matches them. Homebrew is no longer a way to install nett: run
