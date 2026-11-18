@@ -15,6 +15,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Every build in CI starts from a fresh checkout: incremental data only grows the cache
+  CARGO_INCREMENTAL: "0"
   # Hub queries are checked at compile time against the committed .sqlx/: compilation fails when a
   # query changes and the offline data is not updated (CLAUDE.md "API, protocol and database")
   SQLX_OFFLINE: "true"
@@ -29,9 +31,37 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
+      # Dependencies and their build outputs (cargo's downloads and target/), keyed by the
+      # dependencies in Cargo.lock without nett's own versions, so a release does not invalidate it.
+      # Written only by pushes to main; pull requests read it
+      - name: Dependency key
+        id: deps
+        run: |
+          key=$(awk '/^name = "nett/ { skip = 1; next } skip { skip = 0; next } { print }' Cargo.lock \
+            | cat - rust-toolchain.toml | shasum -a 256 | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       # Generated Protobuf types are committed in the repository (CLAUDE.md "API, protocol and
       # database"): regenerate them, and there must be no difference
       - name: Generated Protobuf types are up to date
@@ -59,8 +89,34 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
+      # The dependency cache, as in the rust job
+      - name: Dependency key
+        id: deps
+        run: |
+          key=$(awk '/^name = "nett/ { skip = 1; next } skip { skip = 0; next } { print }' Cargo.lock \
+            | cat - rust-toolchain.toml | shasum -a 256 | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - run: cargo test --workspace --all-features --locked
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: utun, addresses and routes (needs root)
         run: |
           cargo test --locked -p nett-mesh --lib --no-run
@@ -273,6 +329,25 @@ jobs:
         run: rustup toolchain install
       # Release key rotation (design/auth.md section 11.3): this version trusts an old primary and
       # backup key; 99.0.0, signed by the old backup key, carries a new pair
+      # The dependency cache, as in the rust job
+      - name: Dependency key
+        id: deps
+        run: |
+          key=$(awk '/^name = "nett/ { skip = 1; next } skip { skip = 0; next } { print }' Cargo.lock \
+            | cat - rust-toolchain.toml | shasum -a 256 | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            ${{ runner.temp }}/previous-target/
+            ${{ runner.temp }}/next-target/
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - name: Release keys for this test
         run: |
           curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
@@ -317,6 +392,17 @@ jobs:
             '{version: $v, programs: {"x86_64-unknown-linux-musl": {url: ("https://127.0.0.1:8444/dl/nett-" + $v + "-x86_64-unknown-linux-musl"), sha256: $sha, minisig: $sig}}}' \
             > "$site/release.json"
           SH
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+            ${{ runner.temp }}/previous-target/
+            ${{ runner.temp }}/next-target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Serve the newer release over HTTPS
         run: |
           site="$RUNNER_TEMP/site"
@@ -522,6 +608,23 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get -c .github/apt.conf update
           sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools
+      # The dependency cache, as in the rust job
+      - name: Dependency key
+        id: deps
+        run: |
+          key=$(awk '/^name = "nett/ { skip = 1; next } skip { skip = 0; next } { print }' Cargo.lock \
+            | cat - rust-toolchain.toml | shasum -a 256 | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - name: A release key for this test
         run: |
           curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
@@ -541,10 +644,20 @@ jobs:
           mkdir -p "$next"
           tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C "$next"
           sed -i '0,/^version = ".*"/s//version = "99.0.0"/' "$next/Cargo.toml"
+          # The same target directory: the dependencies are built once, only nett's own crates again
           (cd "$next" && cargo update --workspace --offline \
-            && CARGO_TARGET_DIR="$PWD/../next-target" cargo build --release --target x86_64-unknown-linux-musl -p nett-cli -p nett-hub)
-          cp "$RUNNER_TEMP/next-target/x86_64-unknown-linux-musl/release/nett" "$out/nett-99.0.0"
-          cp "$RUNNER_TEMP/next-target/x86_64-unknown-linux-musl/release/nett-hub" "$out/nett-hub-99.0.0"
+            && CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --release --target x86_64-unknown-linux-musl -p nett-cli -p nett-hub)
+          cp target/x86_64-unknown-linux-musl/release/nett "$out/nett-99.0.0"
+          cp target/x86_64-unknown-linux-musl/release/nett-hub "$out/nett-hub-99.0.0"
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Join, reach a service beside a container, upgrade in place, roll back (needs Docker)
         run: |
           out="$RUNNER_TEMP/out" data="$RUNNER_TEMP/hub-data" site="$RUNNER_TEMP/site"
@@ -655,9 +768,9 @@ jobs:
           for name in hub box peer; do echo "== $name"; docker logs "$name" 2>&1 | tail -60 || true; done
 
   # Mesh lab scenarios (design/prototype.md section 7), all run on every push. Scenarios do not
-  # depend on each other, and are split by duration into groups run in parallel,
-  # about 4 minutes each. One scenario per line: title | arguments for nett-lab run (fixed in this
-  # file, not from external input).
+  # depend on each other, and are split by duration into groups run in parallel, none much longer
+  # than the longest scenario (five minutes of loss on the direct path). One scenario per line:
+  # title | arguments for nett-lab run (fixed in this file, not from external input).
   lab:
     name: lab (${{ matrix.title }})
     runs-on: ubuntu-24.04
@@ -675,11 +788,14 @@ jobs:
               Scenario 2: the current relay fails and switches to another relay | relay-loss --topology crates/nett-lab/topologies/relays.toml
               Scenario 3: restart the current relay without interrupting the connection | relay-restart --topology crates/nett-lab/topologies/relays.toml
               Scenario 26: the current relay's leg to the peer breaks while it still answers, and the pair moves to the other relay | relay-far-leg --topology crates/nett-lab/topologies/far-leg.toml
-              Scenario 27: the network drops the peer's WireGuard port toward a relay, and the pair stays off that relay | relay-port-block --topology crates/nett-lab/topologies/far-leg.toml
-              Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
               Scenarios 7, 9: switch to TLS when all UDP is blocked, then return to direct after recovery | fallback --topology crates/nett-lab/topologies/fallback.toml
               Scenario 16: both sides are dial-only, and after a proposal through the tunnel both ends switch together | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
               Scenario 17: both sides are dial-only, the current relay fails, and they meet by time slice | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
+          - group: relay-choice
+            title: A blocked relay port and a faster relay
+            scenarios: |
+              Scenario 27: the network drops the peer's WireGuard port toward a relay, and the pair stays off that relay | relay-port-block --topology crates/nett-lab/topologies/far-leg.toml
+              Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
           - group: nat
             title: NAT, hole punching, MTU and access control
             scenarios: |
@@ -689,7 +805,7 @@ jobs:
               Scenario 13: symmetric NAT on both ends, no hole punching attempted | punch --topology crates/nett-lab/topologies/punch-symmetric.toml
               Scenario 19: outer path MTU of 1500, 1360, 1300 (IPv4) | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu4.toml
               Scenario 19: outer path MTU of 1500, 1360, 1300 (IPv6) | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
-              Access control, Edge address and container members (design/local-signing.md section 8) | access --topology crates/nett-lab/topologies/access.toml
+              Access control, Edge address and forwarding to advertised routes (design/local-signing.md section 8) | access --topology crates/nett-lab/topologies/access.toml
               Devices: WireGuard clients reach what their rules allow through a mobile gateway whose FORWARD chain drops (design/devices.md section 10) | devices --topology crates/nett-lab/topologies/devices.toml
               Hub: push, apply, the mesh keeps working when the Hub stops, catch-up after recovery, forged members and old-version rules are rejected (design/hub.md section 10) | hub --topology crates/nett-lab/topologies/direct.toml
           - group: handshake
@@ -721,6 +837,23 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain specified by rust-toolchain.toml
         run: rustup toolchain install
+      # The dependency cache, as in the rust job
+      - name: Dependency key
+        id: deps
+        run: |
+          key=$(awk '/^name = "nett/ { skip = 1; next } skip { skip = 0; next } { print }' Cargo.lock \
+            | cat - rust-toolchain.toml | shasum -a 256 | cut -c1-16)
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
+          restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
       - name: Install tools used by the lab network
         timeout-minutes: 10
         run: |
@@ -733,6 +866,15 @@ jobs:
           sudo ip link add wgcheck type wireguard
           sudo ip link del wgcheck
       - run: cargo build --locked -p nett-cli -p nett-lab -p nett-hub --features nett-cli/lab
+      - if: github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Lab tool self-check (measurement and fault injection)
         run: >-
           sudo ./target/debug/nett-lab run selftest
