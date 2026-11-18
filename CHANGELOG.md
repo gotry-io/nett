@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-18
+
 - The container: one image, `ghcr.io/gotry-io/nett`, for linux/amd64 and linux/arm64. Set
   `NETT_TOKEN` to the token from `nett site add`, keep `/var/lib/nett` in a volume, and run the
   service with `network_mode: service:nett`: it is reached at the member's mesh address and sees
