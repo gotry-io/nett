@@ -4,6 +4,19 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- The container: one image, `ghcr.io/gotry-io/nett`, for linux/amd64 and linux/arm64. Set
+  `NETT_TOKEN` to the token from `nett site add`, keep `/var/lib/nett` in a volume, and run the
+  service with `network_mode: service:nett`: it is reached at the member's mesh address and sees
+  each caller's mesh address, on macOS too (design/container.md). The three-container Compose
+  example is gone; a container member set up with it is removed with `nett site remove` and added
+  again with the new image.
+- The Hub and the container upgrade themselves with each release, the Hub before it relays the
+  release: the program installed by root, or the one in the image, runs a newer version from the
+  data directory or the volume once its release signature holds, and goes back to the version
+  before when a new one does not settle (ADR 0026). `nett site status` shows the Hub's upgrade
+  problem on its own line. The Hub's release files are named `nett-<version>-hub-<target>`, and its
+  image is `ghcr.io/gotry-io/nett-hub`. A Hub before this release is upgraded by hand once.
+
 ## [0.4.0] - 2026-11-18
 
 - Devices: a phone or computer that runs no nett joins with a standard WireGuard client or Surge.

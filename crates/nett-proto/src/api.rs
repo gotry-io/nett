@@ -48,6 +48,10 @@ pub struct PushResponse {
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct StatusResponse {
     pub hub_version: String,
+    /// The Hub's last upgrade that was not installed or was rolled back, and why (design/release.md
+    /// section 7); absent when it is on the latest release it could install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_upgrade: Option<String>,
     pub url: String,
     pub generation: u64,
     pub machines: Vec<MachineStatus>,

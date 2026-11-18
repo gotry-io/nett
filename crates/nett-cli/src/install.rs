@@ -42,14 +42,14 @@ Leaves the site: tells the Hub, which removes this machine from every member, st
 removes the services, removes the mesh interface, and deletes the keys, the desired state,\n\
 the trust store and the Hub configuration. The machine can then join any site. Without a Hub,\n\
 remove it on the computer that holds the site with `nett site remove <name>`.\n\n\
-With --dir, for a machine set up with `nett join` (a container member): tells the Hub and\n\
-deletes the keys and configuration in that directory, and leaves the services to you.";
-pub const JOIN_USAGE: &str = "usage: nett join <token> [--dir <directory>]\n\n\
-Joins this machine to the site through the Hub without installing services, for container\n\
-members and service managers other than systemd and launchd. Creates the keys in the directory\n\
-(or keeps them), joins with the token from `nett site add` or `nett site invite`, and writes\n\
-hub.json and desired.json there; then run `nett mesh` and `nett node` with that directory.\n\
-The directory defaults to /etc/nett.";
+With --dir, for a machine set up with `nett join`: tells the Hub and deletes the keys and\n\
+configuration in that directory, and leaves the services to you.";
+pub const JOIN_USAGE: &str = "usage: nett join [<token>] [--dir <directory>]\n\n\
+Joins this machine to the site through the Hub without installing services, for service managers\n\
+other than systemd and launchd. Creates the keys in the directory (or keeps them), joins with the\n\
+token from `nett site add` or `nett site invite` (from NETT_TOKEN when it is not given), and\n\
+writes hub.json and desired.json there; then run `nett mesh` and `nett node` with that directory.\n\
+The directory defaults to /etc/nett, and in the container to its volume.";
 
 pub struct InstallArgs {
     pub token: Option<String>,
@@ -104,7 +104,7 @@ pub fn leave_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 /// `nett join <token> [--dir]` (design/hub.md section 7): what `sudo nett install <token>` does,
 /// without the services.
 pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    let (mut token, mut dir) = (None, "/etc/nett".to_owned());
+    let (mut token, mut dir) = (None, default_join_dir());
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("dir") => dir = parser.value()?.string()?,
@@ -112,7 +112,10 @@ pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
-    let token = token.ok_or_else(|| anyhow::anyhow!(JOIN_USAGE))?;
+    // The container passes it in the environment, which other users cannot read
+    let token = token
+        .or_else(|| std::env::var("NETT_TOKEN").ok())
+        .ok_or_else(|| anyhow::anyhow!(JOIN_USAGE))?;
     ensure_dir(&dir, 0o700)?;
     let keys = crate::mesh::node_keys(Path::new(&dir))?;
     let outcome = apply_token(&dir, &format!("{dir}/state"), Some(&token), &keys.0)?;
@@ -121,6 +124,15 @@ pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     }
     println!("Ready in {dir}: run `nett mesh` and `nett node` with this directory.");
     Ok(())
+}
+
+/// Where `nett join` writes: the volume in the container, `/etc/nett` elsewhere.
+fn default_join_dir() -> String {
+    #[cfg(target_os = "linux")]
+    if let Some(dir) = crate::container::state_dir() {
+        return dir.to_string_lossy().into_owned();
+    }
+    "/etc/nett".to_owned()
 }
 
 pub fn require_root() -> anyhow::Result<()> {

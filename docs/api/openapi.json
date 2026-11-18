@@ -215,6 +215,13 @@
             "minimum": 0,
             "type": "integer"
           },
+          "hub_upgrade": {
+            "description": "The Hub's last upgrade that was not installed or was rolled back, and why (design/release.md\nsection 7); absent when it is on the latest release it could install.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "hub_version": {
             "type": "string"
           },

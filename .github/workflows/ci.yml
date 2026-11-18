@@ -500,6 +500,160 @@ jobs:
           cat hub.log site.log || true
           sudo journalctl -u nett-mesh -u nett-node --no-pager | tail -80 || true
 
+  # The container and the Hub upgrade themselves (design/container.md, ADR 0026): nett's image joins
+  # through a Hub with NETT_TOKEN, a service in its network sees each caller's mesh address, the Hub
+  # and the containers move in place to 99.0.0, signed with a key generated for this test and built
+  # into each version, and a signed release that does not start is rolled back
+  container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      # The same pinned minisign as the release workflow
+      MINISIGN_URL: https://github.com/jedisct1/minisign/releases/download/0.12/minisign-0.12-linux.tar.gz
+      MINISIGN_SHA256: 9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain specified by rust-toolchain.toml, and musl
+        timeout-minutes: 10
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get -c .github/apt.conf update
+          sudo apt-get -c .github/apt.conf install -y --no-install-recommends musl-tools
+      - name: A release key for this test
+        run: |
+          curl -fsSL -o minisign.tar.gz "$MINISIGN_URL"
+          echo "$MINISIGN_SHA256  minisign.tar.gz" | sha256sum -c -
+          tar -xzf minisign.tar.gz minisign-linux/x86_64/minisign
+          minisign-linux/x86_64/minisign -G -W -p "$RUNNER_TEMP/test.pub" -s "$RUNNER_TEMP/test.key"
+      - name: Build this version and 99.0.0 of nett and nett-hub, statically linked
+        run: |
+          NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/test.pub")"
+          export NETT_RELEASE_PUBLIC_KEYS
+          out="$RUNNER_TEMP/out"
+          mkdir -p "$out"
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p nett-cli -p nett-hub
+          cp target/x86_64-unknown-linux-musl/release/nett "$out/nett-current"
+          cp target/x86_64-unknown-linux-musl/release/nett-hub "$out/nett-hub-current"
+          next="$RUNNER_TEMP/next"
+          mkdir -p "$next"
+          tar --exclude=./target --exclude=./.git -cf - . | tar -xf - -C "$next"
+          sed -i '0,/^version = ".*"/s//version = "99.0.0"/' "$next/Cargo.toml"
+          (cd "$next" && cargo update --workspace --offline \
+            && CARGO_TARGET_DIR="$PWD/../next-target" cargo build --release --target x86_64-unknown-linux-musl -p nett-cli -p nett-hub)
+          cp "$RUNNER_TEMP/next-target/x86_64-unknown-linux-musl/release/nett" "$out/nett-99.0.0"
+          cp "$RUNNER_TEMP/next-target/x86_64-unknown-linux-musl/release/nett-hub" "$out/nett-hub-99.0.0"
+      - name: Join, reach a service beside a container, upgrade in place, roll back (needs Docker)
+        run: |
+          out="$RUNNER_TEMP/out" data="$RUNNER_TEMP/hub-data" site="$RUNNER_TEMP/site"
+          mkdir -p "$site" "$RUNNER_TEMP/home"
+          # Owned by root, as Docker creates a volume: the Hub runs as root without capabilities,
+          # and writes only where it owns the directory
+          sudo install -d -m 0700 "$data"
+          export HOME="$RUNNER_TEMP/home"
+          nett="$out/nett-current"
+          for image in nett nett-hub; do
+            context="$RUNNER_TEMP/image-$image"
+            mkdir -p "$context"
+            cp /etc/ssl/certs/ca-certificates.crt "$context/"
+            cp "$out/$image-current" "$context/$image-amd64"
+            dir=container
+            [ "$image" = nett-hub ] && dir=hub
+            docker build -q -t "$image:ci" -f "packaging/$dir/Dockerfile" "$context"
+          done
+          # offer <version> <nett program> [<nett-hub program>]: signs them as that release, puts
+          # them where the Hub's mirror finds them (it verifies them instead of fetching), and
+          # writes the manifest it reads at start
+          offer() {
+            programs='{}'
+            for pair in "x86_64-unknown-linux-musl:$2" "hub-x86_64-unknown-linux-musl:${3:-}"; do
+              target=${pair%%:*} src=${pair#*:}
+              [ -n "$src" ] || continue
+              name="nett-$1-$target"
+              cp "$src" "$RUNNER_TEMP/$name"
+              rm -f "$RUNNER_TEMP/$name.minisig"
+              minisign-linux/x86_64/minisign -S -s "$RUNNER_TEMP/test.key" -m "$RUNNER_TEMP/$name" -t "nett v$1 $name" < /dev/null
+              sudo mkdir -p "$data/releases"
+              sudo cp "$RUNNER_TEMP/$name" "$data/releases/$name"
+              programs=$(jq --arg t "$target" --arg url "https://nett.example.com/dl/$name" \
+                --arg sha "$(sha256sum "$RUNNER_TEMP/$name" | cut -d' ' -f1)" --rawfile sig "$RUNNER_TEMP/$name.minisig" \
+                '. + {($t): {url: $url, sha256: $sha, minisig: $sig}}' <<< "$programs")
+            done
+            jq -n --arg v "$1" --argjson programs "$programs" '{version: $v, programs: $programs}' > "$site/release.json"
+          }
+          status() { "$nett" site status --json | jq -e "$1" > /dev/null; }
+          wait_for() {
+            for _ in $(seq 90); do status "$1" && return 0; sleep 2; done
+            "$nett" site status
+            return 1
+          }
+          # ask <container> <command>: runs a command in a container's network, as a service
+          # beside it does
+          ask() { sudo nsenter -t "$(docker inspect -f '{{.State.Pid}}' "$1")" -n -- bash -c "$2"; }
+          echo '{"version": "0.0.1", "programs": {}}' > "$site/release.json"
+          docker network create --subnet 172.31.0.0/24 nett-ci
+          certs="$PWD/crates/nett-hub/tests/data"
+          code=$(docker run --rm -v "$data":/data -v "$certs":/certs:ro nett-hub:ci init --data /data \
+            --url https://172.31.0.10:8443 --tls-cert /certs/test-cert.pem | grep -o 'nett_lnk_[A-Za-z0-9_-]*')
+          docker run -d --name hub --network nett-ci --ip 172.31.0.10 --cap-drop ALL --read-only \
+            --restart unless-stopped -v "$data":/data -v "$certs":/certs:ro -v "$site":/site:ro nett-hub:ci \
+            serve --data /data --listen 0.0.0.0:8443 --tls-cert /certs/test-cert.pem \
+            --tls-key /certs/test-key.pem --releases /site/release.json
+          sleep 2
+          "$nett" site init
+          "$nett" site link "$code"
+          for name in box peer; do
+            token=$("$nett" site add "$name" --yes | grep -o 'nett_enr_[A-Za-z0-9_-]*')
+            ip=172.31.0.11
+            [ "$name" = peer ] && ip=172.31.0.12
+            docker run -d --name "$name" --network nett-ci --ip "$ip" --cap-add NET_ADMIN --cap-add NET_RAW \
+              --restart unless-stopped -e NETT_TOKEN="$token" -v "$name-state":/var/lib/nett nett:ci
+          done
+          wait_for '[.machines[] | select(.online)] | length == 2'
+          "$nett" site set box --public --ipv4 172.31.0.11 --yes
+          "$nett" site allow peer box 8080/tcp --yes
+          # The three processes, each with only its own capabilities
+          docker top box | tee top.log
+          grep -F 'nett mesh --config /var/lib/nett/desired.json' top.log
+          grep -F 'nett node --dir /var/lib/nett' top.log
+          node=$(docker top box -eo pid,args | awk '/nett node/ { print $1 }')
+          grep -E '^CapEff:\s+0+$' "/proc/$node/status"
+          # NET_ADMIN, NET_RAW and NET_BIND_SERVICE
+          mesh=$(docker top box -eo pid,args | awk '/nett mesh/ { print $1 }')
+          grep -E '^CapEff:\s+0+3400$' "/proc/$mesh/status"
+          # A service beside box answers each connection with the address it came from
+          ask box "perl -MIO::Socket::INET -e '\$s = IO::Socket::INET->new(LocalPort => 8080, Listen => 5, ReuseAddr => 1) or die; while (\$c = \$s->accept) { print \$c \"from \" . \$c->peerhost . \"\n\"; close \$c }'" &
+          from=""
+          for _ in $(seq 30); do
+            from=$(ask peer 'timeout 5 bash -c "exec 3<>/dev/tcp/100.88.0.1/8080; cat <&3"' || true)
+            [ -n "$from" ] && break
+            sleep 2
+          done
+          test "$from" = "from 100.88.0.2"
+          # 99.0.0: the Hub upgrades itself first, then relays it, and the containers move in place
+          started=$(docker inspect -f '{{.State.StartedAt}}' box)
+          offer 99.0.0 "$out/nett-99.0.0" "$out/nett-hub-99.0.0"
+          docker restart hub
+          wait_for '.hub_version == "99.0.0"'
+          docker logs hub 2>&1 | grep -F 'the Hub upgrades itself before it relays the release'
+          docker logs hub 2>&1 | grep -F 'upgrade complete'
+          wait_for '[.machines[] | select(.online and .nett_version == "99.0.0")] | length == 2'
+          test "$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' box)" = "$started 0"
+          docker exec box nett status | grep -F 'nett 99.0.0'
+          test "$(ask peer 'timeout 5 bash -c "exec 3<>/dev/tcp/100.88.0.1/8080; cat <&3"')" = "from 100.88.0.2"
+          # 99.1.0 is signed but does not start (it is the Hub's program): three starts, then back
+          offer 99.1.0 "$out/nett-hub-99.0.0"
+          docker restart hub
+          wait_for '[.machines[] | select(.online and .nett_version == "99.0.0" and ((.upgrade_reason // "") | contains("started 3 times without settling")))] | length == 2'
+          docker logs box 2>&1 | grep -F 'rolling back the new version'
+          "$nett" site status
+      - name: Logs on failure
+        if: failure()
+        run: |
+          for name in hub box peer; do echo "== $name"; docker logs "$name" 2>&1 | tail -60 || true; done
+
   # Mesh lab scenarios (design/prototype.md section 7), all run on every push. Scenarios do not
   # depend on each other, and are split by duration into groups run in parallel,
   # about 4 minutes each. One scenario per line: title | arguments for nett-lab run (fixed in this

@@ -161,17 +161,21 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: when a behavior depends on a side effect of a mechanism (probing, upgrading), every role that skips the mechanism gets the side effect another way.
 
-**Breaks when** a role is added or changed (a follower that does not probe, a container member without an upgrader) and keeps relying on what the skipped mechanism did.
+**Breaks when** a role is added or changed (a follower that does not probe, a program that cannot replace itself) and keeps relying on what the skipped mechanism did.
 
 **Where it holds**
 
 - A `dial-only` follower probes its TLS relays every 5 seconds, which keeps the standby connections authenticated (mesh.md section 5.3);
-- A machine without an upgrader, such as a container member, applies a release it already runs and reports a newer one as available.
+- A machine without an upgrader (set up with `nett join` under another service manager) applies a release it already runs and reports a newer one as available;
+- The Hub and the container cannot replace the program they are started from, and upgrade through their state directory instead, with the same verification and rollback as machines (ADR 0026).
 
 **Guards**
 
 - `nett-mesh:the_dial_only_follower_keeps_its_tls_relays_authenticated`
 - `nett-node:a_machine_without_an_upgrader_reports_only_a_newer_release`
+- `nett-node:a_new_version_that_does_not_settle_goes_back_to_the_one_before`
+- `nett-hub:the_hub_upgrades_itself_before_it_relays_a_release`
+- `ci:Join, reach a service beside a container, upgrade in place, roll back (needs Docker)`
 - `lab:dial-only-switch`
 
 ## 7. Input is checked where it enters

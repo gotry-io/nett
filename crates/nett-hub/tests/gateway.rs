@@ -232,7 +232,8 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
     let missing = hub
         .take_release(manifest.to_string().into_bytes())
         .await
-        .expect("manifest");
+        .expect("manifest")
+        .missing;
     assert_eq!(missing.len(), 1, "{missing:?}");
     let mut answer = None;
     for _ in 0..200 {
@@ -293,7 +294,7 @@ async fn nodes_fetch_the_program_of_a_release_from_the_hub() {
     )
     .expect("older");
     let manifest = release_key().manifest(version, target, "https://127.0.0.1:9/nett", &program);
-    let missing = hub.take_release(manifest).await.expect("manifest");
+    let missing = hub.take_release(manifest).await.expect("manifest").missing;
     assert!(missing.is_empty(), "{missing:?}");
     // Only the current version is kept
     assert!(
@@ -481,5 +482,90 @@ async fn a_stopping_hub_says_goodbye_and_records_the_disconnection() {
     assert_eq!(
         (events[0].kind.as_str(), events[0].detail.as_str()),
         ("disconnected", "the Hub is stopping")
+    );
+}
+
+/// The Hub upgrades itself before it relays a higher release (design/release.md section 7, ADR
+/// 0026): once it holds its own program, it readies it for the upgrade instead of relaying; a
+/// version that failed before is relayed without upgrading, and shows as the Hub's problem.
+#[tokio::test]
+async fn the_hub_upgrades_itself_before_it_relays_a_release() {
+    let (hub, app, token, _site, _state, linked_tmp) =
+        linked("gateway-self-upgrade", "https://127.0.0.1").await;
+    let version: nett_trust::release::Version = "99.0.0".parse().expect("version");
+    let data = linked_tmp.path();
+    let releases = data.join(nett_hub::mirror::DIR);
+    std::fs::create_dir_all(&releases).expect("releases");
+    let (node, hub_program) = (b"node program".to_vec(), b"hub program".to_vec());
+    let mut programs = serde_json::Map::new();
+    for (target, bytes) in [
+        ("x86_64-unknown-linux-musl", &node),
+        (common::HUB_TARGET, &hub_program),
+    ] {
+        std::fs::write(releases.join(format!("nett-{version}-{target}")), bytes).expect("program");
+        let entry: serde_json::Value = serde_json::from_slice(&common::release_key().manifest(
+            version,
+            target,
+            "https://127.0.0.1:9/nett",
+            bytes,
+        ))
+        .expect("manifest");
+        programs.insert(target.into(), entry["programs"][target].clone());
+    }
+    let manifest = serde_json::json!({ "version": version.to_string(), "programs": programs })
+        .to_string()
+        .into_bytes();
+
+    // Where the program goes cannot be written: the release is relayed, the Hub says why it does
+    // not upgrade and tries again sooner
+    let taken = hub.take_release(manifest.clone()).await.expect("manifest");
+    assert!(taken.missing.is_empty(), "{:?}", taken.missing);
+    assert_eq!(hub.upgrade_problem(), None);
+    let upgrade = taken.upgrade.expect("the Hub upgrades itself");
+    assert_eq!(upgrade.version, version);
+    assert!(
+        upgrade
+            .minisig
+            .contains(&format!("nett-{version}-{}", common::HUB_TARGET))
+    );
+    assert_eq!(
+        std::fs::read(data.join("nett-hub.new")).expect("readied"),
+        hub_program
+    );
+    assert!(
+        hub.subscribe_release().borrow().is_none(),
+        "not relayed before the Hub has upgraded"
+    );
+
+    // Where the program goes cannot be written: the release is relayed, and the Hub says why it
+    // does not upgrade and tries again sooner
+    std::fs::remove_file(data.join("nett-hub.new")).expect("readied");
+    std::fs::create_dir_all(data.join("nett-hub.new/in-the-way")).expect("in the way");
+    let taken = hub.take_release(manifest.clone()).await.expect("manifest");
+    assert!(taken.upgrade.is_none());
+    assert_eq!(taken.missing.len(), 1, "{:?}", taken.missing);
+    let problem = hub.upgrade_problem().expect("a problem");
+    assert!(
+        problem.starts_with("99.0.0: not placed yet (copying"),
+        "{problem}"
+    );
+    assert!(hub.subscribe_release().borrow().is_some(), "relayed");
+
+    std::fs::write(
+        data.join("upgrade.json"),
+        br#"{"failed": {"99.0.0": "nett-hub 99.0.0 started 3 times without settling; back to 0.5.0"}}"#,
+    )
+    .expect("record");
+    let taken = hub.take_release(manifest).await.expect("manifest");
+    assert!(
+        taken.upgrade.is_none(),
+        "a version that failed is not tried again"
+    );
+    assert!(taken.missing.is_empty(), "{:?}", taken.missing);
+    let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;
+    let status: nett_proto::api::StatusResponse = serde_json::from_slice(&body).expect("status");
+    assert_eq!(
+        status.hub_upgrade.as_deref(),
+        Some("99.0.0: nett-hub 99.0.0 started 3 times without settling; back to 0.5.0")
     );
 }

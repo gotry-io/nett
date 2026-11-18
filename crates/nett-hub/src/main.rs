@@ -17,6 +17,13 @@ const DEFAULT_DATA: &str = "/var/lib/nett-hub";
 const DEFAULT_LISTEN: &str = "127.0.0.1:8480";
 const KEY_FILE: &str = "hub.key";
 const DB_FILE: &str = "hub.db";
+/// The database as it was before the Hub's new version started, until that version settles
+/// (design/release.md section 7).
+const DB_BEFORE_UPGRADE: &str = "hub.db.previous";
+/// The Hub's own program in its data directory (ADR 0026).
+const PROGRAM: &str = "nett-hub";
+/// A new version has settled once a node's session started, or after this long.
+const SETTLED: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 /// Where the Hub learns about new releases (design/release.md section 7).
 const DEFAULT_RELEASES: &str = "https://nett.gotry.io/release.json";
 const RELEASES_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
@@ -85,6 +92,9 @@ fn run() -> anyhow::Result<()> {
             other => return Err(other.unexpected().into()),
         }
     }
+    if words.first().is_some_and(|w| w != "openapi") {
+        run_newest(&data, words.first().is_some_and(|w| w == "serve"));
+    }
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
@@ -121,6 +131,81 @@ fn run() -> anyhow::Result<()> {
         }),
         _ => bail!(USAGE),
     }
+}
+
+/// The Hub's program in its data directory, which it upgrades to, when this build has a Hub
+/// target and release keys.
+fn staged(data: &Path) -> Option<nett_node::launch::Staged> {
+    Some(nett_node::launch::Staged {
+        keys: nett_trust::release::ReleaseKeys::built_in().ok()?,
+        target: nett_trust::release::hub_target()?,
+        current: env!("CARGO_PKG_VERSION").parse().ok()?,
+        dir: data.to_path_buf(),
+        name: PROGRAM,
+    })
+}
+
+/// The installed program's check (ADR 0026): runs the newer verified version in the data
+/// directory in this process, and continues with this one when there is none or it does not
+/// start. At the start of the service it counts the starts of a new version and goes back from one
+/// that does not settle, with the database it found.
+fn run_newest(data: &Path, start: bool) {
+    let Some(staged) = staged(data) else {
+        return;
+    };
+    let rollback = || {
+        let before = data.join(DB_BEFORE_UPGRADE);
+        if !before.exists() {
+            return;
+        }
+        for leftover in ["hub.db-wal", "hub.db-shm"] {
+            std::fs::remove_file(data.join(leftover)).ok();
+        }
+        match std::fs::rename(&before, data.join(DB_FILE)) {
+            Ok(()) => tracing::info!("restored the database from before the upgrade"),
+            Err(e) => tracing::error!(error = %e, "restoring the database from before the upgrade"),
+        }
+    };
+    if let nett_node::launch::Check::Newer { version, file } = staged.check(start, &rollback) {
+        #[cfg(target_os = "linux")]
+        {
+            tracing::info!(%version, "running the newer version in the data directory");
+            let error = nett_node::launch::exec(&file);
+            tracing::error!(%version, %error, "running the newer version; this one continues");
+            if start {
+                staged.refuse(version, &format!("it does not run: {error}"), &rollback);
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (version, file);
+    }
+}
+
+/// Upgrades after the Hub has stopped (design/release.md section 7): keeps a copy of the database
+/// for a rollback, places the new program and runs the installed program's check on it in this
+/// process. Returns only when that fails.
+async fn upgrade(hub: &hub::Hub, data: &Path, upgrade: hub::SelfUpgrade) -> anyhow::Result<()> {
+    let staged = hub
+        .upgrade
+        .as_ref()
+        .context("the Hub has no program of its own to upgrade")?;
+    let before = data.join(DB_BEFORE_UPGRADE);
+    std::fs::remove_file(&before).ok();
+    hub.db
+        .snapshot(&before)
+        .await
+        .context("copying the database before the upgrade")?;
+    hub.db.close().await;
+    staged
+        .place(upgrade.version, &upgrade.minisig)
+        .map_err(anyhow::Error::msg)?;
+    tracing::info!(version = %upgrade.version, "Hub upgrading");
+    let error = nett_node::launch::relaunch();
+    Err(anyhow::Error::new(error).context(format!(
+        "running {} after placing {}",
+        nett_node::launch::installed().display(),
+        upgrade.version
+    )))
 }
 
 /// Rebuilds the Hub from a backup a machine keeps (design/hub.md section 8.2): opens it with the site's
@@ -266,7 +351,11 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
 
 /// Fetches the release manifest now and every 6 hours, and holds its programs; a failure keeps the
 /// previous manifest. While a program is not held, both are fetched again sooner.
-fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
+fn follow_releases(
+    hub: std::sync::Arc<hub::Hub>,
+    source: String,
+    upgrades: tokio::sync::oneshot::Sender<hub::SelfUpgrade>,
+) {
     if source == "off" {
         tracing::info!("upgrades are off");
         return;
@@ -294,7 +383,15 @@ fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
                 Ok(bytes) => hub.take_release(bytes).await,
                 Err(e) => Err(e),
             };
-            let wait = match taken {
+            if let Ok(hub::Taken {
+                upgrade: Some(upgrade),
+                ..
+            }) = taken
+            {
+                upgrades.send(upgrade).ok();
+                return;
+            }
+            let wait = match taken.map(|t| t.missing) {
                 Ok(missing) if missing.is_empty() => {
                     tracing::debug!(%source, "release manifest checked");
                     retry = RETRY_FIRST;
@@ -336,10 +433,13 @@ async fn serve(
         url,
         Some(data.to_path_buf()),
         release_keys,
+        staged(data),
     )
     .await
     .map_err(anyhow::Error::msg)?;
-    follow_releases(hub.clone(), releases.to_owned());
+    settle(hub.clone(), data);
+    let (upgrades, upgrade_ready) = tokio::sync::oneshot::channel();
+    follow_releases(hub.clone(), releases.to_owned(), upgrades);
     let acceptor = tls
         .map(|(cert, key)| tls::acceptor(&cert, &key))
         .transpose()?;
@@ -349,15 +449,53 @@ async fn serve(
     tracing::info!(%listen, tls = acceptor.is_some(), "Hub listening");
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .context("installing the SIGTERM handler")?;
-    let shutdown = async move {
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = tokio::signal::ctrl_c() => {}
+    let upgrading = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let shutdown = {
+        let upgrading = upgrading.clone();
+        async move {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+                Ok(upgrade) = upgrade_ready => {
+                    *upgrading.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(upgrade);
+                }
+            }
+            tracing::info!("Hub stopping");
         }
-        tracing::info!("Hub stopping");
     };
-    nett_hub::serve(listener, acceptor, hub, shutdown).await?;
-    Ok(())
+    nett_hub::serve(listener, acceptor, hub.clone(), shutdown).await?;
+    let upgrade_to = upgrading
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    match upgrade_to {
+        Some(to) => upgrade(&hub, data, to).await,
+        None => Ok(()),
+    }
+}
+
+/// A new version of the Hub has settled once a node's session started, or after `SETTLED`
+/// (design/release.md section 7): its starts are no longer counted and the database copy from
+/// before it goes.
+fn settle(hub: std::sync::Arc<hub::Hub>, data: &Path) {
+    let before = data.join(DB_BEFORE_UPGRADE);
+    let Some(staged) = hub.upgrade.clone() else {
+        return;
+    };
+    if staged.pending() != Some(staged.current) {
+        std::fs::remove_file(&before).ok();
+        return;
+    }
+    tokio::spawn(async move {
+        tokio::select! {
+            () = hub.first_session() => {}
+            () = tokio::time::sleep(SETTLED) => {}
+        }
+        if staged.settled() {
+            tracing::info!(version = %staged.current, "upgrade complete");
+        }
+        std::fs::remove_file(&before).ok();
+    });
 }
 
 #[cfg(test)]

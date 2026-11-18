@@ -1,9 +1,8 @@
-# Access control, Edge addresses and container members (design/local-signing.md sections 6 and 8,
-# ADR 0015, 0016, 0023): edge runs Edge (with a "container" behind it, and the node masquerades its
-# traffic like Docker); app is a container member, behind a cone NAT, with a service behind it
-# (equivalent to a container with a fixed address in a Docker network); it advertises the service's
-# address, and only the Edge of edge is allowed to access port 8686 of the service; other is an
-# ordinary member. Between members only app accessing the other two and edge accessing other are
+# Access control, Edge addresses and forwarding to advertised routes (design/local-signing.md
+# sections 6 and 8, ADR 0015, 0023): edge runs Edge (with a "container" behind it, and the node
+# masquerades its traffic like Docker); app is behind a cone NAT with a service behind it; it
+# advertises the service's address, and only the Edge of edge is allowed to access port 8686 of the
+# service; other is an ordinary member. Between members only app accessing the other two and edge accessing other are
 # allowed; all other directions are denied by default
 
 [mesh]

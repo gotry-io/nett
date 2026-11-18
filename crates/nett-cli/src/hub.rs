@@ -452,20 +452,19 @@ pub fn status(
         (None, Some(_)) => "none yet: machines ask for it when they connect".to_owned(),
         (None, None) => "no backup key: the Hub makes backups after `nett site link`".to_owned(),
     };
-    print!(
-        "{}",
-        key_values(&[
-            (
-                "hub",
-                format!("{}, nett-hub {}", reply.url, reply.hub_version)
-            ),
-            (
-                "site",
-                format!("{} machines, {}", state.machines.len(), rules_text(state))
-            ),
-            ("backup", backup),
-        ])
-    );
+    let mut lines = vec![(
+        "hub",
+        format!("{}, nett-hub {}", reply.url, reply.hub_version),
+    )];
+    if let Some(problem) = &reply.hub_upgrade {
+        lines.push(("hub upgrade", format!("not installed: {problem}")));
+    }
+    lines.push((
+        "site",
+        format!("{} machines, {}", state.machines.len(), rules_text(state)),
+    ));
+    lines.push(("backup", backup));
+    print!("{}", key_values(&lines));
     let mut rows =
         vec![["MACHINE", "ADDRESS", "HUB", "VERSION", "CONFIG", "PROBLEMS"].map(String::from)];
     for m in &reply.machines {

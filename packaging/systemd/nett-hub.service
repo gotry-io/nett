@@ -1,6 +1,7 @@
 # nett-hub, run natively under a dedicated system user. It listens on 127.0.0.1:8480; a reverse
 # proxy on this host forwards /api/v1/ and /node/v1/connect to it. /var/lib/nett-hub holds the
-# database and the Hub's identity key.
+# database and the Hub's identity key, and the versions the Hub upgrades itself to: the program in
+# /usr/local/bin stays as installed and runs a newer one there only when its release signature holds.
 # First use:
 #   sudo useradd --system --home-dir /var/lib/nett-hub --shell /usr/sbin/nologin nett-hub
 #   sudo install -d -o nett-hub -g nett-hub -m 0700 /var/lib/nett-hub
