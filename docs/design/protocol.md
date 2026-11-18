@@ -148,7 +148,7 @@ The desired state is organized in partitions, each versioned independently:
 | `trust` | Trust anchor list (signed) | M1 |
 | `policy` | Node policy (signed when it raises privileges) | M1 |
 | `hub_endpoints` | The Hub's endpoint list: a JSON array of `https://` addresses | M1 |
-| `release` | The release manifest (`release.json`, release.md section 7): the latest version and, per target, the URL, SHA-256 and signature of the program; the node verifies the program with the project public keys (primary and backup) built into `nett` and installs only higher versions (`auth.md` section 11.3). This is the only path for upgrades. When only this partition changes, the Hub sends it as an increment (`base_generation` equal to `generation`) | M1 |
+| `release` | The release manifest (`release.json`, release.md section 7), sent to a node once the user has approved its version for that machine: the version and, per target, the URL, SHA-256 and signature of the program; the node verifies the program with the project public keys (primary and backup) built into `nett` and installs only higher versions (`auth.md` section 11.3). This is the only path for upgrades. When only this partition changes, the Hub sends it as an increment (`base_generation` equal to `generation`) | M1 |
 | `mesh` | Mesh topology, admission material, and revocations. Members, advertised routes, and access rule sets are signed artifacts, verified independently by the mesh process (`mesh.md` section 4.1); node names are not signed and are used only for display (`status.md` section 5); nett-node only hands them over. The content is the mesh process's desired state file (JSON), identical to the file the signing tool writes when no Hub is used (`hub.md` section 4) | M1 |
 
 - Each node has a monotonically increasing **generation**; a change in any partition increments it by one;
@@ -218,7 +218,7 @@ message Task {
 - The Hub supports nodes of at least the current and the previous minor version; a node can likewise connect to a Hub of the previous minor version;
 - **Optional features** are negotiated through `capabilities` flags, for example `chunked_state`; both sides use only features both support;
 - A Hub that does not know `ProgramFetch` ignores it; the node then fetches the program from the URL in the manifest after 10 seconds (release.md section 7);
-- When a node's version is too old to be compatible, the Hub returns `UPGRADE_REQUIRED` but still lets it into **upgrade-only mode**: it receives only the `release` partition and upgrade tasks, so that it can complete an automatic upgrade.
+- When a node's version is too old to be compatible, the Hub returns `UPGRADE_REQUIRED` but still lets it into **upgrade-only mode**: it receives only the `release` partition and upgrade tasks, so that it can complete an approved upgrade.
 
 ## 10. Security
 

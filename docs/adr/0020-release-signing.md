@@ -37,7 +37,7 @@ nett is an open-source project: anyone can compile it themselves, and those who 
 - With public keys as build parameters, people who compile it themselves do not have to trust the project;
 - Releases are fully automatic with no human involved (the user's choice); the signing job is separate from the build, so a compromised build dependency cannot get the private key;
 - The backup key never enters CI: after the primary key in CI is leaked, keys can still be replaced and nodes do not need to be reinstalled;
-- Automatic upgrades by default let fixes reach all nodes promptly (the user's choice).
+- Upgrades start when the user approves them (ADR 0027): a release reaches the machines the user chose, when the user chose.
 - The ad-hoc signature the linker gives every build makes each version a new program to macOS: its application firewall then holds the packets other members send to the mesh process until someone answers a prompt, which on an unattended Mac happens after every automatic upgrade. A Developer ID signature stays the same across versions, and macOS lets signed downloaded software receive by default.
 
 ## Alternatives considered

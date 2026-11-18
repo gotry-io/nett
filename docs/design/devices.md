@@ -125,7 +125,7 @@ PersistentKeepalive = 25
 
 - Signed payloads, the pushed site and the desired state reject content they do not recognize (auth.md section 10.5). The new fields appear only once a device exists, so upgrading changes nothing by itself;
 - Before signing the first device, the Hub and every machine run the release that adds devices: with a Hub, `nett site device add` reads each machine's version from the Hub and refuse while the Hub or any machine runs an older release, or than the signing tool when that is older still (a machine on the tool's own release knows everything it signs), or has not reported one, naming them. A machine that has never connected joins with the current release. Without a Hub they print which release every machine needs;
-- Machines, containers and the Hub upgrade themselves and get there on their own (release.md section 7).
+- Machines, containers and the Hub get there with `nett site upgrade` (release.md section 7).
 
 ## 10. Verification
 
