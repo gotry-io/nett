@@ -66,9 +66,6 @@ jobs:
       # database"): regenerate them, and there must be no difference
       - name: Generated Protobuf types are up to date
         run: |
-          sudo apt-get -c .github/apt.conf update
-          # libprotobuf-dev carries the well-known types (google/protobuf/timestamp.proto)
-          sudo apt-get -c .github/apt.conf install -y --no-install-recommends protobuf-compiler libprotobuf-dev
           cargo run --locked -p nett-proto-gen
           git diff --exit-code crates/nett-proto/src/gen
       # Install script for new machines (design/release.md section 6): POSIX sh only

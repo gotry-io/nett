@@ -7,8 +7,12 @@ fn main() -> std::io::Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let out = root.join("crates/nett-proto/src/gen");
     std::fs::create_dir_all(&out)?;
-    prost_build::Config::new().out_dir(&out).compile_protos(
-        &[root.join("proto/nett/v1/control.proto")],
-        &[root.join("proto")],
+    let descriptors = protox::compile(
+        [root.join("proto/nett/v1/control.proto")],
+        [root.join("proto")],
     )
+    .map_err(|e| std::io::Error::other(format!("parsing proto/: {e}")))?;
+    prost_build::Config::new()
+        .out_dir(&out)
+        .compile_fds(descriptors)
 }
