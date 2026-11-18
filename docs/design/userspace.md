@@ -113,7 +113,7 @@ The enhanced mode of a proxy app (for example Surge) creates its own utun and ta
 
 - In a site, a macOS node is the same as other nodes and is usually `dial-only`; the formats of signed artifacts and the desired state file are unchanged;
 - When the node policy carries an `edge` or `subnet_router` role, the mesh process on macOS does not apply that part and reports an event;
-- The same Mac can have both a native member and a container member (architecture.md section 13). The native member handles services on the Mac itself and the Mac's outbound access to the mesh, and the container member handles container services that need the visitor's real IP (ADR 0016). They are different node identities with different mesh addresses.
+- A container on the Mac that runs nett's image is a member of its own beside the native member (ADR 0016): the native member handles services on the Mac itself and the Mac's outbound access to the mesh, and the container serves the services that share its network, which see each caller's mesh address. They are different node identities with different mesh addresses.
 
 ## 8. Verification
 

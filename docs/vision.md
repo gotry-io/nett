@@ -68,7 +68,7 @@ When M1 is done: hand-written tunnels, home broadband port forwarding and existi
 | **High performance** | Mesh encryption uses WireGuard, done by the kernel on Linux; bulk traffic prefers the direct path and avoids relays |
 | **Adapts to complex networks** | LAN, public internet, mainland China, cross-border; home broadband without inbound 80/443, NAT-based VPSes, links where UDP is throttled or identified |
 | **High availability** | Automatic switching when a path jitters, breaks or a node goes offline, with connections kept alive; no single point; the mesh is unaffected when the Hub is offline |
-| **Multi-platform** | Linux, Synology DSM, macOS (native mesh membership; container services that need the visitor's real IP use a container member instead), Home Assistant OS (runs as an add-on); phones join through a standard WireGuard client or proxy client; iOS, Android apps and Windows in M3. See architecture.md section 14 for the support matrix |
+| **Multi-platform** | Linux, Synology DSM, macOS (native mesh membership), containers on Linux and macOS (nett's image, with services sharing its network), Home Assistant OS (runs as an add-on); phones join through a standard WireGuard client or proxy client; iOS, Android apps and Windows in M3. See architecture.md section 14 for the support matrix |
 | **General purpose** | Open-source project: does not depend on a specific cloud vendor, region or network environment; differences between environments are handled by capability detection and measurement, not hard-coded |
 | **One language** | The command line, API error messages, the web console and the documentation are in plain English, in one version without translations |
 | **Single user** | Each deployment serves a single user; no multi-tenancy |

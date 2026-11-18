@@ -206,7 +206,7 @@ The plaintext token is returned only once, in the creation response. Action: `re
 | `status.phase` | `pending` (enrollment token created, not yet connected) / `online` / `offline` / `removed` |
 | `status.version` | nett version |
 | `status.platform` | `os`, `distro`, `kernel`, `arch` |
-| `status.install_method` | `native` / `container_member` (the container member on macOS) / `haos_addon` (Home Assistant OS add-on); the console uses it to show only the modules that are available |
+| `status.install_method` | `native` / `container` (nett's image, design/container.md) / `haos_addon` (Home Assistant OS add-on); the console uses it to show only the modules that are available |
 | `status.capabilities` | Detection results such as `wireguard_kernel`, `tun`, `docker`, `root` |
 | `status.hard_deny` | Modules forbidden locally on the node (read-only, reported by the node) |
 | `status.modules` | The state of each module: `{ name, enabled, state, message }` |
@@ -215,7 +215,7 @@ The plaintext token is returned only once, in the creation response. Action: `re
 | `status.relay` | Whether it provides relay and the traffic currently carried |
 | `status.last_seen_at` | Time of the most recent communication with the Hub |
 
-When Edge sends origin traffic, the source a service sees is the Edge address; when forwarded through a smart gateway or a container member, it is the smart gateway's entry address or the container member's address (ADR 0015, 0016). Services that need the visitor's real IP configure this address as a trusted proxy.
+When Edge sends origin traffic, the source a service sees is the Edge address, also for a service sharing the network of nett's container (ADR 0016); when forwarded through a smart gateway, it is the smart gateway's entry address (ADR 0015). Services that need the visitor's real IP configure this address as a trusted proxy.
 
 A node's module permissions are not changed in `spec` but through `node-policies`: enabling a module goes through a change set and requires a signature, while disabling a module can be delivered directly. Action: `remove` (high risk, revokes the node's credentials). Upgrades go through the `release` partition (`auth.md` section 11.3) and are not an action on the node. When a node leaves by itself (`nett leave`), the Hub marks it `removed` directly.
 

@@ -52,7 +52,7 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 [design/local-signing.md](design/local-signing.md).
 
 - [x] The signing tool `nett site` on the user's computer, with the recovery key as the only trust anchor; keys generated on each node; release builds read the local desired state file
-- [x] Access control, denied by default between members (ADR 0023); Edge address (`edge` role; Edge is the user's own reverse proxy, ADR 0015); container member (ADR 0016)
+- [x] Access control, denied by default between members (ADR 0023); Edge address (`edge` role; Edge is the user's own reverse proxy, ADR 0015)
 - [x] A locally signed mesh replaces hand-made WireGuard tunnels
 
 ### 3. Userspace data plane and the macOS native member
@@ -73,7 +73,7 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 - [x] H5, first half: the encrypted Hub backup every machine keeps, `nett-hub restore` and the rebuild procedure (design/hub.md section 8.2); the second half is stage 9
 - [x] Site: machines, Edge, advertised routes (denied by default) and access rules maintained with `nett site` commands; connections derived from access rules
 - [x] Authentication: recovery key and backup key, the site's API token, node keys and admission proofs, trust anchors; signing on the user's own computer (ADR 0024)
-- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, images for container members and the Hub built from `packaging/` with a Compose example, automatic upgrade and rollback
+- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, the Hub's image and Compose example in `packaging/`, automatic upgrade and rollback
 - [x] Availability: nett-node and the mesh process apply the locally saved configuration at start-up
 - [x] OpenAPI document of the Hub API (`docs/api/openapi.json`)
 
@@ -94,7 +94,9 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [x] Release key rotation: a release signed by the backup key (CI, `linux` job)
 - [x] Troubleshooting manual, including how to run alongside proxy-style VPN apps ([troubleshooting.md](troubleshooting.md))
 - [ ] Synology DSM member ([design/dsm.md](design/dsm.md)): the userspace data plane chosen when the kernel has no WireGuard, units for systemd 219 started by a boot task, the TLS transport in the mesh process; verified on a Virtual DSM, then services on a NAS reached by an Edge through the mesh
-- [ ] Upgrades fetch the program through the Hub (ADR 0025): the Hub mirrors the current release's programs, nodes fetch them over their session and from the website when the Hub does not have them, a program that cannot be fetched is fetched again later
+- [x] Upgrades fetch the program through the Hub (ADR 0025): the Hub mirrors the current release's programs, nodes fetch them over their session and from the website when the Hub does not have them, a program that cannot be fetched is fetched again later
+- [x] The container ([design/container.md](design/container.md), ADR 0016): one image from the registry, the token in the environment, services sharing its network and seeing each caller's mesh address (CI, `container` job)
+- [ ] The Hub and the container upgrade themselves from their state directory, and roll back a version that does not settle (ADR 0026; CI, `container` job); verified on the Hub host
 
 ### 7. Phones and restricted networks
 

@@ -30,7 +30,7 @@ Supporting rules:
 - Topology and keys are persisted locally on nodes, and nodes keep selecting paths and switching when the Hub is offline;
 - A LAN joins through one host running nett-node acting as the smart gateway;
 - tailscale is kept as an optional fallback, managed by the Hub and hidden from upper layers. The fallback is not scheduled; it runs only on nodes where the user explicitly enables it and is not bound by the node memory budget; Headscale's address pool must exclude nett's mesh prefixes.
-- The path layer and the userspace WireGuard run in a separate mesh process (ADR 0013); on macOS in M1 it joins as a native member (ADR 0018), and container services that need the visitor's real IP use the container member (ADR 0016).
+- The path layer and the userspace WireGuard run in a separate mesh process (ADR 0013); on macOS in M1 it joins as a native member (ADR 0018), and a container joins with nett's image (ADR 0016).
 
 ## Rationale
 
