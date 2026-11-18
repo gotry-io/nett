@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-19
+
 - Upgrades start when you approve them: the Hub holds each release, and `nett site status` shows
   it as available. `nett site upgrade` approves it for the Hub and every machine; `nett site
   upgrade <machine>` approves one machine first, and `--hub` the Hub alone. Nothing upgrades on
