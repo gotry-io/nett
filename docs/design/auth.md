@@ -185,11 +185,11 @@ The signed policy plus the admission proof is the node's **admission material**:
 
 | Type | Content | Purpose |
 |---|---|---|
-| `wireguard` | WireGuard key pair | A standard WireGuard client or proxy client (Surge, mihomo, sing-box) joins the mesh |
+| `wireguard` | WireGuard key pair | A WireGuard client joins the mesh with the standard configuration |
 | `connect` | CONNECT proxy token | Access internal services through the CONNECT proxy of nett-relay when UDP is restricted |
 
 - WireGuard private keys are **generated only on the user's computer by the signing tool**; the Hub stores only the public key and never handles the private key;
-- **The full configuration (including the private key) is generated only once, at creation**: the signing tool generates the configuration file and QR code (or the proxy client's configuration) for saving or scanning, and it cannot be exported again afterwards. If the configuration is lost, create a new credential and revoke the old one;
+- **The full configuration (including the private key) is generated only once, at creation**: the signing tool generates the configuration file and QR code for saving or scanning, and it cannot be exported again afterwards. If the configuration is lost, create a new credential and revoke the old one;
 - Adding a device (`device.add`) and adding a credential to an existing device (`device_credential.create`) are both high-risk operations and require a signature; the signed artifact binds the credential's public key (or token hash) and the mesh address, and is verified independently by every mesh member and nett-relay;
 - Credential creation is recorded as an activity event; once revoked, the credential is removed immediately from the mobile gateway and nett-relay.
 

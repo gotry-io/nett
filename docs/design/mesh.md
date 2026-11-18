@@ -28,7 +28,7 @@ Out of scope for this phase: per-connection path selection (all traffic between 
 | Admission material | Signed artifacts that prove a peer may join the mesh (section 4.1) |
 | Edge | A reverse proxy the user runs on the entry node; any implementation works (Caddy, nginx, Traefik, etc.); nett neither generates nor manages its configuration (ADR 0019) |
 | Edge address | On a node with the `edge` role, the mesh address reserved for traffic sent by Edge (ADR 0015) |
-| Full member | A member that runs the mesh process, verifies admission material itself and selects paths; other members can connect to it directly. A device using a standard WireGuard or proxy client is not a full member |
+| Full member | A member that runs the mesh process, verifies admission material itself and selects paths; other members can connect to it directly. A device using a WireGuard client is not a full member |
 | Container | A member that runs nett's image; services sharing its network are reached at its mesh address (ADR 0016, design/container.md) |
 
 ## 3. Address plan
@@ -350,7 +350,7 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 - The configuration exported to a device has one peer, its mobile gateway, with the mesh prefixes and the LAN prefixes advertised in the mesh as `AllowedIPs`; beyond the gateway the path layer chooses the path (ADR 0008);
 - **Device ownership is per credential**: in WireGuard an address can appear in the `AllowedIPs` of only one peer, so at any one time a device credential belongs to only one mobile gateway, which advertises this credential's address on its behalf. When multiple mobile gateways are deployed, the configuration of each credential corresponds to one gateway; the gateway reports the credential's latest handshake, and the Hub accordingly moves the credential address into the `AllowedIPs` of the current gateway peer (it can move only between nodes with the `gateway` role, section 4.1). A gateway that has the credential as a direct peer configures its address only on that peer (section 4);
 - The gateway can send traffic with the addresses of devices connected through it; this is trust inherent to the `gateway` role (auth.md section 2), so it is granted only to nodes the user trusts;
-- **Proxy client configuration** (ADR 0018): when creating a credential, an export format can be chosen: standard WireGuard, or Surge, mihomo, sing-box. The proxy client configuration contains one WireGuard outbound to the mobile gateway, which the mesh prefixes and the advertised LAN prefixes go to; domain names under the mesh suffix are resolved by the gateway's DNS. These configurations do not occupy the phone's single VPN slot and can be used together with proxy apps;
+- **One configuration format** (ADR 0018): the standard WireGuard configuration; a client that takes WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up from the same fields, and does not occupy the phone's single VPN slot;
 - Traffic between devices is forwarded through the mobile gateway;
 - Direct paths to home and to other nodes, chosen automatically, come with the phone app, a full member (M3, ADR 0018).
 
@@ -363,7 +363,7 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 | macOS | Native member: Rust userspace implementation in the mesh process + utun (ADR 0018) | Mesh process | Default way; laptops are usually `dial-only`; the mesh process carries the TLS transport itself (section 5.3) |
 | Container (Linux, or the Docker Linux virtual machine on macOS) | Kernel WireGuard in the container's network namespace, or userspace over TUN (ADR 0016) | nftables (in the container's network namespace) | Serves the services that share its network |
 | Home Assistant OS | Runs inside an add-on, using the WireGuard that comes with the HAOS kernel (ADR 0017) | Packet filtering on the host network (subject to capability detection) | Can act as smart gateway, mobile gateway, relay |
-| Phone | Standard WireGuard client, or Surge, mihomo, sing-box | Enforced by the mobile gateway | See section 13; app in M3 |
+| Phone | Any WireGuard client, from the standard configuration | Enforced by the mobile gateway | See section 13; app in M3 |
 | Windows, iOS, Android (M3) | Windows: wireguard-nt; iOS, Android: userspace implementation inside the app | Windows firewall (WFP); inside the app | Full members (ADR 0018) |
 
 The concrete userspace WireGuard implementation is evaluated and selected after the prototype gate and before rolling out to DSM and macOS; M1 must cover DSM, Linux with old kernels and macOS.
@@ -427,7 +427,6 @@ The concrete userspace WireGuard implementation is evaluated and selected after 
 | Access control (advertised prefixes denied by default) | ✅ | |
 | Mobile gateway and device configuration | ✅ | |
 | macOS native member; the container (services that share its network) | ✅ | |
-| Proxy client configuration (Surge, mihomo, sing-box) | ✅ | |
 
 M3: iOS and Android apps and Windows members (ADR 0018).
 

@@ -60,7 +60,7 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
   routes <name> <prefix>... | --none   the routes this machine advertises
   device add <name> [--gateway <machine>] [--limited] [--out <dir>]
                                        add a phone or computer that runs no nett, and write its
-                                       WireGuard and Surge configurations. It joins through the
+                                       WireGuard configuration. It joins through the
                                        public Linux machine --gateway names, which the first
                                        device needs and later ones reuse; it reaches every
                                        machine, or with --limited only what rules allow
@@ -1125,13 +1125,16 @@ mod tests {
         );
         assert!(conf.contains("Endpoint = 203.0.113.10:41820"));
         use std::os::unix::fs::PermissionsExt as _;
-        for f in ["work.conf", "work.surge.conf"] {
-            let mode = std::fs::metadata(out.join(f))
-                .expect("file")
-                .permissions()
-                .mode();
-            assert_eq!(mode & 0o777, 0o600, "{f}");
-        }
+        let mode = std::fs::metadata(out.join("work.conf"))
+            .expect("file")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+        assert_eq!(
+            std::fs::read_dir(&out).expect("out").count(),
+            1,
+            "the WireGuard configuration alone"
+        );
         // The site keeps no private key
         let saved = std::fs::read_to_string(dir.join("state.json")).expect("state");
         assert!(!saved.contains(private));

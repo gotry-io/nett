@@ -6,7 +6,7 @@
 
 ## 1. Goal
 
-A phone or a computer that does not run nett joins the mesh with a standard WireGuard client or a proxy client such as Surge: the user adds it on the computer that holds the site, imports the configuration on the device, and from then on the device reaches the machines its permissions allow through one mobile gateway (ADR 0008). Nothing of nett is installed on the device, and the device's private key exists only in the configuration it imports.
+A phone or a computer that does not run nett joins the mesh with a standard WireGuard client: the user adds it on the computer that holds the site, imports the configuration on the device, and from then on the device reaches the machines its permissions allow through one mobile gateway (ADR 0008). Nothing of nett is installed on the device, and the device's private key exists only in the configuration it imports.
 
 ## 2. Scope
 
@@ -15,7 +15,7 @@ A phone or a computer that does not run nett joins the mesh with a standard Wire
 | Devices with one WireGuard credential each, added and removed with `nett site device` | More than one credential per device; CONNECT credentials (mesh.md section 5.4) |
 | The `gateway` role on a public Linux machine with kernel WireGuard | A gateway on the userspace data plane (DSM, macOS), and a second gateway a credential moves to (mesh.md section 13) |
 | Devices that reach every machine, and limited devices that reach only what rules allow (section 5) | Names for devices: the exported configuration carries no DNS server, and devices use mesh addresses |
-| Export of a standard WireGuard configuration (file and QR code) and a Surge configuration | mihomo and sing-box configurations |
+| Export of a standard WireGuard configuration (file and QR code) | Configurations in the formats of particular apps: a client that takes WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up from the same fields |
 | The devices a gateway serves, with their last handshake, in that gateway's status | Devices in `nett site status` |
 
 ## 3. Commands
@@ -26,8 +26,8 @@ $ nett site device add work --gateway gw --limited
 + work (device, limited), 100.88.0.9, through gw
 Sign and push? [y/N] y
 Pushed. 7 of 7 machines applied.
-Wrote ./work.conf (WireGuard) and ./work.surge.conf (Surge).
-They hold the device's private key, and nett keeps no copy: import one, then delete both.
+Wrote ./work.conf (WireGuard).
+It holds the device's private key, and nett keeps no copy: import it, then delete it.
 <QR code of work.conf>
 
 $ nett site allow work gw 8081/tcp --note "admin console"
@@ -101,7 +101,7 @@ $ nett site device remove work
 
 ## 8. Exported configuration
 
-The signing tool writes both files with mode `0600`, refusing to overwrite an existing file, in the current directory or `--out <dir>`, and prints the QR code of the WireGuard configuration when its output is a terminal. The private key is generated in memory, written only into these files and the QR code, and never stored in the site or sent to the Hub (auth.md section 9).
+The signing tool writes the file with mode `0600`, refusing to overwrite an existing file, in the current directory or `--out <dir>`, and prints the QR code of the WireGuard configuration when its output is a terminal. The private key is generated in memory, written only into this file and the QR code, and never stored in the site or sent to the Hub (auth.md section 9).
 
 ```ini
 # work.conf
@@ -115,23 +115,6 @@ PublicKey = <the gateway's mesh public key>
 Endpoint = <the gateway's public address>:<port>
 AllowedIPs = 100.88.0.0/16, fd…::/48, <advertised routes>
 PersistentKeepalive = 25
-```
-
-```ini
-# work.surge.conf: sections to add to a Surge profile
-[Proxy]
-nett = wireguard, section-name = nett
-
-[WireGuard nett]
-private-key = …
-self-ip = 100.88.0.9
-self-ip-v6 = fd…::9
-mtu = 1280
-peer = (public-key = …, allowed-ips = "100.88.0.0/16, fd…::/48", endpoint = <address>:<port>, keepalive = 25)
-
-[Rule]
-IP-CIDR,100.88.0.0/16,nett,no-resolve
-IP-CIDR6,fd…::/48,nett,no-resolve
 ```
 
 - `AllowedIPs` covers the mesh prefixes and the advertised routes, whatever the device may reach: the rule set decides what passes, and the configuration stays valid when rules change;
@@ -151,8 +134,4 @@ IP-CIDR6,fd…::/48,nett,no-resolve
 | Unit tests | Signing and verifying a credential; a revoked, overlapping or unsigned credential and one whose gateway lacks the role are rejected alone; the expanded rule for devices covers the mesh prefixes and the routes and leaves limited devices out; removing a device revokes it and strips its rules, and the last one takes its gateway's role; the exported files hold the right keys, addresses and endpoint and are written `0600`; the version check before signing |
 | Hub integration tests | A push with a device verifies the credential; a revoked credential never comes back; a device disappears only with a revocation |
 | Lab scenario `devices` | Network namespaces with plain `wg` as the devices, a gateway with a Docker-style `filter FORWARD` chain that drops, and a member behind NAT: the device reaches the member and the gateway; a limited device reaches only its allowed port; the member cannot open a connection to the device; after `device remove` the device's traffic stops; with IPv4 forwarding off the gateway lists the problem; the rule added to the `FORWARD` chain goes with the gateway's last device |
-| Real machines | gw as the gateway; the work computer with Surge reaches the admin console on gw and nothing else; the iPhone with the WireGuard app reaches services at home and the other machines |
-
-## 11. Open questions
-
-- The Surge syntax in section 8 is checked against the current Surge on iOS and macOS when the export is written.
+| Real machines | gw as the gateway; the work computer reaches the admin console on gw and nothing else; the iPhone with the WireGuard app reaches services at home and the other machines |

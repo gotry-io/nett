@@ -1,7 +1,6 @@
 //! What `nett site device add` exports (design/devices.md section 8): a standard WireGuard
-//! configuration and a Surge one, written with mode `0600` without overwriting a file, and the QR code
-//! of the WireGuard one on a terminal. The device's private key exists only in these, and in memory,
-//! where it is zeroed.
+//! configuration, written with mode `0600` without overwriting a file, and its QR code on a terminal.
+//! The device's private key exists only in these, and in memory, where it is zeroed.
 
 use std::io::Write as _;
 use std::net::{IpAddr, SocketAddr};
@@ -19,8 +18,6 @@ use zeroize::Zeroizing;
 
 /// Keepalive the device sends, so the NAT in front of a phone keeps its mapping.
 const KEEPALIVE_SECS: u16 = 25;
-/// Name of the policy and WireGuard section in the Surge configuration.
-const SURGE_POLICY: &str = "nett";
 
 /// The gateway a new device comes through, chosen as `nett site device add` chooses it and checked
 /// before anything is signed: it has joined, so its key is known, and has a public address.
@@ -54,27 +51,21 @@ pub fn gateway_for<'a>(
     Ok((name, m))
 }
 
-/// The files the configuration goes into, refused when either exists already.
+/// The file the configuration goes into, refused when it exists already.
 pub struct Files {
     pub wireguard: PathBuf,
-    pub surge: PathBuf,
 }
 
 impl Files {
     pub fn new(out: &Path, name: &NodeName) -> anyhow::Result<Self> {
-        let files = Self {
-            wireguard: out.join(format!("{name}.conf")),
-            surge: out.join(format!("{name}.surge.conf")),
-        };
-        for path in [&files.wireguard, &files.surge] {
-            if path.exists() {
-                bail!(
-                    "{} exists already; move it away or choose another directory with --out",
-                    path.display()
-                );
-            }
+        let wireguard = out.join(format!("{name}.conf"));
+        if wireguard.exists() {
+            bail!(
+                "{} exists already; move it away or choose another directory with --out",
+                wireguard.display()
+            );
         }
-        Ok(files)
+        Ok(Self { wireguard })
     }
 }
 
@@ -107,14 +98,9 @@ pub fn export(
     };
     let wireguard = config.wireguard();
     write_new(&files.wireguard, &wireguard)?;
-    write_new(&files.surge, &config.surge())?;
+    println!("Wrote {} (WireGuard).", files.wireguard.display());
     println!(
-        "Wrote {} (WireGuard) and {} (Surge).",
-        files.wireguard.display(),
-        files.surge.display()
-    );
-    println!(
-        "They hold the device's private key, and nett keeps no copy: import one, then delete both."
+        "It holds the device's private key, and nett keeps no copy: import it, then delete it."
     );
     if terminal {
         print!("{}", qr(&wireguard)?.as_str());
@@ -175,35 +161,6 @@ impl Config {
             self.gateway_key,
             self.endpoint,
             self.allowed_list(),
-        ))
-    }
-
-    /// The sections to add to a Surge profile: a WireGuard policy and the rules that send the mesh
-    /// to it.
-    fn surge(&self) -> Zeroizing<String> {
-        let rules: String = self
-            .allowed
-            .iter()
-            .map(|p| {
-                let kind = if p.addr().is_ipv4() {
-                    "IP-CIDR"
-                } else {
-                    "IP-CIDR6"
-                };
-                format!("{kind},{p},{SURGE_POLICY},no-resolve\n")
-            })
-            .collect();
-        Zeroizing::new(format!(
-            "[Proxy]\n{SURGE_POLICY} = wireguard, section-name = {SURGE_POLICY}\n\n\
-             [WireGuard {SURGE_POLICY}]\nprivate-key = {}\nself-ip = {}\nself-ip-v6 = {}\nmtu = {MESH_MTU}\n\
-             peer = (public-key = {}, allowed-ips = \"{}\", endpoint = {}, keepalive = {KEEPALIVE_SECS})\n\n\
-             [Rule]\n{rules}",
-            self.private_key.as_str(),
-            self.ipv4,
-            self.ipv6,
-            self.gateway_key,
-            self.allowed_list(),
-            self.endpoint,
         ))
     }
 }
@@ -280,17 +237,6 @@ mod tests {
         assert!(text.contains("Endpoint = 203.0.113.10:41820\n"));
         assert!(text.contains("AllowedIPs = 100.88.0.0/16, fd00:88::/48\n"));
         assert!(text.contains("PersistentKeepalive = 25\n"));
-    }
-
-    #[test]
-    fn the_surge_configuration_sends_the_mesh_to_its_policy() {
-        let text = config().surge();
-        assert!(text.contains("nett = wireguard, section-name = nett\n"));
-        assert!(text.contains("[WireGuard nett]\n"));
-        assert!(text.contains("self-ip = 100.88.0.9\nself-ip-v6 = fd00:88::9\n"));
-        assert!(text.contains("endpoint = 203.0.113.10:41820"));
-        assert!(text.contains("IP-CIDR,100.88.0.0/16,nett,no-resolve\n"));
-        assert!(text.contains("IP-CIDR6,fd00:88::/48,nett,no-resolve\n"));
     }
 
     #[test]
