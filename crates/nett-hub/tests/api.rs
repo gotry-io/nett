@@ -229,3 +229,55 @@ async fn removed_machines_stay_removed() {
     let (status, _) = push(&app, &token, &back).await;
     assert_eq!(status, StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn device_credentials_are_verified_and_revocations_kept() {
+    let (_hub, app, token, site, mut state, _linked_tmp) = linked("devices", URL).await;
+    let (device_id, credential_id) = nett_site::dir::new_device_ids().expect("ids");
+    state
+        .add_device(
+            "phone".parse().expect("name"),
+            nett_site::ops::NewDevice {
+                device_id,
+                credential_id,
+                public_key: nett_trust::keys::X25519PublicKey::from_bytes([0x51; 32]),
+                limited: false,
+                gateway: Some("edge-vps".parse().expect("name")),
+            },
+        )
+        .expect("device");
+    resign(&site, &mut state);
+    let (status, body) = push(&app, &token, &state).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+
+    // A credential whose signed content is not the device's
+    let mut forged = state.clone();
+    if let Some(d) = forged.devices.values_mut().next() {
+        d.credential.public_key = nett_trust::keys::X25519PublicKey::from_bytes([0x52; 32]);
+    }
+    let (status, body) = push(&app, &token, &forged).await;
+    assert_eq!(status, StatusCode::CONFLICT, "forged credential");
+    assert!(String::from_utf8_lossy(&body).contains("differs"));
+
+    // A device gone without a revocation
+    let mut gone = state.clone();
+    gone.devices.clear();
+    resign(&site, &mut gone);
+    let (status, body) = push(&app, &token, &gone).await;
+    assert_eq!(status, StatusCode::CONFLICT, "gone without revocation");
+    assert!(String::from_utf8_lossy(&body).contains("without a revocation"));
+
+    // Removed with a revocation, which cannot be taken back
+    let mut removed = state.clone();
+    removed
+        .remove_device(&"phone".parse().expect("name"))
+        .expect("removed");
+    resign(&site, &mut removed);
+    let (status, body) = push(&app, &token, &removed).await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let mut back = removed.clone();
+    back.revoked_credentials.clear();
+    let (status, body) = push(&app, &token, &back).await;
+    assert_eq!(status, StatusCode::CONFLICT, "revocation taken back");
+    assert!(String::from_utf8_lossy(&body).contains("cannot come back"));
+}

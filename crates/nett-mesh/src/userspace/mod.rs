@@ -255,7 +255,7 @@ mod dataplane {
             match ingress {
                 None => Ok(()),
                 Some(_) => Err(DataPlaneError::Unsupported(
-                    "forwarding to advertised routes",
+                    "forwarding to advertised routes and for devices",
                 )),
             }
         }
@@ -489,7 +489,8 @@ mod dataplane {
             let b = node("100.88.0.2");
             assert!(matches!(
                 a.plane.apply_ingress(Some(&IngressSpec {
-                    edge_sources: vec![]
+                    edge_sources: Some(vec![]),
+                    devices: vec![],
                 })),
                 Err(DataPlaneError::Unsupported(_))
             ));

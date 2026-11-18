@@ -22,6 +22,7 @@ use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
 };
+use crate::devices::{Device, Devices};
 use crate::event::{Event, EventSink};
 use crate::helper::{AssignedMember, RelayAssignment};
 use crate::key::PrivateKey;
@@ -47,6 +48,9 @@ const STATS_INTERVAL: Duration = Duration::from_millis(100);
 /// then after twice as long each time, up to [`RETRY_MAX`] (design/mesh.md section 15).
 pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(1);
 pub(crate) const RETRY_MAX: Duration = Duration::from_secs(30);
+/// How often a mobile gateway installs its forwarding again: a firewall that started after the mesh
+/// process (Docker at boot) may have put a chain that drops forwarded traffic in front of it.
+const FORWARDING_RECHECK: Duration = Duration::from_secs(60);
 
 /// A desired state whose application hit a data plane failure, to apply again at `due`.
 struct Retry {
@@ -112,6 +116,9 @@ pub struct Engine<D> {
     tls_guarded: Option<Vec<u16>>,
     access: AccessRules,
     routes: Routes,
+    devices: Devices,
+    /// When the forwarding rules were last installed.
+    ingress_at: Option<Instant>,
     /// Filter rules, Edge settings, smart gateway forwarding rules, and routes for other members' prefixes
     /// already installed on the data plane.
     filter: Option<FilterSpec>,
@@ -168,6 +175,8 @@ impl<D: DataPlane> Engine<D> {
             tls_guarded: None,
             access: AccessRules::default(),
             routes: Routes::default(),
+            devices: Devices::default(),
+            ingress_at: None,
             filter: None,
             edge: None,
             ingress: None,
@@ -184,7 +193,8 @@ impl<D: DataPlane> Engine<D> {
     /// accepted for each artifact.
     pub fn with_trust_store(mut self, trust: TrustStore) -> Self {
         if let Some(saved) = trust.saved() {
-            self.members.restore(&saved.revoked, &saved.members);
+            self.members
+                .restore(&saved.revoked, &saved.revoked_credentials, &saved.members);
             self.access.restore(saved.access_rules);
             self.routes.restore(&saved.routes);
         }
@@ -212,6 +222,7 @@ impl<D: DataPlane> Engine<D> {
             address,
             kind,
             node: Some(node_ref(&m.node_id)),
+            device: None,
             mesh: mesh_addrs(m),
             roles: m.roles.clone(),
             prefix,
@@ -233,10 +244,25 @@ impl<D: DataPlane> Engine<D> {
                 return answer(status::WhoisKind::Route, m, Some(*prefix));
             }
         }
+        if let Some(d) = self.devices.find(address) {
+            return status::Whois {
+                address,
+                kind: status::WhoisKind::Device,
+                node: Some(node_ref(&d.gateway)),
+                device: Some(status::DeviceRef {
+                    credential: d.credential_id.clone(),
+                    name: d.name.clone(),
+                }),
+                mesh: d.addrs().to_vec(),
+                roles: vec![],
+                prefix: None,
+            };
+        }
         status::Whois {
             address,
             kind: status::WhoisKind::None,
             node: None,
+            device: None,
             mesh: vec![],
             roles: vec![],
             prefix: None,
@@ -391,6 +417,7 @@ impl<D: DataPlane> Engine<D> {
             access_rules: self.access.saved_version(),
             routes: self.routes.saved_versions(&revoked),
             revoked,
+            revoked_credentials: self.members.revocations().credentials().clone(),
             ..Saved::new(self.node_id.clone(), desired.trust_anchors.clone())
         };
         match self.trust.save(saved, desired.doc()) {
@@ -417,6 +444,12 @@ impl<D: DataPlane> Engine<D> {
         };
         self.members.apply(desired, &own, events);
         self.routes.apply(desired, self.members.members(), events);
+        self.devices.apply(
+            desired,
+            self.members.members(),
+            self.members.revocations(),
+            events,
+        );
 
         let Some(me) = self.members.get(&self.node_id) else {
             events.emit(Event::SelfNotAdmitted {
@@ -491,7 +524,7 @@ impl<D: DataPlane> Engine<D> {
             desired.tls_endpoints(),
         );
         self.tls_endpoints = desired.tls_endpoints().values().copied().collect();
-        let peers: Vec<PeerSpec> = self
+        let mut peers: Vec<PeerSpec> = self
             .members
             .members()
             .values()
@@ -507,11 +540,13 @@ impl<D: DataPlane> Engine<D> {
                 peer_spec(
                     m,
                     self.routes.of(&m.node_id),
+                    self.devices.served_by(&m.node_id),
                     desired.reachability,
                     endpoint,
                 )
             })
             .collect();
+        peers.extend(self.devices.served_by(&self.node_id).map(device_peer));
         self.sync_peers(peers, events);
         let others: Vec<IpPrefix> = self.routes.of_others(&self.node_id).collect();
         self.sync_routes(others, events);
@@ -521,10 +556,20 @@ impl<D: DataPlane> Engine<D> {
     /// When this machine advertises prefixes, installs the smart gateway forwarding rules (design/mesh.md
     /// section 10). On failure, retried on the next desired state.
     fn apply_ingress(&mut self, events: &mut impl EventSink) {
-        let ingress = IngressSpec::of(self.routes.of(&self.node_id), self.members.members());
+        let devices = self
+            .devices
+            .served_by(&self.node_id)
+            .flat_map(Device::addrs)
+            .collect();
+        let ingress = IngressSpec::of(
+            self.routes.of(&self.node_id),
+            self.members.members(),
+            devices,
+        );
         if self.ingress.as_ref() == Some(&ingress) {
             return;
         }
+        self.ingress_at = Some(Instant::now());
         match self.dataplane.apply_ingress(ingress.as_ref()) {
             Ok(()) => self.ingress = Some(ingress),
             Err(e) => {
@@ -796,6 +841,32 @@ impl<D: DataPlane> Engine<D> {
         if self.interface.is_none() {
             return Vec::new();
         }
+        let carrying = matches!(&self.ingress, Some(Some(i)) if i.carries_devices());
+        if carrying
+            && self.retry.is_none()
+            && self
+                .ingress_at
+                .is_none_or(|t| now.saturating_duration_since(t) >= FORWARDING_RECHECK)
+        {
+            self.ingress = None;
+            let mut watch = FailureWatch {
+                inner: &mut *events,
+                failed: false,
+            };
+            self.apply_ingress(&mut watch);
+            // Retried as a whole with the desired state in effect, as after a failed apply, so the
+            // problem goes once a retry succeeds
+            if watch.failed
+                && let Ok(Some(doc)) = self.trust.accepted()
+                && let Ok(desired) = DesiredMesh::from_doc(doc)
+            {
+                self.retry = Some(Retry {
+                    desired,
+                    due: now + RETRY_FIRST,
+                    delay: RETRY_FIRST,
+                });
+            }
+        }
         // Also read when a re-handshake's confirmation is due: decide whether to re-handshake again based on
         // the handshake state just read
         let handshake_due = self.prober.as_ref().is_some_and(|p| p.handshake_due(now));
@@ -822,6 +893,7 @@ impl<D: DataPlane> Engine<D> {
                         let spec = peer_spec(
                             member,
                             self.routes.of(&switch.peer),
+                            self.devices.served_by(&switch.peer),
                             self.reachability,
                             Some(switch.to.endpoint()),
                         );
@@ -877,6 +949,21 @@ impl<D: DataPlane> Engine<D> {
             .retain(|key, _| stats.iter().any(|s| s.public_key == *key));
         for stat in stats {
             let Some(id) = by_key.get(&stat.public_key) else {
+                // A device this machine carries: only its traffic is recorded, for the status
+                if self
+                    .devices
+                    .served_by(&self.node_id)
+                    .any(|d| d.public_key == stat.public_key)
+                {
+                    let traffic = self.traffic.entry(stat.public_key).or_default();
+                    if traffic.rx_bytes != stat.rx_bytes {
+                        traffic.last_rx = Some(now);
+                    }
+                    traffic.rx_bytes = stat.rx_bytes;
+                    traffic.tx_bytes = stat.tx_bytes;
+                    traffic.endpoint = stat.endpoint;
+                    traffic.last_handshake = stat.last_handshake;
+                }
                 continue;
             };
             let bytes = (stat.rx_bytes, stat.tx_bytes);
@@ -1111,11 +1198,34 @@ impl<D: DataPlane> Engine<D> {
                 .relay_fetched
                 .map(|(_, at)| status::wall_time(now, wall, at)),
         });
+        let devices: Vec<status::DeviceStatus> = self
+            .devices
+            .served_by(&self.node_id)
+            .map(|d| {
+                let traffic = self.traffic.get(&d.public_key);
+                status::DeviceStatus {
+                    credential: d.credential_id.clone(),
+                    name: d.name.clone(),
+                    mesh: d.addrs().to_vec(),
+                    endpoint: traffic.and_then(|t| t.endpoint),
+                    last_handshake: traffic
+                        .and_then(|t| t.last_handshake)
+                        .map(status::timestamp),
+                    rx_bytes: traffic.map_or(0, |t| t.rx_bytes),
+                    tx_bytes: traffic.map_or(0, |t| t.tx_bytes),
+                }
+            })
+            .collect();
+        let gateway = (!devices.is_empty()).then(|| status::GatewayStatus {
+            ipv6_forwarding: self.dataplane.ipv6_forwarding(),
+            devices,
+        });
         StatusDoc {
             v: status::VERSION,
             version: env!("CARGO_PKG_VERSION").to_owned(),
             node,
             relay,
+            gateway,
             config: ConfigStatus {
                 applied_at: self.applied_at.map(|t| status::wall_time(now, wall, t)),
                 access_rules_version: self.access.version(),
@@ -1208,25 +1318,39 @@ fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u
     matches!((done_ms, rehandshaked_ms), (Some(done), Some(at)) if done >= at)
 }
 
-fn peer_spec(
+fn peer_spec<'a>(
     member: &Member,
     routes: &[IpPrefix],
+    devices: impl Iterator<Item = &'a Device>,
     own: Reachability,
     endpoint: Option<SocketAddr>,
 ) -> PeerSpec {
-    // The mesh address, the Edge address when there is an `edge` role, and the prefixes it advertises
-    // (design/mesh.md section 4)
+    // The mesh address, the Edge address when there is an `edge` role, the addresses of the devices it
+    // carries as a mobile gateway, and the prefixes it advertises (design/mesh.md section 4)
     let edge = member.edge.iter().map(|e| e.addresses);
     PeerSpec {
         public_key: member.mesh_public_key,
         allowed_ips: std::iter::once(member.addresses)
             .chain(edge)
+            .chain(devices.map(|d| d.addresses))
             .flat_map(|a| [IpAddr::V4(a.ipv4), IpAddr::V6(a.ipv6)])
             .map(IpPrefix::host)
             .chain(routes.iter().copied())
             .collect(),
         endpoint,
         persistent_keepalive: (own == Reachability::DialOnly).then_some(DIAL_ONLY_KEEPALIVE_SECS),
+    }
+}
+
+/// A device this machine carries as a mobile gateway (design/devices.md section 6): the device connects,
+/// and WireGuard keeps the address it connects from; it is not a member, so it gets no keepalive and
+/// the path layer leaves it alone.
+fn device_peer(device: &Device) -> PeerSpec {
+    PeerSpec {
+        public_key: device.public_key,
+        allowed_ips: device.addrs().into_iter().map(IpPrefix::host).collect(),
+        endpoint: None,
+        persistent_keepalive: None,
     }
 }
 
@@ -1265,6 +1389,121 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_gateway_carries_its_devices_and_others_route_them_to_it() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut doc = mesh.desired(1, vec![mesh.gateway_material(1, 1), mesh.material(2, 1)]);
+        doc.devices = vec![mesh.device(9, 1)];
+        let device = crate::testutil::device_addresses(9);
+        let device_v4 = IpPrefix::host(IpAddr::V4(device.ipv4));
+
+        // The gateway: the device is a peer with its own addresses and no endpoint, after the filter
+        // rules, and the forwarding rules carry its addresses
+        let mut gateway = engine(1);
+        gateway
+            .apply(&validated(doc.clone()), &mut VecSink::default())
+            .expect("accepted");
+        let peers = gateway.dataplane.peers.as_ref().expect("peers");
+        let peer = peers
+            .iter()
+            .find(|p| p.public_key == crate::testutil::device_key(9))
+            .expect("device peer");
+        assert!(peer.allowed_ips.contains(&device_v4));
+        assert_eq!(peer.endpoint, None);
+        assert_eq!(peer.persistent_keepalive, None);
+        let ingress = gateway.dataplane.ingress.as_ref().expect("ingress");
+        assert!(ingress.carries_devices());
+        assert!(ingress.devices.contains(&IpAddr::V4(device.ipv4)));
+        assert!(ingress.edge_sources.is_none());
+        let calls = &gateway.dataplane.calls;
+        let filter_at = calls.iter().position(|c| *c == "apply_filter");
+        let peers_at = calls.iter().position(|c| *c == "sync_peers");
+        assert!(filter_at < peers_at, "{calls:?}");
+
+        // Another member: the device's addresses are on the gateway's peer, and there is no device peer
+        let mut doc2 = doc;
+        doc2.node_id = node_id(2);
+        let mut member = engine(2);
+        member
+            .apply(&validated(doc2), &mut VecSink::default())
+            .expect("accepted");
+        let peers = member.dataplane.peers.as_ref().expect("peers");
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].public_key, mesh_key(1));
+        assert!(peers[0].allowed_ips.contains(&device_v4));
+        assert!(member.dataplane.ingress.is_none());
+        assert_eq!(
+            member.whois(IpAddr::V4(device.ipv4)).kind,
+            status::WhoisKind::Device
+        );
+    }
+
+    #[test]
+    fn a_gateway_whose_forwarding_breaks_lists_it_until_a_retry_succeeds() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut doc = mesh.desired(1, vec![mesh.gateway_material(1, 1), mesh.material(2, 1)]);
+        doc.devices = vec![mesh.device(9, 1)];
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        // Forwarding goes off after the gateway was set up: the next check finds it
+        e.dataplane.fail_ingress = true;
+        let start = Instant::now();
+        e.tick(start + FORWARDING_RECHECK, 0, &mut events);
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|ev| matches!(ev, Event::DataPlaneFailed { .. }))
+        );
+        // Back on: the retry that follows succeeds and the problem goes
+        e.dataplane.fail_ingress = false;
+        e.tick(start + FORWARDING_RECHECK + RETRY_FIRST, 0, &mut events);
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|ev| matches!(ev, Event::DataPlaneRecovered)),
+            "{:?}",
+            events.0
+        );
+    }
+
+    #[test]
+    fn a_revoked_credential_stays_revoked_after_a_restart() {
+        let mesh = Mesh::new(&[1, 2]);
+        let mut doc = mesh.desired(1, vec![mesh.gateway_material(1, 1), mesh.material(2, 1)]);
+        doc.revocations = vec![nett_trust::revocation::Revocation::DeviceCredential {
+            credential_id: crate::testutil::credential_id(9),
+        }];
+        let backend = crate::store::MemoryBackend::default();
+        let mut e = engine(1).with_trust_store(TrustStore::open(Box::new(backend.clone())));
+        e.apply(&validated(doc.clone()), &mut VecSink::default())
+            .expect("accepted");
+        // Restarted, and given the credential without the revocation: it is still refused
+        let mut e = engine(1).with_trust_store(TrustStore::open(Box::new(backend)));
+        doc.revocations.clear();
+        doc.devices = vec![mesh.device(9, 1)];
+        let mut events = VecSink::default();
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        assert!(
+            events
+                .0
+                .iter()
+                .any(|ev| matches!(ev, Event::DeviceRejected { .. })),
+            "{:?}",
+            events.0
+        );
+        assert!(
+            !e.dataplane
+                .peers
+                .as_ref()
+                .expect("peers")
+                .iter()
+                .any(|p| p.public_key == crate::testutil::device_key(9))
+        );
     }
 
     #[test]
@@ -1607,7 +1846,8 @@ mod tests {
         assert!(
             ingress
                 .edge_sources
-                .contains(&"100.88.1.1".parse().expect("ip"))
+                .as_ref()
+                .is_some_and(|e| e.contains(&"100.88.1.1".parse().expect("ip")))
         );
         assert!(router.dataplane.routes.is_empty());
         let filter = router.dataplane.filter.as_ref().expect("filter");

@@ -5,18 +5,31 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, DeviceId, NodeId};
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_mesh::config::Reachability;
-use nett_trust::keys::Ed25519PublicKey;
+use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{MeshAddresses, PortRange};
 
 use crate::SiteError;
 use crate::state::{
-    Edge, Enrollment, Learned, Machine, NodeKeys, Part, RelayKey, RelayRole, Revoked, Rule, RuleId,
-    Selector, State,
+    Credential, Device, DeviceSelector, Edge, Enrollment, Learned, Machine, NodeKeys, Part,
+    RelayKey, RelayRole, Revoked, RevokedCredential, Rule, RuleId, Selector, State,
 };
+
+/// A new device (design/devices.md section 3): its IDs and public key come from the caller, which
+/// generated the key pair.
+#[derive(Debug, Clone)]
+pub struct NewDevice {
+    pub device_id: DeviceId,
+    pub credential_id: CredentialId,
+    pub public_key: X25519PublicKey,
+    pub limited: bool,
+    /// The `public` machine it comes through: required for the first device, and when devices come
+    /// through more than one; otherwise the one in use.
+    pub gateway: Option<NodeName>,
+}
 
 /// Options when adding a machine.
 #[derive(Debug, Clone, Default)]
@@ -136,6 +149,100 @@ impl State {
         self.attempt(|s| s.remove_rule_in(id))
     }
 
+    /// Adds a device with one credential and returns its addresses (design/devices.md section 3). Its
+    /// gateway gets the `gateway` role with it.
+    pub fn add_device(
+        &mut self,
+        name: NodeName,
+        new: NewDevice,
+    ) -> Result<MeshAddresses, SiteError> {
+        self.attempt(|s| s.add_device_in(name, new))
+    }
+
+    /// Removes a device: its credential is revoked for good, and the rules that name it are cleaned
+    /// up as for a machine. A gateway no device comes through any more loses the `gateway` role.
+    pub fn remove_device(&mut self, name: &NodeName) -> Result<(), SiteError> {
+        self.attempt(|s| {
+            let d = s
+                .devices
+                .remove(name)
+                .ok_or_else(|| SiteError::invalid(format!("there is no device `{name}`")))?;
+            s.revoked_credentials.push(RevokedCredential {
+                name: name.clone(),
+                credential_id: d.credential.id.clone(),
+            });
+            s.strip(|sel| sel.device() == Some(&d.device_id));
+            s.check()
+        })
+    }
+
+    fn add_device_in(
+        &mut self,
+        name: NodeName,
+        new: NewDevice,
+    ) -> Result<MeshAddresses, SiteError> {
+        if self.machines.contains_key(&name) || self.devices.contains_key(&name) {
+            return Err(SiteError::invalid(format!(
+                "`{name}` is already in the site; machines and devices share names"
+            )));
+        }
+        if self
+            .revoked_credentials
+            .iter()
+            .any(|r| r.credential_id == new.credential_id)
+        {
+            return Err(SiteError::invalid(
+                "the new credential ID was revoked before",
+            ));
+        }
+        let in_use: std::collections::BTreeSet<&NodeId> =
+            self.devices.values().map(|d| &d.gateway).collect();
+        let gateway = match (&new.gateway, in_use.len()) {
+            (Some(g), _) => {
+                let m = self.machine(g)?;
+                if m.reachability != Reachability::Public {
+                    return Err(SiteError::invalid(format!(
+                        "`{g}` is dial-only: devices connect to their gateway, so it is a --public \
+                         machine"
+                    )));
+                }
+                m.node_id.clone()
+            }
+            (None, 1) => in_use
+                .into_iter()
+                .next()
+                .cloned()
+                .ok_or_else(|| SiteError::invalid("no gateway in use"))?,
+            (None, 0) => {
+                return Err(SiteError::invalid(
+                    "name the public machine the first device joins through with --gateway <machine>",
+                ));
+            }
+            (None, _) => {
+                return Err(SiteError::invalid(
+                    "devices come through more than one gateway; choose one with --gateway",
+                ));
+            }
+        };
+        let addresses = self.allocate()?;
+        self.devices.insert(
+            name,
+            Device {
+                device_id: new.device_id,
+                limited: new.limited,
+                gateway,
+                credential: Credential {
+                    id: new.credential_id,
+                    public_key: new.public_key,
+                    addresses,
+                    signed: None,
+                },
+            },
+        );
+        self.check()?;
+        Ok(addresses)
+    }
+
     /// Adds a machine: allocates a node ID and a mesh address. When the same name was removed
     /// before, this is a new machine (design/site.md section 4).
     fn add_in(
@@ -147,6 +254,11 @@ impl State {
         if self.machines.contains_key(&name) {
             return Err(SiteError::invalid(format!(
                 "`{name}` is already in the site; `nett site set {name}` changes it"
+            )));
+        }
+        if self.devices.contains_key(&name) {
+            return Err(SiteError::invalid(format!(
+                "`{name}` is a device; machines and devices share names"
             )));
         }
         if self.revoked.iter().any(|r| r.node_id == node_id) {
@@ -205,6 +317,13 @@ impl State {
     /// Removes a machine: generates an identity revocation, and the parts of rules that reference
     /// it are deleted with it (design/site.md section 4).
     fn remove_in(&mut self, name: &NodeName) -> Result<(), SiteError> {
+        let node = self.machine(name)?.node_id.clone();
+        if let Some((device, _)) = self.devices.iter().find(|(_, d)| d.gateway == node) {
+            return Err(SiteError::invalid(format!(
+                "device `{device}` comes through `{name}`; remove it first with \
+                 `nett site device remove {device}`"
+            )));
+        }
         let m = self
             .machines
             .remove(name)
@@ -213,7 +332,7 @@ impl State {
             name: name.clone(),
             node_id: m.node_id.clone(),
         });
-        self.strip(|s| s.node == m.node_id);
+        self.strip(|s| s.node().is_some_and(|(n, _)| *n == m.node_id));
         self.check()
     }
 
@@ -239,7 +358,7 @@ impl State {
             }
             None => {
                 self.machine_mut(name)?.edge = None;
-                self.strip(|s| s.node == node && s.part == Part::Edge);
+                self.strip(|s| s.node() == Some((&node, Part::Edge)));
             }
         }
         self.check()
@@ -252,7 +371,7 @@ impl State {
         let empty = routes.is_empty();
         self.machine_mut(name)?.routes = routes;
         if empty {
-            self.strip(|s| s.node == node && s.part == Part::Routes);
+            self.strip(|s| s.node() == Some((&node, Part::Routes)));
         }
         self.check()
     }
@@ -301,8 +420,15 @@ impl State {
             .ok_or_else(|| SiteError::invalid(format!("there is no rule {id}")))
     }
 
-    /// `mac`, `edge-vps.edge`, `mac-app.routes`.
+    /// `mac`, `edge-vps.edge`, `mac-app.routes`, or a device's name.
     pub fn parse_selector(&self, text: &str) -> Result<Selector, SiteError> {
+        if let Ok(name) = text.parse::<NodeName>()
+            && let Some(d) = self.devices.get(&name)
+        {
+            return Ok(Selector::Device(DeviceSelector {
+                device: d.device_id.clone(),
+            }));
+        }
         let (name, part) = if let Some(name) = text.strip_suffix(".edge") {
             (name, Part::Edge)
         } else if let Some(name) = text.strip_suffix(".routes") {
@@ -321,10 +447,7 @@ impl State {
             Part::Routes if m.routes.is_empty() => Err(SiteError::invalid(format!(
                 "`{text}`: `{name}` advertises no routes; `nett site routes {name} <prefix>` sets them"
             ))),
-            _ => Ok(Selector {
-                node: m.node_id.clone(),
-                part,
-            }),
+            _ => Ok(Selector::machine(m.node_id.clone(), part)),
         }
     }
 

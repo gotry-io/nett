@@ -29,6 +29,9 @@ base64.workspace = true
 nett-trust = { workspace = true, features = ["signing"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# The device configuration `nett site device add` exports, and the private key in it
+qrcodegen.workspace = true
+zeroize.workspace = true
 
 # Mesh process: Linux, and the macOS native member (design/userspace.md)
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]

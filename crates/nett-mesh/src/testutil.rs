@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, DeviceId, NodeId};
 use nett_trust::admission::{AdmissionMaterial, AdmissionProofDoc, AdmissionProofKind};
 use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Timestamp;
@@ -15,7 +15,9 @@ use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
-use crate::config::{Candidate, DesiredMesh, DesiredMeshDoc, MeshPrefixes, PathDoc, Reachability};
+use crate::config::{
+    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, MeshPrefixes, PathDoc, Reachability,
+};
 use crate::dataplane::{
     DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, PeerSpec, PeerStat, WgPortProbes,
 };
@@ -138,6 +140,43 @@ impl Mesh {
         self.material_for(policy, mesh_key(n))
     }
 
+    /// A node with the `gateway` role (mobile gateway).
+    pub fn gateway_material(&self, n: u8, version: u64) -> AdmissionMaterial {
+        let mut policy = self.policy(n, version);
+        policy.roles.push(Role::Gateway);
+        self.material_for(policy, mesh_key(n))
+    }
+
+    /// The credential of device `n`, carried by node `gateway`: its address is `100.88.0.n` and
+    /// `fd00:88::n`, and its key `[0x40 + n; 32]`.
+    pub fn device(&self, n: u8, gateway: u8) -> DeviceDoc {
+        self.device_at(n, gateway, device_addresses(n))
+    }
+
+    pub fn device_at(&self, n: u8, gateway: u8, addresses: MeshAddresses) -> DeviceDoc {
+        DeviceDoc {
+            credential: self.sign(&device_doc(n, addresses)),
+            gateway: node_id(gateway),
+            name: Some(format!("device-{n}").parse().expect("name")),
+        }
+    }
+
+    /// Device `n` signed with a key that is not this site's recovery key.
+    pub fn forged_device(&self, n: u8, gateway: u8) -> DeviceDoc {
+        let other = RecoveryKeyPair::generate().expect("recovery key");
+        DeviceDoc {
+            credential: other
+                .sign(
+                    device_doc(n, device_addresses(n))
+                        .to_canonical()
+                        .expect("canonical"),
+                )
+                .expect("sign"),
+            gateway: node_id(gateway),
+            name: None,
+        }
+    }
+
     /// The payload of the prefixes advertised by node `n`.
     pub fn routes_doc(&self, n: u8, version: u64, routes: &[&str]) -> PayloadDoc {
         PayloadDoc::EnrollmentPolicy {
@@ -193,6 +232,7 @@ impl Mesh {
                 .collect(),
             access_rules: None,
             advertised_routes: vec![],
+            devices: vec![],
             names: self
                 .enrollment
                 .keys()
@@ -200,6 +240,40 @@ impl Mesh {
                 .collect(),
             relay: None,
         }
+    }
+}
+
+pub fn credential_id(n: u8) -> CredentialId {
+    format!("dcr_01J9Z3K8Q2T7V4X6Y8A0B2C4{n:02}")
+        .parse()
+        .expect("valid credential id")
+}
+
+pub fn device_key(n: u8) -> X25519PublicKey {
+    X25519PublicKey::from_bytes([0x40 + n; 32])
+}
+
+pub fn device_addresses(n: u8) -> MeshAddresses {
+    MeshAddresses {
+        ipv4: format!("100.88.0.{n}").parse().expect("ipv4"),
+        ipv6: format!("fd00:88::{n:x}").parse().expect("ipv6"),
+    }
+}
+
+fn device_doc(n: u8, addresses: MeshAddresses) -> PayloadDoc {
+    PayloadDoc::EnrollmentPolicy {
+        v: 1,
+        artifacts: vec![Artifact::DeviceCredential(
+            nett_trust::payload::DeviceCredential {
+                device_id: format!("dev_01J9Z3K8Q2T7V4X6Y8A0B2C4{n:02}")
+                    .parse::<DeviceId>()
+                    .expect("valid device id"),
+                credential_id: credential_id(n),
+                public_key: device_key(n),
+                addresses,
+            },
+        )],
+        expires_at: FAR_FUTURE,
     }
 }
 
@@ -229,6 +303,8 @@ pub struct FakeDataPlane {
     pub listen_port: Option<u16>,
     pub peers: Option<Vec<PeerSpec>>,
     pub fail_peers: bool,
+    /// Installing the forwarding rules fails, as when forwarding is off.
+    pub fail_ingress: bool,
     /// How many more interface creations fail, as when the TUN device appears only after the mesh
     /// process started.
     pub fail_interface: u32,
@@ -261,6 +337,7 @@ impl FakeDataPlane {
             listen_port: None,
             peers: None,
             fail_peers: false,
+            fail_ingress: false,
             fail_interface: 0,
             rehandshakes: Vec::new(),
             tls_guards: Vec::new(),
@@ -388,6 +465,12 @@ impl DataPlane for FakeDataPlane {
     fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
         self.calls.push("apply_ingress");
         self.ingress = ingress.cloned();
+        if self.fail_ingress && ingress.is_some() {
+            return Err(DataPlaneError::Protocol {
+                op: "forward traffic",
+                detail: "forwarding is off".into(),
+            });
+        }
         Ok(())
     }
 

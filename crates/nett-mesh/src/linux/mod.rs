@@ -3,6 +3,7 @@
 //! Requires `CAP_NET_ADMIN`.
 
 mod filter;
+mod hostfw;
 mod netlink;
 mod nft;
 mod rtnl;
@@ -67,6 +68,7 @@ pub fn teardown() -> Result<(), DataPlaneError> {
         for table in nft::tables() {
             nft::delete_table(table).map_err(kernel("delete an nftables table"))?;
         }
+        hostfw::remove().map_err(kernel("remove nett's rule from the system's FORWARD chain"))?;
     }
     Ok(())
 }
@@ -97,6 +99,16 @@ fn family_error(e: NlError) -> DataPlaneError {
     } else {
         kernel("resolve the wireguard netlink family")(e)
     }
+}
+
+/// Whether a forwarding setting in `/proc/sys` is on.
+fn forwarding(path: &str) -> Result<bool, DataPlaneError> {
+    std::fs::read_to_string(path)
+        .map(|v| v.trim() == "1")
+        .map_err(|source| DataPlaneError::Os {
+            op: "read a forwarding setting",
+            source,
+        })
 }
 
 fn kernel(op: &'static str) -> impl FnOnce(NlError) -> DataPlaneError {
@@ -357,27 +369,42 @@ impl DataPlane for KernelWireGuard {
 
     fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
         filter::install_ingress(ingress).map_err(kernel("install forwarding rules"))?;
+        let carry = ingress.is_some_and(IngressSpec::carries_devices);
+        let blocked = hostfw::reconcile(carry).map_err(kernel(
+            "accept device traffic in the system's FORWARD chain",
+        ))?;
         if ingress.is_none() {
             return Ok(());
         }
         // Forwarding is decided by this network namespace's settings (in a container, enable it with Compose
         // sysctls); the mesh process only checks and does not modify
         let path = "/proc/sys/net/ipv4/ip_forward";
-        let on = std::fs::read_to_string(path)
-            .map_err(|source| DataPlaneError::Os {
-                op: "read the IPv4 forwarding setting",
-                source,
-            })?
-            .trim()
-            == "1";
-        if on {
-            Ok(())
-        } else {
-            Err(DataPlaneError::Protocol {
-                op: "forward to advertised routes",
-                detail: format!("{path} is 0: this node advertises routes but does not forward"),
-            })
+        if !forwarding(path)? {
+            let what = if carry {
+                "carries devices"
+            } else {
+                "advertises routes"
+            };
+            return Err(DataPlaneError::Protocol {
+                op: "forward traffic",
+                detail: format!("{path} is 0: this node {what} but does not forward"),
+            });
         }
+        if carry && !blocked.is_empty() {
+            return Err(DataPlaneError::Protocol {
+                op: "forward device traffic",
+                detail: format!(
+                    "{} drops forwarded traffic by default, so devices cannot reach other machines \
+                     through this gateway; accept traffic from nett0 to nett0 there",
+                    blocked.join(", ")
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn ipv6_forwarding(&self) -> Option<bool> {
+        forwarding("/proc/sys/net/ipv6/conf/all/forwarding").ok()
     }
 
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {

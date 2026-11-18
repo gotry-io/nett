@@ -80,8 +80,35 @@ pub struct StatusDoc {
     /// The relay on this machine (design/status.md section 6); absent when it is not a relay.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayStatus>,
+    /// The devices this machine carries as a mobile gateway (design/devices.md section 6); absent when it
+    /// carries none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<GatewayStatus>,
     pub problems: Vec<Problem>,
     pub events: Vec<EventRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GatewayStatus {
+    /// Whether this machine forwards IPv6, where the data plane can tell; without it devices reach
+    /// other machines over IPv4 only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6_forwarding: Option<bool>,
+    pub devices: Vec<DeviceStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeviceStatus {
+    pub credential: nett_core::id::CredentialId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<NodeName>,
+    pub mesh: Vec<IpAddr>,
+    /// Where the device last connected from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<std::net::SocketAddr>,
+    pub last_handshake: Option<Timestamp>,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +309,8 @@ pub enum ProblemKind {
     MemberRejected,
     AccessRulesRejected,
     RoutesRejected,
+    /// A device credential failed verification (design/devices.md section 4).
+    DeviceRejected,
     DataPlaneFailed,
     /// Reading or writing the trust store failed (design/mesh.md section 4.2).
     TrustStore,
@@ -314,9 +343,12 @@ impl EventRecord {
 pub struct Whois {
     pub address: IpAddr,
     /// `member` (a mesh address), `edge` (an Edge address), `route` (inside a prefix a member
-    /// advertises) or `none`.
+    /// advertises), `device` (a device credential; `node` is its gateway) or `none`.
     pub kind: WhoisKind,
     pub node: Option<NodeRef>,
+    /// For a device address: the credential and the device's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device: Option<DeviceRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mesh: Vec<IpAddr>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -332,7 +364,15 @@ pub enum WhoisKind {
     Member,
     Edge,
     Route,
+    Device,
     None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeviceRef {
+    pub credential: nett_core::id::CredentialId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<NodeName>,
 }
 
 /// Result of a `reload` (design/status.md section 4.1).
@@ -383,6 +423,7 @@ struct Problems {
     members: BTreeMap<Option<NodeId>, (Timestamp, String)>,
     access: Option<(Timestamp, String)>,
     routes: BTreeMap<Option<NodeId>, (Timestamp, String)>,
+    devices: BTreeMap<Option<nett_core::id::CredentialId>, (Timestamp, String)>,
     data_plane: Option<(Instant, Timestamp, String)>,
     /// Stays listed until the next write succeeds.
     trust_store: Option<(Timestamp, String)>,
@@ -476,6 +517,13 @@ impl<E: EventSink> Recorder<E> {
         for (id, r) in &p.routes {
             push(ProblemKind::RoutesRejected, node_ref(id), r);
         }
+        for (id, (at, reason)) in &p.devices {
+            let reason = match id {
+                Some(id) => format!("{id}: {reason}"),
+                None => reason.clone(),
+            };
+            push(ProblemKind::DeviceRejected, None, &(*at, reason));
+        }
         if let Some((seen, at, reason)) = &p.data_plane
             && now.saturating_duration_since(*seen) < DATA_PLANE_WINDOW
         {
@@ -509,6 +557,15 @@ impl<E: EventSink> Recorder<E> {
             }
             Event::RoutesRejected { node_id, reason } => {
                 bounded_insert(&mut self.problems.routes, node_id, reason.clone());
+            }
+            Event::DeviceRejected {
+                credential_id,
+                reason,
+            } => {
+                let devices = &mut self.problems.devices;
+                if devices.len() < MAX_NODE_PROBLEMS || devices.contains_key(credential_id) {
+                    devices.insert(credential_id.clone(), (now, reason.clone()));
+                }
             }
             Event::DataPlaneFailed { reason } => {
                 self.problems.data_plane = Some((Instant::now(), now, reason.clone()));
@@ -1054,6 +1111,7 @@ mod tests {
         StatusDoc {
             v: VERSION,
             version: "0.0.0".into(),
+            gateway: None,
             node: NodeStatus {
                 id: node(1),
                 name: Some("edge-vps".parse().expect("name")),
@@ -1126,6 +1184,7 @@ mod tests {
                 address,
                 kind: WhoisKind::None,
                 node: None,
+                device: None,
                 mesh: vec![],
                 roles: vec![],
                 prefix: None,

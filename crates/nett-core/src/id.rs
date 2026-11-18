@@ -113,6 +113,16 @@ prefixed_id!(
     ChangeId,
     "chg"
 );
+prefixed_id!(
+    /// Device ID: a phone or computer that joins through a mobile gateway (design/devices.md).
+    DeviceId,
+    "dev"
+);
+prefixed_id!(
+    /// ID of one WireGuard credential of a device; a credential is revoked by this ID for good.
+    CredentialId,
+    "dcr"
+);
 
 #[cfg(test)]
 mod tests {

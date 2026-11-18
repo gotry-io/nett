@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, NodeId};
 use nett_trust::admission::AppliedRecord;
 use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Sha256Digest;
@@ -39,6 +39,9 @@ pub struct Saved {
     pub trust_anchors: TrustAnchorsDoc,
     #[serde(default)]
     pub revoked: BTreeSet<NodeId>,
+    /// Revoked device credentials (design/devices.md section 4).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub revoked_credentials: BTreeSet<CredentialId>,
     #[serde(default)]
     pub members: BTreeMap<NodeId, AppliedRecord>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -54,6 +57,7 @@ impl Saved {
             node_id,
             trust_anchors,
             revoked: BTreeSet::new(),
+            revoked_credentials: BTreeSet::new(),
             members: BTreeMap::new(),
             access_rules: None,
             routes: BTreeMap::new(),

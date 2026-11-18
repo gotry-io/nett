@@ -1,7 +1,7 @@
 //! Events reported by the mesh process. Every event is also written to the log; lab builds additionally
 //! write a JSON-lines copy for `nett-lab` to collect.
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, NodeId};
 use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -34,6 +34,21 @@ pub enum Event {
     MemberRejected {
         node_id: Option<NodeId>,
         reason: String,
+    },
+    /// A device credential passed verification and is used (design/devices.md section 4).
+    DeviceAdded {
+        credential_id: CredentialId,
+        gateway: NodeId,
+    },
+    /// A device credential failed verification and is not used. Empty when the credential cannot be
+    /// read.
+    DeviceRejected {
+        credential_id: Option<CredentialId>,
+        reason: String,
+    },
+    /// A device credential stopped being used: revoked or no longer in the desired state.
+    DeviceRemoved {
+        credential_id: CredentialId,
     },
     /// A member was removed because of a revocation.
     MemberRemoved {
@@ -167,6 +182,22 @@ pub fn log_event(event: &Event) {
             None => tracing::warn!(%reason, "member rejected"),
         },
         Event::MemberRemoved { node_id } => tracing::info!(%node_id, "member removed"),
+        Event::DeviceAdded {
+            credential_id,
+            gateway,
+        } => tracing::info!(%credential_id, %gateway, "device credential added"),
+        Event::DeviceRejected {
+            credential_id,
+            reason,
+        } => match credential_id {
+            Some(credential_id) => {
+                tracing::warn!(%credential_id, %reason, "device credential rejected")
+            }
+            None => tracing::warn!(%reason, "device credential rejected"),
+        },
+        Event::DeviceRemoved { credential_id } => {
+            tracing::info!(%credential_id, "device credential removed")
+        }
         Event::PeersApplied { peers } => tracing::info!(peers, "peers applied"),
         Event::InterfaceReady { listen_port } => {
             tracing::info!(listen_port, "mesh interface ready")

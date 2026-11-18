@@ -63,6 +63,18 @@ pub fn whois(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             "{address} is behind {node}, in the prefix {} it advertises",
             who.prefix.map_or_else(|| "-".to_owned(), |p| p.to_string())
         ),
+        (WhoisKind::Device, Some(node)) => {
+            let device = who.device.as_ref().map_or_else(
+                || "a device".to_owned(),
+                |d| {
+                    crate::status::labelled(
+                        d.name.as_ref().map(|n| n.as_str()),
+                        d.credential.as_str(),
+                    )
+                },
+            );
+            format!("{address} is device {device}, through {node}")
+        }
         _ => format!("{address} belongs to no member this machine has verified"),
     };
     println!("{line}");

@@ -6,6 +6,7 @@
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+mod device;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod diagnose;
 #[cfg(target_os = "linux")]

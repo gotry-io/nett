@@ -580,6 +580,7 @@ pub fn generate(
             paths,
             access_rules: access_rules.clone(),
             advertised_routes: routes.clone(),
+            devices: vec![],
             names: names.clone(),
             // Lab relays are separate processes with their own assignment file
             relay: None,

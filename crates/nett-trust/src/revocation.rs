@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, NodeId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,11 +12,15 @@ pub enum Revocation {
     /// Identity revocation: removes a node. It takes effect permanently by node ID, and no version
     /// of a signed artifact can restore it.
     Node { node_id: NodeId },
+    /// Identity revocation of a device credential, permanent like a node's (design/devices.md
+    /// section 4).
+    DeviceCredential { credential_id: CredentialId },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Revocations {
     nodes: BTreeSet<NodeId>,
+    credentials: BTreeSet<CredentialId>,
 }
 
 impl Revocations {
@@ -25,7 +29,19 @@ impl Revocations {
             Revocation::Node { node_id } => {
                 self.nodes.insert(node_id.clone());
             }
+            Revocation::DeviceCredential { credential_id } => {
+                self.credentials.insert(credential_id.clone());
+            }
         }
+    }
+
+    pub fn is_credential_revoked(&self, credential_id: &CredentialId) -> bool {
+        self.credentials.contains(credential_id)
+    }
+
+    /// Revoked device credentials, kept in the local trust store with the nodes.
+    pub fn credentials(&self) -> &BTreeSet<CredentialId> {
+        &self.credentials
     }
 
     pub fn is_node_revoked(&self, node_id: &NodeId) -> bool {

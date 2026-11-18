@@ -100,8 +100,9 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 
 [design/devices.md](design/devices.md); [design/mesh.md](design/mesh.md) sections 5.3, 5.4 and 13; ADR 0008, 0011.
 
-- [ ] Device and credential model; mobile gateway
-- [ ] Export of standard WireGuard configurations (configuration file and QR code), and of Surge, mihomo and sing-box configurations (one WireGuard outbound to the mobile gateway)
+- [x] Device and credential model; mobile gateway ([design/devices.md](design/devices.md))
+- [x] Export of standard WireGuard configurations (configuration file and QR code) and Surge configurations (one WireGuard outbound to the mobile gateway)
+- [ ] mihomo and sing-box configurations
 - [ ] Hostname aliases (`hostnames`) and names for devices
 - [ ] HTTPS CONNECT proxy in nett-relay (HTTP/2 only on entry nodes)
 - [ ] On entry nodes the reverse proxy hands the TLS transport and CONNECT to nett-relay by domain name, and members verify that relay by CA certificates and domain name; the Hub's Compose example with Caddy includes this section
