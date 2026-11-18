@@ -8,6 +8,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   machine connected to a Hub nett-node upgrades the `nett` command together with the services, so
   the command always matches them. Homebrew is no longer a way to install nett: run
   `brew uninstall nett`, then the install script.
+- Every nett program logs plain text, in a terminal too: the Hub's log in the journal carried
+  terminal color codes.
 
 ## [0.3.20] - 2026-11-18
 

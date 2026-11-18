@@ -5,6 +5,7 @@
 //! this machine (local-signing.md section 3). The event file, simulated clock skew and transport
 //! adapter configuration exist only in the lab build (the `lab` feature).
 
+#[cfg(target_os = "macos")]
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
 
@@ -197,14 +198,12 @@ pub(crate) fn print_keys(
 /// standard error file only records startup failures, and launchd reopens it each time it starts
 /// the process, so rotation works.
 pub(crate) fn init_logging() {
-    let builder = tracing_subscriber::fmt()
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_ansi(std::io::stderr().is_terminal());
+    let builder =
+        tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::INFO);
     #[cfg(target_os = "macos")]
     if !std::io::stderr().is_terminal() {
         builder
             .without_time()
-            .with_ansi(false)
             .with_writer(syslog::Syslog(std::sync::Arc::new(
                 nett_mesh::macos::SystemLog::open(),
             )))

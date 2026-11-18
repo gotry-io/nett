@@ -4,7 +4,6 @@
 //! from a local file (`--config`). Exits on `SIGTERM` or `SIGINT`, and when the assignment changes its
 //! ports (the service manager starts it again).
 
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
@@ -38,7 +37,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     }
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_ansi(std::io::stderr().is_terminal())
         .with_writer(std::io::stderr)
         .init();
     let runtime = tokio::runtime::Builder::new_current_thread()
