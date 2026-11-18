@@ -38,7 +38,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 - A relay binds a `public` member where a changed assignment puts it, and restores a saved binding only while the assignment still gives the address it gave when saved; the relay's own machine stays on loopback over saved and learned bindings (mesh.md sections 5.1 and 5.2);
 - On Linux, the probes on the WireGuard port move with the port when it changes (mesh.md section 5.5);
-- A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way (mesh.md section 15);
+- A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way, as is a failure the mobile gateway's periodic check of its forwarding finds (mesh.md section 15, devices.md section 6);
 - After an upgrade settles, and after `sudo nett install` brings a new program, the relay and the transport adapter restart on it; a changed launchd configuration is unloaded and loaded again (release.md sections 4 and 7);
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
@@ -53,6 +53,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-transport:a_port_held_by_another_process_is_opened_once_free`
 - `nett-mesh:a_failed_interface_comes_up_on_a_retry`
 - `nett-mesh:a_new_desired_state_replaces_a_pending_retry`
+- `nett-mesh:a_gateway_whose_forwarding_breaks_lists_it_until_a_retry_succeeds`
 - `nett-node:a_program_not_fetched_yet_is_fetched_again_later`
 - `nett-node:a_program_whose_signature_does_not_hold_is_marked_failed`
 - `nett-node:a_transfer_from_the_hub_that_breaks_off_is_fetched_from_the_hub_again`
@@ -60,7 +61,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-site:advertised_routes_keep_counting_after_they_are_removed`
 - `lab:port-change`, `lab:relay-restart`
 
-**Not yet guarded**: the restart of the helpers by `sudo nett install` with a new program; the unload and load of a changed launchd configuration.
+**Not yet guarded**: the restart of the helpers by `sudo nett install` with a new program, and the unload and load of a changed launchd configuration. Each needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, both are watched when each release is installed on real machines.
 
 ## 3. A switch acts on evidence that covers its reason
 
@@ -120,9 +121,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-node:what_the_hub_does_not_deliver_is_unavailable`
 - `nett-hub:a_stopping_hub_says_goodbye_and_records_the_disconnection`
 - `nett-lab:a_sender_connects_once_its_receiver_appears`
+- `nett-site:a_command_waits_for_the_site_lock_for_a_bounded_time`
 - `ci:Full flow of sudo nett install (needs root)`
 
-**Not yet guarded**: the wait for the site directory lock.
+- A `nett site` command waits at most 2 seconds for the site directory's lock, then says another command holds it.
 
 ## 5. Platform behavior is tested on the platform
 
@@ -203,7 +205,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett doctor` asks the DNS responder for this machine's own name and tells apart the ways a resolver can bypass it (names-and-diagnostics.md section 6);
 - A download over the upgrade limit names the URL and the limit;
 - `sudo nett install` prints the machine's keys only while it has no desired state;
-- A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6); a failure found by the mobile gateway's periodic check of its forwarding is retried the same way;
+- A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6);
 - Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file.
 
 **Guards**
@@ -211,8 +213,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:a_responder_that_does_not_answer_its_own_name_is_a_problem`
 - `nett-cli:a_resolv_conf_past_systemd_resolved_is_named`
 - `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
-- `nett-mesh:a_gateway_whose_forwarding_breaks_lists_it_until_a_retry_succeeds`
 - `nett-hub:logs_carry_no_terminal_color_codes`
 - `ci:Full flow of sudo nett install (needs root)`
 
-**Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub; the error for a download over the size limit.
+**Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub, which needs a Hub that serves those updates to the command line in a test; the error for a download over the size limit, since the client fetches only `https://` URLs verified against the system's root certificates, which a test cannot serve (the limit itself is guarded by `nett-node:a_program_larger_than_any_release_is_refused`, and the error is one message naming the URL and the limit).

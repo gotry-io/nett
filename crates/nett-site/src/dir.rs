@@ -26,7 +26,7 @@ pub const NODES_DIR: &str = "nodes";
 pub const DESIRED_FILE: &str = "desired.json";
 const LOCK_FILE: &str = ".lock";
 /// How long a command waits for the site directory's lock.
-const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// IPv4 prefix of the mesh (design/mesh.md section 3).
 const MESH_IPV4: &str = "100.88.0.0/16";
 

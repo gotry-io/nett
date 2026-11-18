@@ -1446,3 +1446,22 @@ fn a_site_without_devices_serializes_as_before() {
     assert!(!json.contains("gateway"));
     assert!(!json.contains("revoked_credentials"));
 }
+
+#[test]
+fn a_command_waits_for_the_site_lock_for_a_bounded_time() {
+    let (_tmp, dir) = temp_dir("lock");
+    SiteDir::init(&dir, "https://nett.invalid").expect("init");
+    let held = SiteDir::open(&dir).expect("open");
+    let started = std::time::Instant::now();
+    let second = SiteDir::open(&dir);
+    let waited = started.elapsed();
+    let err = second.err().expect("the lock is held");
+    assert!(
+        err.to_string().contains("another nett site command"),
+        "{err}"
+    );
+    assert!(waited >= crate::dir::LOCK_WAIT, "{waited:?}");
+    assert!(waited < crate::dir::LOCK_WAIT * 2, "{waited:?}");
+    drop(held);
+    assert!(SiteDir::open(&dir).is_ok());
+}
