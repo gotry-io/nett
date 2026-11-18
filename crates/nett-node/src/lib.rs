@@ -4,6 +4,7 @@
 
 pub mod config;
 pub mod coord;
+pub mod fetch;
 pub mod http;
 pub mod join;
 #[cfg(target_os = "macos")]

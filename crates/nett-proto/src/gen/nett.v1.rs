@@ -9,7 +9,7 @@ pub struct Envelope {
     pub reply_to: u64,
     #[prost(message, optional, tag = "3")]
     pub sent_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 50, 51, 40")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 50, 51, 52, 53, 40")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
@@ -44,6 +44,10 @@ pub mod envelope {
         BackupFetch(super::BackupFetch),
         #[prost(message, tag = "51")]
         Backup(super::Backup),
+        #[prost(message, tag = "52")]
+        ProgramFetch(super::ProgramFetch),
+        #[prost(message, tag = "53")]
+        ProgramPart(super::ProgramPart),
         /// An Envelope that exceeds the single-message limit is sent in fragments (protocol.md section
         /// 4.1)
         #[prost(message, tag = "40")]
@@ -196,6 +200,31 @@ pub struct Backup {
     #[prost(bytes = "vec", tag = "2")]
     pub data: ::prost::alloc::vec::Vec<u8>,
 }
+/// node → Hub: asks for the program of a release (design/protocol.md section 5, design/release.md
+/// section 7); sent when the release partition names a higher version for this machine's target.
+/// The Hub answers with ProgramPart from the start to the end, or Error NOT_FOUND
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProgramFetch {
+    #[prost(string, tag = "1")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub target: ::prost::alloc::string::String,
+}
+/// Hub → node: the next part of a program, in order; offset is where data starts, data is at most
+/// 48 KiB, size is the whole program's
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct ProgramPart {
+    #[prost(string, tag = "1")]
+    pub version: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub target: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "3")]
+    pub offset: u64,
+    #[prost(uint64, tag = "4")]
+    pub size: u64,
+    #[prost(bytes = "vec", tag = "5")]
+    pub data: ::prost::alloc::vec::Vec<u8>,
+}
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Chunk {
     #[prost(uint64, tag = "1")]
@@ -219,6 +248,8 @@ pub enum ErrorCode {
     /// Enrollment rejected: token expired, machine already enrolled, or wrong admission proof; the
     /// reason is in message
     EnrollmentRefused = 6,
+    /// The Hub does not hold what was asked for, for example the program of a release (ProgramFetch)
+    NotFound = 7,
 }
 impl ErrorCode {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -234,6 +265,7 @@ impl ErrorCode {
             Self::InvalidMessage => "INVALID_MESSAGE",
             Self::RateLimited => "RATE_LIMITED",
             Self::EnrollmentRefused => "ENROLLMENT_REFUSED",
+            Self::NotFound => "NOT_FOUND",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -246,6 +278,7 @@ impl ErrorCode {
             "INVALID_MESSAGE" => Some(Self::InvalidMessage),
             "RATE_LIMITED" => Some(Self::RateLimited),
             "ENROLLMENT_REFUSED" => Some(Self::EnrollmentRefused),
+            "NOT_FOUND" => Some(Self::NotFound),
             _ => None,
         }
     }

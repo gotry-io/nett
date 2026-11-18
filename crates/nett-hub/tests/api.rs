@@ -64,6 +64,7 @@ async fn expired_link_code_is_refused() {
         x25519_dalek::StaticSecret::from([200; 32]),
         URL.into(),
         None,
+        release_keys(),
     )
     .await
     .expect("hub");

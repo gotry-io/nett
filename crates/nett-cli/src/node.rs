@@ -79,6 +79,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         desired: dir.join("desired.json"),
         socket,
         upgrader,
+        link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: managed.then(|| std::sync::Mutex::new(None)),
     };
     drop(identity);

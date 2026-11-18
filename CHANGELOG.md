@@ -4,6 +4,16 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Upgrades fetch the new program through the Hub (ADR 0025): the Hub keeps a verified copy of the
+  current release's programs and relays a new release only once it holds them, and machines fetch
+  the program over their connection to the Hub, falling back to the website when the Hub does not
+  have it. Machines write the program to disk as it arrives instead of holding it in memory, and
+  verify it as before. A program that could not be fetched is fetched again after 1 minute, then
+  after twice as long each time up to an hour. A download that did not finish within 5 minutes
+  marked the release as failed for good: a machine whose path to the website was slow never
+  upgraded to it.
+- `nett-hub` keeps the programs of the current release in `releases/` in its data directory.
+
 ## [0.3.19] - 2026-11-17
 
 - Synology DSM 7 joins as a member: the install script and `sudo nett install <token>` as on

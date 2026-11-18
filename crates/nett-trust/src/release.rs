@@ -153,9 +153,14 @@ impl ReleaseKeys {
         Ok(Self(keys))
     }
 
-    /// Verifies a minisign signature (`.minisig` text) over `data` and returns its trusted
-    /// comment. Both the plain and the prehashed (BLAKE2b-512) forms are accepted.
-    pub fn verify(&self, data: &[u8], minisig: &str) -> Result<String, ReleaseError> {
+    /// Verifies a minisign signature (`.minisig` text) over data whose BLAKE2b-512 is `blake2b`,
+    /// and returns its trusted comment. Signatures are in the prehashed form minisign writes by
+    /// default, so a program can be verified from digests computed while it arrives.
+    pub fn verify_prehashed(
+        &self,
+        blake2b: &[u8; 64],
+        minisig: &str,
+    ) -> Result<String, ReleaseError> {
         let sig = Minisig::parse(minisig)?;
         let key = self
             .0
@@ -163,16 +168,8 @@ impl ReleaseKeys {
             .find(|k| k.id == sig.key_id)
             .ok_or_else(|| ReleaseError::UnknownKey(key_id(&sig.key_id)))?;
         let public = UnparsedPublicKey::new(&ED25519, &key.key);
-        let digest;
-        let message: &[u8] = if sig.prehashed {
-            use blake2::digest::Digest as _;
-            digest = blake2::Blake2b512::digest(data);
-            digest.as_slice()
-        } else {
-            data
-        };
         public
-            .verify(message, &sig.signature)
+            .verify(blake2b, &sig.signature)
             .map_err(|_| ReleaseError::BadSignature)?;
         let mut global = sig.signature.to_vec();
         global.extend_from_slice(sig.trusted_comment.as_bytes());
@@ -183,9 +180,8 @@ impl ReleaseKeys {
     }
 }
 
-/// A parsed `.minisig` file.
+/// A parsed `.minisig` file, in the prehashed form.
 struct Minisig {
-    prehashed: bool,
     key_id: [u8; 8],
     signature: [u8; 64],
     trusted_comment: String,
@@ -217,13 +213,12 @@ impl Minisig {
         if sig.len() != 74 || global.len() != 64 {
             return Err(bad("wrong length"));
         }
-        let prehashed = match &sig[..2] {
-            b"ED" => true,
-            b"Ed" => false,
+        match &sig[..2] {
+            b"ED" => {}
+            b"Ed" => return Err(bad("not prehashed; sign with minisign 0.11 or later")),
             _ => return Err(bad("not an Ed25519 signature")),
-        };
+        }
         Ok(Self {
-            prehashed,
             key_id: sig[2..10].try_into().map_err(|_| bad("key ID"))?,
             signature: sig[10..74].try_into().map_err(|_| bad("signature"))?,
             trusted_comment,
@@ -267,6 +262,17 @@ impl Manifest {
             serde_json::from_slice(bytes).map_err(|e| ReleaseError::Manifest(e.to_string()))?;
         manifest.version()?;
         for (target, program) in &manifest.programs {
+            // Target names become file names on the Hub (section 7)
+            if target.is_empty()
+                || target.len() > 64
+                || !target
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+            {
+                return Err(ReleaseError::Manifest(format!(
+                    "{target:?} is not a target name"
+                )));
+            }
             if !program.url.starts_with("https://") || program.url.len() > 2048 {
                 return Err(ReleaseError::Manifest(format!(
                     "{target}: the URL must be https"
@@ -309,6 +315,63 @@ pub fn current_target() -> Option<&'static str> {
     }
 }
 
+/// The digests a program is verified by, computed as it arrives so that it is never held whole
+/// (design/release.md section 7).
+pub struct ProgramDigest {
+    sha256: ring::digest::Context,
+    blake2b: blake2::Blake2b512,
+    len: u64,
+}
+
+/// What [`ProgramDigest`] computed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Digests {
+    pub sha256: [u8; 32],
+    pub blake2b: [u8; 64],
+}
+
+impl Default for ProgramDigest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProgramDigest {
+    pub fn new() -> Self {
+        use blake2::digest::Digest as _;
+        Self {
+            sha256: ring::digest::Context::new(&ring::digest::SHA256),
+            blake2b: blake2::Blake2b512::new(),
+            len: 0,
+        }
+    }
+
+    pub fn update(&mut self, data: &[u8]) {
+        use blake2::digest::Digest as _;
+        self.sha256.update(data);
+        self.blake2b.update(data);
+        self.len += data.len() as u64;
+    }
+
+    /// The bytes seen so far.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn finish(self) -> Digests {
+        use blake2::digest::Digest as _;
+        let mut sha256 = [0; 32];
+        sha256.copy_from_slice(self.sha256.finish().as_ref());
+        let mut blake2b = [0; 64];
+        blake2b.copy_from_slice(&self.blake2b.finalize());
+        Digests { sha256, blake2b }
+    }
+}
+
 /// Checks a downloaded program for `target` against the manifest: SHA-256, release signature and
 /// the signed comment for this version and target.
 pub fn verify_program(
@@ -318,12 +381,24 @@ pub fn verify_program(
     program: &Program,
     bytes: &[u8],
 ) -> Result<(), ReleaseError> {
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+    let mut digest = ProgramDigest::new();
+    digest.update(bytes);
+    verify_program_digests(keys, version, target, program, &digest.finish())
+}
+
+/// [`verify_program`] from the digests of a program that was not held whole.
+pub fn verify_program_digests(
+    keys: &ReleaseKeys,
+    version: Version,
+    target: &str,
+    program: &Program,
+    digests: &Digests,
+) -> Result<(), ReleaseError> {
+    let hex: String = digests.sha256.iter().map(|b| format!("{b:02x}")).collect();
     if hex != program.sha256 {
         return Err(ReleaseError::Digest);
     }
-    let comment = keys.verify(bytes, &program.minisig)?;
+    let comment = keys.verify_prehashed(&digests.blake2b, &program.minisig)?;
     let expected = trusted_comment(version, target);
     if comment != expected {
         return Err(ReleaseError::Comment {
@@ -384,6 +459,13 @@ mod tests {
         )
     }
 
+    /// Verifies a signature over `data` the way programs are: from its BLAKE2b-512.
+    fn verify_data(keys: &ReleaseKeys, data: &[u8], minisig: &str) -> Result<String, ReleaseError> {
+        let mut digest = ProgramDigest::new();
+        digest.update(data);
+        keys.verify_prehashed(&digest.finish().blake2b, minisig)
+    }
+
     #[test]
     fn the_built_in_keys_refuse_a_development_key() {
         // A build made with NETT_RELEASE_PUBLIC_KEYS trusts a development key; an official build
@@ -392,9 +474,7 @@ mod tests {
         let data = b"a program signed by a development key";
         let sig = sign(&pair, id, data, "nett v99.0.0 nett", true);
         assert!(matches!(
-            ReleaseKeys::built_in()
-                .expect("built-in keys")
-                .verify(data, &sig),
+            verify_data(&ReleaseKeys::built_in().expect("built-in keys"), data, &sig),
             Err(ReleaseError::UnknownKey(_))
         ));
     }
@@ -406,17 +486,18 @@ mod tests {
         let data = include_bytes!("../tests/data/SHA256SUMS");
         let sig = include_str!("../tests/data/SHA256SUMS.minisig");
         assert_eq!(
-            keys.verify(data, sig).expect("verified"),
+            verify_data(&keys, data, sig).expect("verified"),
             "nett v0.1.5 SHA256SUMS"
         );
         let mut tampered = data.to_vec();
         tampered[0] ^= 1;
-        assert_eq!(keys.verify(&tampered, sig), Err(ReleaseError::BadSignature));
+        assert_eq!(
+            verify_data(&keys, &tampered, sig),
+            Err(ReleaseError::BadSignature)
+        );
         // the backup key alone does not accept what the primary key signed
         assert!(matches!(
-            ReleaseKeys::parse(BACKUP)
-                .expect("backup")
-                .verify(data, sig),
+            verify_data(&ReleaseKeys::parse(BACKUP).expect("backup"), data, sig),
             Err(ReleaseError::UnknownKey(_))
         ));
         assert!(format!("{keys:?}").contains("16CDF76C9920EED7"));
@@ -436,19 +517,21 @@ mod tests {
                 .map(|x| format!("{x:02x}"))
                 .collect()
         };
-        for prehashed in [true, false] {
+        {
             let program = Program {
                 url: "https://nett.example.com/dl/nett".into(),
                 sha256: hex(&bytes),
-                minisig: sign(
-                    &pair,
-                    id,
-                    &bytes,
-                    &trusted_comment(version, target),
-                    prehashed,
-                ),
+                minisig: sign(&pair, id, &bytes, &trusted_comment(version, target), true),
             };
             verify_program(&keys, version, target, &program, &bytes).expect("verified");
+            // digests computed part by part, as the program arrives, verify the same
+            let mut digest = ProgramDigest::new();
+            for part in bytes.chunks(4) {
+                digest.update(part);
+            }
+            assert_eq!(digest.len(), bytes.len() as u64);
+            verify_program_digests(&keys, version, target, &program, &digest.finish())
+                .expect("verified from digests");
             // another program under the same manifest entry
             assert_eq!(
                 verify_program(&keys, version, target, &program, b"other"),
@@ -485,9 +568,16 @@ mod tests {
         let forged = sign(&pair, id, &bytes, "nett v0.1.0 x", true)
             .replace("nett v0.1.0 x", &trusted_comment(version, target));
         assert_eq!(
-            keys.verify(&bytes, &forged),
+            verify_data(&keys, &bytes, &forged),
             Err(ReleaseError::BadSignature)
         );
+        // a signature in minisign's legacy form, over the data itself, cannot be checked from
+        // digests and is refused
+        let legacy = sign(&pair, id, &bytes, &trusted_comment(version, target), false);
+        assert!(matches!(
+            verify_data(&keys, &bytes, &legacy),
+            Err(ReleaseError::Signature(_))
+        ));
     }
 
     #[test]
@@ -511,6 +601,12 @@ mod tests {
         assert!(Manifest::parse(good("https://x/p", &"AB".repeat(32)).as_bytes()).is_err());
         assert!(Manifest::parse(&vec![b' '; MAX_MANIFEST_BYTES + 1]).is_err());
         assert!(Manifest::parse(br#"{"version":"0.2","programs":{}}"#).is_err());
+        // a target name that is not one cannot name a file on the Hub
+        for target in ["../../etc/x", "", "X86", "a/b"] {
+            let renamed = good("https://nett.example.com/p", &digest)
+                .replace("x86_64-unknown-linux-musl", target);
+            assert!(Manifest::parse(renamed.as_bytes()).is_err(), "{target}");
+        }
 
         let v = |s: &str| s.parse::<Version>();
         assert!(v("0.10.0").expect("v") > v("0.9.9").expect("v"));

@@ -41,6 +41,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way (mesh.md section 15);
 - After an upgrade settles, and after `sudo nett install` brings a new program, the relay and the transport adapter restart on it; a changed launchd configuration is unloaded and loaded again (release.md sections 4 and 7);
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
+- The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2).
 
 **Guards**
@@ -52,6 +53,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-transport:a_port_held_by_another_process_is_opened_once_free`
 - `nett-mesh:a_failed_interface_comes_up_on_a_retry`
 - `nett-mesh:a_new_desired_state_replaces_a_pending_retry`
+- `nett-node:a_program_not_fetched_yet_is_fetched_again_later`
+- `nett-node:a_program_whose_signature_does_not_hold_is_marked_failed`
+- `nett-node:a_transfer_from_the_hub_that_breaks_off_is_fetched_from_the_hub_again`
+- `nett-hub:only_verified_programs_are_served`
 - `nett-site:advertised_routes_keep_counting_after_they_are_removed`
 - `lab:port-change`, `lab:relay-restart`
 
@@ -91,7 +96,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 ## 4. Waits are bounded and nothing slow holds up a loop that must keep going
 
-**Holds**: every wait has a total time limit, and a backoff starts over once things work again. A slow disk, a slow client or a flood never stalls forwarding or a server: costly work runs off the loop, and floods are capped per source before it. A process that stops lets its sessions finish and record their end.
+**Holds**: every wait has a total time limit, and a backoff starts over once things work again; a transfer whose length depends on the link instead stops when it makes no progress, and holds up nothing while it runs. A slow disk, a slow client or a flood never stalls forwarding or a server: costly work runs off the loop, and floods are capped per source before it. A process that stops lets its sessions finish and record their end.
 
 **Breaks when** disk writes run in the forwarding loop; a time limit applies to each read instead of the whole request; every handshake is handled before any limit; a reconnect wait only grows; a command reports done while the service is still exiting; a server exits under its long-lived connections.
 
@@ -101,6 +106,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The local socket gives each request and the input after it a total time limit (status.md section 4);
 - The userspace data plane caps handshake messages per source and in total before the session layer (userspace.md section 4.1);
 - nett-node's reconnect wait starts over after a session that outlasted the longest wait (protocol.md section 8);
+- A program download is abandoned after 60 seconds without data, from the Hub or the website, and runs in its own task beside the session (release.md section 7);
 - `sudo nett uninstall` waits until launchd no longer has the service;
 - The Hub says goodbye to each session and waits for it to record its end before exiting (hub.md section 8).
 
@@ -111,6 +117,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:handshake_floods_are_capped_per_source_and_in_total`
 - `nett-mesh:over_budget_handshakes_get_no_response`
 - `nett-node:reconnecting_starts_over_after_a_lasting_session`
+- `nett-node:what_the_hub_does_not_deliver_is_unavailable`
 - `nett-hub:a_stopping_hub_says_goodbye_and_records_the_disconnection`
 - `nett-lab:a_sender_connects_once_its_receiver_appears`
 - `ci:Full flow of sudo nett install (needs root)`
@@ -174,12 +181,15 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 **Where it holds**
 
 - A WireGuard port that nett uses itself on the machine (the probe port, the TLS loopback ports) is rejected when the desired state is built and when it is applied (site.md section 4);
-- `sudo nett install`, running as root, opens the desired state from the user's directory without following links or blocking, and checks the file it opened.
+- `sudo nett install`, running as root, opens the desired state from the user's directory without following links or blocking, and checks the file it opened;
+- The target names of a release manifest are checked before the Hub names files after them, and the version and target a node asks for are only compared with what the Hub holds, never used as a path (release.md section 7).
 
 **Guards**
 
 - `nett-mesh:listen_port_avoids_the_ports_nett_uses_itself`
 - `nett-cli:reads_only_regular_files_without_following_links_or_blocking`
+- `nett-trust:manifests_and_versions_from_the_network_are_checked`
+- `nett-hub:nodes_fetch_the_program_of_a_release_from_the_hub`
 
 ## 8. Output says what happened and what to do
 

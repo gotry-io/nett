@@ -52,6 +52,6 @@ nett-relay.workspace = true
 [dev-dependencies]
 # Test directories removed when a test ends
 tempfile.workspace = true
-blake2.workspace = true
 nett-site.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
+# test-util: tests that wait for timeouts run on a paused clock
+tokio = { workspace = true, features = ["rt", "macros", "test-util"] }

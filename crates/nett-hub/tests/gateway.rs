@@ -33,6 +33,7 @@ fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
         // No mesh process: after the desired state is written it is acknowledged as pending
         socket: dir.join("mesh.sock"),
         upgrader: None,
+        link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,
     }
 }
@@ -213,18 +214,26 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
     acked(&hub, &mac, 1).await;
 
     // A manifest that does not parse is not taken
-    assert!(hub.set_release(b"{\"version\": \"1\"}".to_vec()).is_err());
-    // A new release reaches the connected node as an increment; this one does not upgrade itself
+    assert!(
+        hub.take_release(b"{\"version\": \"1\"}".to_vec())
+            .await
+            .is_err()
+    );
+    // A new release reaches the connected node as an increment; this one does not upgrade itself.
+    // Nothing serves its program, so the Hub does not hold it and relays the manifest all the same
     let manifest = serde_json::json!({
         "version": "9.9.9",
         "programs": { "x86_64-unknown-linux-musl": {
-            "url": "https://nett.example.com/dl/nett-9.9.9-x86_64-unknown-linux-musl",
+            "url": "https://127.0.0.1:9/dl/nett-9.9.9-x86_64-unknown-linux-musl",
             "sha256": "ab".repeat(32),
             "minisig": include_str!("../../nett-trust/tests/data/SHA256SUMS.minisig"),
         }}
     });
-    hub.set_release(manifest.to_string().into_bytes())
+    let missing = hub
+        .take_release(manifest.to_string().into_bytes())
+        .await
         .expect("manifest");
+    assert_eq!(missing.len(), 1, "{missing:?}");
     let mut answer = None;
     for _ in 0..200 {
         answer = hub
@@ -254,6 +263,76 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
         .find(|m| m.name == "mac")
         .expect("mac");
     assert_eq!(m.upgrade_result.as_deref(), Some("rejected"));
+
+    stop.send(()).ok();
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("the node stops")
+        .expect("no panic");
+}
+
+/// The Hub holds the verified programs of the current release before it relays the manifest, and a
+/// node fetches one over its session (ADR 0025); a program the Hub does not hold is answered with
+/// `NOT_FOUND`, which leaves the node to fetch it from its URL
+#[tokio::test]
+async fn nodes_fetch_the_program_of_a_release_from_the_hub() {
+    let (hub, app, token, _site, state, linked_tmp) =
+        linked("gateway-program", "https://127.0.0.1").await;
+    assert_eq!(push(&app, &token, &state).await.0, StatusCode::OK);
+    let target = "x86_64-unknown-linux-musl";
+    let version: nett_trust::release::Version = "9.9.9".parse().expect("version");
+    // Several parts, the last one shorter
+    let program: Vec<u8> = (0..150_000u32).map(|i| (i % 253) as u8).collect();
+    // Already on disk, as after a restart of the Hub: checked again, not fetched
+    let releases = linked_tmp.path().join(nett_hub::mirror::DIR);
+    std::fs::create_dir_all(&releases).expect("releases");
+    std::fs::write(releases.join(format!("nett-{version}-{target}")), &program).expect("program");
+    std::fs::write(
+        releases.join("nett-9.9.8-x86_64-unknown-linux-musl"),
+        b"older",
+    )
+    .expect("older");
+    let manifest = release_key().manifest(version, target, "https://127.0.0.1:9/nett", &program);
+    let missing = hub.take_release(manifest).await.expect("manifest");
+    assert!(missing.is_empty(), "{missing:?}");
+    // Only the current version is kept
+    assert!(
+        !releases
+            .join("nett-9.9.8-x86_64-unknown-linux-musl")
+            .exists()
+    );
+
+    let url = serve(hub.clone()).await;
+    let (_dir_tmp, dir) = temp_dir("gateway-program-mac");
+    let mac = state
+        .machine(&name("mac"))
+        .expect("mac")
+        .node_id
+        .to_string();
+    let node = node(&url, &mac, identity(2), &dir);
+    let link = node.link.clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let task = tokio::spawn(nett_node::session::run(node, async move {
+        stopped.await.ok();
+    }));
+    acked(&hub, &mac, 1).await;
+
+    let path = dir.join("nett.new");
+    let mut file = nett_node::fetch::ProgramFile::create(&path).expect("file");
+    nett_node::fetch::from_hub(&link, "9.9.9", target, &mut file)
+        .await
+        .expect("fetched from the Hub");
+    file.finish().expect("written");
+    assert_eq!(std::fs::read(&path).expect("read"), program);
+
+    for (version, target) in [("9.9.8", target), ("9.9.9", "aarch64-apple-darwin")] {
+        let mut file = nett_node::fetch::ProgramFile::create(&path).expect("file");
+        let result = nett_node::fetch::from_hub(&link, version, target, &mut file).await;
+        assert!(
+            matches!(&result, Err(nett_node::fetch::FetchError::Unavailable(r)) if r.contains("does not hold")),
+            "{result:?}"
+        );
+    }
 
     stop.send(()).ok();
     tokio::time::timeout(Duration::from_secs(5), task)

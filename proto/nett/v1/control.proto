@@ -28,6 +28,8 @@ message Envelope {
     PathSwitch path_switch = 32;
     BackupFetch backup_fetch = 50;
     Backup backup = 51;
+    ProgramFetch program_fetch = 52;
+    ProgramPart program_part = 53;
     // An Envelope that exceeds the single-message limit is sent in fragments (protocol.md section
     // 4.1)
     Chunk chunk = 40;
@@ -83,6 +85,8 @@ enum ErrorCode {
   // Enrollment rejected: token expired, machine already enrolled, or wrong admission proof; the
   // reason is in message
   ENROLLMENT_REFUSED = 6;
+  // The Hub does not hold what was asked for, for example the program of a release (ProgramFetch)
+  NOT_FOUND = 7;
 }
 
 message Error {
@@ -168,6 +172,24 @@ message BackupFetch {
 message Backup {
   bytes sha256 = 1;
   bytes data = 2;
+}
+
+// node → Hub: asks for the program of a release (design/protocol.md section 5, design/release.md
+// section 7); sent when the release partition names a higher version for this machine's target.
+// The Hub answers with ProgramPart from the start to the end, or Error NOT_FOUND
+message ProgramFetch {
+  string version = 1;
+  string target = 2;
+}
+
+// Hub → node: the next part of a program, in order; offset is where data starts, data is at most
+// 48 KiB, size is the whole program's
+message ProgramPart {
+  string version = 1;
+  string target = 2;
+  uint64 offset = 3;
+  uint64 size = 4;
+  bytes data = 5;
 }
 
 message Chunk {

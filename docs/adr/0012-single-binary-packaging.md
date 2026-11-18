@@ -13,8 +13,8 @@ A node needs the command-line tool, the high-privilege nett-node, and the low-pr
 - The Hub is released separately as `nett-hub` and is installed only on the Hub host;
 - node, the mesh process, the transport adapter, and relay run as separate system services, each with its own identity and privileges (on macOS and Synology DSM the mesh process carries the TLS transport itself, ADR 0013);
 - Whether relay runs is decided by the Hub based on node reachability and signed policy, and relay is started and stopped by nett-node, not decided by the installation process;
-- The install script and binaries are distributed by the user's own Hub, the script has the Hub public key fingerprint preset, and release packages must carry signatures;
-- **The release signing key belongs to the project, not to the user's Hub**. The public keys are embedded into `nett` at build time (two keys, primary and backup, ADR 0020), and nodes use them to verify every release package. The install script itself is provided by the Hub and cannot serve as an independent trust anchor; on first installation, the user can check against the fingerprint published on the project home page;
+- New machines install from the project website (ADR 0020), and machines upgrade with programs fetched through their Hub (ADR 0025); release packages carry signatures;
+- **The release signing key belongs to the project, not to the user's Hub**. The public keys are embedded into `nett` at build time (two keys, primary and backup, ADR 0020), and nodes use them to verify every release package, wherever it came from;
 - **Downgrade protection**: a node automatically accepts only higher versions; a rollback can only go to the version last installed on this machine; other downgrades need a passkey signature;
 - On Home Assistant OS it is provided as an add-on: a container image plus an add-on repository (ADR 0017), and the image is signed as well. The add-on is upgraded by HA, not through the `release` partition; downgrade protection is checked at startup.
 
@@ -34,4 +34,4 @@ A node needs the command-line tool, the high-privilege nett-node, and the low-pr
 ## Consequences
 
 - The relay process's file contains node code that does not execute; the security boundary relies on the low-privilege user and on not holding the mesh private key;
-- The release process needs to sign the executable, and the Hub needs to cache and serve release packages.
+- The release process needs to sign the executable, and the Hub caches and serves the programs of the current release (ADR 0025).

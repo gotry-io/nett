@@ -21,6 +21,10 @@ const DB_FILE: &str = "hub.db";
 const DEFAULT_RELEASES: &str = "https://nett.gotry.io/release.json";
 const RELEASES_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
 const RELEASES_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// A program of the release the Hub could not fetch is fetched again after this long, then after
+/// twice as long each time up to `RETRY_MAX` (design/release.md section 7).
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_secs(60);
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(3600);
 
 const USAGE: &str = "usage: nett-hub <command> [--data <dir>]
 
@@ -254,13 +258,15 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Fetches the release manifest now and every 6 hours; a failure keeps the previous one.
+/// Fetches the release manifest now and every 6 hours, and holds its programs; a failure keeps the
+/// previous manifest. While a program is not held, both are fetched again sooner.
 fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
     if source == "off" {
         tracing::info!("upgrades are off");
         return;
     }
     tokio::spawn(async move {
+        let mut retry = RETRY_FIRST;
         loop {
             let fetched = if source.starts_with("https://") {
                 nett_node::http::get(
@@ -278,11 +284,28 @@ fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
                 .map_err(|e| e.to_string())
                 .and_then(|b| b.ok_or_else(|| "not a regular file".to_owned()))
             };
-            match fetched.and_then(|bytes| hub.set_release(bytes)) {
-                Ok(()) => tracing::debug!(%source, "release manifest checked"),
-                Err(e) => tracing::warn!(%source, error = %e, "fetching the release manifest"),
-            }
-            tokio::time::sleep(RELEASES_EVERY).await;
+            let taken = match fetched {
+                Ok(bytes) => hub.take_release(bytes).await,
+                Err(e) => Err(e),
+            };
+            let wait = match taken {
+                Ok(missing) if missing.is_empty() => {
+                    tracing::debug!(%source, "release manifest checked");
+                    retry = RETRY_FIRST;
+                    RELEASES_EVERY
+                }
+                Ok(missing) => {
+                    let wait = retry;
+                    retry = (retry * 2).min(RETRY_MAX);
+                    tracing::info!(%source, missing = missing.len(), wait_secs = wait.as_secs(), "programs of the release not held yet; fetching them again later");
+                    wait
+                }
+                Err(e) => {
+                    tracing::warn!(%source, error = %e, "fetching the release manifest");
+                    RELEASES_EVERY
+                }
+            };
+            tokio::time::sleep(wait).await;
         }
     });
 }
@@ -299,11 +322,14 @@ async fn serve(
         db.hub().await?.map(|h| h.url).context(
             "the Hub is not initialized; run `nett-hub init --url https://<host>` first",
         )?;
+    let release_keys = nett_trust::release::ReleaseKeys::built_in()
+        .context("reading the release public keys built into nett-hub")?;
     let hub = hub::Hub::load(
         db,
         x25519_dalek::StaticSecret::from(*key.as_bytes()),
         url,
         Some(data.to_path_buf()),
+        release_keys,
     )
     .await
     .map_err(anyhow::Error::msg)?;

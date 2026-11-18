@@ -64,6 +64,7 @@ async fn a_connected_machine_has_events_through_the_api() {
         desired: dir.join("desired.json"),
         socket: dir.join("mesh.sock"),
         upgrader: None,
+        link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,
     };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();

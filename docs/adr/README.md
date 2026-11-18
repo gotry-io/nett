@@ -30,6 +30,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0022](0022-local-signing-before-hub.md) | Before joining the Hub, replace existing tunnels with local signing | Accepted |
 | [0023](0023-access-default-deny.md) | Access is denied by default | Accepted |
 | [0024](0024-cli-first-headless-hub.md) | The command line is the operating interface; the Hub ships without a console at first | Accepted |
+| [0025](0025-upgrades-through-the-hub.md) | Upgrades fetch the program through the Hub | Accepted |
 
 Template:
 

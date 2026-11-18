@@ -56,6 +56,7 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
         desired: dir.join("desired.json"),
         socket: dir.join("mesh.sock"),
         upgrader: None,
+        link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,
     };
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();

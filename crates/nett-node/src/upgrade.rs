@@ -1,20 +1,22 @@
-//! Automatic upgrades (design/release.md section 7, ADR 0020): the Hub relays the release
-//! manifest; nett-node downloads the program for its target, verifies it against the release
-//! keys built into `nett`, installs only a higher version, restarts the mesh service and rolls
-//! back when it does not come up. The replaced program is kept as `nett.previous`, the only
-//! version a machine rolls back to. Nothing here trusts the Hub: the signature decides.
+//! Automatic upgrades (design/release.md section 7, ADR 0020, ADR 0025): the Hub relays the
+//! release manifest; nett-node fetches the program for its target from the Hub, or from the URL in
+//! the manifest, verifies it against the release keys built into `nett`, installs only a higher
+//! version, restarts the mesh service and rolls back when it does not come up. The replaced program
+//! is kept as `nett.previous`, the only version a machine rolls back to. Nothing here trusts the
+//! Hub: the signature decides.
 
 use std::collections::BTreeMap;
-use std::io::Write as _;
-use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use nett_trust::release::{
-    MAX_PROGRAM_BYTES, Manifest, Program, ReleaseKeys, Version, verify_program,
+    Manifest, Program, ReleaseError, ReleaseKeys, Version, verify_program_digests,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::fetch::{FetchError, HubLink, ProgramFile};
 
 /// How long the mesh service has to answer on its local interface after a restart.
 pub const MESH_START: Duration = Duration::from_secs(60);
@@ -23,7 +25,10 @@ pub const MESH_START: Duration = Duration::from_secs(60);
 const MAX_STARTS: u32 = 3;
 /// After running this long, a new nett-node counts as working even while the Hub is away.
 pub const SETTLED: Duration = Duration::from_secs(5 * 60);
-const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+/// After the program of a release could not be fetched, it is fetched again after this long, then
+/// after twice as long each time up to [`RETRY_MAX`] (design/release.md section 7).
+const RETRY_FIRST: Duration = Duration::from_secs(60);
+const RETRY_MAX: Duration = Duration::from_secs(60 * 60);
 const SERVICE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Failed versions remembered so that they are not tried again.
 const MAX_FAILED: usize = 16;
@@ -188,31 +193,127 @@ impl Upgrader {
         })
     }
 
-    /// Downloads, verifies and installs `version`, then restarts the mesh service. On success the
-    /// caller exits so that the service manager starts nett-node from the new program. A failure
-    /// is recorded and not retried for this version.
-    pub async fn upgrade(&self, version: Version, program: &Program) -> Result<(), String> {
-        let result = self.try_upgrade(version, program).await;
-        if let Err(reason) = &result {
-            tracing::warn!(%version, %reason, "upgrade not installed");
-            self.record_failure(version, reason);
+    /// Fetches, verifies and installs `version`, then restarts the mesh service. On success the
+    /// caller exits so that the service manager starts nett-node from the new program. A program
+    /// that could not be fetched is fetched again later, and `progress` says why it is still
+    /// waiting; a program that fails verification from every source, or fails to install or to
+    /// start, is recorded and not tried again for this version.
+    pub async fn upgrade(
+        &self,
+        version: Version,
+        program: &Program,
+        link: Option<&HubLink>,
+        progress: &tokio::sync::watch::Sender<Progress>,
+    ) -> Result<(), String> {
+        let mut wait = RETRY_FIRST;
+        loop {
+            match self.fetch(version, program, link).await {
+                Fetched::Verified => break,
+                Fetched::Unavailable(reason) => {
+                    let reason = format!(
+                        "not fetched yet ({reason}); trying again in {} min",
+                        wait.as_secs() / 60
+                    );
+                    tracing::warn!(%version, %reason, "fetching the new version");
+                    progress.send_replace(Progress::Waiting(reason));
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(RETRY_MAX);
+                }
+                Fetched::Rejected(reason) => return Err(self.failed(version, reason)),
+            }
         }
-        result
-    }
-
-    async fn try_upgrade(&self, version: Version, program: &Program) -> Result<(), String> {
-        tracing::info!(%version, url = %program.url, "downloading the new version");
-        let bytes = crate::http::get(&program.url, MAX_PROGRAM_BYTES, DOWNLOAD_TIMEOUT)
-            .await
-            .map_err(|e| format!("downloading it: {e}"))?;
-        verify_program(&self.keys, version, &self.target, program, &bytes)
-            .map_err(|e| e.to_string())?;
+        // From here the upgrade finishes even when a newer release arrives: the install runs on its
+        // own thread and replaces files
+        progress.send_replace(Progress::Installing);
         let this = self.clone_paths();
         let services = self.services.clone();
         let current = self.current;
-        tokio::task::spawn_blocking(move || this.install(&bytes, version, current, &*services))
+        tokio::task::spawn_blocking(move || this.install(version, current, &*services))
             .await
-            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())
+            .and_then(|installed| installed)
+            .map_err(|reason| self.failed(version, reason))
+    }
+
+    fn failed(&self, version: Version, reason: String) -> String {
+        tracing::warn!(%version, %reason, "upgrade not installed");
+        self.record_failure(version, &reason);
+        reason
+    }
+
+    /// Fetches the program into `nett.new` next to the installed one, from the Hub and then from its
+    /// URL, until one source delivers a program that verifies.
+    async fn fetch(&self, version: Version, program: &Program, link: Option<&HubLink>) -> Fetched {
+        let path = self.program.with_file_name("nett.new");
+        let mut unavailable = Vec::new();
+        let mut rejected = Vec::new();
+        for from_hub in [true, false] {
+            if from_hub && link.is_none() {
+                continue;
+            }
+            let source = if from_hub { "the Hub" } else { "its URL" };
+            let mut file = match ProgramFile::create(&path) {
+                Ok(file) => file,
+                Err(e) => {
+                    unavailable.push(e);
+                    continue;
+                }
+            };
+            let fetched = match link.filter(|_| from_hub) {
+                Some(link) => {
+                    crate::fetch::from_hub(link, &version.to_string(), &self.target, &mut file)
+                        .await
+                }
+                None => crate::fetch::from_url(&program.url, &mut file).await,
+            };
+            let received = file.len();
+            let digests = match fetched.map(|()| file.finish()) {
+                Ok(Ok(digests)) => digests,
+                Ok(Err(e)) => {
+                    unavailable.push(e);
+                    continue;
+                }
+                // The Hub holds the program and was sending it: it is fetched from the Hub again
+                // once the session is back, rather than over the website's path
+                Err(FetchError::Unavailable(e)) if from_hub && received > 0 => {
+                    unavailable.push(e);
+                    break;
+                }
+                Err(FetchError::Unavailable(e)) => {
+                    unavailable.push(e);
+                    continue;
+                }
+                Err(FetchError::Refused(e)) => {
+                    rejected.push(e);
+                    continue;
+                }
+            };
+            match verify_program_digests(&self.keys, version, &self.target, program, &digests) {
+                Ok(()) => {
+                    tracing::info!(%version, from = source, "fetched and verified the new version");
+                    return Fetched::Verified;
+                }
+                Err(ReleaseError::Digest) => {
+                    rejected.push(format!(
+                        "the program from {source}: {}",
+                        ReleaseError::Digest
+                    ));
+                }
+                // These are the bytes the manifest names, and every source delivers the same:
+                // their signature does not hold anywhere
+                Err(e) => {
+                    std::fs::remove_file(&path).ok();
+                    return Fetched::Rejected(format!("the program from {source}: {e}"));
+                }
+            }
+        }
+        std::fs::remove_file(&path).ok();
+        if unavailable.is_empty() {
+            Fetched::Rejected(rejected.join("; "))
+        } else {
+            unavailable.extend(rejected);
+            Fetched::Unavailable(unavailable.join("; "))
+        }
     }
 
     /// The paths, for the blocking part.
@@ -294,6 +395,28 @@ impl Upgrader {
     }
 }
 
+/// Where a running upgrade is, reported to the Hub as it changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Progress {
+    #[default]
+    Fetching,
+    /// No source delivered the program yet, and why; it is fetched again later.
+    Waiting(String),
+    /// Verified and being installed.
+    Installing,
+}
+
+/// What fetching the program of a release came to.
+#[derive(Debug, PartialEq, Eq)]
+enum Fetched {
+    /// `nett.new` holds the verified program.
+    Verified,
+    /// No source delivered it; it is fetched again later.
+    Unavailable(String),
+    /// Every source delivered something that is not this release's program.
+    Rejected(String),
+}
+
 struct Paths {
     program: PathBuf,
     command: Option<PathBuf>,
@@ -306,17 +429,15 @@ impl Paths {
         self.program.with_file_name("nett.previous")
     }
 
-    /// Installs the verified program, restarts the mesh service and checks it; rolls back when
-    /// it does not answer.
+    /// Installs the verified program waiting in `nett.new`, restarts the mesh service and checks
+    /// it; rolls back when it does not answer.
     fn install(
         &self,
-        bytes: &[u8],
         version: Version,
         current: Version,
         services: &dyn Services,
     ) -> Result<(), String> {
         let new = self.program.with_file_name("nett.new");
-        write_program(&new, bytes)?;
         if self.program.exists() {
             std::fs::rename(&self.program, self.previous())
                 .map_err(|e| format!("keeping {}: {e}", self.program.display()))?;
@@ -324,7 +445,7 @@ impl Paths {
         std::fs::rename(&new, &self.program)
             .map_err(|e| format!("installing {}: {e}", self.program.display()))?;
         if let Some(command) = &self.command
-            && let Err(e) = replace_command(command, bytes)
+            && let Err(e) = replace_command(command, &self.program)
         {
             tracing::warn!(error = %e, "updating the command copy");
         }
@@ -381,22 +502,6 @@ fn wait_for(mut ok: impl FnMut() -> bool, within: Duration) -> bool {
     }
 }
 
-/// Writes an executable owned by the caller (root), mode `0755`, without following links.
-fn write_program(path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let io = |e: std::io::Error| format!("writing {}: {e}", path.display());
-    std::fs::remove_file(path).ok();
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o755)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)
-        .map_err(io)?;
-    file.write_all(bytes).map_err(io)?;
-    file.sync_all().map_err(io)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).map_err(io)
-}
-
 /// Whether the command at `path` is nett's own copy: a regular file owned by root in a directory
 /// owned by root that others cannot write. A link, or a copy in a directory the user can write
 /// (Homebrew), belongs to another installer.
@@ -411,14 +516,17 @@ pub fn own_command(path: &Path) -> bool {
     meta.file_type().is_file() && meta.uid() == 0 && dir.uid() == 0 && dir.mode() & 0o022 == 0
 }
 
-/// Replaces the command copy when it is nett's own ([`own_command`]): another installer's is the
-/// user's to upgrade.
-fn replace_command(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Replaces the command copy with the installed `program` when it is nett's own
+/// ([`own_command`]): another installer's is the user's to upgrade.
+fn replace_command(path: &Path, program: &Path) -> Result<(), String> {
     if !own_command(path) {
         return Ok(());
     }
     let new = path.with_file_name(".nett.new");
-    write_program(&new, bytes)?;
+    let io = |e: std::io::Error| format!("writing {}: {e}", new.display());
+    std::fs::remove_file(&new).ok();
+    std::fs::copy(program, &new).map_err(io)?;
+    std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).map_err(io)?;
     std::fs::rename(&new, path).map_err(|e| format!("replacing {}: {e}", path.display()))
 }
 
@@ -426,11 +534,6 @@ fn replace_command(path: &Path, bytes: &[u8]) -> Result<(), String> {
 mod tests {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    use ring::rand::SystemRandom;
-    use ring::signature::{Ed25519KeyPair, KeyPair as _};
 
     use super::*;
 
@@ -473,40 +576,11 @@ mod tests {
 
     /// A release key and a manifest for `version` whose program is `bytes`.
     fn release(version: &str, target: &str, bytes: &[u8]) -> (ReleaseKeys, Vec<u8>) {
-        use blake2::digest::Digest as _;
-        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&SystemRandom::new()).expect("key");
-        let pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("key");
-        let id = [7u8; 8];
-        let mut public = b"Ed".to_vec();
-        public.extend_from_slice(&id);
-        public.extend_from_slice(pair.public_key().as_ref());
-        let keys = ReleaseKeys::parse(&STANDARD.encode(public)).expect("keys");
-        let comment = format!("nett v{version} nett-{version}-{target}");
-        let signature = pair.sign(blake2::Blake2b512::digest(bytes).as_slice());
-        let mut sig = b"ED".to_vec();
-        sig.extend_from_slice(&id);
-        sig.extend_from_slice(signature.as_ref());
-        let mut global = signature.as_ref().to_vec();
-        global.extend_from_slice(comment.as_bytes());
-        let minisig = format!(
-            "untrusted comment: t\n{}\ntrusted comment: {comment}\n{}\n",
-            STANDARD.encode(sig),
-            STANDARD.encode(pair.sign(&global).as_ref())
-        );
-        let sha256: String = ring::digest::digest(&ring::digest::SHA256, bytes)
-            .as_ref()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let manifest = serde_json::json!({
-            "version": version,
-            "programs": { target: {
-                "url": format!("https://nett.example.com/dl/nett-{version}-{target}"),
-                "sha256": sha256,
-                "minisig": minisig,
-            }}
-        });
-        (keys, manifest.to_string().into_bytes())
+        let pair = nett_trust::signing::ReleaseKeyPair::generate().expect("key");
+        let keys = ReleaseKeys::parse(&pair.public_key()).expect("keys");
+        let version: Version = version.parse().expect("version");
+        let url = format!("https://nett.example.com/dl/nett-{version}-{target}");
+        (keys, pair.manifest(version, target, &url, bytes))
     }
 
     fn upgrader(dir: &Path, keys: ReleaseKeys, healthy: bool) -> (Upgrader, Arc<FakeServices>) {
@@ -557,13 +631,9 @@ mod tests {
         let (_dir_tmp, dir) = temp("install");
         let (keys, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
         let (up, services) = upgrader(&dir, keys, true);
+        std::fs::write(dir.join("nett.new"), b"new program").expect("fetched");
         up.clone_paths()
-            .install(
-                b"new program",
-                "0.2.0".parse().expect("v"),
-                up.current,
-                &*services,
-            )
+            .install("0.2.0".parse().expect("v"), up.current, &*services)
             .expect("installed");
         assert_eq!(std::fs::read(&up.program).expect("program"), b"new program");
         assert_eq!(
@@ -585,19 +655,167 @@ mod tests {
         let (keys, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"bad program");
         let (up, services) = upgrader(&dir, keys, false);
         let paths = up.clone_paths();
+        std::fs::write(dir.join("nett.new"), b"bad program").expect("fetched");
         let err = paths
-            .install(
-                b"bad program",
-                "0.2.0".parse().expect("v"),
-                up.current,
-                &*services,
-            )
+            .install("0.2.0".parse().expect("v"), up.current, &*services)
             .expect_err("rolled back");
         assert!(err.contains("restored 0.1.5"), "{err}");
         assert_eq!(std::fs::read(&up.program).expect("program"), b"old program");
         assert_eq!(services.restarts.load(Ordering::SeqCst), 2);
         assert!(paths.marker().is_none());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The manifest entry of `manifest` for the test target.
+    fn entry(manifest: &[u8]) -> (Version, Program) {
+        let manifest = Manifest::parse(manifest).expect("manifest");
+        let program = manifest.programs["x86_64-unknown-linux-musl"].clone();
+        (manifest.version().expect("v"), program)
+    }
+
+    fn reason(progress: &Progress) -> String {
+        match progress {
+            Progress::Waiting(reason) => reason.clone(),
+            other => panic!("not waiting: {other:?}"),
+        }
+    }
+
+    /// Answers the next fetch on `link` with `bytes`, as a session passes the Hub's parts on.
+    async fn serve(link: &HubLink, bytes: &[u8]) {
+        let request = link.pending.lock().await.recv().await.expect("request");
+        request
+            .parts
+            .send(crate::fetch::Part::Data {
+                offset: 0,
+                size: bytes.len() as u64,
+                data: bytes.to_vec(),
+            })
+            .await
+            .expect("send");
+    }
+
+    /// The program comes from the Hub over the session, is verified there, and installed
+    #[tokio::test]
+    async fn the_program_from_the_hub_is_verified_and_installed() {
+        let (_dir_tmp, dir) = temp("hub");
+        let (keys, manifest) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
+        let (up, services) = upgrader(&dir, keys, true);
+        let (version, program) = entry(&manifest);
+        let link = HubLink::new();
+        let (progress, _) = tokio::sync::watch::channel(Progress::default());
+        let (installed, ()) = tokio::join!(
+            up.upgrade(version, &program, Some(&link), &progress),
+            serve(&link, b"new program")
+        );
+        installed.expect("installed");
+        assert_eq!(std::fs::read(&up.program).expect("program"), b"new program");
+        assert_eq!(services.restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A program that cannot be fetched, or that fails verification while another source is
+    /// unreachable, is fetched again later: after 1 minute, then 2, then 4, and the version is not
+    /// marked failed (on a NAS whose path to the website delivered 1–5 KB/s, a download limit
+    /// marked the release failed for good)
+    #[tokio::test(start_paused = true)]
+    async fn a_program_not_fetched_yet_is_fetched_again_later() {
+        let (_dir_tmp, dir) = temp("retry");
+        let (keys, manifest) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
+        let (up, _services) = upgrader(&dir, keys, true);
+        let (version, mut program) = entry(&manifest);
+        // Nothing listens there: the website is unreachable
+        program.url = "https://127.0.0.1:9/nett".into();
+        let link = HubLink::new();
+        let (progress, mut waiting) = tokio::sync::watch::channel(Progress::default());
+        let upgrade = up.upgrade(version, &program, Some(&link), &progress);
+        tokio::pin!(upgrade);
+        let mut seen = Vec::new();
+        for answer in [Some(b"tampered".as_slice()), None, None] {
+            let hub = async {
+                if let Some(bytes) = answer {
+                    serve(&link, bytes).await;
+                }
+                waiting.changed().await.expect("waiting");
+                seen.push(reason(&waiting.borrow_and_update()));
+            };
+            tokio::select! {
+                _ = &mut upgrade => panic!("the upgrade ended"),
+                () = hub => {}
+            }
+        }
+        assert!(seen[0].contains("the program from the Hub"), "{}", seen[0]);
+        let waits: Vec<&str> = seen
+            .iter()
+            .map(|s| s.rsplit("trying again in ").next().unwrap_or_default())
+            .collect();
+        assert_eq!(waits, ["1 min", "2 min", "4 min"]);
+        assert!(up.state().failed.is_empty(), "nothing marked failed");
+    }
+
+    /// A transfer from the Hub that breaks off is taken up from the Hub again later, not from the
+    /// website: the Hub holds the program, and the website may be the slow path
+    #[tokio::test(start_paused = true)]
+    async fn a_transfer_from_the_hub_that_breaks_off_is_fetched_from_the_hub_again() {
+        let (_dir_tmp, dir) = temp("cut");
+        let (keys, manifest) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
+        let (up, services) = upgrader(&dir, keys, true);
+        let (version, mut program) = entry(&manifest);
+        // A URL the upgrade must not use: it would fail and say so
+        program.url = "https://127.0.0.1:9/nett".into();
+        let link = HubLink::new();
+        let (progress, mut waiting) = tokio::sync::watch::channel(Progress::default());
+        let upgrade = up.upgrade(version, &program, Some(&link), &progress);
+        tokio::pin!(upgrade);
+        let cut = async {
+            let request = link.pending.lock().await.recv().await.expect("request");
+            request
+                .parts
+                .send(crate::fetch::Part::Data {
+                    offset: 0,
+                    size: 11,
+                    data: b"new ".to_vec(),
+                })
+                .await
+                .expect("send");
+            // the session ends
+            drop(request);
+            waiting.changed().await.expect("waiting");
+            reason(&waiting.borrow_and_update())
+        };
+        let reason = tokio::select! {
+            _ = &mut upgrade => panic!("the upgrade ended"),
+            reason = cut => reason,
+        };
+        assert!(reason.contains("the connection ended after"), "{reason}");
+        assert!(
+            !reason.contains("127.0.0.1:9"),
+            "the website was not tried: {reason}"
+        );
+        let (installed, ()) = tokio::join!(upgrade, serve(&link, b"new program"));
+        installed.expect("installed");
+        assert_eq!(services.restarts.load(Ordering::SeqCst), 1);
+    }
+
+    /// A program that matches the manifest but whose signature does not hold is the same from every
+    /// source: the version is marked failed at once, without waiting for the website
+    #[tokio::test(start_paused = true)]
+    async fn a_program_whose_signature_does_not_hold_is_marked_failed() {
+        let (_dir_tmp, dir) = temp("untrusted");
+        let (_, manifest) = release("0.2.0", "x86_64-unknown-linux-musl", b"new program");
+        let (other, _) = release("0.2.0", "x86_64-unknown-linux-musl", b"x");
+        let (up, services) = upgrader(&dir, other, true);
+        let (version, mut program) = entry(&manifest);
+        program.url = "https://127.0.0.1:9/nett".into();
+        let link = HubLink::new();
+        let (progress, _) = tokio::sync::watch::channel(Progress::default());
+        let (result, ()) = tokio::join!(
+            up.upgrade(version, &program, Some(&link), &progress),
+            serve(&link, b"new program")
+        );
+        let reason = result.expect_err("refused");
+        assert!(reason.contains("does not trust"), "{reason}");
+        assert!(up.state().failed.contains_key("0.2.0"));
+        assert_eq!(services.restarts.load(Ordering::SeqCst), 0);
+        assert!(!dir.join("nett.new").exists());
     }
 
     #[test]

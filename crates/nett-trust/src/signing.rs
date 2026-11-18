@@ -208,3 +208,89 @@ impl EnrollmentKeyPair {
         Ok(AdmissionProof { payload, signature })
     }
 }
+
+/// A release key generated on the spot, for tests and lab builds that sign their own programs.
+/// Official releases are signed with minisign in the release workflow (ADR 0020); this signs the
+/// same way, the prehashed form over the program's BLAKE2b-512.
+pub struct ReleaseKeyPair {
+    key: Ed25519KeyPair,
+    id: [u8; 8],
+}
+
+impl ReleaseKeyPair {
+    pub fn generate() -> Result<Self, SigningError> {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)?;
+        let key =
+            Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).map_err(|_| SigningError::KeyFormat)?;
+        let mut id = [0u8; 8];
+        rng.fill(&mut id)?;
+        Ok(Self { key, id })
+    }
+
+    /// The public key in minisign's form, as `NETT_RELEASE_PUBLIC_KEYS` takes it.
+    pub fn public_key(&self) -> String {
+        use base64::Engine as _;
+        let mut bytes = b"Ed".to_vec();
+        bytes.extend_from_slice(&self.id);
+        bytes.extend_from_slice(self.key.public_key().as_ref());
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    /// The minisign signature of `program` as the release of `version` for `target`.
+    pub fn sign_program(
+        &self,
+        version: crate::release::Version,
+        target: &str,
+        program: &[u8],
+    ) -> String {
+        let mut digest = crate::release::ProgramDigest::new();
+        digest.update(program);
+        self.sign_prehashed(
+            &digest.finish().blake2b,
+            &crate::release::trusted_comment(version, target),
+        )
+    }
+
+    /// A minisign signature over a BLAKE2b-512 digest, with `comment` as the trusted comment.
+    pub fn sign_prehashed(&self, blake2b: &[u8; 64], comment: &str) -> String {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let signature = self.key.sign(blake2b);
+        let mut sig = b"ED".to_vec();
+        sig.extend_from_slice(&self.id);
+        sig.extend_from_slice(signature.as_ref());
+        let mut global = signature.as_ref().to_vec();
+        global.extend_from_slice(comment.as_bytes());
+        format!(
+            "untrusted comment: signature\n{}\ntrusted comment: {comment}\n{}\n",
+            b64.encode(sig),
+            b64.encode(self.key.sign(&global).as_ref())
+        )
+    }
+
+    /// A release manifest offering `program` as `version` for `target`, at `url`.
+    pub fn manifest(
+        &self,
+        version: crate::release::Version,
+        target: &str,
+        url: &str,
+        program: &[u8],
+    ) -> Vec<u8> {
+        let sha256: String = ring::digest::digest(&ring::digest::SHA256, program)
+            .as_ref()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        serde_json::json!({
+            "version": version.to_string(),
+            "programs": { target: {
+                "url": url,
+                "sha256": sha256,
+                "minisig": self.sign_program(version, target, program),
+            }}
+        })
+        .to_string()
+        .into_bytes()
+    }
+}
