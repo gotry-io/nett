@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-18
+
 - `nett site device add` writes the standard WireGuard configuration only: a client that takes
   WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up
   from the same fields. The Surge configuration is no longer written.
