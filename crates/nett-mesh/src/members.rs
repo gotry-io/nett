@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, NodeId};
 use nett_trust::admission::{AppliedMembers, AppliedRecord, Member, VersionCheck, admit};
 use nett_trust::encoding::Timestamp;
 use nett_trust::revocation::{Revocation, Revocations};
@@ -51,10 +51,20 @@ impl MemberSet {
     }
 
     /// Restores revocations and the previously accepted versions of each member from the trust store.
-    pub fn restore(&mut self, revoked: &BTreeSet<NodeId>, floor: &BTreeMap<NodeId, AppliedRecord>) {
+    pub fn restore(
+        &mut self,
+        revoked: &BTreeSet<NodeId>,
+        revoked_credentials: &BTreeSet<CredentialId>,
+        floor: &BTreeMap<NodeId, AppliedRecord>,
+    ) {
         for node_id in revoked {
             self.revocations.apply(&Revocation::Node {
                 node_id: node_id.clone(),
+            });
+        }
+        for credential_id in revoked_credentials {
+            self.revocations.apply(&Revocation::DeviceCredential {
+                credential_id: credential_id.clone(),
             });
         }
         self.floor = floor.clone();
@@ -62,6 +72,11 @@ impl MemberSet {
 
     pub fn revoked(&self) -> &BTreeSet<NodeId> {
         self.revocations.nodes()
+    }
+
+    /// All revocations in effect, nodes and device credentials.
+    pub fn revocations(&self) -> &Revocations {
+        &self.revocations
     }
 
     /// Versions saved into the trust store: those previously accepted, plus those that took effect this
@@ -86,7 +101,10 @@ impl MemberSet {
     ) {
         for revocation in &desired.revocations {
             self.revocations.apply(revocation);
-            let Revocation::Node { node_id } = revocation;
+            // A revoked device credential stops being used when the devices are applied after the members
+            let Revocation::Node { node_id } = revocation else {
+                continue;
+            };
             self.applied.remove(node_id);
             self.floor.remove(node_id);
             if self.members.remove(node_id).is_some() {
@@ -184,7 +202,7 @@ impl MemberSet {
 }
 
 /// All addresses a member occupies: the mesh address, plus the Edge address when it has the `edge` role.
-fn addresses(member: &Member) -> Vec<IpAddr> {
+pub(crate) fn addresses(member: &Member) -> Vec<IpAddr> {
     std::iter::once(member.addresses)
         .chain(member.edge.iter().map(|e| e.addresses))
         .flat_map(|a| [IpAddr::V4(a.ipv4), IpAddr::V6(a.ipv6)])

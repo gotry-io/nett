@@ -45,12 +45,29 @@ pub struct DesiredMeshDoc {
     /// Prefixes advertised by smart gateways, each a signed payload (design/mesh.md section 10).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advertised_routes: Vec<SignedPayload>,
+    /// Device credentials and the gateways that carry them (design/devices.md section 4).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<DeviceDoc>,
     /// Node name, not signed, used only for display (design/status.md section 5).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub names: BTreeMap<NodeId, NodeName>,
     /// The relay this machine runs, with the links assigned to it (design/mesh.md section 5.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayDoc>,
+}
+
+/// One device credential in the desired state (design/devices.md section 4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceDoc {
+    /// Signed payload carrying the `device_credential` artifact.
+    pub credential: SignedPayload,
+    /// The member with the `gateway` role that carries this credential. Not signed: the `gateway` role
+    /// is the trust that lets a member send from its devices' addresses (design/mesh.md section 13).
+    pub gateway: NodeId,
+    /// The device's name, not signed, used only for display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<NodeName>,
 }
 
 /// Relay assignment in the desired state (design/mesh.md section 5.2). Members are named by node ID;
@@ -145,6 +162,8 @@ const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 pub const MAX_DESIRED_BYTES: u64 = 4 << 20;
 /// Upper limit on the number of members (and paths, node names, advertised prefixes) in one desired state.
 pub const MAX_MEMBERS: usize = 256;
+/// Upper limit on the number of device credentials in one desired state.
+pub const MAX_DEVICES: usize = 256;
 /// Upper limit on the number of revocations: revocations are kept permanently, and each re-enrolled node
 /// leaves one.
 pub const MAX_REVOCATIONS: usize = 4096;
@@ -246,6 +265,7 @@ pub struct DesiredMesh {
     pub paths: BTreeMap<NodeId, PeerPathConfig>,
     pub access_rules: Option<SignedPayload>,
     pub advertised_routes: Vec<SignedPayload>,
+    pub devices: Vec<DeviceDoc>,
     pub names: BTreeMap<NodeId, NodeName>,
     pub relay: Option<RelayDoc>,
     /// TLS targets of the transport adapter, coming from the same place as [`DesiredMesh::tls_endpoints`].
@@ -299,6 +319,7 @@ impl DesiredMesh {
                 doc.advertised_routes.len(),
                 MAX_MEMBERS,
             ),
+            ("devices", doc.devices.len(), MAX_DEVICES),
         ] {
             if len > max {
                 return Err(ConfigError::TooMany { what, max });
@@ -374,6 +395,7 @@ impl DesiredMesh {
             paths,
             access_rules: doc.access_rules,
             advertised_routes: doc.advertised_routes,
+            devices: doc.devices,
             names: doc.names,
             relay: doc.relay,
             tls_targets: targets,

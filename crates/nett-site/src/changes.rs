@@ -3,9 +3,10 @@
 //! members added or removed; widened items are marked with `+`, narrowed items with `-`, other
 //! changes with `~`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use nett_core::id::NodeId;
+use nett_core::name::NodeName;
 use nett_mesh::config::Reachability;
 use nett_trust::payload::{PortRange, Protocol};
 
@@ -93,8 +94,68 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
             lines.push(format!("- {name} ({}): every member drops it", o.node_id));
         }
     }
+    for (name, m) in &new.machines {
+        let (was, is) = (old.is_gateway(&m.node_id), new.is_gateway(&m.node_id));
+        if is && !was {
+            lines.push(format!("~ {name}: mobile gateway for devices"));
+        } else if was && !is {
+            lines.push(format!("~ {name}: no longer a mobile gateway"));
+        }
+    }
+    for (name, d) in &new.devices {
+        if old
+            .devices
+            .get(name)
+            .is_none_or(|o| o.device_id != d.device_id)
+        {
+            let gateway = new
+                .name_of(&d.gateway)
+                .map_or_else(|| d.gateway.to_string(), ToString::to_string);
+            let access = if d.limited { ", limited" } else { "" };
+            lines.push(format!(
+                "+ {name} (device{access}), {}, through {gateway}",
+                d.credential.addresses.ipv4
+            ));
+        }
+    }
+    for (name, o) in &old.devices {
+        if new
+            .devices
+            .get(name)
+            .is_none_or(|d| d.device_id != o.device_id)
+        {
+            lines.push(format!(
+                "- {name} (device {}): its credential is revoked",
+                o.device_id
+            ));
+        }
+    }
 
     let mut rules = Vec::new();
+    // Devices that are not limited reach every machine through one expanded rule (design/devices.md
+    // section 5): list who joins or leaves it
+    let own = |s: &State| -> BTreeMap<NodeName, String> {
+        s.devices
+            .iter()
+            .filter(|(_, d)| !d.limited)
+            .map(|(n, d)| (n.clone(), d.credential.addresses.ipv4.to_string()))
+            .collect()
+    };
+    let (own_old, own_new) = (own(old), own(new));
+    for (name, address) in &own_new {
+        if !own_old.contains_key(name) {
+            rules.push(format!(
+                "  + {name} ({address}) -> every machine and route  all ports"
+            ));
+        }
+    }
+    for (name, address) in &own_old {
+        if !own_new.contains_key(name) {
+            rules.push(format!(
+                "  - {name} ({address}) -> every machine and route  all ports"
+            ));
+        }
+    }
     for (id, r) in &new.rules {
         match old.rules.get(id) {
             None => rules.push(format!("  + {id}  {}", rule_text(new, r))),
@@ -203,10 +264,19 @@ pub fn rule_text(state: &State, r: &Rule) -> String {
 }
 
 fn addresses(state: &State, s: &Selector) -> String {
-    let Some(m) = state.by_id(&s.node) else {
+    let (node, part) = match s {
+        Selector::Machine(m) => (&m.node, m.part),
+        Selector::Device(d) => {
+            return state.device_by_id(&d.device).map_or_else(
+                || "?".to_owned(),
+                |(_, d)| d.credential.addresses.ipv4.to_string(),
+            );
+        }
+    };
+    let Some(m) = state.by_id(node) else {
         return "?".to_owned();
     };
-    match s.part {
+    match part {
         Part::Mesh => m.mesh.ipv4.to_string(),
         Part::Edge => m
             .edge

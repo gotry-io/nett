@@ -11,7 +11,9 @@
 //!   the Edge address but do not come from the Edge;
 //! - `nett_ingress`: when this machine is a smart gateway, connections coming in from the mesh interface
 //!   and forwarded out allow only Edge sources, with the source replaced by the address on the outgoing
-//!   interface; forwarding from other sources is dropped (design/mesh.md section 10).
+//!   interface (design/mesh.md section 10); when it is a mobile gateway, traffic from the mesh interface
+//!   back out of it passes only from or to the devices it carries (design/devices.md section 6).
+//!   Forwarding from other sources is dropped.
 
 use std::net::IpAddr;
 
@@ -199,7 +201,19 @@ pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlErr
         0,
         "filter",
     ));
-    for source in &ingress.edge_sources {
+    for device in &ingress.devices {
+        for source in [true, false] {
+            messages.push(rule(INGRESS_TABLE, "fwd", |m| {
+                ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+                ifname(m, NFT_META_OIFNAME, NFT_CMP_EQ);
+                family(m, device.is_ipv4());
+                address(m, IpPrefix::host(*device), source);
+                verdict(m, NF_ACCEPT);
+            }));
+        }
+    }
+    let edge_sources = ingress.edge_sources.as_deref().unwrap_or_default();
+    for source in edge_sources {
         messages.push(rule(INGRESS_TABLE, "fwd", |m| {
             ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
             family(m, source.is_ipv4());
@@ -207,10 +221,19 @@ pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlErr
             verdict(m, NF_ACCEPT);
         }));
     }
+    // A smart gateway forwards nothing else from the mesh interface; a mobile gateway alone leaves
+    // forwarding to this machine's own containers (published ports) alone
     messages.push(rule(INGRESS_TABLE, "fwd", |m| {
         ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
+        if ingress.edge_sources.is_none() {
+            ifname(m, NFT_META_OIFNAME, NFT_CMP_EQ);
+        }
         verdict(m, NF_DROP);
     }));
+    if ingress.edge_sources.is_none() {
+        messages.push(batch(NFNL_MSG_BATCH_END));
+        return Socket::open(Some(NETFILTER))?.request_batch(messages);
+    }
     messages.push(base_chain(
         INGRESS_TABLE,
         "snat",
@@ -218,7 +241,7 @@ pub(crate) fn install_ingress(ingress: Option<&IngressSpec>) -> Result<(), NlErr
         SRCNAT_PRIORITY,
         "nat",
     ));
-    for source in &ingress.edge_sources {
+    for source in edge_sources {
         messages.push(rule(INGRESS_TABLE, "snat", |m| {
             ifname(m, NFT_META_IIFNAME, NFT_CMP_EQ);
             ifname(m, NFT_META_OIFNAME, NFT_CMP_NEQ);

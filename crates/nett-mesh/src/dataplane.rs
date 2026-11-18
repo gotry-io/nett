@@ -181,10 +181,17 @@ pub trait DataPlane: Send {
     /// previous setting as a whole.
     fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError>;
 
-    /// Sets or clears the forwarding rules for this machine as a smart gateway (design/mesh.md section 10),
-    /// replacing the previous setting as a whole. Returns an error when this machine advertises prefixes
-    /// but forwarding is not enabled (the rules are installed as usual).
+    /// Sets or clears the forwarding rules for this machine as a smart gateway (design/mesh.md section 10)
+    /// and a mobile gateway (design/devices.md section 6), replacing the previous setting as a whole.
+    /// Returns an error when forwarding is not enabled or the system drops it (the rules are installed
+    /// as usual).
     fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError>;
+
+    /// Whether this machine forwards IPv6, where the data plane can tell: a mobile gateway that does not
+    /// carries its devices' IPv4 traffic only.
+    fn ipv6_forwarding(&self) -> Option<bool> {
+        None
+    }
 
     /// Makes the routes on the mesh interface exactly `routes`: the prefixes advertised by other members
     /// (design/mesh.md section 10).

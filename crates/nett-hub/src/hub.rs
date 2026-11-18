@@ -686,6 +686,37 @@ pub fn verify(anchors: &TrustAnchorsDoc, old: Option<&State>, new: &State) -> Re
                 .map_err(|e| format!("machine `{name}`: advertised routes: {e}"))?;
         }
     }
+    for r in &new.revoked_credentials {
+        revocations.apply(&Revocation::DeviceCredential {
+            credential_id: r.credential_id.clone(),
+        });
+    }
+    for (name, d) in &new.devices {
+        let Some(signed) = &d.credential.signed else {
+            return Err(format!("device `{name}`: the credential is not signed"));
+        };
+        let verified = signed
+            .verify(&trusted)
+            .map_err(|e| format!("device `{name}`: {e}"))?;
+        let mut credentials = verified.payload.device_credentials();
+        let matches = match (credentials.next(), credentials.next()) {
+            (Some((_, c)), None) => {
+                c.device_id == d.device_id
+                    && c.credential_id == d.credential.id
+                    && c.public_key == d.credential.public_key
+                    && c.addresses == d.credential.addresses
+            }
+            _ => false,
+        };
+        if !matches {
+            return Err(format!(
+                "device `{name}`: the signed credential differs from the device's"
+            ));
+        }
+        if revocations.is_credential_revoked(&d.credential.id) {
+            return Err(format!("device `{name}`: its credential is revoked"));
+        }
+    }
     if let Some(rules) = &new.access_rules {
         let verified = rules
             .signed
@@ -708,6 +739,31 @@ pub fn verify(anchors: &TrustAnchorsDoc, old: Option<&State>, new: &State) -> Re
                 "node {} was revoked and cannot come back",
                 r.node_id
             ));
+        }
+    }
+    for r in &old.revoked_credentials {
+        if !new
+            .revoked_credentials
+            .iter()
+            .any(|n| n.credential_id == r.credential_id)
+        {
+            return Err(format!(
+                "device credential {} was revoked and cannot come back",
+                r.credential_id
+            ));
+        }
+    }
+    for (name, o) in &old.devices {
+        let kept = new
+            .devices
+            .values()
+            .any(|n| n.credential.id == o.credential.id);
+        let revoked = new
+            .revoked_credentials
+            .iter()
+            .any(|r| r.credential_id == o.credential.id);
+        if !kept && !revoked {
+            return Err(format!("device `{name}` is gone without a revocation"));
         }
     }
     for (name, o) in &old.machines {

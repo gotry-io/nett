@@ -237,6 +237,26 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
         out.push_str(&table(&rows));
     }
 
+    if let Some(gateway) = &doc.gateway {
+        out.push('\n');
+        let mut rows =
+            vec![["DEVICE", "ADDRESS", "FROM", "HANDSHAKE", "RECEIVED", "SENT"].map(str::to_owned)];
+        for d in &gateway.devices {
+            rows.push([
+                labelled(d.name.as_ref().map(|n| n.as_str()), d.credential.as_str()),
+                d.mesh.first().map_or_else(dash, ToString::to_string),
+                d.endpoint.map_or_else(dash, |e| e.to_string()),
+                d.last_handshake.map_or_else(dash, |t| ago(t, now)),
+                bytes(d.rx_bytes),
+                bytes(d.tx_bytes),
+            ]);
+        }
+        out.push_str(&table(&rows));
+        if gateway.ipv6_forwarding == Some(false) {
+            out.push_str("IPv6 forwarding is off: devices reach other machines over IPv4 only.\n");
+        }
+    }
+
     if !doc.problems.is_empty() {
         out.push_str("\nPROBLEMS\n");
         let mut rows = Vec::new();
@@ -461,6 +481,7 @@ pub(crate) fn problem_text(p: &Problem) -> String {
             Some(node) => format!("routes of {} rejected: {reason}", node_label(node)),
             None => format!("routes rejected: {reason}"),
         },
+        ProblemKind::DeviceRejected => format!("device credential rejected: {reason}"),
         ProblemKind::DataPlaneFailed => format!("data plane error: {reason}"),
         ProblemKind::TrustStore => format!("trust store: {reason}"),
         ProblemKind::Other => reason.clone(),

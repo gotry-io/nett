@@ -1,0 +1,24 @@
+# Devices through a mobile gateway (design/devices.md): h runs the Hub and the site, g is the public
+# member made the mobile gateway, and m is a member behind NAT with the services the devices use. The
+# devices themselves are namespaces the scenario adds on the public network, running plain WireGuard.
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "h"
+reachability = "public"
+
+[[node]]
+name = "g"
+reachability = "public"
+
+[[node]]
+name = "m"
+reachability = "dial-only"
+behind = "nat-m"
+
+[[router]]
+name = "nat-m"
+nat = "cone"

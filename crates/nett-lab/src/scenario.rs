@@ -14,6 +14,7 @@ use crate::material::{self, Generated, LabNode, key_from_wg_text};
 use crate::net::Underlay;
 use crate::topology::Topology;
 
+mod devices;
 mod faster_relay;
 mod hub;
 mod hub_relay;
@@ -21,6 +22,7 @@ mod lossy_direct;
 mod port_block;
 mod port_change;
 mod throughput;
+pub use devices::devices;
 pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;

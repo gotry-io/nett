@@ -203,7 +203,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett doctor` asks the DNS responder for this machine's own name and tells apart the ways a resolver can bypass it (names-and-diagnostics.md section 6);
 - A download over the upgrade limit names the URL and the limit;
 - `sudo nett install` prints the machine's keys only while it has no desired state;
-- A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6);
+- A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6); a failure found by the mobile gateway's periodic check of its forwarding is retried the same way;
 - Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file.
 
 **Guards**
@@ -211,6 +211,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:a_responder_that_does_not_answer_its_own_name_is_a_problem`
 - `nett-cli:a_resolv_conf_past_systemd_resolved_is_named`
 - `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
+- `nett-mesh:a_gateway_whose_forwarding_breaks_lists_it_until_a_retry_succeeds`
 - `nett-hub:logs_carry_no_terminal_color_codes`
 - `ci:Full flow of sudo nett install (needs root)`
 

@@ -4,8 +4,8 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 
 use crate::canonical::{CanonicalError, parse_canonical, to_canonical};
 use crate::encoding::{Sha256Digest, Timestamp};
-use crate::keys::Ed25519PublicKey;
-use nett_core::id::{ChangeId, NodeId};
+use crate::keys::{Ed25519PublicKey, X25519PublicKey};
+use nett_core::id::{ChangeId, CredentialId, DeviceId, NodeId};
 use nett_core::prefix::IpPrefix;
 use serde::{Deserialize, Serialize};
 
@@ -48,6 +48,7 @@ pub enum Artifact {
     NodePolicy(NodePolicy),
     AccessRuleSet(AccessRuleSet),
     AdvertisedRoutes(AdvertisedRoutes),
+    DeviceCredential(DeviceCredential),
 }
 
 /// Node policy, with fields matching the `node-policies` resource (design/api-resources.md section
@@ -79,6 +80,9 @@ pub enum Role {
     Edge,
     /// Smart gateway: advertises routes and forwards (design/mesh.md section 10).
     SubnetRouter,
+    /// Mobile gateway: carries the traffic of the devices assigned to it, sending it from their
+    /// addresses (design/devices.md section 6).
+    Gateway,
 }
 
 /// Where Edge traffic comes from: the container prefixes where Edge runs.
@@ -106,6 +110,17 @@ pub struct AdvertisedRoutes {
     pub node_id: NodeId,
     pub version: u64,
     pub routes: Vec<IpPrefix>,
+}
+
+/// One WireGuard credential of a device (design/devices.md section 4). It has no version: it is
+/// created once and revoked for good by its ID.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceCredential {
+    pub device_id: DeviceId,
+    pub credential_id: CredentialId,
+    pub public_key: X25519PublicKey,
+    pub addresses: MeshAddresses,
 }
 
 /// Access rule set (design/mesh.md section 12): the prefixes and ports after selector expansion,
@@ -185,6 +200,10 @@ pub enum PayloadError {
     Routes(NodeId, &'static str),
     #[error("payload: carries more than one set of advertised routes for {0}")]
     DuplicateRoutes(NodeId),
+    #[error("payload: device credential {0} has an address that is not a unicast address")]
+    CredentialAddress(CredentialId),
+    #[error("payload: carries device credential {0} more than once")]
+    DuplicateCredential(CredentialId),
 }
 
 /// A parsed payload with a validated format (the signature is verified by [`crate::signed`]).
@@ -246,6 +265,21 @@ impl Payload {
                         return Err(PayloadError::DuplicateRoutes(routes.node_id.clone()));
                     }
                 }
+                Artifact::DeviceCredential(credential) => {
+                    if !credential.addresses.is_unicast() {
+                        return Err(PayloadError::CredentialAddress(
+                            credential.credential_id.clone(),
+                        ));
+                    }
+                    let duplicate = artifacts[..i].iter().any(|other| {
+                        matches!(other, Artifact::DeviceCredential(o) if o.credential_id == credential.credential_id)
+                    });
+                    if duplicate {
+                        return Err(PayloadError::DuplicateCredential(
+                            credential.credential_id.clone(),
+                        ));
+                    }
+                }
             }
             artifact_hashes.push(artifact_hash(artifact)?);
         }
@@ -299,6 +333,15 @@ impl Payload {
         self.artifacts()
             .filter_map(|(hash, artifact)| match artifact {
                 Artifact::AdvertisedRoutes(routes) => Some((hash, routes)),
+                _ => None,
+            })
+    }
+
+    /// All device credentials in the payload.
+    pub fn device_credentials(&self) -> impl Iterator<Item = (&Sha256Digest, &DeviceCredential)> {
+        self.artifacts()
+            .filter_map(|(hash, artifact)| match artifact {
+                Artifact::DeviceCredential(credential) => Some((hash, credential)),
                 _ => None,
             })
     }
@@ -485,14 +528,14 @@ pub(crate) mod tests {
         let mut extra_in_policy = policy_value();
         extra_in_policy["note"] = json!("x");
         let mut unknown_role = policy_value();
-        unknown_role["roles"] = json!(["gateway"]);
+        unknown_role["roles"] = json!(["router"]);
         let mut unknown_kind = payload_value(vec![policy_value()]);
         unknown_kind["kind"] = json!("trust_update");
         for v in [
             extra,
             payload_value(vec![extra_in_policy]),
             payload_value(vec![unknown_role]),
-            payload_value(vec![json!({"kind": "device_credential", "version": 1})]),
+            payload_value(vec![json!({"kind": "device_group", "version": 1})]),
             unknown_kind,
         ] {
             assert!(Payload::parse(&bytes(&v)).is_err(), "{v}");
@@ -687,6 +730,60 @@ pub(crate) mod tests {
             (
                 payload_value(vec![routes.clone(), routes.clone()]),
                 "DuplicateRoutes",
+            ),
+        ] {
+            let err = Payload::parse(&bytes(&v)).expect_err(want);
+            assert!(format!("{err:?}").starts_with(want), "{v}: {err:?}");
+        }
+    }
+
+    pub(crate) const DEVICE: &str = "dev_01J9Z3K8Q2T7V4X6Y8A0B2C4D7";
+    pub(crate) const CREDENTIAL: &str = "dcr_01J9Z3K8Q2T7V4X6Y8A0B2C4D8";
+
+    pub(crate) fn credential_value() -> Value {
+        json!({
+            "kind": "device_credential",
+            "device_id": DEVICE,
+            "credential_id": CREDENTIAL,
+            "public_key": crate::encoding::encode_b64(&[7u8; 32]),
+            "addresses": { "ipv4": "100.88.0.9", "ipv6": "fd00:88::9" },
+        })
+    }
+
+    #[test]
+    fn parses_a_device_credential_and_the_gateway_role() {
+        let mut gateway = policy_value();
+        gateway["roles"] = json!(["gateway"]);
+        let p = Payload::parse(&bytes(&payload_value(vec![gateway, credential_value()])))
+            .expect("valid");
+        let node: NodeId = NODE_A.parse().expect("id");
+        assert!(
+            p.node_policy(&node)
+                .expect("policy")
+                .1
+                .has_role(Role::Gateway)
+        );
+        let (hash, credential) = p.device_credentials().next().expect("credential");
+        assert_eq!(*hash, Sha256Digest::of(&bytes(&credential_value())));
+        assert_eq!(credential.credential_id.as_str(), CREDENTIAL);
+        assert_eq!(credential.addresses.ipv4, Ipv4Addr::new(100, 88, 0, 9));
+    }
+
+    #[test]
+    fn rejects_bad_device_credentials() {
+        let mut loopback = credential_value();
+        loopback["addresses"]["ipv4"] = json!("127.0.0.1");
+        let mut versioned = credential_value();
+        versioned["version"] = json!(1);
+        let mut node_id = credential_value();
+        node_id["device_id"] = json!(NODE_A);
+        for (v, want) in [
+            (payload_value(vec![loopback]), "CredentialAddress"),
+            (payload_value(vec![versioned]), "Document"),
+            (payload_value(vec![node_id]), "Document"),
+            (
+                payload_value(vec![credential_value(), credential_value()]),
+                "DuplicateCredential",
             ),
         ] {
             let err = Payload::parse(&bytes(&v)).expect_err(want);

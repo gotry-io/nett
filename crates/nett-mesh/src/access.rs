@@ -55,25 +55,42 @@ impl FilterSpec {
     }
 }
 
-/// Traffic this machine forwards as a smart gateway (design/mesh.md section 10, ADR 0016): for
-/// connections coming in from the mesh interface and forwarded out, only those whose source is an Edge
-/// address are allowed, and the source is replaced with this machine's address on the outgoing
-/// interface; forwarding from other sources is dropped.
+/// Traffic this machine forwards. As a smart gateway (design/mesh.md section 10, ADR 0016): of the
+/// connections coming in from the mesh interface and forwarded out of it, only those whose source is an
+/// Edge address, with the source replaced by this machine's address on the outgoing interface. As a
+/// mobile gateway (design/devices.md section 6): traffic from the mesh interface back out of it whose
+/// source or destination is a device this machine carries. Other forwarding from the mesh interface is
+/// dropped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IngressSpec {
-    pub edge_sources: Vec<IpAddr>,
+    /// Present when this machine advertises prefixes: the Edge addresses whose connections it forwards.
+    pub edge_sources: Option<Vec<IpAddr>>,
+    /// The addresses of the devices this machine carries.
+    pub devices: Vec<IpAddr>,
 }
 
 impl IngressSpec {
-    /// Forwards only when this machine advertises prefixes.
-    pub fn of(own_routes: &[IpPrefix], members: &BTreeMap<NodeId, Member>) -> Option<Self> {
-        (!own_routes.is_empty()).then(|| Self {
-            edge_sources: members
+    /// Forwards only when this machine advertises prefixes or carries devices.
+    pub fn of(
+        own_routes: &[IpPrefix],
+        members: &BTreeMap<NodeId, Member>,
+        devices: Vec<IpAddr>,
+    ) -> Option<Self> {
+        let edge_sources = (!own_routes.is_empty()).then(|| {
+            members
                 .values()
                 .filter_map(|m| m.edge.as_ref())
                 .flat_map(|e| mesh_addrs(&e.addresses))
-                .collect(),
+                .collect()
+        });
+        (edge_sources.is_some() || !devices.is_empty()).then_some(Self {
+            edge_sources,
+            devices,
         })
+    }
+
+    pub fn carries_devices(&self) -> bool {
+        !self.devices.is_empty()
     }
 }
 

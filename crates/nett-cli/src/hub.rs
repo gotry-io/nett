@@ -30,6 +30,9 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{key_values, table};
 
 pub const SITE_HUB_FILE: &str = "hub.json";
+/// The release that adds devices: the Hub and every machine run it before the first gateway role or
+/// device is signed, since older ones reject what they do not recognize (design/devices.md section 9).
+pub const DEVICES_SINCE: &str = "0.4.0";
 /// Script that installs `nett` on a new machine (design/release.md section 6): installs the program
 /// only, does not read the token.
 pub const INSTALL_SCRIPT: &str = "curl -fsSL https://nett.gotry.io/install.sh | sh";
@@ -173,6 +176,40 @@ pub fn fetch_updates(hub: &SiteHub) -> anyhow::Result<Updates> {
 
 fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
     request(&hub.target(), "GET", STATUS_PATH, Some(&hub.token), None)
+}
+
+/// Refuses while the Hub or a machine runs a release older than [`DEVICES_SINCE`], or than this
+/// signing tool when it is older still: a machine on the same release as the tool knows everything
+/// it signs. A machine that never connected joins with the current release.
+pub fn require_devices(hub: &SiteHub) -> anyhow::Result<()> {
+    use nett_trust::release::Version;
+    let since: Version = DEVICES_SINCE.parse().context("DEVICES_SINCE")?;
+    let own: Version = env!("CARGO_PKG_VERSION")
+        .parse()
+        .context("this tool's version")?;
+    let since = since.min(own);
+    let older = |v: &str| v.parse::<Version>().map_or(true, |v| v < since);
+    let status = fetch_status(hub).context("reading which release each machine runs")?;
+    let mut behind = Vec::new();
+    if older(&status.hub_version) {
+        behind.push(format!("the Hub ({})", status.hub_version));
+    }
+    for m in &status.machines {
+        match (&m.nett_version, m.last_seen) {
+            (Some(v), _) if !older(v) => {}
+            (Some(v), _) => behind.push(format!("{} ({v})", m.name)),
+            (None, Some(_)) => behind.push(format!("{} (no version reported)", m.name)),
+            (None, None) => {}
+        }
+    }
+    if !behind.is_empty() {
+        bail!(
+            "devices need nett {since} or later on the Hub and every machine, which otherwise \
+             reject the new signed content; still older: {}",
+            behind.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// One machine's confirmation of `generation`.

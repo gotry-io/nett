@@ -16,6 +16,8 @@ pub const INET_NETNS: &str = "nl-inet";
 /// The "stranger" that sends unauthenticated probes in scenario 18: attached to the "public
 /// network" and not a member.
 pub const OUTSIDER_NETNS: &str = "nl-x";
+/// Devices on the public network, running plain WireGuard (the `devices` scenario).
+pub const DEVICE_NETNS: [&str; 2] = ["nl-dev0", "nl-dev1"];
 const NETNS_PREFIX: &str = "nl-";
 
 #[derive(Debug, Clone)]
@@ -181,6 +183,7 @@ impl Underlay {
             crate::tailscale::derp_netns(2),
             OUTSIDER_NETNS.to_owned(),
         ];
+        all.extend(DEVICE_NETNS.map(str::to_owned));
         all.extend(self.routers.iter().map(|(name, _, _)| netns(name)));
         all.extend(self.nodes.values().map(|n| n.netns.clone()));
         all.extend(

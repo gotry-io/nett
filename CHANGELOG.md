@@ -4,6 +4,17 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Devices: a phone or computer that runs no nett joins with a standard WireGuard client or Surge.
+  `nett site device add <name> --gateway <machine>` adds it through a public Linux machine, which
+  is a mobile gateway while devices come through it, and writes the device's WireGuard and Surge
+  configurations (and prints the QR code on a terminal); its private key is in those files only.
+  Later devices come through the same gateway without `--gateway`. A device reaches every machine,
+  or with `--limited` only what rules allow, such as `nett site allow <device> <machine> 8081/tcp`;
+  `nett site device remove` revokes it. On a gateway
+  whose system `filter FORWARD` chain drops forwarded traffic, as Docker sets it, nett adds one
+  accept for `nett0` to `nett0` there. Devices need nett 0.4.0 on the Hub and every machine first,
+  which `nett site` checks (design/devices.md).
+
 ## [0.3.21] - 2026-11-18
 
 - macOS: every Mac installs with the install script, the one that holds the site too, and on a

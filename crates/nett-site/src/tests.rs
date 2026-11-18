@@ -11,8 +11,8 @@ use nett_trust::payload::{PortRange, Protocol};
 
 use crate::changes::describe;
 use crate::compose::{connections, desired};
-use crate::dir::{SiteDir, new_node_id};
-use crate::ops::{MachineChange, MachineOptions};
+use crate::dir::{SiteDir, new_device_ids, new_node_id};
+use crate::ops::{MachineChange, MachineOptions, NewDevice};
 use crate::sign::{RESIGN_BEFORE_SECS, expand_rules, sign};
 use crate::state::{NodeKeys, Part, RuleId, State};
 
@@ -305,12 +305,10 @@ fn removing_a_machine_revokes_it_and_cleans_up_its_rules() {
     let again = &state.machines[&name("nas")];
     assert_ne!(again.node_id, nas);
     assert_eq!(again.mesh.ipv4.to_string(), "100.88.0.4");
-    assert!(
-        state
-            .rules
-            .values()
-            .all(|r| r.to.iter().all(|s| s.node != again.node_id))
-    );
+    assert!(state.rules.values().all(|r| {
+        r.to.iter()
+            .all(|s| s.node().is_some_and(|(n, _)| *n != again.node_id))
+    }));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -373,12 +371,11 @@ fn edge_and_routes_selectors_need_their_part_and_go_with_it() {
     let mut s = state.clone();
     s.set_routes(&name("mac"), vec![]).expect("removed");
     assert!(s.rules.is_empty());
-    assert!(
-        state
-            .rules
-            .values()
-            .all(|r| r.from.iter().all(|s| s.part == Part::Edge))
-    );
+    assert!(state.rules.values().all(|r| {
+        r.from
+            .iter()
+            .all(|s| s.node().is_some_and(|(_, p)| p == Part::Edge))
+    }));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -1205,4 +1202,247 @@ fn machines_behind_the_same_nat_connect_over_their_lan() {
     learn(&mut state, "nas", "192.168.1.20/24", 50002, elsewhere);
     assert_eq!(lan_of(&state, "mac", "nas"), Some(Candidate::Punch));
     std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A site with edge-vps as the mobile gateway, an own device `phone` and a limited device `work`.
+fn device_site(dir: &Path) -> (SiteDir, State) {
+    let (site, mut state) = site(dir);
+    for (n, limited, k) in [("phone", false, 0x51), ("work", true, 0x52)] {
+        let (device_id, credential_id) = new_device_ids().expect("ids");
+        state
+            .add_device(
+                name(n),
+                NewDevice {
+                    device_id,
+                    credential_id,
+                    public_key: X25519PublicKey::from_bytes([k; 32]),
+                    limited,
+                    // The first names it, the second reuses it
+                    gateway: (n == "phone").then(|| name("edge-vps")),
+                },
+            )
+            .expect("add device");
+    }
+    signed(&site, &mut state);
+    (site, state)
+}
+
+/// The devices a machine's desired state carries, as the mesh process verifies them.
+fn devices_of(state: &State, n: &str) -> nett_mesh::devices::Devices {
+    let doc = desired(state, &name(n)).expect("composed").expect("signed");
+    let desired = DesiredMesh::from_doc(doc).expect("valid");
+    let members = admitted(state, n);
+    let mut devices = nett_mesh::devices::Devices::default();
+    let mut events = VecSink::default();
+    devices.apply(
+        &desired,
+        members.members(),
+        members.revocations(),
+        &mut events,
+    );
+    assert!(
+        !events
+            .0
+            .iter()
+            .any(|e| matches!(e, nett_mesh::event::Event::DeviceRejected { .. })),
+        "{:?}",
+        events.0
+    );
+    devices
+}
+
+#[test]
+fn devices_are_signed_and_carried_by_their_gateway() {
+    let (_tmp, dir) = temp_dir("devices");
+    let (_site, state) = device_site(&dir);
+    let gateway = admitted(&state, "edge-vps");
+    let edge = state.machine(&name("edge-vps")).expect("edge-vps");
+    assert!(
+        gateway.members()[&edge.node_id]
+            .roles
+            .contains(&nett_trust::payload::Role::Gateway)
+    );
+    for n in ["edge-vps", "mac", "nas"] {
+        let devices = devices_of(&state, n);
+        assert_eq!(devices.served_by(&edge.node_id).count(), 2, "{n}");
+    }
+    // Addresses come from the same counter as machines, after them
+    let phone = &state.devices[&name("phone")];
+    assert_eq!(phone.credential.addresses.ipv4.to_string(), "100.88.0.4");
+    // The gateway connects to every machine, since phone reaches every machine
+    let pairs = connections(&state);
+    for m in ["mac", "nas"] {
+        let other = &state.machine(&name(m)).expect("m").node_id;
+        let pair = if edge.node_id < *other {
+            (edge.node_id.clone(), other.clone())
+        } else {
+            (other.clone(), edge.node_id.clone())
+        };
+        assert!(pairs.contains(&pair), "{m}");
+    }
+}
+
+#[test]
+fn own_devices_reach_everything_and_limited_ones_only_their_rules() {
+    let (_tmp, dir) = temp_dir("device-rules");
+    let (site, mut state) = device_site(&dir);
+    let phone = state.devices[&name("phone")].credential.addresses;
+    let work = state.devices[&name("work")].credential.addresses;
+    let rules = expand_rules(&state).expect("expanded");
+    assert_eq!(rules.len(), 1);
+    assert!(
+        rules[0]
+            .from
+            .contains(&nett_core::prefix::IpPrefix::host(phone.ipv4.into()))
+    );
+    assert!(
+        !rules[0]
+            .from
+            .contains(&nett_core::prefix::IpPrefix::host(work.ipv4.into()))
+    );
+    assert!(rules[0].to.contains(&state.prefixes.ipv4));
+    assert!(rules[0].ports.is_empty());
+
+    state
+        .allow(
+            &["work".into()],
+            &["edge-vps".into()],
+            vec![tcp(8081)],
+            None,
+        )
+        .expect("allow");
+    signed(&site, &mut state);
+    let rules = expand_rules(&state).expect("expanded");
+    assert_eq!(rules.len(), 2);
+    assert!(
+        rules[1]
+            .from
+            .contains(&nett_core::prefix::IpPrefix::host(work.ipv4.into()))
+    );
+    assert_eq!(rules[1].ports, vec![tcp(8081)]);
+}
+
+#[test]
+fn removing_a_device_revokes_it_and_strips_its_rules() {
+    let (_tmp, dir) = temp_dir("device-remove");
+    let (site, mut state) = device_site(&dir);
+    state
+        .allow(&["mac".into()], &["work".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&site, &mut state);
+    let old = state.clone();
+    let credential = state.devices[&name("work")].credential.id.clone();
+    state.remove_device(&name("work")).expect("removed");
+    signed(&site, &mut state);
+    assert!(state.rules.is_empty());
+    let lines = describe(&old, &state);
+    assert!(
+        lines.iter().any(|l| l.starts_with("- work (device")),
+        "{lines:?}"
+    );
+    let doc = desired(&state, &name("mac"))
+        .expect("composed")
+        .expect("signed");
+    assert!(
+        doc.revocations
+            .contains(&nett_trust::revocation::Revocation::DeviceCredential {
+                credential_id: credential
+            })
+    );
+    assert_eq!(doc.devices.len(), 1);
+}
+
+#[test]
+fn a_gateway_is_a_gateway_while_devices_come_through_it() {
+    let (_tmp, dir) = temp_dir("device-gateway");
+    let (site_dir, mut state) = device_site(&dir);
+    assert!(state.remove(&name("edge-vps")).is_err());
+    assert!(
+        state
+            .set(
+                &name("edge-vps"),
+                MachineChange {
+                    reachability: Some(Reachability::DialOnly),
+                    ..MachineChange::default()
+                },
+            )
+            .is_err()
+    );
+    // The last device gone, the role goes with it
+    let mut last = state.clone();
+    last.remove_device(&name("phone")).expect("phone");
+    last.remove_device(&name("work")).expect("work");
+    signed(&site_dir, &mut last);
+    let edge = last
+        .machine(&name("edge-vps"))
+        .expect("edge-vps")
+        .node_id
+        .clone();
+    assert!(!last.is_gateway(&edge));
+    assert!(
+        !admitted(&last, "edge-vps").members()[&edge]
+            .roles
+            .contains(&nett_trust::payload::Role::Gateway)
+    );
+    let lines = describe(&state, &last);
+    assert!(
+        lines
+            .iter()
+            .any(|l| l == "~ edge-vps: no longer a mobile gateway"),
+        "{lines:?}"
+    );
+    // Names are shared between machines and devices, and a device needs a gateway
+    assert!(
+        state
+            .add(
+                name("phone"),
+                MachineOptions::default(),
+                new_node_id().expect("id")
+            )
+            .is_err()
+    );
+    let (_tmp2, dir2) = temp_dir("device-no-gateway");
+    let (_site2, mut plain) = site(&dir2);
+    let (device_id, credential_id) = new_device_ids().expect("ids");
+    assert!(
+        plain
+            .add_device(
+                name("phone"),
+                NewDevice {
+                    device_id,
+                    credential_id,
+                    public_key: X25519PublicKey::from_bytes([9; 32]),
+                    limited: false,
+                    gateway: None,
+                },
+            )
+            .is_err()
+    );
+    // A dial-only machine cannot be a gateway
+    let (device_id, credential_id) = new_device_ids().expect("ids");
+    assert!(
+        plain
+            .add_device(
+                name("phone"),
+                NewDevice {
+                    device_id,
+                    credential_id,
+                    public_key: X25519PublicKey::from_bytes([9; 32]),
+                    limited: false,
+                    gateway: Some(name("mac")),
+                },
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn a_site_without_devices_serializes_as_before() {
+    let (_tmp, dir) = temp_dir("no-devices");
+    let (site, mut state) = site(&dir);
+    signed(&site, &mut state);
+    let json = serde_json::to_string(&state).expect("json");
+    assert!(!json.contains("devices"));
+    assert!(!json.contains("gateway"));
+    assert!(!json.contains("revoked_credentials"));
 }

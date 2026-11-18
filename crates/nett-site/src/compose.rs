@@ -9,14 +9,14 @@ use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
-    Candidate, DesiredMesh, DesiredMeshDoc, PathDoc, ProbeToken, Reachability, RelayDoc,
+    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, PathDoc, ProbeToken, Reachability, RelayDoc,
     RelayMemberDoc,
 };
 use nett_mesh::prober::is_decider;
 use nett_trust::revocation::Revocation;
 
 use crate::SiteError;
-use crate::state::{Machine, RelayKey, RelayRole, State};
+use crate::state::{Machine, RelayKey, RelayRole, Selector, State};
 
 /// Most candidate paths of one connection (design/mesh.md section 6).
 pub const MAX_CANDIDATES: usize = 6;
@@ -24,9 +24,11 @@ pub const MAX_CANDIDATES: usize = 6;
 /// A pair of machines that need a connection, sorted by node ID.
 pub type Pair = (NodeId, NodeId);
 
-/// Which machines get connections: every pair involved in an access rule, plus every `dial-only`
-/// member with all `public` members (to determine NAT type and mapped address, and as redundancy on
-/// failure, design/mesh.md section 6.1, architecture.md section 12.3).
+/// Which machines get connections: every pair involved in an access rule, a device counting as its
+/// gateway, plus every `dial-only` member with all `public` members (to determine NAT type and mapped
+/// address, and as redundancy on failure, design/mesh.md section 6.1, architecture.md section 12.3).
+/// A gateway that carries devices reaching every machine connects to every machine
+/// (design/devices.md section 7).
 pub fn connections(state: &State) -> BTreeSet<Pair> {
     let mut pairs = BTreeSet::new();
     let mut add = |a: &NodeId, b: &NodeId| {
@@ -38,11 +40,22 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
             });
         }
     };
+    let node = |s: &Selector| match s {
+        Selector::Machine(m) => Some(m.node.clone()),
+        Selector::Device(d) => state
+            .device_by_id(&d.device)
+            .map(|(_, d)| d.gateway.clone()),
+    };
     for rule in state.rules.values() {
-        for f in &rule.from {
-            for t in &rule.to {
-                add(&f.node, &t.node);
+        for f in rule.from.iter().filter_map(node) {
+            for t in rule.to.iter().filter_map(node) {
+                add(&f, &t);
             }
+        }
+    }
+    for d in state.devices.values().filter(|d| !d.limited) {
+        for m in state.machines.values() {
+            add(&d.gateway, &m.node_id);
         }
     }
     let public: Vec<&Machine> = state
@@ -338,6 +351,14 @@ pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>,
             .map(|r| Revocation::Node {
                 node_id: r.node_id.clone(),
             })
+            .chain(
+                state
+                    .revoked_credentials
+                    .iter()
+                    .map(|r| Revocation::DeviceCredential {
+                        credential_id: r.credential_id.clone(),
+                    }),
+            )
             .collect(),
         paths,
         access_rules: state.access_rules.as_ref().map(|r| r.signed.clone()),
@@ -345,6 +366,17 @@ pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>,
             .machines
             .values()
             .filter_map(|m| m.routes_signed.as_ref().map(|r| r.signed.clone()))
+            .collect(),
+        devices: state
+            .devices
+            .iter()
+            .filter_map(|(name, d)| {
+                Some(DeviceDoc {
+                    credential: d.credential.signed.clone()?,
+                    gateway: d.gateway.clone(),
+                    name: Some(name.clone()),
+                })
+            })
             .collect(),
         names,
         relay: relay_doc(state, me),

@@ -15,15 +15,16 @@ use nett_trust::admission::{AdmissionMaterial, AdmissionProofDoc, AdmissionProof
 use nett_trust::encoding::{Sha256Digest, Timestamp};
 use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{
-    AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, EdgeSources, MeshAddresses, Module,
-    NodeAddresses, NodePolicy, Payload, PayloadDoc, Role, RuleAction,
+    AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, DeviceCredential, EdgeSources,
+    MAX_RULE_PREFIXES, MeshAddresses, Module, NodeAddresses, NodePolicy, Payload, PayloadDoc, Role,
+    RuleAction,
 };
 use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
 use serde::Serialize;
 
 use crate::SiteError;
-use crate::state::{Machine, NodeKeys, Part, SignedPolicy, SignedVersion, State};
+use crate::state::{Machine, NodeKeys, Part, Selector, SignedPolicy, SignedVersion, State};
 
 /// Expiry time of a signed payload: 30 days after generation (design/local-signing.md section 5).
 pub const PAYLOAD_VALIDITY_SECS: i64 = 30 * 24 * 3600;
@@ -69,8 +70,11 @@ pub fn sign(
         ));
     }
     let expires_at = Timestamp::from_unix_seconds(now.unix_seconds() + PAYLOAD_VALIDITY_SECS);
+    let gateways: std::collections::BTreeSet<NodeId> =
+        state.devices.values().map(|d| d.gateway.clone()).collect();
     for m in state.machines.values_mut() {
-        if let Some(input) = policy_input(m) {
+        let gateway = gateways.contains(&m.node_id);
+        if let Some(input) = policy_input(m, gateway) {
             let hash = hash_of(&input)?;
             let keep = m.policy.as_ref().is_some_and(|p| {
                 p.input == hash
@@ -90,7 +94,7 @@ pub fn sign(
             // proof is signed by the machine when it joins (design/hub.md section 6)
             let input = PendingInput {
                 enrollment_key: e.public_key,
-                roles: roles(m),
+                roles: roles(m, gateway),
                 edge_sources: m.edge.as_ref().map(|e| EdgeSources {
                     containers: e.containers.clone(),
                 }),
@@ -134,6 +138,25 @@ pub fn sign(
         )?;
     }
 
+    // A credential is signed once, when the device is added (design/devices.md section 4)
+    for d in state.devices.values_mut() {
+        if d.credential.signed.is_none() {
+            let payload = PayloadDoc::EnrollmentPolicy {
+                v: 1,
+                artifacts: vec![Artifact::DeviceCredential(DeviceCredential {
+                    device_id: d.device_id.clone(),
+                    credential_id: d.credential.id.clone(),
+                    public_key: d.credential.public_key,
+                    addresses: d.credential.addresses,
+                })],
+                expires_at,
+            }
+            .to_canonical()
+            .map_err(SiteError::sign)?;
+            d.credential.signed = Some(recovery.sign(payload).map_err(SiteError::sign)?);
+        }
+    }
+
     let rules = expand_rules(state)?;
     let input = hash_of(&rules)?;
     let changed = state.access_rules.as_ref().is_none_or(|r| r.input != input);
@@ -155,12 +178,12 @@ pub fn sign(
     Ok(())
 }
 
-fn policy_input(m: &Machine) -> Option<PolicyInput> {
+fn policy_input(m: &Machine, gateway: bool) -> Option<PolicyInput> {
     let keys = m.keys?;
     Some(PolicyInput {
         mesh_key: keys.mesh,
         identity_key: keys.identity,
-        roles: roles(m),
+        roles: roles(m, gateway),
         edge_sources: m.edge.as_ref().map(|e| EdgeSources {
             containers: e.containers.clone(),
         }),
@@ -175,7 +198,7 @@ fn policy_input(m: &Machine) -> Option<PolicyInput> {
 pub fn outdated(state: &State) -> Result<Vec<String>, SiteError> {
     let mut out = Vec::new();
     for (name, m) in &state.machines {
-        if let (Some(input), Some(p)) = (policy_input(m), &m.policy)
+        if let (Some(input), Some(p)) = (policy_input(m, state.is_gateway(&m.node_id)), &m.policy)
             && hash_of(&input)? != p.input
         {
             out.push(format!("{name}: node policy"));
@@ -195,12 +218,13 @@ pub fn outdated(state: &State) -> Result<Vec<String>, SiteError> {
 }
 
 /// Roles in the node policy: `edge` when there is an Edge, `subnet_router` when there are
-/// advertised routes.
-fn roles(m: &Machine) -> Vec<Role> {
+/// advertised routes, `gateway` when devices come through it.
+fn roles(m: &Machine, gateway: bool) -> Vec<Role> {
     m.edge
         .iter()
         .map(|_| Role::Edge)
         .chain((!m.routes.is_empty()).then_some(Role::SubnetRouter))
+        .chain(gateway.then_some(Role::Gateway))
         .collect()
 }
 
@@ -340,19 +364,58 @@ fn sign_routes(
 }
 
 /// Access rules expanded into prefixes (design/mesh.md section 12), ordered by number: a machine is
-/// its mesh address, `<machine>.edge` is its Edge address, and `<machine>.routes` is the routes it
-/// advertises.
+/// its mesh address, `<machine>.edge` is its Edge address, `<machine>.routes` is the routes it
+/// advertises, and a device is its credential's addresses. Devices that are not limited come first,
+/// allowed to the mesh prefixes and every advertised route (design/devices.md section 5).
 pub fn expand_rules(state: &State) -> Result<Vec<AccessRule>, SiteError> {
     let host =
         |a: MeshAddresses| vec![IpPrefix::host(a.ipv4.into()), IpPrefix::host(a.ipv6.into())];
-    let prefixes = |s: &crate::state::Selector| -> Result<Vec<IpPrefix>, SiteError> {
-        let m = state.by_id(&s.node).ok_or_else(|| {
+    let mut rules = Vec::new();
+    let own: Vec<IpPrefix> = state
+        .devices
+        .values()
+        .filter(|d| !d.limited)
+        .flat_map(|d| host(d.credential.addresses))
+        .collect();
+    let everything: Vec<IpPrefix> = [state.prefixes.ipv4, state.prefixes.ipv6]
+        .into_iter()
+        .chain(
+            state
+                .machines
+                .values()
+                .flat_map(|m| m.routes.iter().copied()),
+        )
+        .collect();
+    // A rule lists at most MAX_RULE_PREFIXES on each side
+    for from in own.chunks(MAX_RULE_PREFIXES) {
+        for to in everything.chunks(MAX_RULE_PREFIXES) {
+            rules.push(AccessRule {
+                action: RuleAction::Allow,
+                from: from.to_vec(),
+                to: to.to_vec(),
+                ports: Vec::new(),
+            });
+        }
+    }
+    let prefixes = |s: &Selector| -> Result<Vec<IpPrefix>, SiteError> {
+        let (node, part) = match s {
+            Selector::Machine(m) => (&m.node, m.part),
+            Selector::Device(d) => {
+                let (_, device) = state.device_by_id(&d.device).ok_or_else(|| {
+                    SiteError::invalid(format!(
+                        "a rule names device {}, which is not in the site",
+                        d.device
+                    ))
+                })?;
+                return Ok(host(device.credential.addresses));
+            }
+        };
+        let m = state.by_id(node).ok_or_else(|| {
             SiteError::invalid(format!(
-                "a rule names node {}, which is not in the site",
-                s.node
+                "a rule names node {node}, which is not in the site"
             ))
         })?;
-        Ok(match s.part {
+        Ok(match part {
             Part::Mesh => host(m.mesh),
             Part::Edge => host(
                 m.edge
@@ -363,7 +426,6 @@ pub fn expand_rules(state: &State) -> Result<Vec<AccessRule>, SiteError> {
             Part::Routes => m.routes.clone(),
         })
     };
-    let mut rules = Vec::new();
     for rule in state.rules.values() {
         let mut from = Vec::new();
         for s in &rule.from {

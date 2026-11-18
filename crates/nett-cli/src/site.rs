@@ -18,8 +18,10 @@ use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{DesiredMeshDoc, MAX_MEMBERS, Reachability};
 use nett_site::changes::{describe, path_kind, ports_text};
 use nett_site::compose::{connections, desired};
-use nett_site::dir::{DESIRED_FILE, NODES_DIR, SiteDir, new_node_id, new_relay_key};
-use nett_site::ops::{MachineChange, MachineOptions};
+use nett_site::dir::{
+    DESIRED_FILE, NODES_DIR, SiteDir, new_device_ids, new_node_id, new_relay_key,
+};
+use nett_site::ops::{MachineChange, MachineOptions, NewDevice};
 use nett_site::sign::sign;
 use nett_site::state::{
     DEFAULT_RELAY_PORT, DEFAULT_RELAY_TLS_PORT, NodeKeys, RelayRole, RuleId, Selector, State,
@@ -56,10 +58,20 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        without: sign its node policy again, rewrite its desired state
   edge <name> <prefix>... | --none     the Edge containers on this machine
   routes <name> <prefix>... | --none   the routes this machine advertises
+  device add <name> [--gateway <machine>] [--limited] [--out <dir>]
+                                       add a phone or computer that runs no nett, and write its
+                                       WireGuard and Surge configurations. It joins through the
+                                       public Linux machine --gateway names, which the first
+                                       device needs and later ones reuse; it reaches every
+                                       machine, or with --limited only what rules allow
+  device remove <name>                 revoke a device; rules that name it go with it, and its
+                                       gateway stops being one when no device is left on it
+  devices [--json]                     list the devices
   allow <from> <to> [<ports>] [--note <text>]
-                                       allow connections: <machine>, <machine>.edge or
-                                       <machine>.routes, several joined by commas; ports such as
-                                       22/tcp or 60000-61000/udp, all ports when left out
+                                       allow connections: <machine>, <machine>.edge,
+                                       <machine>.routes or a device, several joined by commas;
+                                       ports such as 22/tcp or 60000-61000/udp, all ports when
+                                       left out
   rules [--json]                       list the access rules
   rules remove <id>                    remove an access rule, for example r2
   status [<name>] [--json]             list the machines and their connections; with a Hub, also
@@ -71,7 +83,8 @@ The site directory defaults to $XDG_CONFIG_HOME/nett, or ~/.config/nett when it 
 
 /// One modification: made on a copy of the site state.
 type Change = Box<dyn FnOnce(&mut State) -> anyhow::Result<()>>;
-/// What to do after a successful push (print the one line to run on the new machine).
+/// What to do once the change is saved, or after a successful push (print the one line to run on the
+/// new machine).
 type After<'a> = &'a dyn Fn(&State) -> anyhow::Result<()>;
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
@@ -84,6 +97,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         (None, None, None);
     let (mut keys, mut note) = (None, None);
     let (mut tls, mut no_tls, mut off, mut fingerprint) = (None::<String>, false, false, None);
+    let (mut limited, mut gateway, mut out) = (false, None::<String>, None::<PathBuf>);
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Value(v) => words.push(v.string()?),
@@ -103,6 +117,9 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             lexopt::Arg::Long("no-tls") => no_tls = true,
             lexopt::Arg::Long("off") => off = true,
             lexopt::Arg::Long("fingerprint") => fingerprint = Some(parser.value()?.string()?),
+            lexopt::Arg::Long("limited") => limited = true,
+            lexopt::Arg::Long("gateway") => gateway = Some(parser.value()?.string()?),
+            lexopt::Arg::Long("out") => out = Some(PathBuf::from(parser.value()?)),
             other => return Err(other.unexpected().into()),
         }
     }
@@ -125,6 +142,17 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         ["status"] => return status(&dir, None, json),
         ["status", name] => return status(&dir, Some(&machine(name)?), json),
         ["rules"] => return rules(&dir, json),
+        ["devices"] => return devices(&dir, json),
+        ["device", "add", name] => {
+            let gateway = gateway.as_deref().map(machine).transpose()?;
+            let out = out.unwrap_or_else(|| PathBuf::from("."));
+            return device_add(&dir, machine(name)?, limited, gateway, &out, yes);
+        }
+        ["device", "remove", name] => {
+            let name = machine(name)?;
+            Box::new(move |s| Ok(s.remove_device(&name)?))
+        }
+
         ["invite", name] => return invite(&dir, &machine(name)?, yes),
         ["add", name] => {
             let name = machine(name)?;
@@ -265,7 +293,112 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
         _ => bail!(USAGE),
     };
-    modify(&dir, yes, &[], change, None)
+    modify(&dir, yes, &[], change, None, None)
+}
+
+/// Before the site's first device: the Hub and every machine run a release that knows devices
+/// (design/devices.md section 9). Without a Hub the site cannot tell, so it says what is needed.
+fn devices_ready(dir: &Path) -> anyhow::Result<()> {
+    let state = SiteDir::open(dir)?.load()?;
+    if !state.devices.is_empty() {
+        return Ok(());
+    }
+    match SiteHub::load(dir)? {
+        Some(hub) => crate::hub::require_devices(&hub),
+        None => {
+            println!(
+                "Every machine needs nett {} or later for devices; older ones reject the new \
+                 signed content.",
+                crate::hub::DEVICES_SINCE
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `nett site device add` (design/devices.md section 3): the key pair is generated here, the
+/// configuration is written once the signed change is saved, and the private key is kept nowhere
+/// else.
+fn device_add(
+    dir: &Path,
+    name: NodeName,
+    limited: bool,
+    gateway: Option<NodeName>,
+    out: &Path,
+    yes: bool,
+) -> anyhow::Result<()> {
+    devices_ready(dir)?;
+    {
+        let state = SiteDir::open(dir)?.load()?;
+        crate::device::gateway_for(&state, gateway.as_ref())?;
+    }
+    let files = crate::device::Files::new(out, &name)?;
+    let key = nett_mesh::key::PrivateKey::generate()?;
+    let (device_id, credential_id) = new_device_ids()?;
+    let new = NewDevice {
+        device_id,
+        credential_id,
+        public_key: key.public_key(),
+        limited,
+        gateway,
+    };
+    let target = name.clone();
+    let terminal = std::io::stdout().is_terminal();
+    let saved = |state: &State| crate::device::export(state, &name, &key, &files, terminal);
+    modify(
+        dir,
+        yes,
+        &[],
+        Box::new(move |s| {
+            s.add_device(target, new)?;
+            Ok(())
+        }),
+        Some(&saved),
+        None,
+    )
+}
+
+fn devices(dir: &Path, json: bool) -> anyhow::Result<()> {
+    let state = SiteDir::open(dir)?.load()?;
+    if json {
+        let list: Vec<serde_json::Value> = state
+            .devices
+            .iter()
+            .map(|(name, d)| {
+                serde_json::json!({
+                    "name": name,
+                    "device_id": d.device_id,
+                    "credential_id": d.credential.id,
+                    "addresses": d.credential.addresses,
+                    "gateway": state.name_of(&d.gateway),
+                    "limited": d.limited,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if state.devices.is_empty() {
+        println!("No devices. `nett site device add <name>` adds one.");
+        return Ok(());
+    }
+    let mut rows = vec![["NAME", "ADDRESS", "GATEWAY", "ACCESS"].map(String::from)];
+    for (name, d) in &state.devices {
+        rows.push([
+            name.to_string(),
+            d.credential.addresses.ipv4.to_string(),
+            state
+                .name_of(&d.gateway)
+                .map_or_else(|| d.gateway.to_string(), ToString::to_string),
+            if d.limited {
+                "rules only".to_owned()
+            } else {
+                "every machine".to_owned()
+            },
+        ]);
+    }
+    print!("{}", table(&rows));
+    Ok(())
 }
 
 /// Fetches what happened on the Hub side and records it in the site directory (design/hub.md
@@ -376,6 +509,7 @@ fn enroll(
             change(s)?;
             Ok(s.await_enrollment(&target, public_key, expires_at)?)
         }),
+        None,
         Some(&after),
     )
 }
@@ -395,12 +529,14 @@ fn list_or_none(items: &[&str], none: bool, what: &str) -> anyhow::Result<Option
 
 /// One modifying command (design/site.md section 7): modify, sign, list the changes, confirm, write
 /// the desired state, save the site state. Machines in `force` get their node policy re-signed even
-/// if nothing changed (`invite`). When linked to a Hub, `after` runs after a successful push.
+/// if nothing changed (`invite`). `saved` runs once the change is saved; when linked to a Hub,
+/// `after` runs after a successful push.
 fn modify(
     dir: &Path,
     yes: bool,
     force: &[NodeId],
     change: Change,
+    saved: Option<After<'_>>,
     after: Option<After<'_>>,
 ) -> anyhow::Result<()> {
     let site = SiteDir::open(dir)?;
@@ -445,6 +581,9 @@ fn modify(
         },
     )?;
     let written = save_with_outputs(&site, &old, &new, &outputs)?;
+    if let Some(saved) = saved {
+        saved(&new)?;
+    }
     let Some(hub) = hub else {
         print_written(&site, &written);
         return Ok(());
@@ -561,7 +700,7 @@ fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
         let site = SiteDir::open(dir)?;
         site.load()?.machine(name)?.node_id.clone()
     };
-    modify(dir, yes, &[node], Box::new(|_| Ok(())), None)
+    modify(dir, yes, &[node], Box::new(|_| Ok(())), None, None)
 }
 
 fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<()> {
@@ -664,7 +803,13 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
         println!("{}", serde_json::to_string_pretty(&state.rules)?);
         return Ok(());
     }
-    if state.rules.is_empty() {
+    let own: Vec<String> = state
+        .devices
+        .iter()
+        .filter(|(_, d)| !d.limited)
+        .map(|(n, _)| n.to_string())
+        .collect();
+    if state.rules.is_empty() && own.is_empty() {
         println!(
             "No access rules: no connection is allowed. `nett site allow <from> <to> <ports>` adds one."
         );
@@ -677,6 +822,17 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
             .join(", ")
     };
     let mut rows = vec![["ID", "FROM", "TO", "PORTS", "NOTE"].map(String::from)];
+    // What devices that are not limited reach is part of the signed rule set (design/devices.md
+    // section 5)
+    if !own.is_empty() {
+        rows.push([
+            "-".to_owned(),
+            own.join(", "),
+            "every machine and route".to_owned(),
+            "all ports".to_owned(),
+            "devices that are not limited".to_owned(),
+        ]);
+    }
     for (id, r) in &state.rules {
         rows.push([
             id.to_string(),
@@ -892,6 +1048,111 @@ mod tests {
 
     fn name(s: &str) -> NodeName {
         s.parse().expect("name")
+    }
+
+    #[test]
+    fn a_device_is_added_exported_and_removed() {
+        let (dir_tmp, dir) = temp_dir("devices");
+        site(&dir, &["init"]).expect("init");
+        let (_, gw_keys) = keys();
+        site(
+            &dir,
+            &[
+                "add",
+                "gw",
+                "--keys",
+                &gw_keys,
+                "--public",
+                "--ipv4",
+                "203.0.113.10",
+            ],
+        )
+        .expect("add gw");
+        let (_, mac_keys) = keys();
+        site(&dir, &["add", "mac", "--keys", &mac_keys]).expect("add mac");
+        // The first device names its gateway, which is a public machine
+        let out = dir_tmp.path().join("out");
+        std::fs::create_dir(&out).expect("out");
+        let out_arg = out.to_str().expect("utf-8");
+        assert!(site(&dir, &["device", "add", "work", "--out", out_arg]).is_err());
+        assert!(
+            site(
+                &dir,
+                &[
+                    "device",
+                    "add",
+                    "work",
+                    "--gateway",
+                    "mac",
+                    "--out",
+                    out_arg
+                ]
+            )
+            .is_err()
+        );
+        site(
+            &dir,
+            &[
+                "device",
+                "add",
+                "work",
+                "--gateway",
+                "gw",
+                "--limited",
+                "--out",
+                out_arg,
+            ],
+        )
+        .expect("device add");
+
+        let state = SiteDir::open(&dir).expect("open").load().expect("load");
+        let work = &state.devices[&name("work")];
+        assert!(work.limited);
+        let conf = std::fs::read_to_string(out.join("work.conf")).expect("conf");
+        let private = conf
+            .lines()
+            .find_map(|l| l.strip_prefix("PrivateKey = "))
+            .expect("private key line");
+        use base64::Engine as _;
+        let bytes: [u8; 32] = base64::engine::general_purpose::STANDARD
+            .decode(private)
+            .expect("base64")
+            .try_into()
+            .expect("32 bytes");
+        assert_eq!(
+            PrivateKey::from_bytes(bytes).public_key(),
+            work.credential.public_key
+        );
+        assert!(conf.contains("Endpoint = 203.0.113.10:41820"));
+        use std::os::unix::fs::PermissionsExt as _;
+        for f in ["work.conf", "work.surge.conf"] {
+            let mode = std::fs::metadata(out.join(f))
+                .expect("file")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600, "{f}");
+        }
+        // The site keeps no private key
+        let saved = std::fs::read_to_string(dir.join("state.json")).expect("state");
+        assert!(!saved.contains(private));
+        // The gateway's desired state carries the device; the same name again is refused, as is
+        // writing over the exported files
+        let doc: DesiredMeshDoc = serde_json::from_slice(
+            &std::fs::read(dir.join(NODES_DIR).join("gw").join(DESIRED_FILE)).expect("desired"),
+        )
+        .expect("doc");
+        assert_eq!(doc.devices.len(), 1);
+        assert!(site(&dir, &["device", "add", "work", "--out", out_arg]).is_err());
+
+        site(&dir, &["allow", "work", "gw", "8081/tcp"]).expect("allow");
+        // The gateway cannot go while a device comes through it
+        assert!(site(&dir, &["remove", "gw"]).is_err());
+        site(&dir, &["device", "remove", "work"]).expect("remove");
+        let state = SiteDir::open(&dir).expect("open").load().expect("load");
+        assert!(state.devices.is_empty());
+        assert!(state.rules.is_empty());
+        assert_eq!(state.revoked_credentials.len(), 1);
+        assert!(!state.is_gateway(&state.machines[&name("gw")].node_id));
     }
 
     #[test]

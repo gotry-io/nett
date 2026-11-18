@@ -47,6 +47,12 @@ If that answers and programs still do not resolve the name, the system resolver 
 - **The native member** binds its sockets to the physical interface, so its WireGuard and probe traffic does not enter the proxy app's tunnel; it works with the enhanced mode on.
 - **A container member on that Mac** (Docker, OrbStack) sends its traffic through the Mac's network stack, where the proxy app's tunnel takes it. Its direct paths to other machines then fail, and it falls back to relays. Exclude the public addresses of the machines it connects to from the proxy app's tunnel (in Surge, `tun-excluded-routes`), then reload the proxy app's configuration: the container member moves back to its direct paths.
 
+## Devices through a mobile gateway
+
+- **IPv4 forwarding**: a gateway forwards its devices' traffic, so `net.ipv4.ip_forward` has to be 1; nett checks it and does not change it, and `sudo nett status` on the gateway lists the problem while it is 0 (Docker turns it on when it starts). Without IPv6 forwarding (`net.ipv6.conf.all.forwarding`), devices reach other machines over IPv4 only, and the status says so.
+- **A firewall that drops forwarded traffic**: nett adds its accept to the system's `filter FORWARD` chain in nftables, which is where Docker and ufw put theirs. A chain in another nftables table that drops forwarded traffic by default is listed as a problem that names it; accept traffic from `nett0` to `nett0` there. With `iptables-legacy`, which nett cannot read, add `iptables -I FORWARD -i nett0 -o nett0 -j ACCEPT` and keep it across reboots.
+- **A device does not connect**: `sudo nett status` on the gateway lists each device with where it last connected from and its last handshake. No handshake means the device does not reach the gateway's WireGuard port (check the cloud security group) or uses a removed configuration.
+
 ## Container members
 
 A container member runs three containers from the same image ([packaging/container/compose.example.yaml](../packaging/container/compose.example.yaml)): the mesh process, nett-node next to it, and the transport adapter in the mesh container's network namespace for paths over TLS. Without the transport container, the member has no TLS fallback when UDP is blocked. A container member does not upgrade itself: `nett site status` reports a newer release as available, and the image is upgraded by pulling or building a new one.

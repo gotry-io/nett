@@ -7,11 +7,11 @@ use std::fmt;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 
-use nett_core::id::NodeId;
+use nett_core::id::{CredentialId, DeviceId, NodeId};
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
-use nett_mesh::config::{MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_port};
+use nett_mesh::config::{MAX_DEVICES, MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_port};
 use nett_mesh::lan::LanAddress;
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
@@ -65,6 +65,46 @@ pub struct State {
     /// directory (design/hub.md section 8.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backup_key: Option<X25519PublicKey>,
+    /// Devices, by name (design/devices.md section 3); devices and machines share one namespace.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub devices: BTreeMap<NodeName, Device>,
+    /// Removed devices' credentials: revocation takes effect permanently, and the addresses are not
+    /// allocated again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub revoked_credentials: Vec<RevokedCredential>,
+}
+
+/// A device that joins through a mobile gateway with one WireGuard credential (design/devices.md).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Device {
+    pub device_id: DeviceId,
+    /// Reaches only what rules allow; otherwise every machine (design/devices.md section 5).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub limited: bool,
+    /// The machine with the gateway role that carries it, fixed when the credential is created.
+    pub gateway: NodeId,
+    pub credential: Credential,
+}
+
+/// One WireGuard credential: the public key and addresses, and the signed `device_credential`. The
+/// private key is only in the configuration exported when it was created.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Credential {
+    pub id: CredentialId,
+    pub public_key: X25519PublicKey,
+    pub addresses: MeshAddresses,
+    /// Signed once, when the device is added; a credential has no version.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signed: Option<SignedPayload>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RevokedCredential {
+    pub name: NodeName,
+    pub credential_id: CredentialId,
 }
 
 /// The site's relay key. `Debug` does not print it (hard rule 10).
@@ -141,6 +181,10 @@ pub struct Machine {
 
 fn is_zero(v: &u64) -> bool {
     *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl Machine {
@@ -300,7 +344,8 @@ pub struct Revoked {
     pub node_id: NodeId,
 }
 
-/// An access rule: allow only (design/site.md section 5.1). Both sides are recorded by machine ID.
+/// An access rule: allow only (design/site.md section 5.1). Both sides are recorded by machine ID
+/// or device ID.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
@@ -324,11 +369,46 @@ pub enum Part {
     Routes,
 }
 
+/// One side of a rule: a part of a machine, or a device.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Selector {
+    Machine(MachineSelector),
+    Device(DeviceSelector),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Selector {
+pub struct MachineSelector {
     pub node: NodeId,
     pub part: Part,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceSelector {
+    pub device: DeviceId,
+}
+
+impl Selector {
+    pub fn machine(node: NodeId, part: Part) -> Self {
+        Self::Machine(MachineSelector { node, part })
+    }
+
+    /// The machine and part this selects, when it selects a machine.
+    pub fn node(&self) -> Option<(&NodeId, Part)> {
+        match self {
+            Self::Machine(m) => Some((&m.node, m.part)),
+            Self::Device(_) => None,
+        }
+    }
+
+    pub fn device(&self) -> Option<&DeviceId> {
+        match self {
+            Self::Device(d) => Some(&d.device),
+            Self::Machine(_) => None,
+        }
+    }
 }
 
 /// Rule number: `r1`, `r2`, ...
@@ -380,6 +460,8 @@ impl State {
             access_rules: None,
             relay_key: None,
             backup_key: None,
+            devices: BTreeMap::new(),
+            revoked_credentials: Vec::new(),
         }
     }
 
@@ -420,15 +502,33 @@ impl State {
         self.machines.values().find(|m| m.node_id == *node)
     }
 
-    /// Text form of a selector: `mac`, `edge-vps.edge`, `mac-app.routes`.
+    /// Whether a machine is a mobile gateway: some device comes through it, which gives its node policy
+    /// the `gateway` role (design/devices.md section 3).
+    pub fn is_gateway(&self, node: &NodeId) -> bool {
+        self.devices.values().any(|d| d.gateway == *node)
+    }
+
+    /// A device and its name, by device ID.
+    pub fn device_by_id(&self, device: &DeviceId) -> Option<(&NodeName, &Device)> {
+        self.devices.iter().find(|(_, d)| d.device_id == *device)
+    }
+
+    /// Text form of a selector: `mac`, `edge-vps.edge`, `mac-app.routes`, `phone`.
     pub fn selector_text(&self, s: &Selector) -> String {
-        let name = self
-            .name_of(&s.node)
-            .map_or_else(|| s.node.to_string(), ToString::to_string);
-        match s.part {
-            Part::Mesh => name,
-            Part::Edge => format!("{name}.edge"),
-            Part::Routes => format!("{name}.routes"),
+        match s {
+            Selector::Machine(m) => {
+                let name = self
+                    .name_of(&m.node)
+                    .map_or_else(|| m.node.to_string(), ToString::to_string);
+                match m.part {
+                    Part::Mesh => name,
+                    Part::Edge => format!("{name}.edge"),
+                    Part::Routes => format!("{name}.routes"),
+                }
+            }
+            Selector::Device(d) => self
+                .device_by_id(&d.device)
+                .map_or_else(|| d.device.to_string(), |(name, _)| name.to_string()),
         }
     }
 
@@ -564,18 +664,30 @@ impl State {
                 }
             }
         }
+        self.check_devices()?;
         for (id, rule) in &self.rules {
             if rule.from.is_empty() || rule.to.is_empty() {
                 return Err(SiteError::invalid(format!("rule {id} has an empty side")));
             }
             for s in rule.from.iter().chain(&rule.to) {
-                let Some(m) = self.by_id(&s.node) else {
+                let (node, part) = match s {
+                    Selector::Machine(m) => (&m.node, m.part),
+                    Selector::Device(d) => {
+                        if self.device_by_id(&d.device).is_none() {
+                            return Err(SiteError::invalid(format!(
+                                "rule {id} names device {}, which is not in the site",
+                                d.device
+                            )));
+                        }
+                        continue;
+                    }
+                };
+                let Some(m) = self.by_id(node) else {
                     return Err(SiteError::invalid(format!(
-                        "rule {id} names node {}, which is not in the site",
-                        s.node
+                        "rule {id} names node {node}, which is not in the site"
                     )));
                 };
-                let ok = match s.part {
+                let ok = match part {
                     Part::Mesh => true,
                     Part::Edge => m.edge.is_some(),
                     Part::Routes => !m.routes.is_empty(),
@@ -584,6 +696,53 @@ impl State {
                     return Err(SiteError::invalid(format!(
                         "rule {id} names {}, which does not exist",
                         self.selector_text(s)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Devices: their names are not machines' names, their gateway is a `public` machine, and their
+    /// addresses belong to nothing else (design/devices.md section 3).
+    fn check_devices(&self) -> Result<(), SiteError> {
+        if self.devices.len() > MAX_DEVICES {
+            return Err(SiteError::invalid(format!(
+                "a site holds at most {MAX_DEVICES} devices"
+            )));
+        }
+        let mut taken: BTreeMap<std::net::IpAddr, String> = BTreeMap::new();
+        for (name, m) in &self.machines {
+            for a in std::iter::once(m.mesh).chain(m.edge.iter().map(|e| e.addresses)) {
+                taken.insert(a.ipv4.into(), name.to_string());
+                taken.insert(a.ipv6.into(), name.to_string());
+            }
+        }
+        for (name, d) in &self.devices {
+            if self.machines.contains_key(name) {
+                return Err(SiteError::invalid(format!(
+                    "`{name}` is both a machine and a device"
+                )));
+            }
+            match self.by_id(&d.gateway) {
+                Some(g) if g.reachability == Reachability::Public => {}
+                Some(_) => {
+                    return Err(SiteError::invalid(format!(
+                        "device `{name}` comes through a dial-only machine: devices connect to \
+                         their gateway, so it stays --public"
+                    )));
+                }
+                None => {
+                    return Err(SiteError::invalid(format!(
+                        "device `{name}`: its gateway is not in the site"
+                    )));
+                }
+            }
+            let a = d.credential.addresses;
+            for ip in [std::net::IpAddr::V4(a.ipv4), std::net::IpAddr::V6(a.ipv6)] {
+                if let Some(other) = taken.insert(ip, name.to_string()) {
+                    return Err(SiteError::invalid(format!(
+                        "device `{name}`: address {ip} already belongs to `{other}`"
                     )));
                 }
             }

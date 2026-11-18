@@ -21,11 +21,8 @@ A phone or a computer that does not run nett joins the mesh with a standard Wire
 ## 3. Commands
 
 ```
-$ nett site gateway gw
+$ nett site device add work --gateway gw --limited
 ~ gw: mobile gateway for devices
-Sign and push? [y/N] y
-
-$ nett site device add work --limited
 + work (device, limited), 100.88.0.9, through gw
 Sign and push? [y/N] y
 Pushed. 7 of 7 machines applied.
@@ -37,6 +34,11 @@ $ nett site allow work gw 8081/tcp --note "admin console"
 Access rules v14 -> v15:
   + r11  work (100.88.0.9) -> gw (100.88.0.2)  8081/tcp  admin console
 
+$ nett site device add phone
++ phone (device), 100.88.0.10, through gw
+Access rules v15 -> v16:
+  + phone (100.88.0.10) -> every machine and route  all ports
+
 $ nett site devices
 NAME   ADDRESS      GATEWAY  ACCESS
 phone  100.88.0.10  gw       every machine
@@ -45,10 +47,11 @@ work   100.88.0.9   gw       rules only
 $ nett site device remove work
 ```
 
-- `nett site gateway <machine>` gives a `public` machine the `gateway` role in its node policy; `--off` takes it away, and is refused while devices use that gateway;
-- `nett site device add <name>` adds a device with one credential: the signing tool generates the key pair, assigns the next mesh address pair (mesh.md section 3), signs the credential, and writes the exported configuration (section 8). `--limited` makes it reach only what rules allow (section 5). `--gateway <machine>` chooses the gateway, required only when the site has more than one; the gateway of a credential is fixed when it is created;
+- `nett site device add <name>` adds a device with one credential: the signing tool generates the key pair, assigns the next mesh address pair (mesh.md section 3), signs the credential, and writes the exported configuration (section 8). `--limited` makes it reach only what rules allow (section 5);
+- **The gateway is chosen with the device**: `--gateway <machine>` names the `public` machine the device joins through. The first device names one; later ones come through the same one unless they name another, and need to name one once devices come through more than one. A credential's gateway is fixed when it is created;
+- **A machine is a mobile gateway while devices come through it**: its node policy has the `gateway` role from the first device that names it, signed in the same change, until its last device is removed, when the role goes with it and nett's rule in the system's forwarding chain too (section 6). Machines do not go through gateways. A gateway cannot be removed, or become `dial-only`, while devices come through it;
 - `nett site device remove <name>` revokes the device's credential (identity revocation, auth.md section 10.4) and deletes the rules that name it, as `remove` does for a machine (site.md section 5.1);
-- `nett site devices` lists the devices; `--json` gives the full content;
+- `nett site devices` lists the devices with their gateways; `--json` gives the full content;
 - Devices and machines share one namespace of names, so rules name either: `nett site allow work gw 8081/tcp`, `nett site allow mac phone 22/tcp`;
 - These are modifying commands like the others (site.md section 7): changes are listed, confirmed, signed and delivered.
 
@@ -87,8 +90,8 @@ $ nett site device remove work
 - **Port**: devices use the machine's WireGuard port; the gateway listens on nothing new. A handshake from a key that is not a configured peer gets no answer;
 - **Forwarding**: nett's forwarding chain on `nett0` accepts traffic from `nett0` to `nett0` whose source or destination is a device this gateway serves, and drops the rest of the traffic from `nett0` to `nett0`. Traffic from `nett0` to the machine's own containers (published ports) is not affected;
 - **Kernel forwarding**: the gateway needs IPv4 forwarding (`net.ipv4.ip_forward`). nett checks it and does not change it: while it is off, the gateway lists a problem, as a node with advertised routes does (status.md section 6). IPv6 forwarding (`net.ipv6.conf.all.forwarding`) is checked the same way; while it is off, devices reach other machines over IPv4 only, and the gateway's status says so;
-- **Host firewalls that drop forwarded traffic**: Docker, and firewalls such as ufw, set the policy of the system's `filter FORWARD` chain to drop. An accept in nett's own table does not get past a drop in another table, so the gateway adds one rule at the top of that chain, accepting traffic from `nett0` to `nett0`, when the chain exists in nftables (`iptables-nft`) and drops by default. The rule carries a mark nett recognizes; nett removes it when the machine stops being a gateway and with the mesh interface. nett's own forwarding chain still decides which of that traffic passes. Where the drop cannot be reached (`iptables-legacy`, a firewall in another table), the gateway lists a problem that names the chain. Tailscale, as a subnet router, inserts its rules into the system's forwarding chain the same way; the rule is listed in release.md section 8;
-- **Status**: `sudo nett status` on the gateway lists the devices it serves: name, address, last handshake, bytes received and sent.
+- **Host firewalls that drop forwarded traffic**: Docker, and firewalls such as ufw, set the policy of the system's `filter FORWARD` chain to drop. An accept in nett's own table does not get past a drop in another table, so the gateway adds one rule at the top of that chain, accepting traffic from `nett0` to `nett0`, when the chain exists in nftables (`iptables-nft`) and drops by default. The rule is written as `iptables-nft` writes `-i nett0 -o nett0 -j ACCEPT`, so iptables, and Docker through it, keep reading the chain, and carries a comment nett finds it by; nett removes it with the gateway's last device and with the mesh interface. nett's own forwarding chain still decides which of that traffic passes. The gateway installs its forwarding again every minute, so a firewall that starts after it (Docker at boot) is covered. A base chain in another nftables table that drops forwarded traffic by default is listed as a problem that names it; `iptables-legacy`, which nett cannot read, is covered in the troubleshooting guide. Tailscale, as a subnet router, inserts its rules into the system's forwarding chain the same way; the rule is listed in release.md section 8;
+- **Status**: `sudo nett status` on the gateway lists the devices it serves: name, address, where it last connected from, last handshake, bytes received and sent.
 
 ## 7. Other machines
 
@@ -133,21 +136,21 @@ IP-CIDR6,fd…::/48,nett,no-resolve
 
 - `AllowedIPs` covers the mesh prefixes and the advertised routes, whatever the device may reach: the rule set decides what passes, and the configuration stays valid when rules change;
 - The MTU equals the mesh interface's (1280), so the packets a device sends fit `nett0` when the gateway forwards them;
-- The QR code is generated by `qrcodegen` (MIT), a new dependency of the signing tool's path in `nett`, with no dependencies of its own; its size is measured when it is added.
+- The QR code is generated by `qrcodegen` (MIT), with no dependencies of its own, 17 KiB of code in `nett`. It is drawn with light modules as blocks, as `qrencode -t UTF8` does, for a terminal with light text on a dark background; the file imports the same configuration where the code does not scan.
 
 ## 9. Compatibility and rollout
 
-- Signed payloads, the pushed site and the desired state reject content they do not recognize (auth.md section 10.5). The new fields appear only once a gateway or a device exists, so upgrading changes nothing by itself;
-- Before signing the first `gateway` role or device, the Hub and every machine run the release that adds devices: with a Hub, `nett site gateway` and `nett site device add` read each machine's version from the Hub and refuse while the Hub or any machine runs an older release or has not reported one, naming them. Without a Hub they print which release every machine needs;
+- Signed payloads, the pushed site and the desired state reject content they do not recognize (auth.md section 10.5). The new fields appear only once a device exists, so upgrading changes nothing by itself;
+- Before signing the first device, the Hub and every machine run the release that adds devices: with a Hub, `nett site device add` reads each machine's version from the Hub and refuse while the Hub or any machine runs an older release, or than the signing tool when that is older still (a machine on the tool's own release knows everything it signs), or has not reported one, naming them. A machine that has never connected joins with the current release. Without a Hub they print which release every machine needs;
 - Machines that upgrade themselves get there on their own; container members and the Hub are upgraded by hand (release.md section 7).
 
 ## 10. Verification
 
 | Level | Content |
 |---|---|
-| Unit tests | Signing and verifying a credential; a revoked, overlapping or unsigned credential and one whose gateway lacks the role are rejected alone; the expanded rule for devices covers the mesh prefixes and the routes and leaves limited devices out; removing a device revokes it and strips its rules; the exported files hold the right keys, addresses and endpoint and are written `0600`; the version check before signing |
+| Unit tests | Signing and verifying a credential; a revoked, overlapping or unsigned credential and one whose gateway lacks the role are rejected alone; the expanded rule for devices covers the mesh prefixes and the routes and leaves limited devices out; removing a device revokes it and strips its rules, and the last one takes its gateway's role; the exported files hold the right keys, addresses and endpoint and are written `0600`; the version check before signing |
 | Hub integration tests | A push with a device verifies the credential; a revoked credential never comes back; a device disappears only with a revocation |
-| Lab scenario `devices` | A network namespace with plain `wg` as the phone, a gateway with a Docker-style `filter FORWARD` chain that drops, and a member behind NAT: the device reaches the member and the gateway; a limited device reaches only its allowed port; the member cannot open a connection to the device; after `device remove` the device's traffic stops; with IPv4 forwarding off the gateway lists the problem; the rule added to the `FORWARD` chain goes when the gateway stops being one |
+| Lab scenario `devices` | Network namespaces with plain `wg` as the devices, a gateway with a Docker-style `filter FORWARD` chain that drops, and a member behind NAT: the device reaches the member and the gateway; a limited device reaches only its allowed port; the member cannot open a connection to the device; after `device remove` the device's traffic stops; with IPv4 forwarding off the gateway lists the problem; the rule added to the `FORWARD` chain goes with the gateway's last device |
 | Real machines | gw as the gateway; the work computer with Surge reaches the admin console on gw and nothing else; the iPhone with the WireGuard app reaches services at home and the other machines |
 
 ## 11. Open questions

@@ -290,8 +290,8 @@ pub fn new_relay_key() -> Result<crate::state::RelayKey, SiteError> {
     Ok(crate::state::RelayKey(key))
 }
 
-/// Node ID of a new machine: millisecond time plus 80 random bits (ULID form).
-pub fn new_node_id() -> Result<nett_core::id::NodeId, SiteError> {
+/// Millisecond time plus 80 random bits: the parts of a new ID (ULID form).
+fn id_parts() -> Result<(u64, [u8; 10]), SiteError> {
     use ring::rand::{SecureRandom as _, SystemRandom};
     let mut r = [0u8; 10];
     SystemRandom::new()
@@ -300,5 +300,22 @@ pub fn new_node_id() -> Result<nett_core::id::NodeId, SiteError> {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    Ok((ms, r))
+}
+
+/// Node ID of a new machine.
+pub fn new_node_id() -> Result<nett_core::id::NodeId, SiteError> {
+    let (ms, r) = id_parts()?;
     Ok(nett_core::id::NodeId::from_parts(ms, r))
+}
+
+/// IDs of a new device and its credential.
+pub fn new_device_ids() -> Result<(nett_core::id::DeviceId, nett_core::id::CredentialId), SiteError>
+{
+    let (ms, r) = id_parts()?;
+    let (ms2, r2) = id_parts()?;
+    Ok((
+        nett_core::id::DeviceId::from_parts(ms, r),
+        nett_core::id::CredentialId::from_parts(ms2, r2),
+    ))
 }

@@ -68,6 +68,8 @@ const USAGE: &str = "usage:
       (150 ms on the direct path only: a quiet pair moves to a relay, a bulk transfer moves it back)
   nett-lab run hub-relay --topology hub-relay.toml --nett <path/to/nett> --out <dir>
       (members join through the Hub; a relay, its TLS fingerprint learned, and TLS fallback)
+  nett-lab run devices --topology devices.toml --nett <path/to/nett> --out <dir>
+      (WireGuard clients through a mobile gateway whose FORWARD chain drops, as Docker sets it)
   nett-lab down --topology <file.toml>
   nett-lab material --topology <real-machines.toml> --out <dir>   (lab B: configs for real machines)
 measurement helpers (started by the scenarios inside a node's network namespace):
@@ -207,6 +209,7 @@ fn run() -> anyhow::Result<bool> {
                 "access" => scenario::access(&topology, &nett()?, &out)?,
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
+                "devices" => scenario::devices(&topology, &nett()?, &out)?,
                 "throughput" => scenario::throughput(&topology, &nett()?, &out, duration_s)?,
                 "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
                 "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
