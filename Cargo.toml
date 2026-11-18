@@ -56,7 +56,8 @@ tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 toml = { version = "1.2.0", default-features = false, features = ["std", "parse", "serde"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt", "ansi"] }
+# Without the "ansi" feature: logs are plain text in the journal, log files and terminals alike
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["std", "fmt"] }
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 zeroize = { version = "1.9.1", default-features = false, features = ["alloc"] }
 

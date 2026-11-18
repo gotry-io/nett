@@ -44,10 +44,7 @@ const USAGE: &str = "usage: nett-hub <command> [--data <dir>]
 The data directory defaults to /var/lib/nett-hub.";
 
 fn main() -> std::process::ExitCode {
-    tracing_subscriber::fmt()
-        .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
-        .with_writer(std::io::stderr)
-        .init();
+    logs().with_writer(std::io::stderr).init();
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
@@ -55,6 +52,15 @@ fn main() -> std::process::ExitCode {
             std::process::ExitCode::FAILURE
         }
     }
+}
+
+/// The Hub's log format; systemd collects standard error into the journal.
+fn logs() -> tracing_subscriber::fmt::SubscriberBuilder<
+    tracing_subscriber::fmt::format::DefaultFields,
+    tracing_subscriber::fmt::format::Format,
+    tracing_subscriber::filter::LevelFilter,
+> {
+    tracing_subscriber::fmt().with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
 }
 
 fn run() -> anyhow::Result<()> {
@@ -352,4 +358,45 @@ async fn serve(
     };
     nett_hub::serve(listener, acceptor, hub, shutdown).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Buffer {
+        fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("no test thread panics")
+                .extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Logs are read in the journal and in log files, where terminal color codes are noise: the
+    /// log formatter is built without color support, so no process writes them.
+    #[test]
+    fn logs_carry_no_terminal_color_codes() {
+        let buffer = Buffer::default();
+        let writer = buffer.clone();
+        let subscriber = super::logs().with_writer(move || writer.clone()).finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(node_id = "node_1", "link lost");
+        });
+        let line = String::from_utf8(buffer.0.lock().expect("no test thread panics").clone())
+            .expect("logs are UTF-8");
+        assert!(
+            line.contains("WARN") && line.contains("link lost"),
+            "{line:?}"
+        );
+        assert!(!line.contains('\x1b'), "{line:?}");
+    }
 }
