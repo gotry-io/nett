@@ -98,10 +98,10 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 
 ### 7. Phones and restricted networks
 
-[design/mesh.md](design/mesh.md) sections 5.3, 5.4 and 13; ADR 0008, 0011.
+[design/devices.md](design/devices.md); [design/mesh.md](design/mesh.md) sections 5.3, 5.4 and 13; ADR 0008, 0011.
 
-- [ ] Device and credential model; mobile gateway and the direct-to-home dual path
-- [ ] Export of standard WireGuard configurations (configuration file and QR code), and of Surge, mihomo and sing-box configurations (two outbounds in an automatic-fallback policy group)
+- [ ] Device and credential model; mobile gateway
+- [ ] Export of standard WireGuard configurations (configuration file and QR code), and of Surge, mihomo and sing-box configurations (one WireGuard outbound to the mobile gateway)
 - [ ] Hostname aliases (`hostnames`) and names for devices
 - [ ] HTTPS CONNECT proxy in nett-relay (HTTP/2 only on entry nodes)
 - [ ] On entry nodes the reverse proxy hands the TLS transport and CONNECT to nett-relay by domain name, and members verify that relay by CA certificates and domain name; the Hub's Compose example with Caddy includes this section
@@ -125,7 +125,7 @@ Checked items are met; the others name the stage that verifies them.
 
 - [ ] Performance: on paths of 1 Gbps or less, direct throughput is at least 95% of native WireGuard on the same machine, with no measurable latency difference; on both direct and relayed paths, throughput is at least 95% of Tailscale; record the CPU use of each, and the maximum forwarding throughput of a 1 vCPU relay. *Met in the lab and between VPSes under rate limits (stage 1). A relay held to one core of lab A forwards 2.4–2.6 Gbit/s at 93% of that core. On the public paths measured in stage 6 (2–4 Mbit/s between two VPSes), nett carries what the bare path carries; a full-speed comparison and a fully loaded 1 vCPU relay need faster links: stage 6*
 - [ ] All Edge origin traffic goes through the mesh (Edge's configuration is maintained by the user), and services that need the real IP can identify the visitor's address. *Stage 6*
-- [ ] A phone away from home can watch video directly from home and can also reach other nodes through the mobile gateway; after switching to the "all via gateway" backup configuration, services at home are still reachable; with a proxy client configuration, a failed direct connection to home automatically goes through the gateway. *Stage 7*
+- [ ] A phone away from home reaches services at home and the other nodes through the mobile gateway, with a standard WireGuard client and with a proxy client configuration beside a proxy app. *Stage 7*
 - [ ] A Mac laptop recovers automatically after changing networks or waking from sleep and can initiate access to other members; the mesh works normally while the enhanced mode of a proxy-style VPN app is on (or works once configured as documented). *Stage 6*
 - [x] Disconnect, flapping, fallback, recovery: compared with Tailscale in the same experiment under the same faults, outage time, recovery time, number of switches during flapping, throughput and latency are no worse (ADR 0021); **in-flight TCP connections are not interrupted**; the same holds when switching to a relay that has not carried the connection before and after a relay restarts; large-packet transfers are unaffected. *Stage 1*
 - [x] Both sides behind cone NAT, or both with global IPv6 addresses and only a router firewall in between: hole punching succeeds in establishing a direct connection; with only one side behind a cone NAT, hole punching is attempted and the success rate is recorded; when hole punching fails, the current connection is unaffected. *Stage 1*
@@ -148,7 +148,7 @@ Checked items are met; the others name the stage that verifies them.
 
 ## M3: Clients
 
-- iOS and Android apps: full members, running userspace WireGuard and the path layer in a Network Extension (iOS) and VpnService (Android)
+- iOS and Android apps: full members, selecting their paths themselves (directly to home and to other nodes), running userspace WireGuard and the path layer in a Network Extension (iOS) and VpnService (Android)
 - Windows member: wireguard-nt kernel driver, with filtering through Windows Filtering Platform (WFP)
 - Reuse the platform-independent mesh core from M1, adding only the per-platform data plane backends and the app shells (ADR 0018); iOS needs an Apple developer account (paid)
 

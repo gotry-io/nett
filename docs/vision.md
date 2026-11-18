@@ -38,7 +38,7 @@ The reverse proxy at the entry node (Edge) is run by the user and can be any imp
 | **Transports** | UDP, TLS, QUIC and obfuscated transports; automatic fallback to other transports when UDP is blocked |
 | **Relay** | Nodes reachable from outside run nett-relay, which only forwards encrypted packets and does not decrypt mesh traffic |
 | **LAN access** | LAN smart gateway: other hosts at home join the mesh through the smart gateway without installing nett |
-| **Phone access** | Dual path: direct to home, with the mobile gateway as a fallback; export of standard WireGuard configurations and configurations for common proxy clients (automatic fallback when the direct path fails) |
+| **Phone access** | Through the mobile gateway with any standard WireGuard client, and configurations for common proxy clients; direct paths to home with the phone app |
 | **Hostnames and access control** | Node hostnames and aliases; identity lookup (`whois`); access rules: default deny, allow by rule |
 | **Authentication and authorization** | The user signs authorizations on their own computer, with passkeys later; API tokens; raising privileges and mesh admission must both be signed by the user |
 | **Origin identity** | The user's reverse proxy (Edge) sends origin traffic encrypted through the mesh; traffic from Edge uses a dedicated mesh address that other processes on the machine cannot spoof; services that need the real IP trust only requests forwarded by Edge, so they see the visitor's real IP and can tell visitors from the user's own devices |
