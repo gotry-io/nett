@@ -251,7 +251,7 @@
       "name": "MIT OR Apache-2.0"
     },
     "title": "nett Hub API",
-    "version": "0.3.20"
+    "version": "0.3.21"
   },
   "openapi": "3.1.0",
   "paths": {
