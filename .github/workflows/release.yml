@@ -1,7 +1,7 @@
 # Releases when a v* tag is pushed (design/release.md section 3, ADR 0020): builds nett for each
 # platform, signs the macOS program with the Developer ID in the apple environment and has Apple
 # notarize it, signs everything with the primary key in the release environment,
-# publishes the GitHub Release, and updates the formula in gotry-io/homebrew-tap. v* tags are
+# publishes the GitHub Release, and deploys the project website. v* tags are
 # protected by a ruleset, and the primary private key is visible only to them.
 # Third-party actions are pinned to commit hashes; downloaded tools are pinned to versions and
 # hash-verified.
@@ -246,41 +246,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "nett ${GITHUB_REF_NAME#v}" --notes-file notes.md
-
-  tap:
-    needs: publish
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: signed
-          path: dist
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: gotry-io/homebrew-tap
-          token: ${{ secrets.TAP_PUSH_TOKEN }}
-          path: tap
-      - name: Generate the formula from the template and push it
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          sha() { awk -v f="nett-$version-$1.tar.gz" '$2 == f { print $1 }' dist/SHA256SUMS; }
-          arm=$(sha aarch64-apple-darwin)
-          intel=$(sha x86_64-apple-darwin)
-          test -n "$arm" && test -n "$intel"
-          sed -e "s/@VERSION@/$version/g" -e "s/@SHA256_AARCH64@/$arm/" -e "s/@SHA256_X86_64@/$intel/" \
-            packaging/homebrew/nett.rb > tap/Formula/nett.rb
-          cd tap
-          git config user.name "nett release"
-          git config user.email "release@nett.gotry.io"
-          git add Formula/nett.rb
-          git commit -m "nett $version"
-          git push
 
   # Project website nett.gotry.io (design/release.md section 6): the home page, the install script
   # with version and hash filled in, and this version's archives.

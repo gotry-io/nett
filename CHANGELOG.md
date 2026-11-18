@@ -4,6 +4,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- macOS: every Mac installs with the install script, the one that holds the site too, and on a
+  machine connected to a Hub nett-node upgrades the `nett` command together with the services, so
+  the command always matches them. Homebrew is no longer a way to install nett: run
+  `brew uninstall nett`, then the install script.
+
 ## [0.3.20] - 2026-11-18
 
 - Upgrades fetch the new program through the Hub (ADR 0025): the Hub keeps a verified copy of the

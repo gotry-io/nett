@@ -4,7 +4,8 @@
 //! this machine in the site directory of the user who ran sudo; with a Hub (a token, or an existing
 //! Hub configuration) it also starts nett-node, which receives the desired state from the Hub.
 //! `sudo nett uninstall` removes everything but the identity, and `sudo nett leave` the identity.
-//! The Homebrew directory is writable by ordinary users, so the root service only runs this copy.
+//! The program `sudo nett install` runs from may lie where ordinary users can write, so the root
+//! service only runs this copy.
 
 use std::path::{Path, PathBuf};
 

@@ -51,7 +51,7 @@ else
 fi
 
 if [ -L "$LINK" ] && [ "$(readlink "$LINK")" != "$program" ]; then
-    fail "$LINK is a link made by another installer, probably Homebrew; upgrade it with \`brew upgrade nett\`"
+    fail "$LINK is a link made by another installer; uninstall that copy first"
 fi
 if [ "$(id -u)" -eq 0 ]; then
     as_root=""

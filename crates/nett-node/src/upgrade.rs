@@ -503,8 +503,8 @@ fn wait_for(mut ok: impl FnMut() -> bool, within: Duration) -> bool {
 }
 
 /// Whether the command at `path` is nett's own copy: a regular file owned by root in a directory
-/// owned by root that others cannot write. A link, or a copy in a directory the user can write
-/// (Homebrew), belongs to another installer.
+/// owned by root that others cannot write. A link, or a copy in a directory the user can write,
+/// belongs to another installer.
 pub fn own_command(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt as _;
     let (Ok(meta), Some(Ok(dir))) = (

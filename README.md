@@ -23,7 +23,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
 curl -fsSL https://nett.gotry.io/install.sh | sh
 ```
 
-The script installs only the `nett` program to `/usr/local/bin`, after checking the download against the hash written in the script. Release archives and their signatures are also on the [releases page](https://github.com/gotry-io/nett/releases) ([keys/](keys/README.md) explains how to verify them). On the computer that holds your site, you can install with Homebrew instead: `brew install gotry-io/tap/nett`.
+The script installs only the `nett` program to `/usr/local/bin`, after checking the download against the hash written in the script. Release archives and their signatures are also on the [releases page](https://github.com/gotry-io/nett/releases) ([keys/](keys/README.md) explains how to verify them).
 
 ### With a Hub
 
