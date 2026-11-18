@@ -32,6 +32,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0024](0024-cli-first-headless-hub.md) | The command line is the operating interface; the Hub ships without a console at first | Accepted |
 | [0025](0025-upgrades-through-the-hub.md) | Upgrades fetch the program through the Hub | Accepted |
 | [0026](0026-upgrades-from-the-state-directory.md) | Programs that cannot replace themselves upgrade from their state directory | Accepted |
+| [0027](0027-upgrades-by-approval.md) | Upgrades start when the user approves them | Accepted |
 
 Template:
 

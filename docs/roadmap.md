@@ -97,6 +97,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [x] Upgrades fetch the program through the Hub (ADR 0025): the Hub mirrors the current release's programs, nodes fetch them over their session and from the website when the Hub does not have them, a program that cannot be fetched is fetched again later
 - [x] The container ([design/container.md](design/container.md), ADR 0016): one image from the registry, the token in the environment, services sharing its network and seeing each caller's mesh address (CI, `container` job)
 - [ ] The Hub and the container upgrade themselves from their state directory, and roll back a version that does not settle (ADR 0026; CI, `container` job); verified on the Hub host
+- [ ] Upgrades start when the user approves them (ADR 0027): `nett site upgrade` for every machine and the Hub, or for one machine first
 
 ### 7. Phones and restricted networks
 

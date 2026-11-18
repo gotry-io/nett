@@ -63,7 +63,7 @@ nett's image runs as one container ([packaging/container/compose.example.yaml](.
 
 ## Upgrades
 
-Machines installed with `sudo nett install`, containers and the Hub upgrade themselves to a release the Hub announces, after checking its signature ([design/release.md](design/release.md) section 7); the Hub upgrades first. When an upgrade fails, `nett site status` shows the reason (for the Hub on its `hub upgrade` line) and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is. A container or Hub whose new version does not settle goes back to the version before it after three starts, without being recreated.
+Machines installed with `sudo nett install`, containers and the Hub upgrade themselves to a release once you approve it with `nett site upgrade` (all of them, or `nett site upgrade <machine>` to try one first), after checking its signature ([design/release.md](design/release.md) section 7); the Hub upgrades first. Until then `nett site status` shows the release as available. When an upgrade fails, `nett site status` shows the reason (for the Hub on its `hub upgrade` line) and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is. A container or Hub whose new version does not settle goes back to the version before it after three starts, without being recreated.
 
 ## What to collect for a report
 
