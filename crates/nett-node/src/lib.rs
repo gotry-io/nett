@@ -7,6 +7,7 @@ pub mod coord;
 pub mod fetch;
 pub mod http;
 pub mod join;
+pub mod launch;
 #[cfg(target_os = "macos")]
 pub mod launchd;
 #[cfg(target_os = "linux")]

@@ -22,7 +22,7 @@ use crate::fetch::{FetchError, HubLink, ProgramFile};
 pub const MESH_START: Duration = Duration::from_secs(60);
 /// A new nett-node that starts this many times without connecting to the Hub (and without
 /// running for `SETTLED`) is rolled back.
-const MAX_STARTS: u32 = 3;
+pub(crate) const MAX_STARTS: u32 = 3;
 /// After running this long, a new nett-node counts as working even while the Hub is away.
 pub const SETTLED: Duration = Duration::from_secs(5 * 60);
 /// After the program of a release could not be fetched, it is fetched again after this long, then
@@ -150,27 +150,91 @@ struct State {
     failed: BTreeMap<String, String>,
 }
 
+/// The upgrade marker: a new version that has not settled yet, and how often it started.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Marker {
-    version: String,
-    previous: String,
-    starts: u32,
+pub(crate) struct Marker {
+    pub(crate) version: String,
+    pub(crate) previous: String,
+    pub(crate) starts: u32,
+}
+
+/// The versions in `dir`'s `upgrade.json` that were not installed or were rolled back, with why.
+pub fn failed(dir: &Path) -> BTreeMap<String, String> {
+    std::fs::read(dir.join(STATE_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<State>(&b).ok())
+        .unwrap_or_default()
+        .failed
+}
+
+/// The highest version that was not installed or was rolled back, with why.
+pub fn last_failure(dir: &Path) -> Option<(Version, String)> {
+    failed(dir)
+        .into_iter()
+        .filter_map(|(v, reason)| Some((v.parse().ok()?, reason)))
+        .max_by_key(|(v, _)| *v)
+}
+
+pub(crate) fn record_failure(dir: &Path, version: Version, reason: &str) {
+    let mut state = State {
+        failed: failed(dir),
+    };
+    state.failed.insert(version.to_string(), reason.to_owned());
+    while state.failed.len() > MAX_FAILED {
+        let Some(oldest) = state.failed.keys().next().cloned() else {
+            break;
+        };
+        state.failed.remove(&oldest);
+    }
+    if let Ok(json) = serde_json::to_vec_pretty(&state)
+        && let Err(e) = crate::config::write_private(&dir.join(STATE_FILE), &json)
+    {
+        tracing::warn!(error = %e, "recording the failed upgrade");
+    }
+}
+
+pub(crate) fn read_marker(dir: &Path) -> Option<Marker> {
+    std::fs::read(dir.join(MARKER_FILE))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+pub(crate) fn write_marker(dir: &Path, marker: &Marker) -> Result<(), String> {
+    let json = serde_json::to_vec(marker).map_err(|e| e.to_string())?;
+    crate::config::write_private(&dir.join(MARKER_FILE), &json)
+}
+
+pub(crate) fn clear_marker(dir: &Path) {
+    std::fs::remove_file(dir.join(MARKER_FILE)).ok();
 }
 
 pub struct Upgrader {
     pub keys: ReleaseKeys,
     pub target: String,
     pub current: Version,
-    /// The program the services run.
+    /// The program the services run, or, in the container, the one in its volume.
     pub program: PathBuf,
-    /// Another copy of the command to keep in step (macOS: the install script's copy).
-    pub command: Option<PathBuf>,
     /// Where `upgrade.json` and the pending marker live (the configuration directory).
     pub dir: PathBuf,
-    pub services: Arc<dyn Services>,
-    /// How long the restarted mesh service has to answer ([`MESH_START`]).
-    pub mesh_start: Duration,
+    pub install: Install,
+}
+
+/// How a verified program is installed.
+#[derive(Clone)]
+pub enum Install {
+    /// Replaces the program the services run, restarts the mesh service and checks it (machines,
+    /// design/release.md section 7).
+    Replace {
+        /// Another copy of the command to keep in step (macOS: the install script's copy).
+        command: Option<PathBuf>,
+        services: Arc<dyn Services>,
+        /// How long the restarted mesh service has to answer ([`MESH_START`]).
+        mesh_start: Duration,
+    },
+    /// Places it in the state directory, where the installed program's check runs it (the
+    /// container, ADR 0026).
+    Stage(Arc<crate::launch::Staged>),
 }
 
 impl Upgrader {
@@ -181,7 +245,7 @@ impl Upgrader {
         if version <= self.current {
             return Ok(Plan::Current);
         }
-        if let Some(reason) = self.state().failed.get(&manifest.version) {
+        if let Some(reason) = failed(&self.dir).get(&manifest.version) {
             return Ok(Plan::Failed(reason.clone()));
         }
         Ok(match manifest.programs.get(&self.target) {
@@ -226,9 +290,17 @@ impl Upgrader {
         // own thread and replaces files
         progress.send_replace(Progress::Installing);
         let this = self.clone_paths();
-        let services = self.services.clone();
         let current = self.current;
-        tokio::task::spawn_blocking(move || this.install(version, current, &*services))
+        let minisig = program.minisig.clone();
+        let installed = match self.install.clone() {
+            Install::Replace { services, .. } => {
+                tokio::task::spawn_blocking(move || this.install(version, current, &*services))
+            }
+            Install::Stage(staged) => {
+                tokio::task::spawn_blocking(move || staged.place(version, &minisig))
+            }
+        };
+        installed
             .await
             .map_err(|e| e.to_string())
             .and_then(|installed| installed)
@@ -318,17 +390,28 @@ impl Upgrader {
 
     /// The paths, for the blocking part.
     fn clone_paths(&self) -> Paths {
+        let (command, mesh_start) = match &self.install {
+            Install::Replace {
+                command,
+                mesh_start,
+                ..
+            } => (command.clone(), *mesh_start),
+            Install::Stage(_) => (None, MESH_START),
+        };
         Paths {
             program: self.program.clone(),
-            command: self.command.clone(),
+            command,
             dir: self.dir.clone(),
-            mesh_start: self.mesh_start,
+            mesh_start,
         }
     }
 
     /// At start: counts starts of a newly installed version and rolls it back when it keeps
-    /// exiting before it settles.
+    /// exiting before it settles. In the container the installed program's check counts them.
     pub fn on_start(&self) -> Start {
+        let Install::Replace { services, .. } = &self.install else {
+            return Start::Continue;
+        };
         let paths = self.clone_paths();
         let Some(mut marker) = paths.marker() else {
             return Start::Continue;
@@ -350,7 +433,7 @@ impl Upgrader {
             tracing::error!(error = %e, "restoring the previous program");
             return Start::Continue;
         }
-        self.services.restart_mesh().ok();
+        services.restart_mesh().ok();
         if let Ok(version) = marker.version.parse() {
             self.record_failure(version, &reason);
         }
@@ -360,38 +443,28 @@ impl Upgrader {
 
     /// The new version works: it connected to the Hub or ran long enough.
     pub fn settled(&self) {
-        let paths = self.clone_paths();
-        if paths
-            .marker()
-            .is_some_and(|m| m.version == self.current.to_string())
-        {
-            tracing::info!(version = %self.current, "upgrade complete");
-            paths.clear_marker();
-            self.services.restart_helpers();
+        match &self.install {
+            Install::Replace { services, .. } => {
+                let paths = self.clone_paths();
+                if paths
+                    .marker()
+                    .is_some_and(|m| m.version == self.current.to_string())
+                {
+                    tracing::info!(version = %self.current, "upgrade complete");
+                    paths.clear_marker();
+                    services.restart_helpers();
+                }
+            }
+            Install::Stage(staged) => {
+                if staged.settled() {
+                    tracing::info!(version = %self.current, "upgrade complete");
+                }
+            }
         }
-    }
-
-    fn state(&self) -> State {
-        std::fs::read(self.dir.join(STATE_FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
     }
 
     fn record_failure(&self, version: Version, reason: &str) {
-        let mut state = self.state();
-        state.failed.insert(version.to_string(), reason.to_owned());
-        while state.failed.len() > MAX_FAILED {
-            let Some(oldest) = state.failed.keys().next().cloned() else {
-                break;
-            };
-            state.failed.remove(&oldest);
-        }
-        if let Ok(json) = serde_json::to_vec_pretty(&state)
-            && let Err(e) = crate::config::write_private(&self.dir.join(STATE_FILE), &json)
-        {
-            tracing::warn!(error = %e, "recording the failed upgrade");
-        }
+        record_failure(&self.dir, version, reason);
     }
 }
 
@@ -474,18 +547,15 @@ impl Paths {
     }
 
     fn marker(&self) -> Option<Marker> {
-        std::fs::read(self.dir.join(MARKER_FILE))
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
+        read_marker(&self.dir)
     }
 
     fn write_marker(&self, marker: &Marker) -> Result<(), String> {
-        let json = serde_json::to_vec(marker).map_err(|e| e.to_string())?;
-        crate::config::write_private(&self.dir.join(MARKER_FILE), &json)
+        write_marker(&self.dir, marker)
     }
 
     fn clear_marker(&self) {
-        std::fs::remove_file(self.dir.join(MARKER_FILE)).ok();
+        clear_marker(&self.dir);
     }
 }
 
@@ -599,10 +669,12 @@ mod tests {
                 target: "x86_64-unknown-linux-musl".into(),
                 current: "0.1.5".parse().expect("version"),
                 program,
-                command: None,
                 dir: dir.to_path_buf(),
-                services: services.clone(),
-                mesh_start: Duration::from_millis(600),
+                install: Install::Replace {
+                    command: None,
+                    services: services.clone(),
+                    mesh_start: Duration::from_millis(600),
+                },
             },
             services,
         )
@@ -748,7 +820,7 @@ mod tests {
             .map(|s| s.rsplit("trying again in ").next().unwrap_or_default())
             .collect();
         assert_eq!(waits, ["1 min", "2 min", "4 min"]);
-        assert!(up.state().failed.is_empty(), "nothing marked failed");
+        assert!(failed(&up.dir).is_empty(), "nothing marked failed");
     }
 
     /// A transfer from the Hub that breaks off is taken up from the Hub again later, not from the
@@ -813,7 +885,7 @@ mod tests {
         );
         let reason = result.expect_err("refused");
         assert!(reason.contains("does not trust"), "{reason}");
-        assert!(up.state().failed.contains_key("0.2.0"));
+        assert!(failed(&up.dir).contains_key("0.2.0"));
         assert_eq!(services.restarts.load(Ordering::SeqCst), 0);
         assert!(!dir.join("nett.new").exists());
     }

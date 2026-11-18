@@ -304,6 +304,37 @@ pub fn trusted_comment(version: Version, target: &str) -> String {
     format!("nett v{version} nett-{version}-{target}")
 }
 
+/// The version a signed comment names for `target`, when it is a release program's comment
+/// ([`trusted_comment`]).
+pub fn signed_version(comment: &str, target: &str) -> Option<Version> {
+    let (version, name) = comment.strip_prefix("nett v")?.split_once(' ')?;
+    let version: Version = version.parse().ok()?;
+    (name == format!("nett-{version}-{target}")).then_some(version)
+}
+
+/// Verifies a program held without its manifest, from its digest and signature: returns the
+/// version its signed comment names for `target` (ADR 0026).
+pub fn verify_signed(
+    keys: &ReleaseKeys,
+    target: &str,
+    blake2b: &[u8; 64],
+    minisig: &str,
+) -> Result<Version, ReleaseError> {
+    let comment = keys.verify_prehashed(blake2b, minisig)?;
+    signed_version(&comment, target).ok_or_else(|| ReleaseError::Comment {
+        expected: format!("nett v<version> nett-<version>-{target}"),
+        found: comment,
+    })
+}
+
+/// The release target of the Hub built for this platform: the Hub's programs are the `hub-`
+/// targets of the release (design/release.md section 2).
+pub fn hub_target() -> Option<String> {
+    current_target()
+        .filter(|t| t.ends_with("-linux-musl"))
+        .map(|t| format!("hub-{t}"))
+}
+
 /// The release target this program was built for, as release archives name it.
 pub fn current_target() -> Option<&'static str> {
     match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -625,5 +656,45 @@ mod tests {
             assert!(v(bad).is_err(), "{bad}");
         }
         assert!(current_target().is_some(), "built for a release target");
+    }
+
+    /// A program held without its manifest (the Hub's and the container's, ADR 0026) is known by
+    /// its signed comment alone: it names the version, and only for the right target.
+    #[test]
+    fn the_signed_comment_names_the_version_for_one_target() {
+        let target = "hub-x86_64-unknown-linux-musl";
+        let version: Version = "0.5.1".parse().expect("version");
+        assert_eq!(
+            signed_version(&trusted_comment(version, target), target),
+            Some(version)
+        );
+        for other in [
+            trusted_comment(version, "x86_64-unknown-linux-musl"),
+            "nett v0.5.1 nett-0.5.2-hub-x86_64-unknown-linux-musl".to_owned(),
+            "nett v0.5 nett-0.5-hub-x86_64-unknown-linux-musl".to_owned(),
+            "nett 0.5.1 nett-0.5.1-hub-x86_64-unknown-linux-musl".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(signed_version(&other, target), None, "{other}");
+        }
+
+        let pair = crate::signing::ReleaseKeyPair::generate().expect("key");
+        let keys = ReleaseKeys::parse(&pair.public_key()).expect("keys");
+        let program = b"program";
+        let mut digest = ProgramDigest::new();
+        digest.update(program);
+        let blake2b = digest.finish().blake2b;
+        let signed = pair.sign_program(version, target, program);
+        assert_eq!(verify_signed(&keys, target, &blake2b, &signed), Ok(version));
+        assert!(matches!(
+            verify_signed(&keys, "hub-aarch64-unknown-linux-musl", &blake2b, &signed),
+            Err(ReleaseError::Comment { .. })
+        ));
+        let mut changed = ProgramDigest::new();
+        changed.update(b"programs");
+        assert_eq!(
+            verify_signed(&keys, target, &changed.finish().blake2b, &signed),
+            Err(ReleaseError::BadSignature)
+        );
     }
 }

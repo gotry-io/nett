@@ -338,6 +338,7 @@ pub(crate) async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderM
     });
     Json(StatusResponse {
         hub_version: env!("CARGO_PKG_VERSION").to_owned(),
+        hub_upgrade: hub.upgrade_problem(),
         url: hub.url.clone(),
         generation: site.map_or(0, |s| s.generation),
         machines,

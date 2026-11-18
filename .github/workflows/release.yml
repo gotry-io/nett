@@ -1,7 +1,8 @@
 # Releases when a v* tag is pushed (design/release.md section 3, ADR 0020): builds nett for each
-# platform, signs the macOS program with the Developer ID in the apple environment and has Apple
-# notarize it, signs everything with the primary key in the release environment,
-# publishes the GitHub Release, and deploys the project website. v* tags are
+# platform and nett-hub for Linux, signs the macOS program with the Developer ID in the apple
+# environment and has Apple notarize it, signs everything with the primary key in the release
+# environment, publishes the GitHub Release and the container images, and deploys the project
+# website. v* tags are
 # protected by a ruleset, and the primary private key is visible only to them.
 # Third-party actions are pinned to commit hashes; downloaded tools are pinned to versions and
 # hash-verified.
@@ -65,16 +66,16 @@ jobs:
       - name: Package
         run: |
           mkdir dist
-          tar -czf "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
-            -C "target/${{ matrix.target }}/release" nett \
-            -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
-          # The bare program, which nodes download when they upgrade themselves (design/release.md section 7)
-          cp "target/${{ matrix.target }}/release/nett" "dist/nett-${{ steps.version.outputs.version }}-${{ matrix.target }}"
-          if [ "$RUNNER_OS" = Linux ]; then
-            tar -czf "dist/nett-hub-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz" \
-              -C "target/${{ matrix.target }}/release" nett-hub \
+          version="${{ steps.version.outputs.version }}"
+          # package <program> <release target>: the archive and the bare program, which the Hub,
+          # nodes and containers download when they upgrade themselves (design/release.md sections 2 and 7)
+          package() {
+            tar -czf "dist/nett-$version-$2.tar.gz" -C "target/${{ matrix.target }}/release" "$1" \
               -C "$GITHUB_WORKSPACE" LICENSE-MIT LICENSE-APACHE
-          fi
+            cp "target/${{ matrix.target }}/release/$1" "dist/nett-$version-$2"
+          }
+          package nett "${{ matrix.target }}"
+          if [ "$RUNNER_OS" = Linux ]; then package nett-hub "hub-${{ matrix.target }}"; fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           # The macOS files go to the Apple signing job first
@@ -247,6 +248,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --title "nett ${GITHUB_REF_NAME#v}" --notes-file notes.md
 
+  # The images ghcr.io/gotry-io/nett and ghcr.io/gotry-io/nett-hub (design/release.md sections 2 and
+  # 3), from the signed programs: each holds one program and the CA certificates, so no step runs
+  # inside an image and both architectures build without emulation. Podman comes with the runner
+  images:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed
+          path: dist
+      - name: Build and push
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          (cd dist && sha256sum -c SHA256SUMS)
+          printf '%s' "$GH_TOKEN" | podman login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for image in nett nett-hub; do
+            context="$RUNNER_TEMP/$image"
+            mkdir -p "$context"
+            cp /etc/ssl/certs/ca-certificates.crt "$context/"
+            prefix=""
+            [ "$image" = nett-hub ] && prefix=hub-
+            cp "dist/nett-$version-${prefix}x86_64-unknown-linux-musl" "$context/$image-amd64"
+            cp "dist/nett-$version-${prefix}aarch64-unknown-linux-musl" "$context/$image-arm64"
+            dir=container
+            [ "$image" = nett-hub ] && dir=hub
+            name="ghcr.io/gotry-io/$image"
+            podman build --platform linux/amd64,linux/arm64 --manifest "$name:$version" \
+              --label org.opencontainers.image.source=https://github.com/gotry-io/nett \
+              --label org.opencontainers.image.version="$version" \
+              --label org.opencontainers.image.licenses="MIT OR Apache-2.0" \
+              -f "packaging/$dir/Dockerfile" "$context"
+            podman manifest push --all "$name:$version" "docker://$name:$version"
+            podman manifest push --all "$name:$version" "docker://$name:latest"
+          done
+
   # Project website nett.gotry.io (design/release.md section 6): the home page, the install script
   # with version and hash filled in, and this version's archives.
   # A new machine trusts this website on first install; the deployment key, like the signing key, is
@@ -274,7 +320,8 @@ jobs:
           sha() { sum "nett-$version-$1.tar.gz"; }
           mkdir -p site/dl
           programs='{}'
-          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin; do
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin \
+            hub-x86_64-unknown-linux-musl hub-aarch64-unknown-linux-musl; do
             program="nett-$version-$target"
             test -n "$(sha "$target")" && test -n "$(sum "$program")"
             cp "dist/$program.tar.gz" "dist/$program" site/dl/

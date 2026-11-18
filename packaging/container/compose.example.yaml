@@ -1,75 +1,31 @@
-# A mesh member inside a container, acting as the gateway into this container network. It has a
-# fixed address and forwards only connections the access rules allow to the advertised service
-# address, rewriting the source to its own address. The service keeps its own network and fixed
-# address; restarting the mesh member does not affect it.
+# A service that is a member of the mesh of its own. The nett container joins the site and holds the
+# mesh interface; the service shares its network, so other members reach the service at this
+# member's mesh address, as the access rules allow, and the service sees each caller's mesh address.
 #
-# With a Hub: on the computer that holds the site, `nett site add <name>`, then join with the token
-# it prints (the CA certificates let nett verify the Hub; on macOS mount /etc/ssl/cert.pem instead):
-#   docker run --rm -v ./nett:/etc/nett \
-#     -v /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro nett join nett_enr_…
-# and `docker compose up -d`; the node service below keeps the desired state current. Set
-# `nett site routes <name> 172.30.0.10/32` on the computer. The image is upgraded by pulling a new one.
-#
-# Without a Hub: `docker run --rm --network none -v ./nett:/etc/nett nett keys --dir /etc/nett`; on
-# the computer that holds the site, `nett site add <name> --keys "…"` with the printed line, then
-# `nett site routes <name> 172.30.0.10/32`; put the generated desired.json in ./nett and leave out
-# the node service. After an update, `docker compose exec nett /nett reload` reports whether it was
-# accepted.
-# Avoid `docker compose kill`: Docker records the container as stopped by hand and does not start
-# it after a reboot. Avoid `docker compose run` for one-off tasks: the temporary container takes
-# the same fixed address as the running one.
+# On the computer that holds the site:
+#   nett site add app-box          prints the token for NETT_TOKEN below
+#   nett site allow <from> app-box 8080/tcp
+# Then: docker compose up -d
+# The container upgrades itself with each release; the image tag is the version it starts from.
 services:
   nett:
-    image: nett
+    image: ghcr.io/gotry-io/nett:latest
+    environment:
+      # Read on the first start only; the member's identity then lives in the volume
+      NETT_TOKEN: nett_enr_…
+    volumes:
+      - nett-state:/var/lib/nett
     cap_add: [NET_ADMIN, NET_RAW]
-    sysctls:
-      net.ipv4.ip_forward: "1"       # only connections the access rules allow are forwarded
-    volumes:
-      - ./nett:/etc/nett
-      - nett-run:/run/nett           # the local socket nett-node talks to
-    networks:
-      app:
-        ipv4_address: 172.30.0.200
-    restart: unless-stopped
-
-  # nett-node: connects to the Hub, writes the desired state and asks the mesh member to reload it.
-  # It needs no capabilities and no access to Docker.
-  node:
-    image: nett
-    command: ["node", "--dir", "/etc/nett"]
-    volumes:
-      - ./nett:/etc/nett
-      - nett-run:/run/nett
-      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
-    cap_drop: [ALL]
-    restart: unless-stopped
-
-  # The TLS transport adapter, for when UDP is blocked: it runs in the mesh member's network
-  # namespace, where its loopback ports are the endpoints of paths over TLS. It needs no
-  # capabilities, and waits while there is no such path.
-  transport:
-    image: nett
-    command: ["transport"]
-    network_mode: "service:nett"
-    volumes:
-      - nett-run:/run/nett
-    cap_drop: [ALL]
+    # Only when the host kernel has no WireGuard
+    # devices: ["/dev/net/tun:/dev/net/tun"]
     restart: unless-stopped
 
   app:
     image: example/app
-    networks:
-      app:
-        ipv4_address: 172.30.0.10    # the address advertised in the site
+    # Listens in the nett container's network, on port 8080
+    network_mode: service:nett
+    depends_on: [nett]
     restart: unless-stopped
-    # Services that need the real client IP: trust 172.30.0.200 as the proxy
-
-networks:
-  app:
-    ipam:
-      config:
-        - subnet: 172.30.0.0/24
-          ip_range: 172.30.0.0/25    # dynamic range; fixed addresses lie outside it
 
 volumes:
-  nett-run:
+  nett-state:

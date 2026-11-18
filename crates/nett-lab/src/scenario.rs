@@ -4535,11 +4535,11 @@ pub fn congestion(
     Ok(report)
 }
 
-/// Access control, Edge addresses and container members (design/local-signing.md sections 6 and 8,
-/// ADR 0015, 0016). In the topology `edge` runs Edge (with a "container" behind it, and the node
-/// masquerades its traffic like Docker); `app` is a container member (with a service behind it,
-/// advertising the service's address), and only the Edge of `edge` is allowed to access port 8686
-/// of the service; `other` is an ordinary member.
+/// Access control, Edge addresses and forwarding to advertised routes (design/local-signing.md
+/// sections 6 and 8, ADR 0015). In the topology `edge` runs Edge (with a "container" behind it, and
+/// the node masquerades its traffic like Docker); `app` has a service behind it and advertises the
+/// service's address, and only the Edge of `edge` is allowed to access port 8686 of the service;
+/// `other` is an ordinary member.
 pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
     let underlay = Underlay::plan(&topo)?;
@@ -4569,7 +4569,7 @@ pub fn access(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report
     for n in &generated.nodes {
         wait_for(n, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
     }
-    // The container member is behind NAT and only accepts connections it initiates itself: starting
+    // `app` is behind NAT and only accepts connections it initiates itself: starting
     // from it, wait for the tunnel to come up (the rules allow app to access the other two)
     for target in [edge.mesh_ipv4, other.mesh_ipv4] {
         let r = ping(&ns_app, &target.to_string());

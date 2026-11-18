@@ -65,6 +65,7 @@ async fn expired_link_code_is_refused() {
         URL.into(),
         None,
         release_keys(),
+        None,
     )
     .await
     .expect("hub");

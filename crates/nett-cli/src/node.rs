@@ -10,7 +10,7 @@ use anyhow::Context as _;
 use nett_mesh::key::PrivateKey;
 use nett_node::config::{HUB_FILE, HubConfig};
 use nett_node::session::{Exit, Node};
-use nett_node::upgrade::{ServiceManager, Start, Upgrader};
+use nett_node::upgrade::{Install, ServiceManager, Start, Upgrader};
 use tokio::signal::unix::{SignalKind, signal};
 
 /// This machine's configuration directory: Hub configuration, identity key and desired state.
@@ -106,9 +106,24 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 }
 
 /// The upgrader for this machine's layout (design/release.md section 7); `None` where nett did not
-/// install the services (a container member, a lab), or when this build has no release target or
-/// its release keys do not parse.
+/// install the services (a lab, another service manager), or when this build has no release
+/// target or its release keys do not parse. In the container it places the new version in the
+/// volume (design/container.md section 6).
 fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader> {
+    #[cfg(target_os = "linux")]
+    if let Some(state) = crate::container::state_dir()
+        && state == dir
+    {
+        let staged = crate::container::staged(&state)?;
+        return Some(Upgrader {
+            keys: staged.keys.clone(),
+            target: staged.target.clone(),
+            current: staged.current,
+            program: staged.program(),
+            dir: state,
+            install: Install::Stage(Arc::new(staged)),
+        });
+    }
     let installed = if cfg!(target_os = "macos") {
         std::path::Path::new(nett_node::platform::macos::PROGRAM).exists()
     } else {
@@ -140,12 +155,14 @@ fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader>
         target: target.to_owned(),
         current,
         program: PathBuf::from(program),
-        command,
         dir: dir.to_path_buf(),
-        services: Arc::new(ServiceManager {
-            socket: socket.to_path_buf(),
-        }),
-        mesh_start: nett_node::upgrade::MESH_START,
+        install: Install::Replace {
+            command,
+            services: Arc::new(ServiceManager {
+                socket: socket.to_path_buf(),
+            }),
+            mesh_start: nett_node::upgrade::MESH_START,
+        },
     })
 }
 

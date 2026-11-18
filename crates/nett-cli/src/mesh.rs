@@ -1,9 +1,10 @@
 //! `nett mesh`: the mesh process, run by the service manager. The desired state comes from a
 //! local file and is re-read on `SIGHUP` or a `reload` on the local interface
-//! (design/local-signing.md section 5, status.md section 4.1). On macOS it also carries the TLS
-//! transport (ADR 0013). `nett keys` generates the mesh private key and the identity private key on
-//! this machine (local-signing.md section 3). The event file, simulated clock skew and transport
-//! adapter configuration exist only in the lab build (the `lab` feature).
+//! (design/local-signing.md section 5, status.md section 4.1). On macOS, Synology DSM and in the
+//! container it also carries the TLS transport (ADR 0013). `nett keys` generates the mesh private
+//! key and the identity private key on this machine (local-signing.md section 3). The event file,
+//! simulated clock skew and transport adapter configuration exist only in the lab build (the `lab`
+//! feature).
 
 #[cfg(target_os = "macos")]
 use std::io::IsTerminal as _;
@@ -59,7 +60,7 @@ struct LabArgs {
 
 pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>] [--state <dir>]\n\
        nett mesh --prepare-state <dir>\n\n\
-Started by systemd, launchd or a container; to install the service on macOS, use `sudo nett install`.\n\
+Started by systemd, launchd or `nett container`; to install the service on macOS, use `sudo nett install`.\n\
 --prepare-state, run by systemd with full privileges before the service starts on Linux, gives the\n\
 trust store's directory to the service's user and moves the trust store of nett 0.3.13 into it.";
 pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
@@ -398,12 +399,13 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             None
         }
     };
-    // On macOS and Synology DSM this process carries the TLS transport itself and asks its worker
-    // thread for the configuration (ADR 0013)
+    // On macOS, Synology DSM and in the container this process carries the TLS transport itself
+    // and asks its worker thread for the configuration (ADR 0013)
     #[cfg(target_os = "macos")]
     let carries_tls = true;
     #[cfg(target_os = "linux")]
-    let carries_tls = nett_node::platform::linux::Flavor::detect().mesh_carries_tls();
+    let carries_tls = nett_node::platform::linux::Flavor::detect().mesh_carries_tls()
+        || crate::container::state_dir().is_some();
     let transport = carries_tls.then(|| {
         nett_transport::forward::ConfigSource::Mesh(std::sync::Arc::new(
             worker.status_source(reload_tx.clone()),

@@ -1,11 +1,14 @@
 //! `nett` executable: the command line (including the signing tool `nett site`) and the entry
-//! points of the `nett mesh`, `nett node`, `nett transport` and `nett relay` processes (ADR 0012).
+//! points of the `nett mesh`, `nett node`, `nett transport` and `nett relay` processes (ADR 0012),
+//! and of the container (`nett container`, ADR 0016).
 //! Commands fall into three groups by scope: the whole mesh, this machine, service processes
 //! (architecture.md section 13.4).
 
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+#[cfg(target_os = "linux")]
+mod container;
 mod device;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod diagnose;
@@ -112,7 +115,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "join",
         group: Group::Machine,
-        summary: "Join the site through the Hub without installing services (containers)",
+        summary: "Join the site through the Hub without installing services",
         usage: install::JOIN_USAGE,
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -163,6 +166,13 @@ const COMMANDS: &[Command] = &[
         group: Group::Service,
         summary: "The transport adapter that carries WireGuard over TLS",
         usage: transport::USAGE,
+    },
+    #[cfg(target_os = "linux")]
+    Command {
+        name: "container",
+        group: Group::Service,
+        summary: "The first process of nett's container image",
+        usage: container::USAGE,
     },
 ];
 
@@ -244,6 +254,8 @@ fn run() -> anyhow::Result<()> {
         print!("{}", command_help(command));
         return Ok(());
     }
+    #[cfg(target_os = "linux")]
+    container::run_newest(command.name);
     let parser = lexopt::Parser::from_args(args[1..].iter().cloned());
     match command.name {
         "site" => site::run(parser),
@@ -277,6 +289,8 @@ fn run() -> anyhow::Result<()> {
         "transport" => transport::run(parser),
         #[cfg(target_os = "linux")]
         "resolver" => resolver::run(parser),
+        #[cfg(target_os = "linux")]
+        "container" => container::run(parser),
         _ => unreachable!("every listed command is dispatched"),
     }
 }

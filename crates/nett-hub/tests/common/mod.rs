@@ -129,10 +129,20 @@ pub async fn hub(dir: &Path, url: &str) -> Arc<Hub> {
         url.to_owned(),
         Some(dir.to_path_buf()),
         release_keys(),
+        Some(nett_node::launch::Staged {
+            keys: release_keys(),
+            target: HUB_TARGET.into(),
+            current: env!("CARGO_PKG_VERSION").parse().expect("version"),
+            dir: dir.to_path_buf(),
+            name: "nett-hub",
+        }),
     )
     .await
     .expect("hub")
 }
+
+/// The Hub's own target in these tests.
+pub const HUB_TARGET: &str = "hub-x86_64-unknown-linux-musl";
 
 pub async fn call(
     app: &axum::Router,

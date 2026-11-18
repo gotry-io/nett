@@ -308,6 +308,11 @@ impl Db {
         Ok(())
     }
 
+    /// Closes every connection; the last one folds the write-ahead log into the database.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     /// A consistent copy of the whole database in `path` (SQLite `VACUUM INTO`): the file must not
     /// exist.
     pub async fn snapshot(&self, path: &Path) -> Result<(), DbError> {
