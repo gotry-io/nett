@@ -72,9 +72,9 @@ pub struct Hub {
     changes: watch::Sender<u64>,
     /// The current connection of each machine: a new connection replaces the old one.
     live: Mutex<HashMap<NodeId, Live>>,
-    /// The latest release manifest (design/release.md section 7), sent to every node as the
-    /// `release` partition.
-    release: watch::Sender<Option<Arc<Vec<u8>>>>,
+    /// The latest release (design/release.md section 7), sent as the `release` partition to the
+    /// machines approved for it (ADR 0027).
+    release: watch::Sender<Option<Arc<Release>>>,
     /// The programs of that release, which nodes fetch over their session (ADR 0025); only with a
     /// data directory.
     pub mirror: Option<crate::mirror::Mirror>,
@@ -93,16 +93,17 @@ pub struct Hub {
     sessions: Notify,
     /// Why the Hub's own program of a higher release could not be placed for its upgrade yet.
     upgrade_waiting: std::sync::Mutex<Option<String>>,
+    /// The approved upgrade of the Hub, its program waiting in the data directory: the Hub stops
+    /// and runs it (design/release.md section 7).
+    upgrade_ready: watch::Sender<Option<SelfUpgrade>>,
 }
 
-/// What taking a release manifest came to.
-#[derive(Debug, Default)]
-pub struct Taken {
-    /// Why each program not held could not be; they are fetched again when it is taken again.
-    pub missing: Vec<String>,
-    /// The Hub's own program of a higher release, verified and waiting in its data directory: the
-    /// Hub upgrades before it relays the release.
-    pub upgrade: Option<SelfUpgrade>,
+/// A release the Hub holds: the manifest as fetched, already checked.
+#[derive(Debug)]
+pub struct Release {
+    pub version: nett_trust::release::Version,
+    pub manifest: nett_trust::release::Manifest,
+    pub bytes: Vec<u8>,
 }
 
 /// The release the Hub upgrades itself to (design/release.md section 7).
@@ -203,6 +204,7 @@ impl Hub {
             upgrade: upgrade.map(Arc::new),
             sessions: Notify::new(),
             upgrade_waiting: std::sync::Mutex::new(None),
+            upgrade_ready: watch::channel(None).0,
         }))
     }
 
@@ -266,80 +268,116 @@ impl Hub {
         Ok(Some(backup))
     }
 
-    /// The latest release manifest, already checked.
-    pub fn release(&self) -> Option<Arc<Vec<u8>>> {
+    /// The latest release the Hub holds.
+    pub fn release(&self) -> Option<Arc<Release>> {
         self.release.borrow().clone()
     }
 
-    pub fn subscribe_release(&self) -> watch::Receiver<Option<Arc<Vec<u8>>>> {
+    pub fn subscribe_release(&self) -> watch::Receiver<Option<Arc<Release>>> {
         self.release.subscribe()
     }
 
-    /// Takes a newly fetched release manifest: holds its programs first, so that nodes find them
-    /// when they learn of the release; then, when the release is higher than the Hub and the Hub
-    /// holds its own program, readies that for the Hub's upgrade, which comes before the release
-    /// is relayed; otherwise sends it to connected nodes when it changed.
-    pub async fn take_release(&self, manifest: Vec<u8>) -> Result<Taken, String> {
-        let parsed = nett_trust::release::Manifest::parse(&manifest).map_err(|e| e.to_string())?;
+    /// The release to send node `node`: the one the Hub holds, when the user approved this
+    /// machine's upgrade to its version (ADR 0027), and the Hub is not about to upgrade itself to
+    /// it first.
+    pub async fn release_for(&self, node: &NodeId) -> Option<Arc<Release>> {
+        let release = self.release()?;
+        let site = self.site().await?;
+        let approved = site.state.by_id(node)?.upgrade_to?;
+        (approved >= release.version && !self.hub_upgrade_pending(&site.state, &release))
+            .then_some(release)
+    }
+
+    /// Whether the user approved the Hub's upgrade to `release` and the Hub has not made it yet: it
+    /// upgrades before the machines approved with it. A release without a program the Hub can run,
+    /// and one that failed before, leave the machines to go ahead.
+    fn hub_upgrade_pending(&self, state: &State, release: &Release) -> bool {
+        let Some(staged) = &self.upgrade else {
+            return false;
+        };
+        let version = release.version.to_string();
+        release.version > staged.current
+            && state.hub_upgrade_to.is_some_and(|v| v >= release.version)
+            && release.manifest.programs.contains_key(&staged.target)
+            && !self
+                .mirror
+                .as_ref()
+                .is_some_and(|m| m.refused(&version, &staged.target))
+            && !nett_node::upgrade::failed(&staged.dir).contains_key(&version)
+    }
+
+    /// The approved upgrade of the Hub, once its program waits in the data directory.
+    pub fn upgrade_ready(&self) -> watch::Receiver<Option<SelfUpgrade>> {
+        self.upgrade_ready.subscribe()
+    }
+
+    /// Takes a newly fetched release manifest: holds its programs first, so that machines find
+    /// them when they learn of the release, keeps it as the release the Hub holds, and readies the
+    /// Hub's own upgrade when the user approved it. Returns why each program not held could not
+    /// be, and why the Hub's program could not be placed; they are tried again when it is taken
+    /// again.
+    pub async fn take_release(&self, bytes: Vec<u8>) -> Result<Vec<String>, String> {
+        let manifest = nett_trust::release::Manifest::parse(&bytes).map_err(|e| e.to_string())?;
+        let version = manifest.version().map_err(|e| e.to_string())?;
         let mut missing = match &self.mirror {
-            Some(mirror) => mirror.update(&parsed).await,
+            Some(mirror) => mirror.update(&manifest).await,
             None => Vec::new(),
         };
-        let readied = self.ready_upgrade(&parsed).await;
+        self.release.send_if_modified(|current| {
+            if current.as_ref().is_some_and(|r| r.bytes == bytes) {
+                return false;
+            }
+            *current = Some(Arc::new(Release {
+                version,
+                manifest,
+                bytes,
+            }));
+            true
+        });
+        missing.extend(self.consider_upgrade().await);
+        Ok(missing)
+    }
+
+    /// Readies the Hub's upgrade when the user approved it for the release the Hub holds; returns
+    /// why it could not be, for trying again.
+    pub async fn consider_upgrade(&self) -> Option<String> {
+        if self.upgrade_ready.borrow().is_some() {
+            return None;
+        }
+        let (Some(release), Some(site)) = (self.release(), self.site().await) else {
+            return None;
+        };
+        if !self.hub_upgrade_pending(&site.state, &release) {
+            return None;
+        }
+        let readied = self.ready_upgrade(&release).await;
         *self
             .upgrade_waiting
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = readied.as_ref().err().cloned();
         match readied {
             Ok(Some(upgrade)) => {
-                return Ok(Taken {
-                    missing,
-                    upgrade: Some(upgrade),
-                });
+                self.upgrade_ready.send_replace(Some(upgrade));
+                None
             }
-            Ok(None) => {}
-            // Tried again with the programs not held yet
-            Err(reason) => missing.push(reason),
+            Ok(None) => None,
+            Err(reason) => Some(reason),
         }
-        self.release.send_if_modified(|current| {
-            if current.as_deref().map(Vec::as_slice) == Some(manifest.as_slice()) {
-                return false;
-            }
-            *current = Some(Arc::new(manifest));
-            true
-        });
-        Ok(Taken {
-            missing,
-            upgrade: None,
-        })
     }
 
     /// Copies the Hub's own verified program of a higher release from the mirror to where the
     /// upgrade places it from (design/release.md section 7), unless that version failed before.
     /// `Err` says why it could not be copied; it is tried again.
-    async fn ready_upgrade(
-        &self,
-        manifest: &nett_trust::release::Manifest,
-    ) -> Result<Option<SelfUpgrade>, String> {
-        let (Some(staged), Some(mirror), Ok(version)) = (
-            self.upgrade.as_ref(),
-            self.mirror.as_ref(),
-            manifest.version(),
-        ) else {
+    async fn ready_upgrade(&self, release: &Release) -> Result<Option<SelfUpgrade>, String> {
+        let (Some(staged), Some(mirror)) = (self.upgrade.as_ref(), self.mirror.as_ref()) else {
             return Ok(None);
         };
-        if version <= staged.current {
+        let version = release.version;
+        let Some(program) = release.manifest.programs.get(&staged.target) else {
             return Ok(None);
-        }
-        if let Some(reason) = nett_node::upgrade::failed(&staged.dir).get(&manifest.version) {
-            tracing::info!(%version, %reason, "the Hub does not upgrade to a version that failed before");
-            return Ok(None);
-        }
-        let (Some(program), Some(held)) = (
-            manifest.programs.get(&staged.target),
-            mirror.get(&manifest.version, &staged.target),
-        ) else {
-            return Ok(None);
+        };
+        let Some(held) = mirror.get(&version.to_string(), &staged.target) else {
+            return Err(format!("{version}: the Hub's program is not fetched yet"));
         };
         let incoming = staged.incoming();
         let copied = tokio::task::spawn_blocking(move || {
@@ -359,7 +397,7 @@ impl Hub {
             tracing::warn!(%version, %error, "readying the Hub's upgrade; trying again later");
             return Err(format!("{version}: not placed yet ({error})"));
         }
-        tracing::info!(%version, "the Hub upgrades itself before it relays the release");
+        tracing::info!(%version, "the Hub upgrades itself, as approved, before the machines");
         Ok(Some(SelfUpgrade {
             version,
             minisig: program.minisig.clone(),
@@ -542,7 +580,13 @@ impl Hub {
         }
         verify(&anchors, current.as_ref().map(|s| &s.state), &state)
             .map_err(PushError::Rejected)?;
-        self.commit(&mut current, state, now).await
+        let generation = self.commit(&mut current, state, now).await?;
+        drop(current);
+        // The push may approve the Hub's upgrade (ADR 0027)
+        if let Some(reason) = self.consider_upgrade().await {
+            tracing::warn!(%reason, "readying the Hub's upgrade; trying again with the next check of the release");
+        }
+        Ok(generation)
     }
 
     /// Saves with a new generation and distributes it.

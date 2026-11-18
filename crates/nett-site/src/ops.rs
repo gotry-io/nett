@@ -159,6 +159,29 @@ impl State {
         self.attempt(|s| s.add_device_in(name, new))
     }
 
+    /// Approves the upgrade to `version` (design/release.md section 7, ADR 0027) for `machines`,
+    /// and for the Hub when `hub`: the Hub relays that release to them, and upgrades itself.
+    pub fn approve_upgrade(
+        &mut self,
+        version: nett_trust::release::Version,
+        machines: &[NodeName],
+        hub: bool,
+    ) -> Result<(), SiteError> {
+        self.attempt(|s| {
+            for name in machines {
+                let m = s
+                    .machines
+                    .get_mut(name)
+                    .ok_or_else(|| SiteError::invalid(format!("there is no machine `{name}`")))?;
+                m.upgrade_to = Some(version);
+            }
+            if hub {
+                s.hub_upgrade_to = Some(version);
+            }
+            Ok(())
+        })
+    }
+
     /// Removes a device: its credential is revoked for good, and the rules that name it are cleaned
     /// up as for a machine. A gateway no device comes through any more loses the `gateway` role.
     pub fn remove_device(&mut self, name: &NodeName) -> Result<(), SiteError> {
@@ -287,6 +310,7 @@ impl State {
                 policy: None,
                 routes_signed: None,
                 routes_version: 0,
+                upgrade_to: None,
             },
         );
         self.check()

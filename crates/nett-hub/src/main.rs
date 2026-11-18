@@ -351,11 +351,7 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
 
 /// Fetches the release manifest now and every 6 hours, and holds its programs; a failure keeps the
 /// previous manifest. While a program is not held, both are fetched again sooner.
-fn follow_releases(
-    hub: std::sync::Arc<hub::Hub>,
-    source: String,
-    upgrades: tokio::sync::oneshot::Sender<hub::SelfUpgrade>,
-) {
+fn follow_releases(hub: std::sync::Arc<hub::Hub>, source: String) {
     if source == "off" {
         tracing::info!("upgrades are off");
         return;
@@ -383,15 +379,7 @@ fn follow_releases(
                 Ok(bytes) => hub.take_release(bytes).await,
                 Err(e) => Err(e),
             };
-            if let Ok(hub::Taken {
-                upgrade: Some(upgrade),
-                ..
-            }) = taken
-            {
-                upgrades.send(upgrade).ok();
-                return;
-            }
-            let wait = match taken.map(|t| t.missing) {
+            let wait = match taken {
                 Ok(missing) if missing.is_empty() => {
                     tracing::debug!(%source, "release manifest checked");
                     retry = RETRY_FIRST;
@@ -438,8 +426,8 @@ async fn serve(
     .await
     .map_err(anyhow::Error::msg)?;
     settle(hub.clone(), data);
-    let (upgrades, upgrade_ready) = tokio::sync::oneshot::channel();
-    follow_releases(hub.clone(), releases.to_owned(), upgrades);
+    let mut upgrade_ready = hub.upgrade_ready();
+    follow_releases(hub.clone(), releases.to_owned());
     let acceptor = tls
         .map(|(cert, key)| tls::acceptor(&cert, &key))
         .transpose()?;
@@ -456,8 +444,9 @@ async fn serve(
             tokio::select! {
                 _ = term.recv() => {}
                 _ = tokio::signal::ctrl_c() => {}
-                Ok(upgrade) = upgrade_ready => {
-                    *upgrading.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(upgrade);
+                Ok(upgrade) = upgrade_ready.wait_for(Option::is_some) => {
+                    *upgrading.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                        upgrade.clone();
                 }
             }
             tracing::info!("Hub stopping");

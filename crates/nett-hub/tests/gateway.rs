@@ -219,8 +219,9 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
             .await
             .is_err()
     );
-    // A new release reaches the connected node as an increment; this one does not upgrade itself.
-    // Nothing serves its program, so the Hub does not hold it and relays the manifest all the same
+    // A new release reaches a connected node once the user approved its upgrade (ADR 0027); this
+    // one does not upgrade itself. Nothing serves its program, so the Hub does not hold it and
+    // relays the manifest all the same
     let manifest = serde_json::json!({
         "version": "9.9.9",
         "programs": { "x86_64-unknown-linux-musl": {
@@ -232,18 +233,29 @@ async fn release_manifests_reach_connected_nodes_and_their_answers_are_kept() {
     let missing = hub
         .take_release(manifest.to_string().into_bytes())
         .await
-        .expect("manifest")
-        .missing;
+        .expect("manifest");
     assert_eq!(missing.len(), 1, "{missing:?}");
-    let mut answer = None;
-    for _ in 0..200 {
-        answer = hub
-            .db
+    let answered = async || {
+        hub.db
             .nodes()
             .await
             .expect("nodes")
             .into_iter()
-            .find(|r| r.node_id == mac && r.upgrade_result.is_some());
+            .find(|r| r.node_id == mac && r.upgrade_result.is_some())
+    };
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        answered().await.is_none(),
+        "not relayed before it is approved"
+    );
+    let mut approved = state.clone();
+    approved
+        .approve_upgrade("9.9.9".parse().expect("version"), &[name("mac")], false)
+        .expect("approve");
+    assert_eq!(push(&app, &token, &approved).await.0, StatusCode::OK);
+    let mut answer = None;
+    for _ in 0..200 {
+        answer = answered().await;
         if answer.is_some() {
             break;
         }
@@ -294,7 +306,7 @@ async fn nodes_fetch_the_program_of_a_release_from_the_hub() {
     )
     .expect("older");
     let manifest = release_key().manifest(version, target, "https://127.0.0.1:9/nett", &program);
-    let missing = hub.take_release(manifest).await.expect("manifest").missing;
+    let missing = hub.take_release(manifest).await.expect("manifest");
     assert!(missing.is_empty(), "{missing:?}");
     // Only the current version is kept
     assert!(
@@ -485,13 +497,15 @@ async fn a_stopping_hub_says_goodbye_and_records_the_disconnection() {
     );
 }
 
-/// The Hub upgrades itself before it relays a higher release (design/release.md section 7, ADR
-/// 0026): once it holds its own program, it readies it for the upgrade instead of relaying; a
-/// version that failed before is relayed without upgrading, and shows as the Hub's problem.
+/// The Hub holds a release and relays it only as the user approves (design/release.md section
+/// 7, ADR 0027): approved for a machine, it reaches that machine; approved for the Hub too, the Hub
+/// readies its own program and holds the release for the machines until it has upgraded; a
+/// program it cannot place, and a version that failed before, show as the Hub's problem.
 #[tokio::test]
-async fn the_hub_upgrades_itself_before_it_relays_a_release() {
-    let (hub, app, token, _site, _state, linked_tmp) =
-        linked("gateway-self-upgrade", "https://127.0.0.1").await;
+async fn the_hub_relays_and_upgrades_only_as_approved() {
+    let (hub, app, token, _site, state, linked_tmp) =
+        linked("gateway-approved", "https://127.0.0.1").await;
+    assert_eq!(push(&app, &token, &state).await.0, StatusCode::OK);
     let version: nett_trust::release::Version = "99.0.0".parse().expect("version");
     let data = linked_tmp.path();
     let releases = data.join(nett_hub::mirror::DIR);
@@ -515,16 +529,63 @@ async fn the_hub_upgrades_itself_before_it_relays_a_release() {
     let manifest = serde_json::json!({ "version": version.to_string(), "programs": programs })
         .to_string()
         .into_bytes();
+    let mac = state.machine(&name("mac")).expect("mac").node_id.clone();
+    let status = async || -> nett_proto::api::StatusResponse {
+        let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;
+        serde_json::from_slice(&body).expect("status")
+    };
 
-    // Where the program goes cannot be written: the release is relayed, the Hub says why it does
-    // not upgrade and tries again sooner
-    let taken = hub.take_release(manifest.clone()).await.expect("manifest");
-    assert!(taken.missing.is_empty(), "{:?}", taken.missing);
-    assert_eq!(hub.upgrade_problem(), None);
-    let upgrade = taken.upgrade.expect("the Hub upgrades itself");
-    assert_eq!(upgrade.version, version);
+    // Held and shown, relayed to no one, and the Hub stays
     assert!(
-        upgrade
+        hub.take_release(manifest.clone())
+            .await
+            .expect("manifest")
+            .is_empty()
+    );
+    assert_eq!(status().await.release.as_deref(), Some("99.0.0"));
+    assert!(hub.release_for(&mac).await.is_none());
+    assert!(hub.upgrade_ready().borrow().is_none());
+    assert!(!data.join("nett-hub.new").exists());
+
+    // Approved for mac alone: relayed to mac, and the Hub stays
+    let mut approved = state.clone();
+    approved
+        .approve_upgrade(version, &[name("mac")], false)
+        .expect("approve");
+    assert_eq!(push(&app, &token, &approved).await.0, StatusCode::OK);
+    assert_eq!(
+        hub.release_for(&mac).await.map(|r| r.version),
+        Some(version)
+    );
+    assert!(hub.upgrade_ready().borrow().is_none());
+
+    // Approved for the Hub too, where its program cannot be placed yet: the Hub says why and holds
+    // the release for mac, since it upgrades first
+    std::fs::create_dir_all(data.join("nett-hub.new/in-the-way")).expect("in the way");
+    approved
+        .approve_upgrade(version, &[], true)
+        .expect("approve the Hub");
+    assert_eq!(push(&app, &token, &approved).await.0, StatusCode::OK);
+    assert!(hub.upgrade_ready().borrow().is_none());
+    assert!(hub.release_for(&mac).await.is_none());
+    let problem = status().await.hub_upgrade.expect("a problem");
+    assert!(
+        problem.starts_with("99.0.0: not placed yet (copying"),
+        "{problem}"
+    );
+
+    // Taken again with the way clear: readied for the Hub's upgrade, still held for mac
+    std::fs::remove_dir_all(data.join("nett-hub.new")).expect("out of the way");
+    assert!(
+        hub.take_release(manifest.clone())
+            .await
+            .expect("manifest")
+            .is_empty()
+    );
+    let ready = hub.upgrade_ready().borrow().clone().expect("readied");
+    assert_eq!(ready.version, version);
+    assert!(
+        ready
             .minisig
             .contains(&format!("nett-{version}-{}", common::HUB_TARGET))
     );
@@ -532,40 +593,38 @@ async fn the_hub_upgrades_itself_before_it_relays_a_release() {
         std::fs::read(data.join("nett-hub.new")).expect("readied"),
         hub_program
     );
-    assert!(
-        hub.subscribe_release().borrow().is_none(),
-        "not relayed before the Hub has upgraded"
-    );
+    assert!(hub.release_for(&mac).await.is_none());
+    assert_eq!(status().await.hub_upgrade, None);
 
-    // Where the program goes cannot be written: the release is relayed, and the Hub says why it
-    // does not upgrade and tries again sooner
-    std::fs::remove_file(data.join("nett-hub.new")).expect("readied");
-    std::fs::create_dir_all(data.join("nett-hub.new/in-the-way")).expect("in the way");
-    let taken = hub.take_release(manifest.clone()).await.expect("manifest");
-    assert!(taken.upgrade.is_none());
-    assert_eq!(taken.missing.len(), 1, "{:?}", taken.missing);
-    let problem = hub.upgrade_problem().expect("a problem");
-    assert!(
-        problem.starts_with("99.0.0: not placed yet (copying"),
-        "{problem}"
-    );
-    assert!(hub.subscribe_release().borrow().is_some(), "relayed");
-
+    // A version that failed for the Hub is not tried again: the machines get it
     std::fs::write(
         data.join("upgrade.json"),
         br#"{"failed": {"99.0.0": "nett-hub 99.0.0 started 3 times without settling; back to 0.5.0"}}"#,
     )
     .expect("record");
-    let taken = hub.take_release(manifest).await.expect("manifest");
-    assert!(
-        taken.upgrade.is_none(),
-        "a version that failed is not tried again"
-    );
-    assert!(taken.missing.is_empty(), "{:?}", taken.missing);
-    let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;
-    let status: nett_proto::api::StatusResponse = serde_json::from_slice(&body).expect("status");
     assert_eq!(
-        status.hub_upgrade.as_deref(),
+        hub.release_for(&mac).await.map(|r| r.version),
+        Some(version)
+    );
+    assert_eq!(
+        status().await.hub_upgrade.as_deref(),
         Some("99.0.0: nett-hub 99.0.0 started 3 times without settling; back to 0.5.0")
     );
+
+    // A release with no program for the Hub, approved for the Hub and mac: mac gets it
+    let next: nett_trust::release::Version = "99.1.0".parse().expect("version");
+    let target = "x86_64-unknown-linux-musl";
+    std::fs::write(releases.join(format!("nett-{next}-{target}")), &node).expect("program");
+    let manifest = common::release_key().manifest(next, target, "https://127.0.0.1:9/nett", &node);
+    assert!(
+        hub.take_release(manifest)
+            .await
+            .expect("manifest")
+            .is_empty()
+    );
+    approved
+        .approve_upgrade(next, &[name("mac")], true)
+        .expect("approve");
+    assert_eq!(push(&app, &token, &approved).await.0, StatusCode::OK);
+    assert_eq!(hub.release_for(&mac).await.map(|r| r.version), Some(next));
 }

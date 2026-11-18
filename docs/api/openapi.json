@@ -231,6 +231,13 @@
             },
             "type": "array"
           },
+          "release": {
+            "description": "The latest release the Hub holds, which `nett site upgrade` approves (design/release.md\nsection 7); absent before the Hub has fetched one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "url": {
             "type": "string"
           }

@@ -16,6 +16,11 @@ use crate::state::{Machine, Part, Rule, Selector, State};
 /// The changes between two site states, one line per item; empty when nothing changed.
 pub fn describe(old: &State, new: &State) -> Vec<String> {
     let mut lines = Vec::new();
+    if old.hub_upgrade_to != new.hub_upgrade_to
+        && let Some(v) = new.hub_upgrade_to
+    {
+        lines.push(format!("~ the Hub: upgrade to {v} approved"));
+    }
     for (name, m) in &new.machines {
         match old.machines.get(name) {
             None => lines.push(format!("+ {name} ({}), {}", reach(new, m), m.mesh.ipv4)),
@@ -65,6 +70,11 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                         };
                         lines.push(format!("{sign} {name}.routes {}", list(&m.routes)));
                     }
+                }
+                if o.upgrade_to != m.upgrade_to
+                    && let Some(v) = m.upgrade_to
+                {
+                    lines.push(format!("~ {name}: upgrade to {v} approved"));
                 }
                 if let (Some(a), Some(b)) = (&o.enrollment, &m.enrollment)
                     && a.public_key != b.public_key

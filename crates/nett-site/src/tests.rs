@@ -1465,3 +1465,46 @@ fn a_command_waits_for_the_site_lock_for_a_bounded_time() {
     drop(held);
     assert!(SiteDir::open(&dir).is_ok());
 }
+
+/// Approving an upgrade (design/release.md section 7, ADR 0027) is part of the site and listed as
+/// a change, leaves what is signed and the machines' desired states alone, and a site without
+/// approvals is written as before.
+#[test]
+fn upgrade_approvals_are_listed_and_change_nothing_signed() {
+    let (_tmp, dir) = temp_dir("upgrades");
+    let (site, mut state) = site(&dir);
+    signed(&site, &mut state);
+    let plain = serde_json::to_string(&state).expect("json");
+    assert!(!plain.contains("upgrade_to"), "{plain}");
+
+    let before = state.clone();
+    let version: nett_trust::release::Version = "0.6.0".parse().expect("version");
+    state
+        .approve_upgrade(version, &[name("mac")], true)
+        .expect("approve");
+    assert_eq!(
+        describe(&before, &state),
+        vec![
+            "~ the Hub: upgrade to 0.6.0 approved".to_owned(),
+            "~ mac: upgrade to 0.6.0 approved".to_owned(),
+        ]
+    );
+    for n in ["edge-vps", "mac", "nas"] {
+        assert_eq!(
+            desired(&before, &name(n)).expect("composed"),
+            desired(&state, &name(n)).expect("composed"),
+            "{n}"
+        );
+    }
+    let back: State =
+        serde_json::from_str(&serde_json::to_string(&state).expect("json")).expect("parses");
+    assert_eq!(back, state);
+    assert_eq!(back.machines[&name("mac")].upgrade_to, Some(version));
+    assert_eq!(back.machines[&name("nas")].upgrade_to, None);
+
+    assert!(
+        state
+            .approve_upgrade(version, &[name("nowhere")], false)
+            .is_err()
+    );
+}

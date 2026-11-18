@@ -174,7 +174,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:the_dial_only_follower_keeps_its_tls_relays_authenticated`
 - `nett-node:a_machine_without_an_upgrader_reports_only_a_newer_release`
 - `nett-node:a_new_version_that_does_not_settle_goes_back_to_the_one_before`
-- `nett-hub:the_hub_upgrades_itself_before_it_relays_a_release`
+- `nett-hub:the_hub_relays_and_upgrades_only_as_approved`
 - `ci:Join, reach a service beside a container, upgrade in place, roll back (needs Docker)`
 - `lab:dial-only-switch`
 
