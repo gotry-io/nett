@@ -33,6 +33,9 @@ pub const SITE_HUB_FILE: &str = "hub.json";
 /// The release that adds devices: the Hub and every machine run it before the first gateway role or
 /// device is signed, since older ones reject what they do not recognize (design/devices.md section 9).
 pub const DEVICES_SINCE: &str = "0.4.0";
+/// The release that adds upgrade approvals: a Hub before it refuses a site that carries them
+/// (design/release.md section 7, ADR 0027).
+pub const UPGRADES_SINCE: &str = "0.6.0";
 /// Script that installs `nett` on a new machine (design/release.md section 6): installs the program
 /// only, does not read the token.
 pub const INSTALL_SCRIPT: &str = "curl -fsSL https://nett.gotry.io/install.sh | sh";
@@ -176,6 +179,91 @@ pub fn fetch_updates(hub: &SiteHub) -> anyhow::Result<Updates> {
 
 fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
     request(&hub.target(), "GET", STATUS_PATH, Some(&hub.token), None)
+}
+
+/// The release the Hub holds, when the Hub or a machine runs an older one, and the command that
+/// approves it (design/hub.md section 3.4).
+fn available(reply: &StatusResponse) -> Option<String> {
+    use nett_trust::release::Version;
+    let release: Version = reply.release.as_deref()?.parse().ok()?;
+    let older = |v: &str| v.parse::<Version>().is_ok_and(|v| v < release);
+    let hub = older(&reply.hub_version);
+    let machines = reply
+        .machines
+        .iter()
+        .filter(|m| m.nett_version.as_deref().is_some_and(older))
+        .count();
+    let plural = if machines == 1 { "" } else { "s" };
+    let who = match (hub, machines) {
+        (false, 0) => return None,
+        (true, 0) => "the Hub".to_owned(),
+        (false, n) => format!("{n} machine{plural}"),
+        (true, n) => format!("the Hub and {n} machine{plural}"),
+    };
+    Some(format!("{release} available for {who}: nett site upgrade"))
+}
+
+/// What `nett site upgrade` approves: the release the Hub holds, and who runs an older one.
+pub struct UpgradePlan {
+    pub release: nett_trust::release::Version,
+    hub: Option<nett_trust::release::Version>,
+    machines: std::collections::HashMap<String, Option<nett_trust::release::Version>>,
+}
+
+impl UpgradePlan {
+    pub fn hub_behind(&self) -> bool {
+        self.hub.is_none_or(|v| v < self.release)
+    }
+
+    /// Whether `machine` runs an older release, or has not reported one.
+    pub fn behind(&self, machine: &str) -> bool {
+        self.machines
+            .get(machine)
+            .copied()
+            .flatten()
+            .is_none_or(|v| v < self.release)
+    }
+}
+
+/// The release the Hub holds and the versions it knows (design/release.md section 7); refuses a
+/// Hub older than [`UPGRADES_SINCE`] (or this tool, when it is older still), which would refuse
+/// the approval.
+pub fn upgrade_plan(hub: &SiteHub) -> anyhow::Result<UpgradePlan> {
+    use nett_trust::release::Version;
+    let since: Version = UPGRADES_SINCE.parse().context("UPGRADES_SINCE")?;
+    let own: Version = env!("CARGO_PKG_VERSION")
+        .parse()
+        .context("this tool's version")?;
+    let since = since.min(own);
+    let status = fetch_status(hub).context("reading the release the Hub holds")?;
+    let hub_version = status.hub_version.parse::<Version>().ok();
+    if hub_version.is_none_or(|v| v < since) {
+        bail!(
+            "the Hub runs nett-hub {}, which does not take upgrade approvals; it needs {since} or \
+             later, which it upgrades to once on its own",
+            status.hub_version
+        );
+    }
+    let release: Version = status
+        .release
+        .as_deref()
+        .context("the Hub holds no release yet; it fetches one when it starts and every 6 hours")?
+        .parse()
+        .context("the release the Hub holds")?;
+    Ok(UpgradePlan {
+        release,
+        hub: hub_version,
+        machines: status
+            .machines
+            .iter()
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.nett_version.as_deref().and_then(|v| v.parse().ok()),
+                )
+            })
+            .collect(),
+    })
 }
 
 /// Refuses while the Hub or a machine runs a release older than [`DEVICES_SINCE`], or than this
@@ -458,6 +546,9 @@ pub fn status(
     )];
     if let Some(problem) = &reply.hub_upgrade {
         lines.push(("hub upgrade", format!("not installed: {problem}")));
+    }
+    if let Some(available) = available(&reply) {
+        lines.push(("release", available));
     }
     lines.push((
         "site",

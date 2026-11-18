@@ -58,6 +58,9 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        without: sign its node policy again, rewrite its desired state
   edge <name> <prefix>... | --none     the Edge containers on this machine
   routes <name> <prefix>... | --none   the routes this machine advertises
+  upgrade [<name>...] [--hub]          approve the release the Hub holds: for the Hub and every
+                                       machine, for the machines named, or with --hub for the Hub;
+                                       nothing upgrades before it is approved
   device add <name> [--gateway <machine>] [--limited] [--out <dir>]
                                        add a phone or computer that runs no nett, and write its
                                        WireGuard configuration. It joins through the
@@ -98,6 +101,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let (mut keys, mut note) = (None, None);
     let (mut tls, mut no_tls, mut off, mut fingerprint) = (None::<String>, false, false, None);
     let (mut limited, mut gateway, mut out) = (false, None::<String>, None::<PathBuf>);
+    let mut hub_only = false;
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Value(v) => words.push(v.string()?),
@@ -120,6 +124,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             lexopt::Arg::Long("limited") => limited = true,
             lexopt::Arg::Long("gateway") => gateway = Some(parser.value()?.string()?),
             lexopt::Arg::Long("out") => out = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("hub") => hub_only = true,
             other => return Err(other.unexpected().into()),
         }
     }
@@ -154,6 +159,13 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
 
         ["invite", name] => return invite(&dir, &machine(name)?, yes),
+        ["upgrade", names @ ..] => {
+            let names = names
+                .iter()
+                .map(|n| machine(n))
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            return upgrade(&dir, names, hub_only, yes);
+        }
         ["add", name] => {
             let name = machine(name)?;
             let opts = MachineOptions {
@@ -294,6 +306,72 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         _ => bail!(USAGE),
     };
     modify(&dir, yes, &[], change, None, None)
+}
+
+/// `nett site upgrade` (design/release.md section 7, ADR 0027): approves the release the Hub holds
+/// for the Hub and every machine, for the named machines, or with `--hub` for the Hub alone. The
+/// approval signs nothing and changes no desired state, so it is pushed without waiting for the
+/// machines: the Hub may be on its way to the new version already.
+fn upgrade(dir: &Path, names: Vec<NodeName>, hub_only: bool, yes: bool) -> anyhow::Result<()> {
+    let Some(hub) = SiteHub::load(dir)? else {
+        bail!(
+            "upgrades go through the Hub; without one, run the install script and `sudo nett \
+             install` on each machine"
+        );
+    };
+    let plan = crate::hub::upgrade_plan(&hub)?;
+    let release = plan.release;
+    let site = SiteDir::open(dir)?;
+    let old = site.load()?;
+    let all = names.is_empty() && !hub_only;
+    let named = if all {
+        old.machines.keys().cloned().collect()
+    } else {
+        names
+    };
+    for name in &named {
+        old.machine(name)?;
+    }
+    let behind: Vec<NodeName> = named
+        .into_iter()
+        .filter(|n| plan.behind(n.as_str()))
+        .collect();
+    let hub_too = (all || hub_only) && plan.hub_behind();
+    if behind.is_empty() && !hub_too {
+        println!("Nothing to approve: they run {release} already.");
+        return Ok(());
+    }
+    let mut new = old.clone();
+    new.approve_upgrade(release, &behind, hub_too)?;
+    let lines = describe(&old, &new);
+    if lines.is_empty() {
+        println!(
+            "The upgrade to {release} is approved already; `nett site status` shows how far it got."
+        );
+        return Ok(());
+    }
+    for line in &lines {
+        println!("{line}");
+    }
+    println!("Release notes: https://github.com/gotry-io/nett/releases/tag/v{release}");
+    confirm(yes, "Approve and push?")?;
+    save_with_outputs(&site, &old, &new, &outputs(&new)?)?;
+    crate::hub::push(&hub, &new).with_context(|| {
+        "the approval is saved, but pushing it to the Hub failed; the next nett site command \
+         pushes it again"
+    })?;
+    if hub_too {
+        println!(
+            "Pushed. The Hub upgrades to {release} now, then the machines approved with it; \
+             `nett site status` shows their versions."
+        );
+    } else {
+        println!(
+            "Pushed. The approved machines upgrade to {release} now; `nett site status` shows \
+             their versions."
+        );
+    }
+    Ok(())
 }
 
 /// Before the site's first device: the Hub and every machine run a release that knows devices
@@ -633,8 +711,7 @@ fn print_written(site: &SiteDir, written: &[NodeName]) {
         "Wrote the desired state for {} in {}/<machine>/desired.json.
 The files contain no private keys. To apply one on its machine:
   Linux      copy it to /etc/nett/desired.json, then run `sudo nett reload`
-  macOS      sudo nett install, or with --config <desired.json> when the site is elsewhere
-  container  replace the mounted desired.json, then run `docker exec <container> /nett reload`",
+  macOS      sudo nett install, or with --config <desired.json> when the site is elsewhere",
         names.join(", "),
         site.path().join(NODES_DIR).display()
     );
@@ -1048,6 +1125,21 @@ mod tests {
 
     fn name(s: &str) -> NodeName {
         s.parse().expect("name")
+    }
+
+    /// Approvals are for the Hub to act on (design/release.md section 7): without one, the command
+    /// says how machines are upgraded instead
+    #[test]
+    fn upgrades_are_approved_through_the_hub_only() {
+        let (_tmp, dir) = temp_dir("upgrade");
+        site(&dir, &["init"]).expect("init");
+        let (_, mac) = keys();
+        site(&dir, &["add", "mac", "--keys", &mac]).expect("add mac");
+        let error = site(&dir, &["upgrade"]).expect_err("no Hub");
+        assert!(
+            error.to_string().contains("upgrades go through the Hub"),
+            "{error:#}"
+        );
     }
 
     #[test]

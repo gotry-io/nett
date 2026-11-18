@@ -78,6 +78,14 @@ impl Mirror {
         current.programs.get(target).cloned()
     }
 
+    /// Whether the program of `version` for `target` matches its manifest but its signature does
+    /// not hold for the Hub's keys: the Hub cannot run it.
+    pub fn refused(&self, version: &str, target: &str) -> bool {
+        let current = self.current();
+        current.version.is_some_and(|v| v.to_string() == version)
+            && current.refused.contains_key(target)
+    }
+
     /// Holds the programs of `manifest`: keeps those already held, checks one already on disk, and
     /// fetches the others from their URL. The programs of other versions are deleted. Returns why
     /// each program not held yet could not be, for fetching again later; a program whose signature

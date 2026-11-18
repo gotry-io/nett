@@ -18,6 +18,7 @@ use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Sha256Digest;
 use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{MeshAddresses, PortRange};
+use nett_trust::release::Version;
 use nett_trust::signed::SignedPayload;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -72,6 +73,9 @@ pub struct State {
     /// allocated again.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub revoked_credentials: Vec<RevokedCredential>,
+    /// The release the user approved the Hub's upgrade to (design/release.md section 7, ADR 0027).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_upgrade_to: Option<Version>,
 }
 
 /// A device that joins through a mobile gateway with one WireGuard credential (design/devices.md).
@@ -172,6 +176,10 @@ pub struct Machine {
     /// Signed advertised routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routes_signed: Option<SignedVersion>,
+    /// The release the user approved this machine's upgrade to (design/release.md section 7, ADR
+    /// 0027); the Hub relays no higher one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_to: Option<Version>,
     /// Highest version of advertised routes ever signed. When all routes are removed, the signed
     /// artifact is removed with them, but the version stays here: advertising again continues to
     /// increase it, and the mesh process only accepts higher versions (design/mesh.md section 4.2).
@@ -462,6 +470,7 @@ impl State {
             backup_key: None,
             devices: BTreeMap::new(),
             revoked_credentials: Vec::new(),
+            hub_upgrade_to: None,
         }
     }
 

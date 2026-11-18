@@ -308,9 +308,9 @@ jobs:
 
   # Linux with real systemd (design/hub.md section 7, design/release.md sections 7 and 8): a new
   # machine joins through the Hub with `sudo nett install <token>` from 0.3.13, the last release with
-  # the earlier layout, upgrades itself to this version and then a newer one that a local website
-  # serves (signed with keys generated for this test and built into each version) and the Hub
-  # mirrors, and leaves again
+  # the earlier layout, waits for approval, then upgrades itself to newer releases that a local
+  # website serves (signed with keys generated for this test and built into each version) and the
+  # Hub mirrors, and leaves again
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -467,8 +467,8 @@ jobs:
           units=/usr/local/lib/systemd/system
           test ! -e "$units/nett-relay.service"
           test ! -e "$units/nett-transport.service"
-          # The Hub offers 99.0.0, signed by the old backup key: nett-node verifies it, installs it,
-          # restarts the mesh service and itself
+          # The Hub holds 99.0.0, signed by the old backup key, and relays it once it is approved
+          # (ADR 0027): nett-node verifies it, installs it, restarts the mesh service and itself
           wait_for() {
             for _ in $(seq 120); do
               "$nett" site status --json | jq -e ".machines[] | select(.name == \"ci\") | $1" && return 0
@@ -477,6 +477,21 @@ jobs:
             "$nett" site status --json | jq '.machines[] | select(.name == "ci")'
             return 1
           }
+          approve() {
+            for _ in $(seq 60); do
+              "$nett" site status --json | jq -e ".release == \"$1\"" > /dev/null && break
+              sleep 1
+            done
+            "$nett" site upgrade --yes
+          }
+          for _ in $(seq 60); do
+            "$nett" site status --json | jq -e '.release == "99.0.0"' > /dev/null && break
+            sleep 1
+          done
+          sleep 5
+          "$nett" site status | grep -F '99.0.0 available for the Hub and 1 machine: nett site upgrade'
+          wait_for '.online and .nett_version == "0.3.13"'
+          approve 99.0.0
           wait_for '.online and .nett_version == "99.0.0"'
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +99\.0\.0 ' site-status.log
@@ -506,6 +521,7 @@ jobs:
           sh "$RUNNER_TEMP/offer.sh" 99.1.0 old-primary
           kill "$hub_pid"; wait "$hub_pid" || true
           serve_hub
+          approve 99.1.0
           wait_for '.upgrade_result == "rejected" and (.upgrade_reason | contains("does not trust"))'
           wait_for '.online and .nett_version == "99.0.0"'
           # The Hub did not serve it either: the node fetched it from the website
@@ -515,6 +531,7 @@ jobs:
           sh "$RUNNER_TEMP/offer.sh" 99.2.0 new-primary
           kill "$hub_pid"; wait "$hub_pid" || true
           serve_hub
+          approve 99.2.0
           wait_for '.online and .nett_version == "99.2.0"'
           grep -F 'holding the program of the release' hub.log | grep -F 99.2.0
           sudo journalctl -u nett-node --no-pager | grep -F 'fetched and verified the new version' \
@@ -742,12 +759,18 @@ jobs:
             sleep 2
           done
           test "$from" = "from 100.88.0.2"
-          # 99.0.0: the Hub upgrades itself first, then relays it, and the containers move in place
+          # 99.0.0: the Hub holds it and nothing moves until it is approved (ADR 0027); then the Hub
+          # upgrades itself first, relays it, and the containers move in place
           started=$(docker inspect -f '{{.State.StartedAt}}' box)
           offer 99.0.0 "$out/nett-99.0.0" "$out/nett-hub-99.0.0"
           docker restart hub
+          wait_for '.release == "99.0.0"'
+          sleep 5
+          status '.hub_version != "99.0.0" and ([.machines[] | select(.nett_version == "99.0.0")] | length == 0)'
+          "$nett" site status | grep -F '99.0.0 available for the Hub and 2 machines: nett site upgrade'
+          "$nett" site upgrade --yes
           wait_for '.hub_version == "99.0.0"'
-          docker logs hub 2>&1 | grep -F 'the Hub upgrades itself before it relays the release'
+          docker logs hub 2>&1 | grep -F 'the Hub upgrades itself, as approved, before the machines'
           docker logs hub 2>&1 | grep -F 'upgrade complete'
           wait_for '[.machines[] | select(.online and .nett_version == "99.0.0")] | length == 2'
           test "$(docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' box)" = "$started 0"
@@ -756,6 +779,8 @@ jobs:
           # 99.1.0 is signed but does not start (it is the Hub's program): three starts, then back
           offer 99.1.0 "$out/nett-hub-99.0.0"
           docker restart hub
+          wait_for '.release == "99.1.0"'
+          "$nett" site upgrade --yes
           wait_for '[.machines[] | select(.online and .nett_version == "99.0.0" and ((.upgrade_reason // "") | contains("started 3 times without settling")))] | length == 2'
           docker logs box 2>&1 | grep -F 'rolling back the new version'
           "$nett" site status

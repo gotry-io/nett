@@ -52,6 +52,10 @@ pub struct StatusResponse {
     /// section 7); absent when it is on the latest release it could install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_upgrade: Option<String>,
+    /// The latest release the Hub holds, which `nett site upgrade` approves (design/release.md
+    /// section 7); absent before the Hub has fetched one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
     pub url: String,
     pub generation: u64,
     pub machines: Vec<MachineStatus>,

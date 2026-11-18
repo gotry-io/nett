@@ -506,7 +506,7 @@ async fn serve(
                 if changed.is_err() {
                     return Ok(());
                 }
-                send_release(hub, socket, &mut out).await?;
+                send_release(hub, node, socket, &mut out).await?;
             }
             Some((from, message)) = switches.recv() => {
                 out.send(socket, Body::PathSwitch(PathSwitch {
@@ -784,10 +784,10 @@ async fn send_desired(
             content: endpoints,
         },
     ];
-    if let Some(manifest) = hub.release() {
+    if let Some(release) = hub.release_for(node).await {
         partitions.push(Partition {
             kind: PartitionKind::Release as i32,
-            content: manifest.to_vec(),
+            content: release.bytes.clone(),
         });
     }
     out.send(
@@ -803,8 +803,13 @@ async fn send_desired(
 
 /// A new release manifest alone, as an increment on the current generation (protocol.md
 /// section 6.1).
-async fn send_release(hub: &Hub, socket: &mut WebSocket, out: &mut Outbox) -> Result<(), String> {
-    let (Some(site), Some(manifest)) = (hub.site().await, hub.release()) else {
+async fn send_release(
+    hub: &Hub,
+    node: &NodeId,
+    socket: &mut WebSocket,
+    out: &mut Outbox,
+) -> Result<(), String> {
+    let (Some(site), Some(release)) = (hub.site().await, hub.release_for(node).await) else {
         return Ok(());
     };
     out.send(
@@ -814,7 +819,7 @@ async fn send_release(hub: &Hub, socket: &mut WebSocket, out: &mut Outbox) -> Re
             base_generation: site.generation,
             partitions: vec![Partition {
                 kind: PartitionKind::Release as i32,
-                content: manifest.to_vec(),
+                content: release.bytes.clone(),
             }],
         }),
     )
