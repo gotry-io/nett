@@ -12,7 +12,7 @@ The Edge address, advertised prefixes and the container member are already defau
 ## Decision
 
 1. **A new connection that no rule allows is always denied**: connections between nodes, to advertised prefixes, to container members and from the Edge address are all treated the same, with no exception switches;
-2. **The user's devices** (phones and laptops with device credentials) can access all members and the advertised LAN prefixes by default (ADR 0015);
+2. **The user's devices** (phones and laptops with device credentials) can access all members and the advertised LAN prefixes by default (ADR 0015); a device added as limited, such as a work computer, gets only what rules allow. The signing tool writes this default into the signed rule set, so nodes enforce one rule set with no exception for devices (devices.md section 5);
 3. The mesh's own in-tunnel probes are not affected by access rules; return packets and related packets of established connections are allowed (mesh.md section 12). When there is no rule set, only this rule is in effect.
 
 ## Rationale

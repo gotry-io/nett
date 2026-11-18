@@ -189,9 +189,9 @@ The signed policy plus the admission proof is the node's **admission material**:
 | `connect` | CONNECT proxy token | Access internal services through the CONNECT proxy of nett-relay when UDP is restricted |
 
 - WireGuard private keys are **generated only on the user's computer by the signing tool**; the Hub stores only the public key and never handles the private key;
-- **The full configuration (including the private key) is generated only once, at creation**: the signing tool generates the configuration file and QR code (or the proxy client's configuration) for saving or scanning, and it cannot be exported again afterwards. If the configuration is lost, create a new credential and revoke the old one. The "everything through the gateway" fallback configuration uses a separate credential created together with the main configuration (mesh.md section 13);
-- Adding a device (`device.add`) and adding a credential to an existing device (`device_credential.create`) are both high-risk operations and require a signature; the signed artifact binds the credential's public key (or token hash) and the mesh address, and is verified independently by the gateway, the smart gateway, and nett-relay;
-- Credential creation is recorded as an activity event; once revoked, the credential is removed immediately from the mobile gateway, the direct entry point, and nett-relay.
+- **The full configuration (including the private key) is generated only once, at creation**: the signing tool generates the configuration file and QR code (or the proxy client's configuration) for saving or scanning, and it cannot be exported again afterwards. If the configuration is lost, create a new credential and revoke the old one;
+- Adding a device (`device.add`) and adding a credential to an existing device (`device_credential.create`) are both high-risk operations and require a signature; the signed artifact binds the credential's public key (or token hash) and the mesh address, and is verified independently by every mesh member and nett-relay;
+- Credential creation is recorded as an activity event; once revoked, the credential is removed immediately from the mobile gateway and nett-relay.
 
 ## 10. Signature format
 
@@ -224,7 +224,7 @@ Values of `kind`: `change_approval` (change approval), `enrollment_policy` (the 
 | Artifact `kind` | Content | Verified by |
 |---|---|---|
 | `node_policy` | Node ID, version, modules, roles (relay, gateway, smart gateway, edge; the `edge` role states how to recognize traffic sent by Edge), mesh address and Edge address, enrollment public key | That node; mesh members (admission) |
-| `device_credential` | Device ID, credential ID, credential type, public key or token hash, mesh address | Mobile gateway, smart gateway, nett-relay |
+| `device_credential` | Device ID, credential ID, public key or token hash, mesh addresses (devices.md section 4) | Mesh members, nett-relay |
 | `advertised_routes` | Node ID, prefix list, version | Mesh members |
 | `access_rule_set` | The whole access rule set, written as the **result after selector expansion** (member IDs, addresses, ports), not as labels; version | Mesh members, nett-relay (CONNECT) |
 | `release_override` | Node ID, the specific version allowed to be installed (for downgrade) | That node |

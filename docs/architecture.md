@@ -25,7 +25,7 @@ This document is the overall design of nett: what runs on each machine, how the 
      nett-node (+ nett-relay) at home          (join via the smart gateway,
                                                 nothing to install)
 
-External: phone ─standard WireGuard─► home gateway / mobile gateway
+External: phone ─standard WireGuard─► mobile gateway
 ```
 
 **Three planes**
@@ -220,21 +220,19 @@ tailscale (Headscale + derper + tailscaled) is an optional fallback: it is used 
 
 ## 7. Phone access
 
-The phone side is compatible with **any standard WireGuard client**: nett exports a standard configuration (a configuration file and a QR code) and does not pin a client; it also exports configurations for Surge, mihomo and sing-box (ADR 0018). The configuration contains **two paths**:
+The phone side is compatible with **any standard WireGuard client**: nett exports a standard configuration (a configuration file and a QR code) and does not pin a client; it also exports configurations for Surge, mihomo and sing-box (ADR 0018). The configuration has **one entry, the mobile gateway** (ADR 0008):
 
 ```
-Phone ─┬─ direct to the smart gateway at home (standard WireGuard) → services at home;
-       │   heavy traffic (such as video) does not detour
-       └─ mobile gateway (standard WireGuard) → other nodes; fallback when direct is unavailable
+Phone ── mobile gateway (standard WireGuard) → the nodes, and the LAN prefixes advertised in the mesh;
+         beyond the gateway the path layer selects and switches paths
 ```
 
-- The two peers split traffic by prefix, which standard clients support;
-- At any time, each credential of a device belongs to only one mobile gateway, which advertises that credential's address on its behalf; the configuration lists two DNS servers (the mobile gateway and the smart gateway);
+- At any time, each credential of a device belongs to only one mobile gateway, which advertises that credential's address on its behalf; the configuration lists the mobile gateway as its DNS server;
 - The mobile gateway is a WireGuard interface on the Hub host (or another `public` node); the path beyond the gateway is handled by the nett path layer;
 - A device can have multiple credentials (for example, one each for two different client programs), each revocable independently, with permissions granted per device;
 - When UDP is restricted, clients that support an HTTPS proxy can reach internal services through nett-relay's CONNECT proxy;
-- Standard clients do not switch between paths automatically, so a backup configuration that sends "everything via the gateway" is exported as well (using a separate credential), for manual switching when direct is blocked. Proxy client configurations put the two paths in an automatic fallback policy group, so when direct fails they switch to the gateway automatically, and they do not use up the phone's only VPN slot;
-- The phone app and Windows arrive in M3, when they are full members and choose paths themselves (ADR 0018).
+- Proxy client configurations send the mesh prefixes to a WireGuard outbound, so they do not use up the phone's only VPN slot;
+- The phone app and Windows arrive in M3, when they are full members and choose paths themselves, directly to home and to other nodes (ADR 0018).
 
 ## 8. Origin traffic
 
@@ -330,7 +328,7 @@ The Hub is the control plane and the node is the executor:
 1. **Multi-point connectivity**: a `dial-only` node connects to at least two `public` nodes.
 2. **At least two usable relays**, on different hosts. This is a redundancy floor, not a limit on the number of relays.
 3. **The mesh does not depend on the control plane being online**: the topology and keys are persisted locally on each node and do not expire; when the Hub is absent, nodes keep selecting paths and switching.
-4. **Multiple mobile gateways can be deployed**; the phone also keeps its direct path to home.
+4. **Multiple mobile gateways can be deployed**; a device credential moves to the gateway it connects to (mesh.md section 13).
 5. **Backup and rebuild**: the Hub's database, together with the Hub identity private key, is encrypted with the backup public key and pulled periodically by other nodes (the Hub never connects to nodes); an operations manual for rebuilding the Hub on another host is provided. The node's endpoint list includes a backup entry, so after the Hub moves, nodes connect to the new Hub automatically. A backup always lags behind the state of the nodes; on restore the site directory pushes back the signed artifacts in effect, and once the site state lives on the Hub, the nodes send them back (protocol.md section 6.4, design/hub.md section 8.2).
 
 ## 13. Packaging, installation and operation
@@ -384,7 +382,7 @@ curl -fsSLo nett.tar.gz https://hub.example.com/dl/nett-<version>-<target>.tar.g
 - The token is valid once and expires quickly;
 - You can also download manually, verify the signature with minisign, then run `sudo nett install <token>`;
 
-**Phone**: no nett installation is needed. Once device credentials and the mobile gateway are implemented, the `nett site` command generates a standard WireGuard configuration (a configuration file and a QR code, ADR 0008) that any WireGuard client can import; configurations for Surge, mihomo and sing-box can also be exported, which switch to the gateway automatically when direct access to home fails.
+**Phone**: no nett installation is needed. Once device credentials and the mobile gateway are implemented, the `nett site` command generates a standard WireGuard configuration (a configuration file and a QR code, ADR 0008) that any WireGuard client can import; configurations for Surge, mihomo and sing-box can also be exported, which work beside a proxy app.
 
 ### 13.4 Commands
 
@@ -423,7 +421,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | LAN host | Other machines at home | Does not run nett | Through the smart gateway | Add an alias when a name is needed (design/mesh.md section 11) |
 | macOS host | A Mac (including laptops) | Native nett-node, mesh process; optionally a container member | Native member: userspace WireGuard + utun (ADR 0018); container member uses kernel WireGuard (ADR 0016) | With a container member enabled, the same host corresponds to multiple node identities |
 | HAOS device | A device running Home Assistant OS | nett-node and mesh process in the add-on, optionally nett-relay | Kernel WireGuard (ADR 0017) | Can act as a smart gateway |
-| Device | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | Dual path (ADR 0008); proxy clients fall back automatically (ADR 0018) | Does not run nett; the app arrives in M3 |
+| Device | Phone | A standard WireGuard client, or Surge, mihomo, sing-box | Through the mobile gateway (ADR 0008) | Does not run nett; the app arrives in M3 |
 
 ## 14. Supported platforms and external integrations
 
@@ -436,7 +434,7 @@ Commands are in three groups by scope, and each command does one thing. `nett` o
 | Synology DSM 7.x | systemd units started by a boot task, native (design/dsm.md) | Userspace WireGuard | mesh, relay |
 | macOS | launchd, native | Native member: userspace WireGuard + utun (ADR 0018); container services that need the visitor's real IP use a container member (OrbStack, Docker Desktop, ADR 0016) | mesh, relay |
 | Home Assistant OS | Add-on (ADR 0017) | Kernel WireGuard | mesh (can act as a smart gateway), relay |
-| Phone | A standard WireGuard client, or Surge, mihomo, sing-box (automatic fallback) | — | — |
+| Phone | A standard WireGuard client, or Surge, mihomo, sing-box | — | — |
 
 - Windows members and the iOS and Android apps arrive in M3 (ADR 0018);
 - Other platforms are marked "untested" and support is not promised; capability detection explains what is missing and what it degrades to;

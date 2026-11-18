@@ -13,7 +13,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0005](0005-react-spa-embedded.md) | Web console is a React SPA embedded in the Hub binary | Accepted; deferred, see 0024 |
 | [0006](0006-auth-and-passkey-signing.md) | Identity model and passkey signing authorization | Accepted; passkey deferred, see 0024 |
 | [0007](0007-own-mesh-wireguard-session-path-layer.md) | Own mesh: WireGuard session layer + nett path layer | Accepted |
-| [0008](0008-mobile-dual-path.md) | Phones join over standard WireGuard with dual paths | Accepted; pairing see 0024 |
+| [0008](0008-phones-through-mobile-gateway.md) | Phones join over standard WireGuard through a mobile gateway | Accepted; pairing see 0024 |
 | [0009](0009-caddy-as-first-edge.md) | The reverse proxy in front of the Hub defaults to Caddy | Accepted |
 | [0010](0010-ai-via-api-only.md) | AI connects only through the Hub API; node has no AI logic | Accepted |
 | [0011](0011-nett-relay.md) | nett-relay: independent low-privilege relay and transport entry point | Accepted |

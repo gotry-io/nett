@@ -2,7 +2,7 @@
 
 - Status: draft
 - Phase: P0 design; M1 implements the first version, M2 extends it (see section 18)
-- Related: ADR [0007](../adr/0007-own-mesh-wireguard-session-path-layer.md), [0008](../adr/0008-mobile-dual-path.md), [0011](../adr/0011-nett-relay.md), [0013](../adr/0013-mesh-and-transport-processes.md), [0014](../adr/0014-signed-mesh-membership.md), [0015](../adr/0015-origin-identity-and-lan-default-deny.md), [0016](../adr/0016-macos-container-member.md), [0018](../adr/0018-client-platforms.md); [protocol.md](protocol.md), [auth.md](auth.md), [architecture.md](../architecture.md)
+- Related: ADR [0007](../adr/0007-own-mesh-wireguard-session-path-layer.md), [0008](../adr/0008-phones-through-mobile-gateway.md), [0011](../adr/0011-nett-relay.md), [0013](../adr/0013-mesh-and-transport-processes.md), [0014](../adr/0014-signed-mesh-membership.md), [0015](../adr/0015-origin-identity-and-lan-default-deny.md), [0016](../adr/0016-macos-container-member.md), [0018](../adr/0018-client-platforms.md); [protocol.md](protocol.md), [auth.md](auth.md), [architecture.md](../architecture.md)
 
 ## 1. Goals
 
@@ -47,8 +47,8 @@ When allocating addresses and advertising prefixes, the Hub detects conflicts an
 ## 4. Session layer
 
 - Each node has one WireGuard interface `nett0`, listening on one UDP port (default `41820`, configurable);
-- Peers: all other nodes; devices are peers only of the smart gateway and the mobile gateway (section 13);
-- `AllowedIPs` of each peer: its mesh address; its Edge address and CONNECT egress address (if any); the LAN prefixes it advertises (if any); the device credential addresses for which it is the current gateway (if any, only for nodes with the `gateway` role). **When this machine has a device credential directly as a peer (for example a smart gateway), that credential's address is configured only on the device peer and does not appear on the gateway peer**;
+- Peers: all other nodes; devices are peers only of the mobile gateway (section 13);
+- `AllowedIPs` of each peer: its mesh address; its Edge address and CONNECT egress address (if any); the LAN prefixes it advertises (if any); the device credential addresses for which it is the current gateway (if any, only for nodes with the `gateway` role). **When this machine has a device credential directly as a peer (a mobile gateway), that credential's address is configured only on the device peer and does not appear on another gateway's peer**;
 - **The WireGuard private key is generated on the machine and never leaves the node**; the public key is distributed through the Hub together with the admission material (the `mesh` partition of the desired state);
 - Linux uses kernel WireGuard, configured by the mesh process through netlink; platforms without the kernel module (Synology DSM, old kernels) use a Rust userspace implementation with a TUN device, running in the mesh process;
 - `dial-only` members set a persistent keepalive of 25 seconds on every peer to maintain the NAT mapping;
@@ -66,7 +66,7 @@ A member configures WireGuard only for peers whose chain of signatures it can ve
 | Edge address | The `edge` role and address assignment in the signed node policy |
 | Device's mesh public key and address | The signed artifact of `device.add` / `device_credential.create` |
 | LAN prefix | The signed artifact of `node.advertise_routes` |
-| Device address appearing on a node's peer | That node's signed policy has the `gateway` or smart gateway role |
+| Device address appearing on a node's peer | That node's signed policy has the `gateway` role |
 | Access rules | The signed artifact of the whole rule set (members, addresses and ports after selector expansion), version number only increases |
 
 Peers that fail verification are not configured, and an event is reported. Removing a member, revoking a prefix and narrowing rules can take effect directly without a signature, leaving a revocation; when verifying other members' admission material, the approval expiry time is not checked, only the signature, version and revocations (auth.md sections 10.2 and 10.4). The baseline for verification is the local trust store, not the desired state file (section 4.2).
@@ -161,7 +161,7 @@ nett cannot modify a cloud vendor's security group, and some cloud vendors deny 
 | Nodes running nett-relay | UDP relay port (one, configurable) | Relay forwarding, probe responses |
 | | TCP 443 | TLS transport entry, CONNECT; shared with Edge on an entry node |
 | Entry node | TCP 80, 443 | Website, certificate validation |
-| Smart gateway (home broadband) | Router maps the WireGuard port and relay port | Devices connect directly to home; can act as a relay |
+| Smart gateway (home broadband) | Router maps the WireGuard port and relay port | Other members connect to it directly; can act as a relay |
 | M2 | UDP 443 | QUIC transport |
 
 The WireGuard port of a `dial-only` member is assigned by the system and the desired state carries no port: nobody connects to it at a pre-agreed address. Public direct candidates point to `public` nodes, hole punching uses the mapped address observed at run time (section 6.1), and the LAN direct and IPv6 direct candidates generated by the Hub that point to it (section 6) use the actual port it reports. Multiple members on the same host therefore do not contend for ports, for example the native member and the container member on a Mac (the container's UDP may keep its original port when forwarded out). If a port that the mesh process itself uses locally is assigned, it is reallocated: the probe port of section 7.2 and the TLS loopback port of section 5.3 are within the Linux ephemeral port range. The port does not change while the interface exists: on Linux the interface persists across mesh process restarts and so does the port; on userspace platforms the interface is rebuilt with the process and the port changes with it, the connection is initiated by the `dial-only` end, and the peer learns the new address from the handshake arriving from the new port (WireGuard roaming). When the desired state changes from carrying a port to carrying none, the current port is kept. The port of a `public` member can change while it runs, for example to step around a network that blocks it: on Linux the interface takes the new port at once and the probes on the WireGuard port (section 7.1) move with it; on userspace platforms the new port takes effect when the mesh process restarts. Relays forward to the new port as soon as their assignment carries it (section 5.2).
@@ -327,19 +327,19 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 - Each node automatically gets `<node name>.nett.internal`; users can add aliases (the `hostnames` resource), for example naming a service and pointing it to the member where it runs;
 - Hosts on the LAN do not need nett installed; when a name is needed, the user adds an alias pointing to its LAN address within an advertised prefix;
 - The mesh process runs a minimal DNS responder only on the mesh address, answering names under that suffix (names-and-diagnostics.md section 2);
-- **Upstream forwarding**: only the mobile gateway and smart gateway forward other queries for devices, accept queries only from device addresses, and rate-limit them, so they do not become open forwarders;
+- **Upstream forwarding**: only the mobile gateway forwards other queries for devices, accept queries only from device addresses, and rate-limit them, so they do not become open forwarders;
 - Local resolver configuration: on Linux, split-domain resolution for that suffix is set on `nett0` through systemd-resolved; on macOS, `/etc/resolver/<suffix>` is written;
-- Devices: the exported WireGuard configuration lists two DNS servers, the mesh addresses of the mobile gateway and the smart gateway;
+- Devices: the exported WireGuard configuration lists the mobile gateway's mesh address as its DNS server;
 - Edge configuration uses mesh addresses and not hostnames: Edge often runs in a container, which by default uses the host's upstream DNS and cannot resolve the mesh suffix;
 - **Hostnames are only for locating and are not a basis for identity**: hostnames are delivered by the Hub and are not signed. When you need to confirm who the other side is, use the local identity query (`nett whois <address>`, and the interface of the same name on the local socket), which the mesh process answers from verified admission material; the Hub's `whois` interface is for console display, and its result is a claim by the Hub.
 
 ## 12. Access control
 
 - **Default deny** (ADR 0023): a new connection not allowed by any rule is always denied; the same applies between nodes, for advertised prefixes and for container members;
-- **The user's devices**: by default they can reach all members and advertised LAN prefixes;
+- **The user's devices**: by default they can reach all members and advertised LAN prefixes; a device added as limited reaches only what rules allow, like a member. The signing tool writes this default into the signed rule set as one allow rule (devices.md section 5);
 - **Edge address**: by default it cannot reach any target; which hosts and ports it can reach is written by the user in the access rules (part of the signed access rule set, and widening requires a signature). On a node with the `edge` role, the mesh process, according to the identification method declared in the node policy (the address of the container where Edge runs, or the system user when running natively), rewrites the source of mesh traffic sent by Edge to the Edge address; and in both directions, local output and container forwarding, drops packets whose source address is the Edge address but which do not come from Edge (ADR 0015). When Edge fetches from an origin service on the same host it does not pass through the mesh and is not bound by these rules;
 - The rule set is delivered as a whole as one signed artifact, with a version number that only increases; adding a deny rule or deleting an allow rule is narrowing and can take effect directly without a signature;
-- **Matching**: rules apply only to new connections; established connections and packets related to them (replies, ICMP errors) pass directly. Rules are matched in rule set order, and the first matching rule decides allow or deny; when no rule matches, the connection is denied, except that it is allowed when the source is a user's device. The mesh's own in-tunnel probes are not affected by access rules. The same holds when there is no rule set;
+- **Matching**: rules apply only to new connections; established connections and packets related to them (replies, ICMP errors) pass directly. Rules are matched in rule set order, and the first matching rule decides allow or deny; when no rule matches, the connection is denied. The mesh's own in-tunnel probes are not affected by access rules. The same holds when there is no rule set;
 - **What is signed is the expanded result**: rules are written with selectors such as nodes, devices and tags; a source can also select a node's Edge address (written as that node's `edge`), to allow Edge to reach specified services. The signed artifact contains the expanded member IDs, addresses and ports. If a change of tags (for example adding a tag to a node) makes the expansion larger, it is widening access and requires a signature; nodes execute only the expanded result in the signed artifact and do not expand by tag themselves;
 - Rules are compiled into filter rules local to each member: Linux uses nftables, attached at `prerouting` with priority before Docker's destination NAT, matching traffic entering from `nett0`, so traffic to the local machine, to Docker published ports and traffic that needs forwarding (mobile gateway, smart gateway) all passes through; matching is by source mesh address, destination address and port, with IPv4 and IPv6 treated the same. On userspace platforms the mesh process filters before forwarding;
 - **Deny first, then open**: at startup the filter rules are installed first, and peers are added afterwards; when a rule update fails, deny is kept and an event is reported;
@@ -348,18 +348,12 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 ## 13. Phones and the mobile gateway
 
 - The mobile gateway is a `public` node with the `gateway` role (the role is granted by the signed node policy): it accepts devices as peers on `nett0` and carries device traffic into the mesh through the path layer;
-- The configuration exported to a device contains two peers, splitting traffic by prefix:
-
-| Peer | `AllowedIPs` |
-|---|---|
-| The smart gateway at home (direct) | The LAN prefixes advertised at home, and the smart gateway's mesh address |
-| Mobile gateway | The rest of the mesh prefix |
-
-- **Device ownership is per credential**: in WireGuard an address can appear in the `AllowedIPs` of only one peer, so at any one time a device credential belongs to only one mobile gateway, which advertises this credential's address on its behalf. When multiple mobile gateways are deployed, the configuration of each credential corresponds to one gateway; the gateway reports the credential's latest handshake, and the Hub accordingly moves the credential address into the `AllowedIPs` of the current gateway peer (it can move only between nodes with the `gateway` role, section 4.1). On the directly connected smart gateway, this credential's address is configured only on the device peer (section 4);
+- The configuration exported to a device has one peer, its mobile gateway, with the mesh prefixes and the LAN prefixes advertised in the mesh as `AllowedIPs`; beyond the gateway the path layer chooses the path (ADR 0008);
+- **Device ownership is per credential**: in WireGuard an address can appear in the `AllowedIPs` of only one peer, so at any one time a device credential belongs to only one mobile gateway, which advertises this credential's address on its behalf. When multiple mobile gateways are deployed, the configuration of each credential corresponds to one gateway; the gateway reports the credential's latest handshake, and the Hub accordingly moves the credential address into the `AllowedIPs` of the current gateway peer (it can move only between nodes with the `gateway` role, section 4.1). A gateway that has the credential as a direct peer configures its address only on that peer (section 4);
 - The gateway can send traffic with the addresses of devices connected through it; this is trust inherent to the `gateway` role (auth.md section 2), so it is granted only to nodes the user trusts;
-- Standard clients cannot switch between peers automatically: when direct is unavailable, traffic to home does not automatically go through the gateway. So a **"all through the gateway"** backup configuration is exported as well, for the user to switch to manually when direct is blocked (the phone app is in M3). The backup configuration uses **another credential** (another pair of keys and addresses): on the smart gateway the main configuration's credential address is configured only on the direct peer, and packets arriving through the gateway with this address as source are dropped. The private key exists only in the browser, and the two credentials and configurations are generated together at creation (auth.md section 9);
-- **Proxy client configuration** (ADR 0018): when creating a credential, an export format can be chosen: standard WireGuard, or Surge, mihomo, sing-box. Every format uses one main and one backup credential, with the same rules as the previous item. The proxy client configuration contains two WireGuard outbounds: "direct to home" uses the main credential with the smart gateway as peer; "via gateway" uses the backup credential with the mobile gateway as peer. Traffic to the home prefixes goes into an automatic-fallback policy group (direct to home first, via the gateway when that fails), and the other mesh prefixes go through the gateway; domain names under the mesh suffix are resolved by the DNS of the smart gateway and the mobile gateway. The speed-test target of the policy group is the health check port on the smart gateway's mesh address: open only to device addresses, it returns a fixed HTTP 204 response when a connection arrives and closes, without parsing the request content. These configurations do not occupy the phone's single VPN slot and can be used together with proxy apps;
-- Traffic between devices is forwarded through the mobile gateway.
+- **Proxy client configuration** (ADR 0018): when creating a credential, an export format can be chosen: standard WireGuard, or Surge, mihomo, sing-box. The proxy client configuration contains one WireGuard outbound to the mobile gateway, which the mesh prefixes and the advertised LAN prefixes go to; domain names under the mesh suffix are resolved by the gateway's DNS. These configurations do not occupy the phone's single VPN slot and can be used together with proxy apps;
+- Traffic between devices is forwarded through the mobile gateway;
+- Direct paths to home and to other nodes, chosen automatically, come with the phone app, a full member (M3, ADR 0018).
 
 ## 14. Platforms
 
@@ -370,7 +364,7 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 | macOS | Native member: Rust userspace implementation in the mesh process + utun (ADR 0018) | Mesh process | Default way; laptops are usually `dial-only`; the mesh process carries the TLS transport itself (section 5.3) |
 | Container member on macOS | Kernel WireGuard in the Docker Linux virtual machine (ADR 0016) | nftables (inside the virtual machine) | Only serves other members' access to container services on the Mac that need the visitor's real IP |
 | Home Assistant OS | Runs inside an add-on, using the WireGuard that comes with the HAOS kernel (ADR 0017) | Packet filtering on the host network (subject to capability detection) | Can act as smart gateway, mobile gateway, relay |
-| Phone | Standard WireGuard client, or Surge, mihomo, sing-box | Enforced by the mobile gateway and smart gateway | See section 13; app in M3 |
+| Phone | Standard WireGuard client, or Surge, mihomo, sing-box | Enforced by the mobile gateway | See section 13; app in M3 |
 | Windows, iOS, Android (M3) | Windows: wireguard-nt; iOS, Android: userspace implementation inside the app | Windows firewall (WFP); inside the app | Full members (ADR 0018) |
 
 The concrete userspace WireGuard implementation is evaluated and selected after the prototype gate and before rolling out to DSM and macOS; M1 must cover DSM, Linux with old kernels and macOS.
@@ -432,7 +426,7 @@ The concrete userspace WireGuard implementation is evaluated and selected after 
 | Edge address | ✅ | |
 | Hostnames and DNS | ✅ | |
 | Access control (advertised prefixes denied by default) | ✅ | |
-| Mobile gateway and device dual-path configuration | ✅ | |
+| Mobile gateway and device configuration | ✅ | |
 | macOS native member; container member (container services that need the visitor's real IP) | ✅ | |
 | Proxy client configuration (Surge, mihomo, sing-box) | ✅ | |
 
