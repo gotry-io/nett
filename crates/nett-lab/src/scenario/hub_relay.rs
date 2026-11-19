@@ -538,7 +538,7 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     report.check(
         "relay:off",
         off.as_ref().is_ok_and(|o| {
-            o.contains("~ r1 stops its relay") && o.contains("~ a - b  punch only; may not connect")
+            o.contains("~ r1 stops its relay") && o.contains("~ a - b  punch only; connects over a LAN, or once a relay is added: nett site relay <machine>")
         }),
         off.as_ref().map_or_else(|e| format!("{e:#}"), Clone::clone),
     );

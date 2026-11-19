@@ -211,6 +211,12 @@ impl<D: DataPlane> Engine<D> {
         &self.names
     }
 
+    /// Probes every path to `peer` at the next tick (design/status.md section 4.3); `None` when no member
+    /// has that node ID.
+    pub fn probe_now(&mut self, peer: &NodeId, now: Instant) -> Option<usize> {
+        self.prober.as_mut()?.probe_now(peer, now)
+    }
+
     /// Who `address` belongs to, from the verified admission material and the verified advertised routes
     /// only (design/names-and-diagnostics.md section 4).
     pub fn whois(&self, address: IpAddr) -> status::Whois {

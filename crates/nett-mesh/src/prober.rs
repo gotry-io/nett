@@ -38,6 +38,8 @@ const MAX_OUTSTANDING: usize = 4096;
 pub(crate) const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 /// Window for judging whether there is traffic (design/mesh.md section 7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
+/// Probing a peer's paths on request happens at most this often (design/status.md section 4.3).
+pub const PROBE_REQUEST_INTERVAL: Duration = Duration::from_secs(1);
 /// Bytes a second, both directions together (2 Mbit/s), above which a pair is busy: it stays on, or
 /// returns to, its direct path rather than a faster relay with a narrower uplink (design/mesh.md
 /// section 8.2).
@@ -155,6 +157,10 @@ struct Peer {
     /// (design/mesh.md section 6.1).
     punch: Option<Punch>,
     reports: HashMap<KeyId, (Duration, f64)>,
+    /// The send time of the latest direct probe received from the peer (design/mesh.md section 6).
+    latest_probe_ms: u64,
+    /// When the paths to it were last probed on request (design/status.md section 4.3).
+    probed_on_request: Option<Instant>,
     last_activity: Option<Instant>,
     /// WireGuard's byte count for this peer (received and sent), sampled for the traffic rate.
     bytes: VecDeque<(Instant, u64)>,
@@ -514,6 +520,8 @@ impl Prober {
                         .as_ref()
                         .map(|p| p.reports.clone())
                         .unwrap_or_default(),
+                    latest_probe_ms: previous.as_ref().map_or(0, |p| p.latest_probe_ms),
+                    probed_on_request: previous.as_ref().and_then(|p| p.probed_on_request),
                     last_activity: previous.as_ref().and_then(|p| p.last_activity),
                     bytes: previous.map(|p| p.bytes).unwrap_or_default(),
                 },
@@ -612,6 +620,24 @@ impl Prober {
     }
 
     /// This machine's NAT type and mapped addresses (design/mesh.md section 6.1).
+    /// Probes every path to `peer` at the next tick, outside the schedule (design/status.md section 4.3),
+    /// at most once per [`PROBE_REQUEST_INTERVAL`]; returns how many paths, or `None` when no member has
+    /// that node ID. A machine that follows by roaming probes none.
+    pub fn probe_now(&mut self, peer: &NodeId, now: Instant) -> Option<usize> {
+        let peer = self.peers.get_mut(peer)?;
+        let Some(paths) = peer.paths.as_mut() else {
+            return Some(0);
+        };
+        if peer
+            .probed_on_request
+            .is_none_or(|t| now.saturating_duration_since(t) >= PROBE_REQUEST_INTERVAL)
+        {
+            peer.probed_on_request = Some(now);
+            paths.probe_now();
+        }
+        Some(paths.probe_count())
+    }
+
     pub fn own_nat(&self, now: Instant) -> crate::punch::OwnInfo {
         self.observations.own(now)
     }
@@ -1113,32 +1139,45 @@ impl Prober {
                 let Some(probe) = OuterProbe::verify(data, key, now_ms) else {
                     return vec![];
                 };
-                // A probe from a LAN address reached this machine's LAN address: answered only when this
-                // machine has a LAN direct candidate to that address (hard rule 2)
-                if crate::lan::is_lan(from.ip())
-                    && !self
-                        .by_key_id
-                        .get(&head.key_id)
-                        .and_then(|id| self.peers.get(id))
-                        .is_some_and(|p| {
-                            p.routes.iter().any(|(r, k)| {
-                                *k == PathKind::Lan
-                                    && matches!(r, Route::Direct(e) if e.ip() == from.ip())
-                            })
-                        })
-                {
-                    return vec![];
-                }
+                // Answered from any address once authenticated, as WireGuard on this port answers
+                // authenticated handshakes from any address (hard rule 2)
                 let reply = probe.reply(self.own_key_id, from).encode(key);
-                // During hole punching: the direction from the other side to this machine works (design/mesh.md
-                // section 6.1)
                 if let Some(peer) = self
                     .by_key_id
                     .get(&head.key_id)
                     .and_then(|id| self.peers.get_mut(id))
-                    && let (Some(punch), Some(paths)) = (peer.punch.as_mut(), peer.paths.as_ref())
                 {
-                    punch.on_probe_from(from, paths.role() == Role::FollowTogether);
+                    // Only a probe sent later than every one before teaches anything, so one replayed
+                    // from another address teaches nothing
+                    let fresh = probe.sent_ms > peer.latest_probe_ms;
+                    peer.latest_probe_ms = peer.latest_probe_ms.max(probe.sent_ms);
+                    if let Some(paths) = peer.paths.as_mut() {
+                        // During hole punching: the direction from the other side to this machine works
+                        // (design/mesh.md section 6.1)
+                        if let Some(punch) = peer.punch.as_mut() {
+                            punch.on_probe_from(from, paths.role() == Role::FollowTogether);
+                        }
+                        // A LAN address no candidate has is where the peer can be reached when another
+                        // NAT sits inside the LAN (design/mesh.md section 6)
+                        let route = Route::Direct(from);
+                        let known = peer.routes[..peer.configured]
+                            .iter()
+                            .any(|(r, _)| *r == route);
+                        if fresh
+                            && paths.role().together()
+                            && crate::lan::is_lan(from.ip())
+                            && !known
+                        {
+                            let index = paths.learn_lan(from, at);
+                            let entry = (route, PathKind::Lan);
+                            if index < peer.routes.len() {
+                                peer.routes[index] = entry;
+                            } else {
+                                peer.routes.push(entry);
+                                peer.meta.push(CandidateMeta::Direct);
+                            }
+                        }
+                    }
                 }
                 vec![Outgoing::WgPort {
                     to: from,
@@ -2339,11 +2378,8 @@ mod tests {
         assert!(decider.contains(&(true, loopback)), "{decider:?}");
     }
 
-    /// A direct probe from a LAN address reached this machine on its LAN: it is answered only when this
-    /// machine has a LAN direct candidate to that address (hard rule 2); probes from public addresses are
-    /// answered as before.
-    #[test]
-    fn probes_from_the_lan_need_a_lan_candidate() {
+    /// A pair of admitted members, 1 and 2, as prober 1 sees them: 2 has `candidates`, and 1 is `own`.
+    fn prober_of_one(own: Reachability, candidates: Vec<Candidate>) -> (Prober, ProbeKey, KeyId) {
         let mesh = Mesh::new(&[1, 2]);
         let (a_priv, a_pub) = keypair(1);
         let (b_priv, b_pub) = keypair(2);
@@ -2364,40 +2400,157 @@ mod tests {
         let mut a = Prober::new(&a_pub);
         a.update(
             &node_id(1),
-            Reachability::Public,
+            own,
             &a_priv,
             &members,
             &[(
                 node_id(2),
                 PeerPathConfig {
                     reachability: Reachability::DialOnly,
-                    candidates: vec![Candidate::Lan {
-                        endpoint: addr("192.168.1.20:50002"),
-                    }],
+                    candidates,
                 },
             )]
             .into(),
             &BTreeMap::new(),
         );
         let key = ProbeKey::direct(&b_priv, &a_pub).expect("key");
-        let now_ms = 1_700_000_000_000;
-        let probe = OuterProbe {
+        (a, key, KeyId::of(b_pub.as_bytes()))
+    }
+
+    /// Member 2's direct probe, sent at `sent_ms`.
+    fn probe_from_two(key: &ProbeKey, key_id: KeyId, seq: u32, sent_ms: u64) -> Vec<u8> {
+        OuterProbe {
             kind: DIRECT_PROBE,
-            key_id: KeyId::of(b_pub.as_bytes()),
-            seq: 1,
-            sent_ms: now_ms,
+            key_id,
+            seq,
+            sent_ms,
         }
-        .encode(&key);
-        let mut answered = |from: &str| {
-            !a.on_packet(Incoming::WgPort, addr(from), &probe, Instant::now(), now_ms)
+        .encode(key)
+        .to_vec()
+    }
+
+    /// An authenticated probe is answered whatever address it comes from, as WireGuard answers an
+    /// authenticated handshake (hard rule 2); an unauthenticated one never is.
+    #[test]
+    fn an_authenticated_probe_is_answered_from_any_address() {
+        let (mut a, key, key_id) = prober_of_one(
+            Reachability::Public,
+            vec![Candidate::Lan {
+                endpoint: addr("192.168.1.20:50002"),
+            }],
+        );
+        let now_ms = 1_700_000_000_000;
+        let probe = probe_from_two(&key, key_id, 1, now_ms);
+        let mut answered = |from: &str, data: &[u8]| {
+            !a.on_packet(Incoming::WgPort, addr(from), data, Instant::now(), now_ms)
                 .is_empty()
         };
         assert!(
-            answered("192.168.1.20:50002"),
+            answered("192.168.1.20:50002", &probe),
             "the LAN candidate's address"
         );
-        assert!(!answered("192.168.1.30:50002"), "another LAN address");
-        assert!(answered("198.51.100.5:41820"), "a public address");
+        assert!(
+            answered("10.1.3.6:61000", &probe),
+            "another LAN address, as through a NAT inside the LAN"
+        );
+        assert!(answered("198.51.100.5:41820", &probe), "a public address");
+        let mut forged = probe.clone();
+        let last = forged.len() - 1;
+        forged[last] ^= 1;
+        assert!(!answered("10.1.3.6:61000", &forged), "a forged probe");
+    }
+
+    /// Between two dial-only members, a LAN address the peer's probes come from that no candidate has
+    /// becomes a LAN candidate (design/mesh.md section 6); a probe replayed from another address adds
+    /// nothing.
+    #[test]
+    fn a_lan_address_the_peers_probes_come_from_becomes_a_candidate() {
+        let (mut a, key, key_id) = prober_of_one(
+            Reachability::DialOnly,
+            vec![
+                Candidate::Lan {
+                    endpoint: addr("172.20.0.3:50002"),
+                },
+                Candidate::Punch,
+            ],
+        );
+        let now = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let lan_routes = |a: &Prober| {
+            a.peer_view(&node_id(2), now)
+                .expect("peer")
+                .routes
+                .iter()
+                .filter(|(_, kind)| *kind == PathKind::Lan)
+                .map(|(r, _)| *r)
+                .collect::<Vec<_>>()
+        };
+        let probe = probe_from_two(&key, key_id, 1, now_ms);
+        a.on_packet(
+            Incoming::WgPort,
+            addr("10.1.3.6:61000"),
+            &probe,
+            now,
+            now_ms,
+        );
+        let learned = Route::Direct(addr("10.1.3.6:61000"));
+        assert_eq!(
+            lan_routes(&a),
+            [Route::Direct(addr("172.20.0.3:50002")), learned]
+        );
+        // The same probe again, from elsewhere: a replay
+        a.on_packet(Incoming::WgPort, addr("10.1.3.9:1"), &probe, now, now_ms);
+        assert_eq!(lan_routes(&a)[1], learned);
+        // A public source is hole punching's to learn
+        let later = probe_from_two(&key, key_id, 2, now_ms + 1);
+        a.on_packet(
+            Incoming::WgPort,
+            addr("198.51.100.5:41820"),
+            &later,
+            now,
+            now_ms + 1,
+        );
+        assert_eq!(lan_routes(&a)[1], learned);
+    }
+
+    /// A request probes every path to the peer at the next tick, at most once a second
+    /// (design/status.md section 4.3).
+    #[test]
+    fn a_probe_request_probes_every_path_at_once() {
+        let (mut a, _, _) = prober_of_one(
+            Reachability::DialOnly,
+            vec![
+                Candidate::Lan {
+                    endpoint: addr("192.168.1.20:50002"),
+                },
+                Candidate::Lan {
+                    endpoint: addr("10.1.2.10:50002"),
+                },
+            ],
+        );
+        let start = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let probes = |out: &[Outgoing]| {
+            out.iter()
+                .filter(|o| matches!(o, Outgoing::WgPort { data, .. } if data[0] == DIRECT_PROBE))
+                .count()
+        };
+        // Idle, after the first probes: nothing is due for minutes
+        a.tick(start, now_ms);
+        let at = start + Duration::from_secs(70);
+        assert_eq!(probes(&a.tick(at, now_ms).0), 0);
+        assert_eq!(a.probe_now(&node_id(2), at), Some(2));
+        assert_eq!(probes(&a.tick(at, now_ms).0), 2);
+        // Within a second of the last request: no probing again
+        assert_eq!(
+            a.probe_now(&node_id(2), at + Duration::from_millis(500)),
+            Some(2)
+        );
+        assert_eq!(
+            probes(&a.tick(at + Duration::from_millis(500), now_ms).0),
+            0
+        );
+        assert_eq!(a.probe_now(&node_id(9), at), None, "no such member");
     }
 
     #[test]

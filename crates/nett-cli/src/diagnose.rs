@@ -121,6 +121,12 @@ pub fn ping(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let seed = (std::process::id() & 0xffff) << 16;
     for i in 0..count {
         let seq = seed | i;
+        // Every path to the peer is probed now, as `tailscale ping` does, so a path that just started
+        // working is taken during the ping (design/status.md section 4.3); a mesh process that does not
+        // know the request leaves the paths to their schedule
+        if let Some(id) = &peer_id {
+            let _ = status::probe(&socket, id);
+        }
         let sent = Instant::now();
         udp.send_to(&nett_mesh::probe::encode_tunnel_probe(seq), to)
             .with_context(|| format!("sending to {to}; is {label} reachable through nett0?"))?;
