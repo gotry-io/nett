@@ -21,4 +21,4 @@
 | [api-resources.md](api-resources.md) | API resource model: general conventions, write paths and risk levels, resource details, real-time streams | Draft |
 | [changes.md](changes.md) | Change sets and the action catalog: state machine, risk and approval, signing, execution, action catalog | Draft |
 
-Naming: `<topic>.md`. Each document opens with its status (draft / accepted / implemented) and the phase it belongs to.
+Naming: `<topic>.md`. Each document opens with its status (draft / accepted / implemented) and the phase it belongs to. Each mechanism it decides says how comparable products handle the same problem and why nett differs (CLAUDE.md, "Research before deciding").
