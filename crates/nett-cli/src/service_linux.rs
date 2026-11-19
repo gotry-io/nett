@@ -202,7 +202,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         }
         if wants.relay {
             messages.push(format!(
-                "{} runs; `sudo nett status` shows its TLS fingerprint for `nett site relay --fingerprint`.",
+                "{} runs; `nett status` shows its TLS fingerprint for `nett site relay --fingerprint`.",
                 RELAY.what
             ));
         }

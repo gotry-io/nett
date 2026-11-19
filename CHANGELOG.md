@@ -12,8 +12,12 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - A better path that has never answered is probed every second only in its first minute, then every
   5 seconds while the pair is on a relay and every minute while it is direct (not at all when that
   direct path is within 5 ms), as in Tailscale.
-- `sudo nett ping` probes every path to the peer before each ping, so a path that just started
-  working, such as after a firewall in the way was opened, is taken during the ping.
+- `nett status`, `nett whois` and `nett ping` need no sudo, as with Tailscale: every local user
+  may read the status and probe, and only root may change what the mesh service does (`nett
+  reload`). The status shows no keys or tokens; to an ordinary user it newly shows the members'
+  public and LAN addresses, which Tailscale's status shows too.
+- `nett ping` probes every path to the peer before each ping, so a path that just started working,
+  such as after a firewall in the way was opened, is taken during the ping.
 - The change listing of `nett site` says that two dial-only machines without a relay connect only
   over a LAN (`punch only; connects over a LAN, or once a relay is added: nett site relay
   <machine>`), and no longer lists LAN paths, which every pair tries.
