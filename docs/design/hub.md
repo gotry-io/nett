@@ -55,7 +55,7 @@ nett site allow mac nas 22/tcp
 Access rules v4 -> v5:
   + r5  mac (100.88.0.4) -> nas (100.88.0.6)  22/tcp
 Connections:
-  + mac - nas  punch only; may not connect
+  + mac - nas  punch only; connects over a LAN, or once a relay is added: nett site relay <machine>
 Sign and push? [y/N] y
 Pushed. 1 of 2 machines applied.
   nas has not connected yet; `nett site invite nas` connects it

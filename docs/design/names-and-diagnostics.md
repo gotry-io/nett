@@ -37,7 +37,7 @@ The mesh process itself runs no external command (hard rule 1); `nett resolver` 
 
 ## 4. `nett whois <address>`
 
-- A query on the local socket, `{"v":1,"query":"whois","address":"100.88.0.6"}`, answered only for root and the mesh process's own user (status.md section 3);
+- A query on the local socket, `{"v":1,"query":"whois","address":"100.88.0.6"}`, answered for every local user, as Tailscale's `whois` needs only read access (status.md section 3);
 - The mesh process answers from verified admission material only: the member whose mesh or Edge address it is (node ID, name, mesh addresses, roles), or, for an address inside a prefix a member advertises, that gateway; otherwise "not a member". The name is shown as a label; the node ID and the verified material are the identity (mesh.md section 11);
 - `--json` prints the answer as is.
 
@@ -45,8 +45,8 @@ The mesh process itself runs no external command (hard rule 1); `nett resolver` 
 
 - Sends in-tunnel probes (mesh.md section 7.2, `0x80`) to the peer's probe port on its mesh address, once a second, 4 by default (`-c <count>`), each waiting up to 2 seconds, and prints the round-trip time of each reply and a summary (sent, received, loss, min/avg/max);
 - The probe port is open between all members whatever the access rules say (design/mesh.md section 12), so a reply shows the tunnel works, not that a service port is open; the output says so when no rule allows anything to that peer;
-- A name is looked up in this machine's status (or through the responder); with access to the status socket (root) each line also shows the path the probe took: direct, LAN, or the relay and transport;
-- Needs no privileges for the probes themselves: an ordinary UDP socket whose source is this machine's mesh address; the peer answers only probes from the mesh address of an admitted member.
+- A name is looked up in this machine's status; before each probe it asks the mesh process to probe every candidate path to that peer at once (status.md section 4.3), so a path that just started working, such as after a firewall in the way was opened, is taken during the ping instead of at the next scheduled probe, and each line shows the path the probe took: direct, LAN, or the relay and transport;
+- Needs no privileges, like `tailscale ping`: the status and the `probe` request answer every local user (status.md section 3), and the probes go from an ordinary UDP socket whose source is this machine's mesh address; the peer answers only probes from the mesh address of an admitted member.
 
 ## 6. `nett doctor`
 
