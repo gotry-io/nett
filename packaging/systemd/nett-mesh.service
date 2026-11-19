@@ -16,9 +16,10 @@ ExecStartPre=+/usr/local/lib/nett/nett mesh --prepare-state /etc/nett/state
 ExecStart=/usr/local/lib/nett/nett mesh --config /etc/nett/desired.json --key ${CREDENTIALS_DIRECTORY}/mesh.key --state /etc/nett/state
 ExecReload=/bin/kill -HUP $MAINPID
 LoadCredential=mesh.key:/etc/nett/mesh.key
-# Local sockets in /run/nett: mesh.sock (0600) for root and nett-node, helpers.sock for the relay
-# and the transport adapter, which the service answers only for their own units. Others can reach a
-# known name in the directory but not list it
+# Local sockets in /run/nett: mesh.sock answers every local user's status queries and takes changes
+# only from root and nett-node; helpers.sock is for the relay and the transport adapter, which the
+# service answers only for their own units. Others can reach a known name in the directory but not
+# list it
 RuntimeDirectory=nett
 RuntimeDirectoryMode=0711
 ReadWritePaths=/etc/nett/state
