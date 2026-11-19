@@ -51,7 +51,7 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
   relay <name> [--port <udp port>] [--tls <tcp port> | --no-tls] [--fingerprint <sha256:…>]
                                        run a relay on this public Linux machine (UDP 41822 and
                                        TLS 443 unless given); --off stops it. Without a Hub, give
-                                       the TLS fingerprint `sudo nett status` shows on the machine
+                                       the TLS fingerprint `nett status` shows on the machine
   remove <name>                        remove a machine; rules that name it go with it
   invite <name>                        with a Hub: print the command that connects it to the Hub
                                        (a new token for a machine that has not joined yet);

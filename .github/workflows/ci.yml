@@ -141,7 +141,7 @@ jobs:
           test ! -e /Library/Logs/nett
           test ! -e /etc/newsyslog.d/nett.conf
           if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.mesh.plist; then exit 1; fi
-          # Local status (design/status.md): readable by root, and ordinary users get a hint
+          # Local status (design/status.md)
           for _ in $(seq 20); do
             sudo test -S /var/run/nett/mesh.sock && break
             sleep 0.5
@@ -158,8 +158,11 @@ jobs:
           done
           [ "$(dig +short +time=1 +tries=1 @"$v4" ci.nett.internal)" = "$v4" ]
           dscacheutil -q host -a name ci.nett.internal | grep -F "$v4"
-          if "$nett" status 2> status.err; then exit 1; fi
-          grep -F 'run with sudo' status.err
+          # Every local user reads the status, as with Tailscale; only root changes what the mesh
+          # process does (design/status.md section 3)
+          "$nett" status | grep -F 'No peers.'
+          if "$nett" reload 2> reload.err; then exit 1; fi
+          grep -F 'run with sudo' reload.err
           sudo "$nett" install | grep -F 'The services are running. Nothing changed.'
           # The desired state changed (same content, different bytes): reload over the local
           # interface and report the result

@@ -694,7 +694,7 @@ impl StatusServer {
     /// Creates the socket at `path` and starts accepting connections. If the directory does not exist it is
     /// created with `0700`; the socket is `0600`.
     pub fn spawn(path: &Path, source: impl StatusSource) -> std::io::Result<Self> {
-        LocalServer::spawn(path, 0o600, "nett-status", move |stream| {
+        LocalServer::spawn(path, 0o666, "nett-status", move |stream| {
             handle(stream, &source)
         })
         .map(|server| Self { _server: server })
@@ -774,13 +774,9 @@ impl Drop for LocalServer {
     }
 }
 
-/// Mode of the directory the sockets are in. On Linux others pass through it to the helper socket
-/// by name but cannot list it (section 3.1); macOS runs no helpers, so the directory is the owner's
-/// only.
-#[cfg(target_os = "linux")]
+/// Mode of the directory the sockets are in: others pass through it to a socket by name but cannot
+/// list it (sections 3 and 3.1).
 const SOCKET_DIR_MODE: u32 = 0o711;
-#[cfg(not(target_os = "linux"))]
-const SOCKET_DIR_MODE: u32 = 0o700;
 
 fn bind(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
     use std::io::{Error, ErrorKind};
@@ -828,11 +824,17 @@ fn bind(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// Accepts only root and the mesh process's own running identity (a second check in addition to the
-/// socket's permissions).
-fn peer_allowed(stream: &UnixStream) -> std::io::Result<bool> {
+/// The caller is root or the mesh process's own running identity, which may also change what the
+/// mesh process does (section 3).
+fn privileged(stream: &UnixStream) -> std::io::Result<bool> {
     let uid = peer_uid(stream)?;
     Ok(uid == 0 || uid == rustix::process::geteuid().as_raw())
+}
+
+/// Queries that change what the mesh process does, which only a privileged caller may send; every
+/// local user may read and probe, as with Tailscale's LocalAPI (section 3).
+fn changes_something(query: &str) -> bool {
+    matches!(query, "reload" | "coordinate")
 }
 
 #[cfg(target_os = "linux")]
@@ -900,13 +902,7 @@ impl std::io::Read for Deadline<'_> {
 /// Answers one query; returns whether the connection is kept (a `coordinate` connection).
 fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bool> {
     let done = |r: std::io::Result<()>| r.map(|()| false);
-    if !peer_allowed(stream)? {
-        return done(reply_error(
-            stream,
-            "permission_denied",
-            "only root can query the status",
-        ));
-    }
+    let privileged = privileged(stream)?;
     let mut line = String::new();
     BufReader::new(Deadline::new(stream).take(MAX_REQUEST)).read_line(&mut line)?;
     let request: Request = match serde_json::from_str(line.trim_end()) {
@@ -919,6 +915,13 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bo
             ));
         }
     };
+    if changes_something(&request.query) && !privileged {
+        return done(reply_error(
+            stream,
+            "permission_denied",
+            "only root can change what the mesh process does",
+        ));
+    }
     if request.v != VERSION {
         return done(reply_error(
             stream,
@@ -1265,28 +1268,30 @@ mod tests {
         }
     }
 
-    /// The mode a socket directory gets on this platform: on Linux the helpers pass through to their
-    /// socket by name (section 3.1); macOS runs none.
-    fn expected_dir_mode() -> u32 {
-        if cfg!(target_os = "linux") {
-            0o711
-        } else {
-            0o700
-        }
-    }
-
-    /// The directory the mesh process makes for its sockets has its platform's mode, whatever mode
-    /// mkdir got
+    /// The directory the mesh process makes for its sockets lets others reach a socket by name but
+    /// not list it, whatever mode mkdir got
     #[test]
-    fn the_socket_directory_has_its_platforms_mode() {
+    fn the_socket_directory_is_passable_but_not_listable() {
         let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("run").join("nett").join("mesh.sock");
-        let _listener = bind(&path, 0o600).expect("bind");
+        let _listener = bind(&path, 0o666).expect("bind");
         let mode = std::fs::metadata(dir.join("run").join("nett"))
             .expect("directory")
             .permissions()
             .mode();
-        assert_eq!(mode & 0o777, expected_dir_mode());
+        assert_eq!(mode & 0o777, 0o711);
+    }
+
+    /// Every local user may read and probe; only root and the mesh process's own identity may change
+    /// what it does (section 3), as Tailscale's LocalAPI gives every local user read access
+    #[test]
+    fn only_queries_that_change_something_need_privileges() {
+        for query in ["status", "whois", "probe"] {
+            assert!(!changes_something(query), "{query}");
+        }
+        for query in ["reload", "coordinate"] {
+            assert!(changes_something(query), "{query}");
+        }
     }
 
     /// A short directory for tests (Unix socket paths on macOS are at most 104 bytes), removed with
@@ -1366,15 +1371,14 @@ mod tests {
     }
 
     #[test]
-    fn answers_a_status_query_over_a_private_socket() {
+    fn answers_a_status_query_over_its_socket() {
         let (_dir_tmp, dir) = temp_dir();
         let path = dir.join("mesh.sock");
         let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
-        // On Linux others can pass through to the helper socket; the status socket is the owner's
-        // only everywhere
-        assert_eq!(mode(&dir), expected_dir_mode());
-        assert_eq!(mode(&path), 0o600);
+        // Others reach the socket by name, and the mesh process decides per query what they may do
+        assert_eq!(mode(&dir), 0o711);
+        assert_eq!(mode(&path), 0o666);
         assert_eq!(query(&path).expect("query"), sample());
         // The reader ignores fields it does not recognize: fields added in a newer version do not affect an older
         // nett

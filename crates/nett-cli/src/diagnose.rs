@@ -14,9 +14,10 @@ use nett_mesh::status::{
 };
 
 pub const WHOIS_USAGE: &str = "usage: nett whois <address> [--json] [--socket <path>]\n\n\
-Who a mesh, Edge or routed address belongs to, from what this machine has verified. Run it with sudo.";
+Who a mesh, Edge or routed address belongs to, from what this machine has verified.";
 pub const PING_USAGE: &str = "usage: nett ping <peer or address> [-c <count>] [--socket <path>]\n\n\
-Sends probes through the tunnel and shows each reply's round-trip time; with sudo, also the path.";
+Has every path to the peer probed at once, then sends probes through the tunnel and shows each\n\
+reply's round-trip time and the path it took.";
 pub const DOCTOR_USAGE: &str = "usage: nett doctor [--socket <path>]\n\n\
 Checks this machine and says what to do about each problem. Run it with sudo.";
 
@@ -193,7 +194,7 @@ fn resolve(target: &str, doc: Option<&StatusDoc>) -> anyhow::Result<(IpAddr, Str
         .and_then(|mut a| a.next())
         .map(|a| a.ip())
         .with_context(|| {
-            format!("{short}: not an address, and {name} does not resolve; with sudo the status names it")
+            format!("{short}: not an address, and {name} does not resolve; `nett status` lists the peers")
         })?;
     Ok((ip, short.to_owned()))
 }
@@ -348,7 +349,7 @@ pub fn check_status(doc: &StatusDoc, now: nett_trust::encoding::Timestamp) -> Ve
         out.push(Finding::problem(
             "desired state",
             crate::status::problem_text(p),
-            "`sudo nett status` lists the problems with their time",
+            "`nett status` lists the problems with their time",
         ));
     }
     for peer in &doc.peers {
@@ -420,7 +421,7 @@ fn check_peer(peer: &PeerStatus) -> Option<Finding> {
     } else if failing(&[PathKindDoc::Relay]) {
         "the UDP relays fail: check that their relay port (UDP 41822 unless set) is open".to_owned()
     } else {
-        format!("`sudo nett status {label}` shows its candidates and recent switches")
+        format!("`nett status {label}` shows its candidates and recent switches")
     };
     let state = if peer.state == PeerState::Connecting {
         "never answered"

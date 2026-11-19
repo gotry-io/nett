@@ -4,9 +4,9 @@ Start on the machine that misbehaves:
 
 ```
 sudo nett doctor            # checks this machine and says what to do about each finding
-sudo nett status            # every peer: connected or not, the path, round-trip time and loss
-sudo nett status <peer>     # one peer's candidate paths and its recent switches
-nett ping <peer>            # probes through the tunnel; works whatever the access rules allow
+nett status                 # every peer: connected or not, the path, round-trip time and loss
+nett status <peer>          # one peer's candidate paths and its recent switches
+nett ping <peer>            # probes every path now, then through the tunnel; works whatever the access rules allow
 ```
 
 On the computer that holds the site, `nett site status` shows every machine as the Hub sees it: online or not, its version, whether it applied the latest change, and any problem it reported.
@@ -49,9 +49,9 @@ If that answers and programs still do not resolve the name, the system resolver 
 
 ## Devices through a mobile gateway
 
-- **IPv4 forwarding**: a gateway forwards its devices' traffic, so `net.ipv4.ip_forward` has to be 1; nett checks it and does not change it, and `sudo nett status` on the gateway lists the problem while it is 0 (Docker turns it on when it starts). Without IPv6 forwarding (`net.ipv6.conf.all.forwarding`), devices reach other machines over IPv4 only, and the status says so.
+- **IPv4 forwarding**: a gateway forwards its devices' traffic, so `net.ipv4.ip_forward` has to be 1; nett checks it and does not change it, and `nett status` on the gateway lists the problem while it is 0 (Docker turns it on when it starts). Without IPv6 forwarding (`net.ipv6.conf.all.forwarding`), devices reach other machines over IPv4 only, and the status says so.
 - **A firewall that drops forwarded traffic**: nett adds its accept to the system's `filter FORWARD` chain in nftables, which is where Docker and ufw put theirs. A chain in another nftables table that drops forwarded traffic by default is listed as a problem that names it; accept traffic from `nett0` to `nett0` there. With `iptables-legacy`, which nett cannot read, add `iptables -I FORWARD -i nett0 -o nett0 -j ACCEPT` and keep it across reboots.
-- **A device does not connect**: `sudo nett status` on the gateway lists each device with where it last connected from and its last handshake. No handshake means the device does not reach the gateway's WireGuard port (check the cloud security group) or uses a removed configuration.
+- **A device does not connect**: `nett status` on the gateway lists each device with where it last connected from and its last handshake. No handshake means the device does not reach the gateway's WireGuard port (check the cloud security group) or uses a removed configuration.
 
 ## The container
 
@@ -67,7 +67,7 @@ Machines installed with `sudo nett install`, containers and the Hub upgrade them
 
 ## What to collect for a report
 
-- `sudo nett status --json` and `sudo nett doctor` on the machines involved;
+- `nett status --json` and `sudo nett doctor` on the machines involved;
 - the logs: `journalctl -u nett-mesh -u nett-node` on Linux, `log show --last 1h --predicate 'process == "nett"'` on macOS (with sudo);
 - `nett site status --json` from the computer that holds the site.
 

@@ -18,7 +18,7 @@ use crate::layout::{key_values, table};
 
 pub const USAGE: &str = "usage: nett status [<peer>] [--json] [--socket <path>]";
 pub const RELOAD_USAGE: &str = "usage: nett reload [--socket <path>]\n\n\
-On Linux, run it with sudo. In the container: docker compose exec <service> nett reload";
+Run it with sudo. In the container: docker compose exec <service> nett reload";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut peer = None;
