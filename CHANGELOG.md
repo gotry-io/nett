@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-19
+
 - Machines on one LAN connect over it wherever the Hub runs: every LAN address a machine reports is
   tried by its peers and probes decide, as in Tailscale. Two dial-only containers on one Docker
   network, machines on a LAN the Hub is also on, and machines on routed LANs of one site (two VLANs)
