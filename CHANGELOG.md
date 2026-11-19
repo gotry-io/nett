@@ -10,7 +10,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   it as available. `nett site upgrade` approves it for the Hub and every machine; `nett site
   upgrade <machine>` approves one machine first, and `--hub` the Hub alone. Nothing upgrades on
   its own. A site moving to this release still upgrades its Hub once by itself, as before; the
-  machines then wait for the approval (ADR 0027).
+  machines then wait for the approval (ADR 0027). The computer that holds the site approves with
+  `nett` 0.6.0: while it still runs an older one, approve once with the 0.6.0 program from the
+  release (`./nett site upgrade`), which upgrades that computer's own `nett` with the rest.
 - `nett site device add` writes the standard WireGuard configuration only: a client that takes
   WireGuard settings in a format of its own, such as a proxy app's WireGuard outbound, is set up
   from the same fields. The Surge configuration is no longer written.
