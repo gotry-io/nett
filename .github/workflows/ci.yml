@@ -170,7 +170,8 @@ jobs:
           sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
           sudo "$nett" reload | grep -F 'Reloaded the desired state.'
           # A public relay with TLS gives this machine a path over TLS: the mesh process carries it
-          # itself, on a loopback port of its own, and the socket directory stays the owner's only
+          # itself, on a loopback port of its own; others reach the socket directory's names but
+          # cannot list it
           relay_keys=$("$nett" keys --dir "$RUNNER_TEMP/relay1" \
             | sed -n 's/^  nett site add <name> --keys "\(.*\)"$/\1/p')
           test -n "$relay_keys"
@@ -185,7 +186,7 @@ jobs:
           mesh_pid=$(sudo launchctl print system/io.gotry.nett.mesh \
             | sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p')
           sudo lsof -nP -a -p "$mesh_pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
-          [ "$(sudo stat -f %Lp /var/run/nett)" = 700 ]
+          [ "$(sudo stat -f %Lp /var/run/nett)" = 711 ]
           # What earlier releases left on a Mac is removed by the next install: the start-up failure
           # logs with their rotation, and the transport service of 0.3.11 with an account and a group
           # of its own. The directory service refuses an ID another record has, and macOS uses the
