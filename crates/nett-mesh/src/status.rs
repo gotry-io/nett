@@ -626,6 +626,22 @@ struct Request {
     /// The address a `whois` asks about.
     #[serde(default)]
     address: Option<IpAddr>,
+    /// The peer whose paths a `probe` probes, checked as a node ID where it is answered.
+    #[serde(default)]
+    peer: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ProbeReply {
+    v: u32,
+    probe: Probed,
+}
+
+/// What a `probe` request did (design/status.md section 4.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Probed {
+    /// The number of paths probed.
+    pub candidates: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -664,6 +680,9 @@ pub trait StatusSource: Send + 'static {
     fn coordinate(&self, stream: UnixStream) -> std::io::Result<()>;
     /// Who `address` belongs to; `None` when the background thread is busy.
     fn whois(&self, address: IpAddr) -> Option<Whois>;
+    /// Probes every path to `peer` now (design/status.md section 4.3): how many, `Some(None)` when no
+    /// member has that node ID, `None` when the background thread is busy.
+    fn probe(&self, peer: NodeId) -> Option<Option<usize>>;
 }
 
 /// The thread that accepts status queries. Dropping it stops the thread and deletes the socket.
@@ -927,6 +946,43 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bo
         let mut out = stream;
         return done(out.write_all(&bytes));
     }
+    if request.query == "probe" {
+        let Some(peer) = request.peer else {
+            return done(reply_error(stream, "bad_request", "probe needs a peer"));
+        };
+        let Ok(peer) = peer.parse::<NodeId>() else {
+            let shown: String = peer.chars().take(40).collect();
+            return done(reply_error(
+                stream,
+                "bad_request",
+                &format!("`{shown}` is not a node ID"),
+            ));
+        };
+        let reply = match source.probe(peer.clone()) {
+            None => {
+                return done(reply_error(
+                    stream,
+                    "busy",
+                    "the mesh process is busy; try again",
+                ));
+            }
+            Some(None) => {
+                return done(reply_error(
+                    stream,
+                    "unknown_peer",
+                    &format!("no member has the node ID {peer}"),
+                ));
+            }
+            Some(Some(candidates)) => ProbeReply {
+                v: VERSION,
+                probe: Probed { candidates },
+            },
+        };
+        let mut bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
+        bytes.push(b'\n');
+        let mut out = stream;
+        return done(out.write_all(&bytes));
+    }
     if request.query == "coordinate" {
         let mut out = stream;
         let mut accepted = crate::coord::ACCEPTED.as_bytes().to_vec();
@@ -1038,6 +1094,18 @@ pub fn whois(path: &Path, address: IpAddr) -> Result<Whois, QueryError> {
     let reply: WhoisReply =
         serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
     Ok(reply.whois)
+}
+
+/// Asks the mesh process at `path` to probe every path to `peer` now (design/status.md section 4.3).
+pub fn probe(path: &Path, peer: &NodeId) -> Result<Probed, QueryError> {
+    let value = send(
+        path,
+        &serde_json::json!({"v": VERSION, "query": "probe", "peer": peer}),
+        QUERY_TIMEOUT,
+    )?;
+    let reply: ProbeReply =
+        serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
+    Ok(reply.probe)
 }
 
 /// Asks the mesh process at `path` to re-read the desired state file and waits for it to finish applying
@@ -1190,6 +1258,11 @@ mod tests {
                 prefix: None,
             })
         }
+
+        fn probe(&self, peer: NodeId) -> Option<Option<usize>> {
+            let doc = self.0.as_ref()?;
+            Some(doc.peers.iter().any(|p| p.id == peer).then_some(3))
+        }
     }
 
     /// The mode a socket directory gets on this platform: on Linux the helpers pass through to their
@@ -1313,6 +1386,28 @@ mod tests {
 
         drop(server);
         assert!(!path.exists(), "socket removed on shutdown");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_probe_request_names_a_member() {
+        let (_dir_tmp, dir) = temp_dir();
+        let path = dir.join("mesh.sock");
+        let _server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
+        assert_eq!(
+            probe(&path, &node(2)).expect("probe"),
+            Probed { candidates: 3 }
+        );
+        assert!(matches!(
+            probe(&path, &node(9)),
+            Err(QueryError::Refused { code, .. }) if code == "unknown_peer"
+        ));
+        let code = |request: &[u8]| raw(&path, request)["error"]["code"].clone();
+        assert_eq!(code(b"{\"v\":1,\"query\":\"probe\"}\n"), "bad_request");
+        assert_eq!(
+            code(b"{\"v\":1,\"query\":\"probe\",\"peer\":\"node_x\"}\n"),
+            "bad_request"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

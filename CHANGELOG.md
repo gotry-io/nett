@@ -4,6 +4,20 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Machines on one LAN connect over it wherever the Hub runs: every LAN address a machine reports is
+  tried by its peers and probes decide, as in Tailscale. Two dial-only containers on one Docker
+  network, machines on a LAN the Hub is also on, and machines on routed LANs of one site (two VLANs)
+  now connect directly. A probe is answered from any address once authenticated, and two dial-only
+  machines learn the address the other's probes come from when another NAT sits inside the LAN.
+- A better path that has never answered is probed every second only in its first minute, then every
+  5 seconds while the pair is on a relay and every minute while it is direct (not at all when that
+  direct path is within 5 ms), as in Tailscale.
+- `sudo nett ping` probes every path to the peer before each ping, so a path that just started
+  working, such as after a firewall in the way was opened, is taken during the ping.
+- The change listing of `nett site` says that two dial-only machines without a relay connect only
+  over a LAN (`punch only; connects over a LAN, or once a relay is added: nett site relay
+  <machine>`), and no longer lists LAN paths, which every pair tries.
+
 ## [0.6.0] - 2026-11-19
 
 - Upgrades start when you approve them: the Hub holds each release, and `nett site status` shows

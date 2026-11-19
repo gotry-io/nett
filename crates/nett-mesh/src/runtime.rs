@@ -16,6 +16,8 @@ use std::sync::mpsc::{RecvTimeoutError, SyncSender, TrySendError, sync_channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
+use nett_core::id::NodeId;
+
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::coord::{Coordinator, Inbound};
@@ -68,6 +70,8 @@ enum Msg {
     Coordination(Inbound),
     /// Who an address belongs to (design/names-and-diagnostics.md section 4).
     Whois(IpAddr, SyncSender<crate::status::Whois>),
+    /// Probe a peer's paths now (design/status.md section 4.3).
+    Probe(NodeId, SyncSender<Option<usize>>),
     Shutdown,
 }
 
@@ -202,6 +206,10 @@ impl Runtime {
                         Ok(Msg::Whois(address, reply)) => {
                             let _ = reply.try_send(worker.engine.whois(address));
                         }
+                        Ok(Msg::Probe(peer, reply)) => {
+                            let _ = reply.try_send(worker.engine.probe_now(&peer, Instant::now()));
+                            tick_now = true;
+                        }
                         Ok(Msg::Coordination(Inbound::Hub(up))) => worker.engine.set_hub(up),
                         Ok(Msg::Coordination(Inbound::PathSwitch { peer, message })) => {
                             let out = worker.engine.on_hub_message(
@@ -307,6 +315,12 @@ impl StatusSource for RuntimeStatus {
     fn whois(&self, address: IpAddr) -> Option<crate::status::Whois> {
         let (reply, answer) = sync_channel(1);
         self.tx.try_send(Msg::Whois(address, reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
+
+    fn probe(&self, peer: NodeId) -> Option<Option<usize>> {
+        let (reply, answer) = sync_channel(1);
+        self.tx.try_send(Msg::Probe(peer, reply)).ok()?;
         answer.recv_timeout(QUERY_TIMEOUT).ok()
     }
 

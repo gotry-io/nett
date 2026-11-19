@@ -238,7 +238,7 @@ fn rules_expand_to_addresses_and_bring_connections() {
     assert!(
         lines
             .iter()
-            .any(|l| l.contains("mac - nas  punch only; may not connect"))
+            .any(|l| l.contains("mac - nas  punch only; connects over a LAN, or once a relay is added: nett site relay <machine>"))
     );
     // The same rule is not added a second time; numbers are not reused
     assert!(
@@ -1127,37 +1127,106 @@ fn relay_changes_are_listed_with_the_paths_they_change() {
         "{lines:?}"
     );
     assert!(
-        lines.contains(&"  ~ mac - nas  punch only; may not connect".to_owned()),
+        lines.contains(&"  ~ mac - nas  punch only; connects over a LAN, or once a relay is added: nett site relay <machine>".to_owned()),
         "{lines:?}"
     );
     std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
-fn machines_behind_the_same_nat_connect_over_their_lan() {
+fn every_lan_address_a_peer_reports_is_a_candidate() {
     let (_dir_tmp, dir) = temp_dir("lan");
     let (site, mut state) = site(&dir);
     state
         .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
         .expect("allow");
     signed(&site, &mut state);
-    let home = crate::state::LearnedIp {
-        ip: "198.51.100.7".parse().expect("ip"),
+    let seen = |ip: &str| crate::state::LearnedIp {
+        ip: ip.parse().expect("ip"),
         from: crate::state::AddressSource::Hub,
     };
-    let learn =
-        |state: &mut State, n: &str, lan: &str, port: u16, nat: crate::state::LearnedIp<_>| {
-            let m = state.machine_mut(&name(n)).expect("machine");
-            m.learned.ipv4 = Some(nat);
-            m.learned.lan = vec![
-                lan.parse().expect("lan"),
-                "172.17.0.1/16".parse().expect("lan"),
-            ];
-            m.learned.listen_port = Some(port);
-        };
-    learn(&mut state, "mac", "192.168.1.10/24", 50001, home);
-    learn(&mut state, "nas", "192.168.1.20/24", 50002, home);
+    let learn = |state: &mut State, n: &str, lan: &[&str], port: u16, nat: &str| {
+        let m = state.machine_mut(&name(n)).expect("machine");
+        m.learned.ipv4 = Some(seen(nat));
+        m.learned.lan = lan.iter().map(|a| a.parse().expect("lan")).collect();
+        m.learned.listen_port = Some(port);
+    };
     let lan_of = |state: &State, me: &str, peer: &str| {
+        let doc = desired(state, &name(me)).expect("ok").expect("signed");
+        let id = &state.machine(&name(peer)).expect("peer").node_id;
+        doc.paths
+            .iter()
+            .find(|p| &p.peer == id)
+            .map(|p| {
+                p.candidates
+                    .iter()
+                    .filter_map(|c| match c {
+                        Candidate::Lan { endpoint } => Some(endpoint.to_string()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    // Behind one NAT, each with the same Docker bridge address, which leads back to the machine itself
+    learn(
+        &mut state,
+        "mac",
+        &["192.168.1.10/24", "172.17.0.1/16"],
+        50001,
+        "198.51.100.7",
+    );
+    learn(
+        &mut state,
+        "nas",
+        &["fd00::20/64", "192.168.1.20/24", "172.17.0.1/16"],
+        50002,
+        "198.51.100.7",
+    );
+    assert_eq!(
+        lan_of(&state, "mac", "nas"),
+        ["192.168.1.20:50002", "[fd00::20]:50002"],
+        "at the peer's reported port, IPv4 first, without an address this machine has itself"
+    );
+    assert_eq!(lan_of(&state, "nas", "mac"), ["192.168.1.10:50001"]);
+    // Elsewhere, on another network: routed LANs of one site, or someone else's; probes decide
+    learn(&mut state, "nas", &["10.1.2.10/24"], 50002, "203.0.113.99");
+    assert_eq!(lan_of(&state, "mac", "nas"), ["10.1.2.10:50002"]);
+    // Without a relay, two dial-only machines connect only over a LAN
+    let line = crate::changes::path_kind(
+        &state,
+        &state.machine(&name("mac")).expect("mac").node_id,
+        &state.machine(&name("nas")).expect("nas").node_id,
+    );
+    assert_eq!(
+        line,
+        "punch only; connects over a LAN, or once a relay is added: nett site relay <machine>"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn machines_the_hub_sees_on_their_own_lan_connect_over_it() {
+    let (_dir_tmp, dir) = temp_dir("lan-hub");
+    let (site, mut state) = site(&dir);
+    state
+        .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&site, &mut state);
+    // The Hub is on their network (a Docker network, a home LAN, a cloud VPC): no NAT between it
+    // and them, so it sees each one at its own LAN address
+    let learn = |state: &mut State, n: &str, ip: &str, port: u16| {
+        let m = state.machine_mut(&name(n)).expect("machine");
+        m.learned.ipv4 = Some(crate::state::LearnedIp {
+            ip: ip.parse().expect("ip"),
+            from: crate::state::AddressSource::Hub,
+        });
+        m.learned.lan = vec![format!("{ip}/24").parse().expect("lan")];
+        m.learned.listen_port = Some(port);
+    };
+    learn(&mut state, "mac", "172.31.0.11", 50001);
+    learn(&mut state, "nas", "172.31.0.12", 50002);
+    let first = |state: &State, me: &str, peer: &str| {
         let doc = desired(state, &name(me)).expect("ok").expect("signed");
         let id = &state.machine(&name(peer)).expect("peer").node_id;
         doc.paths
@@ -1166,41 +1235,65 @@ fn machines_behind_the_same_nat_connect_over_their_lan() {
             .and_then(|p| p.candidates.first().cloned())
     };
     assert_eq!(
-        lan_of(&state, "mac", "nas"),
+        first(&state, "mac", "nas"),
         Some(Candidate::Lan {
-            endpoint: "192.168.1.20:50002".parse().expect("endpoint")
-        }),
-        "the LAN path comes first, at the peer's reported port"
-    );
-    assert_eq!(
-        lan_of(&state, "nas", "mac"),
-        Some(Candidate::Lan {
-            endpoint: "192.168.1.10:50001".parse().expect("endpoint")
+            endpoint: "172.31.0.12:50002".parse().expect("endpoint")
         })
     );
-    // The same Docker bridge address on both machines is not a LAN between them
-    assert!(
-        desired(&state, &name("mac"))
-            .expect("ok")
-            .expect("signed")
-            .paths
-            .iter()
-            .flat_map(|p| &p.candidates)
-            .all(|c| !matches!(c, Candidate::Lan { endpoint } if endpoint.ip().to_string() == "172.17.0.1"))
+    assert_eq!(
+        first(&state, "nas", "mac"),
+        Some(Candidate::Lan {
+            endpoint: "172.31.0.11:50001".parse().expect("endpoint")
+        })
     );
-    let line = crate::changes::path_kind(
-        &state,
-        &state.machine(&name("mac")).expect("mac").node_id,
-        &state.machine(&name("nas")).expect("nas").node_id,
-    );
-    assert_eq!(line, "lan, punch");
-    // Behind different NATs the same private network is someone else's
-    let elsewhere = crate::state::LearnedIp {
-        ip: "203.0.113.99".parse().expect("ip"),
-        from: crate::state::AddressSource::Hub,
-    };
-    learn(&mut state, "nas", "192.168.1.20/24", 50002, elsewhere);
-    assert_eq!(lan_of(&state, "mac", "nas"), Some(Candidate::Punch));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn lan_paths_leave_the_relays_their_room() {
+    let (_dir_tmp, dir) = temp_dir("lan-room");
+    let (site, mut state) = site(&dir);
+    state
+        .allow(&["mac".into()], &["nas".into()], vec![tcp(22)], None)
+        .expect("allow");
+    state
+        .set_relay(
+            &name("edge-vps"),
+            Some(crate::state::RelayRole {
+                port: 41822,
+                tls_port: Some(8443),
+                fingerprint: Some(
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .parse()
+                        .expect("fingerprint"),
+                ),
+            }),
+            crate::state::RelayKey([2; 32]),
+        )
+        .expect("relay");
+    signed(&site, &mut state);
+    let nas = state.machine_mut(&name("nas")).expect("nas");
+    nas.learned.lan = (1..=8)
+        .map(|i| format!("10.0.{i}.20/24").parse().expect("lan"))
+        .collect();
+    nas.learned.listen_port = Some(50002);
+    let doc = desired(&state, &name("mac")).expect("ok").expect("signed");
+    let id = &state.machine(&name("nas")).expect("nas").node_id;
+    let candidates = &doc
+        .paths
+        .iter()
+        .find(|p| &p.peer == id)
+        .expect("path")
+        .candidates;
+    let lan = candidates
+        .iter()
+        .filter(|c| matches!(c, Candidate::Lan { .. }))
+        .count();
+    let relays = candidates
+        .iter()
+        .filter(|c| matches!(c, Candidate::Relay { .. } | Candidate::RelayTls { .. }))
+        .count();
+    assert_eq!((lan, relays), (8, 2), "{candidates:?}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

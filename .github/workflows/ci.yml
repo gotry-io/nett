@@ -601,9 +601,11 @@ jobs:
           sudo journalctl -u nett-mesh -u nett-node --no-pager | tail -80 || true
 
   # The container and the Hub upgrade themselves (design/container.md, ADR 0026): nett's image joins
-  # through a Hub with NETT_TOKEN, a service in its network sees each caller's mesh address, the Hub
-  # and the containers move in place to 99.0.0, signed with a key generated for this test and built
-  # into each version, and a signed release that does not start is rolled back
+  # through a Hub with NETT_TOKEN, two dial-only containers on one network with the Hub and no relay
+  # reach each other over that network (design/mesh.md section 6), a service in its network sees each
+  # caller's mesh address, the Hub and the containers move in place to 99.0.0, signed with a key
+  # generated for this test and built into each version, and a signed release that does not start is
+  # rolled back
   container:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -672,7 +674,7 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ steps.cache.outputs.cache-primary-key }}
-      - name: Join, reach a service beside a container, upgrade in place, roll back (needs Docker)
+      - name: Join, reach a service beside a container over the LAN, upgrade in place, roll back (needs Docker)
         run: |
           out="$RUNNER_TEMP/out" data="$RUNNER_TEMP/hub-data" site="$RUNNER_TEMP/site"
           mkdir -p "$site" "$RUNNER_TEMP/home"
@@ -739,7 +741,8 @@ jobs:
               --restart unless-stopped -e NETT_TOKEN="$token" -v "$name-state":/var/lib/nett nett:ci
           done
           wait_for '[.machines[] | select(.online)] | length == 2'
-          "$nett" site set box --public --ipv4 172.31.0.11 --yes
+          # Both stay dial-only and the site has no relay: the Hub sees each at its own address on the
+          # network they share, and they connect over it
           "$nett" site allow peer box 8080/tcp --yes
           # The three processes, each with only its own capabilities
           docker top box | tee top.log
@@ -759,6 +762,8 @@ jobs:
             sleep 2
           done
           test "$from" = "from 100.88.0.2"
+          docker exec peer nett status --json | tee peer-status.json \
+            | jq -e '.peers[] | select(.name == "box") | .path.kind == "lan"'
           # 99.0.0: the Hub holds it and nothing moves until it is approved (ADR 0027); then the Hub
           # upgrades itself first, relays it, and the containers move in place
           started=$(docker inspect -f '{{.State.StartedAt}}' box)

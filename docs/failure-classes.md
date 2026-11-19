@@ -12,16 +12,22 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: every measurement that chooses a path is taken on the port, transport and route the traffic it judges uses, and a reply counts only when it comes back the way its probe went. A path's state shown to the user is the measurement of that path as it carries traffic.
 
-**Breaks when** a probe leaves from another socket than the tunnel (a network can treat ports differently, mesh.md section 7.1); when one end's probes stand in for a leg only the other end sees (the leg from a relay to the peer); when a value measured before a switch is shown after it.
+**Breaks when** a probe leaves from another socket than the tunnel (a network can treat ports differently, mesh.md section 7.1); when one end's probes stand in for a leg only the other end sees (the leg from a relay to the peer); when a value measured before a switch is shown after it; when what the Hub sees of two machines stands in for whether a path between them works (the address each reaches it from says nothing once the Hub is on their network).
 
 **Where it holds**
 
 - Probes of direct candidates and of UDP relays leave from the WireGuard port, and replies come back to it; probes of TLS relays travel inside the connection the tunnel uses (mesh.md section 7.1);
 - A path through a relay that failed while the relay still answered is broken beyond the relay; the relay counts as recovered only when the peer reports its leg without loss in a report covering the time since, and a relay the peer never reached is reported lost (mesh.md section 8.2);
-- The current candidate shows the tunnel's measurement (status.md section 6).
+- The current candidate shows the tunnel's measurement (status.md section 6);
+- Whether a LAN path works is found by probing it: every LAN address a peer reports is a candidate whatever the Hub sees of the two, an authenticated probe is answered from any address, the address the peer's probes come from is learned when another NAT sits inside the LAN, and both `dial-only` ends probe their LAN paths (mesh.md sections 6 and 7).
 
 **Guards**
 
+- `nett-site:machines_the_hub_sees_on_their_own_lan_connect_over_it`
+- `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
+- `nett-mesh:an_authenticated_probe_is_answered_from_any_address`
+- `nett-mesh:a_lan_address_the_peers_probes_come_from_becomes_a_candidate`
+- `nett-mesh:the_follower_takes_the_lan_path_that_answers`
 - `nett-mesh:a_relay_the_followers_wireguard_port_cannot_reach_is_not_used`
 - `nett-mesh:a_break_beyond_a_relay_moves_to_another_relay`
 - `nett-mesh:a_relay_that_never_answered_is_reported_lost`
@@ -175,7 +181,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-node:a_machine_without_an_upgrader_reports_only_a_newer_release`
 - `nett-node:a_new_version_that_does_not_settle_goes_back_to_the_one_before`
 - `nett-hub:the_hub_relays_and_upgrades_only_as_approved`
-- `ci:Join, reach a service beside a container, upgrade in place, roll back (needs Docker)`
+- `ci:Join, reach a service beside a container over the LAN, upgrade in place, roll back (needs Docker)`
 - `lab:dial-only-switch`
 
 ## 7. Input is checked where it enters
@@ -210,7 +216,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A download over the upgrade limit names the URL and the limit;
 - `sudo nett install` prints the machine's keys only while it has no desired state;
 - A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6);
-- Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file.
+- Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file;
+- The change listing says that two `dial-only` machines without a relay connect only over a LAN, and gives the command that adds one (site.md section 6).
 
 **Guards**
 
@@ -218,6 +225,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:a_resolv_conf_past_systemd_resolved_is_named`
 - `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
 - `nett-hub:logs_carry_no_terminal_color_codes`
+- `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
 - `ci:Full flow of sudo nett install (needs root)`
 
 **Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub, which needs a Hub that serves those updates to the command line in a test; the error for a download over the size limit, since the client fetches only `https://` URLs verified against the system's root certificates, which a test cannot serve (the limit itself is guarded by `nett-node:a_program_larger_than_any_release_is_refused`, and the error is one message naming the URL and the limit).

@@ -64,6 +64,16 @@ const DEGRADED_INTERVAL: Duration = Duration::from_secs(3);
 /// learn whether it can connect and what this machine's mapped address is (design/mesh.md sections 6.1
 /// and 7).
 const DISCOVERY_WINDOW: Duration = Duration::from_secs(60);
+/// After its first minute, a better-type candidate that has never replied is probed on Tailscale's
+/// schedule for an address it has had no reply from (ADR 0021): every 5 seconds while the current path
+/// goes through a relay, every minute while it is direct, and not at all while that direct path's
+/// round-trip time is at most 5 milliseconds.
+const UNANSWERED_ON_RELAY: Duration = Duration::from_secs(5);
+const UNANSWERED_ON_DIRECT: Duration = Duration::from_secs(60);
+const GOOD_ENOUGH_MS: f64 = 5.0;
+/// A LAN address learned from where the peer's probes come from stays a candidate this long after the
+/// last of them, as in Tailscale (design/mesh.md section 6).
+pub const LEARNED_TTL: Duration = Duration::from_secs(45);
 /// Right after switching away from a better-type path because of a first failure, probe it once every
 /// [`FAST_RECOVERY_INTERVAL`] for this long, so that it switches back quickly after recovery (ADR 0021).
 const FAST_RECOVERY_WINDOW: Duration = Duration::from_secs(15);
@@ -509,6 +519,12 @@ pub struct PeerPaths {
     /// The direct candidate established by hole punching (design/mesh.md section 6.1), ordered after the
     /// configured candidates.
     punched: Option<usize>,
+    /// The LAN direct candidate learned from where the peer's probes come from (design/mesh.md section
+    /// 6), ordered after the configured candidates, and when the latest of those probes arrived.
+    learned: Option<(usize, Instant)>,
+    /// Probe every candidate this end probes at the next tick, outside the schedule (design/status.md
+    /// section 4.3).
+    probe_now: bool,
     seq: u32,
 }
 
@@ -545,6 +561,8 @@ impl PeerPaths {
             busy: false,
             hold: false,
             punched: None,
+            learned: None,
+            probe_now: false,
             seq: 0,
         })
         .map(|mut paths| {
@@ -598,9 +616,80 @@ impl PeerPaths {
         self.punched
     }
 
-    /// The LAN direct candidate of this pair.
+    /// A LAN address the peer's probes came from at `now` that no candidate has (design/mesh.md section
+    /// 6): added as a LAN direct candidate, or kept alive when it is the one learned before; a new address
+    /// replaces it and measurement starts over, except while it carries the tunnel. Returns its index.
+    pub fn learn_lan(&mut self, endpoint: SocketAddr, now: Instant) -> usize {
+        let route = Route::Direct(endpoint);
+        if let Some((i, seen)) = &mut self.learned {
+            let i = *i;
+            if self.candidates[i].route == route {
+                *seen = now;
+            } else if i != self.current {
+                self.candidates[i] = Candidate::new(route, PathKind::Lan);
+                *seen = now;
+            }
+            return i;
+        }
+        self.candidates.push(Candidate::new(route, PathKind::Lan));
+        let i = self.candidates.len() - 1;
+        self.learned = Some((i, now));
+        i
+    }
+
+    /// The learned LAN address has heard nothing from the peer for [`LEARNED_TTL`]: it is no longer
+    /// probed, and starts over when the peer's probes come from it again. Not while it carries the tunnel:
+    /// a break there is a failure like any other.
+    fn learned_lapsed(&self, index: usize, now: Instant) -> bool {
+        self.learned.is_some_and(|(i, seen)| {
+            i == index && i != self.current && now.saturating_duration_since(seen) >= LEARNED_TTL
+        })
+    }
+
+    /// Forgets the measurement of a learned LAN address that lapsed, so nothing chooses it on old replies.
+    fn reset_lapsed(&mut self, now: Instant) {
+        if let Some((i, _)) = self.learned
+            && self.learned_lapsed(i, now)
+            && self.candidates[i].last_probe.is_some()
+        {
+            let route = self.candidates[i].route;
+            self.candidates[i] = Candidate::new(route, PathKind::Lan);
+        }
+    }
+
+    /// Probes every candidate this end probes at the next tick, outside the schedule, as `tailscale ping`
+    /// does (design/status.md section 4.3).
+    pub fn probe_now(&mut self) {
+        self.probe_now = true;
+    }
+
+    /// How many candidates [`Self::probe_now`] probes: the follower of two `dial-only` ends probes only the
+    /// LAN paths, like its scheduled probes.
+    pub fn probe_count(&self) -> usize {
+        (0..self.candidates.len())
+            .filter(|&i| match self.role {
+                Role::FollowTogether => self.candidates[i].kind == PathKind::Lan,
+                _ => i != self.current || self.candidates[i].kind <= PathKind::Direct,
+            })
+            .count()
+    }
+
+    /// The LAN direct candidate the follower takes when both ends move to a LAN path together (design/mesh.md
+    /// section 7.2): of those answering now, the one with the best score; the first one when none is.
     pub fn lan_index(&self) -> Option<usize> {
-        self.candidates.iter().position(|c| c.kind == PathKind::Lan)
+        let lan =
+            || (0..self.candidates.len()).filter(|&i| self.candidates[i].kind == PathKind::Lan);
+        lan()
+            .filter_map(|i| {
+                let c = &self.candidates[i];
+                (c.stats.consecutive_successes > 0)
+                    .then(|| c.stats.score(c.kind))
+                    .flatten()
+                    .map(|score| (score, i))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, i)| i)
+            .or_else(|| lan().next())
     }
 
     /// Measurements and state of each candidate path, including the current one (design/status.md section 6).
@@ -912,6 +1001,7 @@ impl PeerPaths {
     pub fn tick(&mut self, now: Instant, active: bool) -> Vec<Action> {
         let mut actions = Vec::new();
         self.expire(now);
+        self.reset_lapsed(now);
 
         if let Some(action) = self.check_handshake(now, active) {
             actions.push(action);
@@ -955,6 +1045,7 @@ impl PeerPaths {
                     }
                     return actions;
                 }
+                let all = std::mem::take(&mut self.probe_now);
                 let due = active
                     && self
                         .last_tunnel_probe
@@ -964,13 +1055,25 @@ impl PeerPaths {
                     actions.push(Action::TunnelProbe { seq });
                 }
                 if self.role == Role::FollowTogether {
+                    // The follower probes the LAN paths too, as both ends ping in Tailscale: each end then
+                    // learns where the other can be reached when another NAT sits inside the LAN, and the
+                    // follower knows which LAN path to take (design/mesh.md section 6)
+                    for index in 0..self.candidates.len() {
+                        if self.candidates[index].kind == PathKind::Lan
+                            && (all || self.candidate_due(index, now, active))
+                        {
+                            actions.extend(self.probe_candidate(index, now, false));
+                        }
+                    }
                     return actions;
                 }
                 // When the loss rate has just become too high, probe all candidates immediately, as with suspected
                 // failure
                 let lossy = self.high_loss_since == Some(now);
                 for index in 0..self.candidates.len() {
-                    if index != self.current && (lossy || self.candidate_due(index, now, active)) {
+                    if index != self.current
+                        && (lossy || all || self.candidate_due(index, now, active))
+                    {
                         let stack = self.fast_recovery(index, now);
                         actions.extend(self.probe_candidate(index, now, stack));
                     }
@@ -978,7 +1081,7 @@ impl PeerPaths {
                 // When the current path is direct, also probe it from the WireGuard port: the reply carries back this
                 // machine's mapped address (design/mesh.md section 6.1)
                 if matches!(self.current_kind(), PathKind::Lan | PathKind::Direct)
-                    && self.candidate_due(self.current, now, active)
+                    && (all || self.candidate_due(self.current, now, active))
                 {
                     actions.extend(self.probe_candidate(self.current, now, false));
                 }
@@ -1054,9 +1157,15 @@ impl PeerPaths {
     }
 
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
+        if self.learned_lapsed(index, now) {
+            return false;
+        }
         let c = &self.candidates[index];
         let better = c.kind < self.current_kind();
         let first_reply = c.stats.consecutive_successes == 1;
+        let discovering = c.last_reply.is_none()
+            && c.first_probe
+                .is_some_and(|t| now.saturating_duration_since(t) < DISCOVERY_WINDOW);
         let interval = if !active {
             IDLE_CANDIDATE_INTERVAL
         } else if self.fast_recovery(index, now) {
@@ -1071,11 +1180,21 @@ impl PeerPaths {
             // A better-type candidate just got a reply: probe once more soon to confirm, without waiting for the
             // next interval
             CONFIRM_INTERVAL
-        } else if better
-            || (c.last_reply.is_none()
-                && c.first_probe
-                    .is_some_and(|t| now.saturating_duration_since(t) < DISCOVERY_WINDOW))
-        {
+        } else if discovering {
+            BETTER_TYPE_INTERVAL
+        } else if better && c.last_reply.is_none() {
+            if self.current_kind().via_relay() {
+                UNANSWERED_ON_RELAY
+            } else if self
+                .tunnel
+                .rtt_ms()
+                .is_some_and(|rtt| rtt <= GOOD_ENOUGH_MS)
+            {
+                return false;
+            } else {
+                UNANSWERED_ON_DIRECT
+            }
+        } else if better {
             BETTER_TYPE_INTERVAL
         } else if c.kind == self.current_kind() && self.degraded() {
             DEGRADED_INTERVAL
@@ -1492,6 +1611,10 @@ mod tests {
         Route::Direct("198.51.100.2:41820".parse().expect("addr"))
     }
 
+    fn lan(ip: &str) -> Route {
+        Route::Direct(format!("{ip}:50002").parse().expect("addr"))
+    }
+
     fn relay(n: u8) -> Route {
         Route::Relay {
             relay: KeyId([n; 8]),
@@ -1712,6 +1835,20 @@ mod tests {
     }
 
     impl Sim {
+        /// Room for a candidate added while running (a learned LAN address), working by default.
+        fn grow(&mut self) {
+            self.up.push(true);
+            self.rtt.push(2 * MS);
+            self.queue.push(Duration::ZERO);
+            self.one_way.push(false);
+            self.drop_every.push(0);
+            self.loss.push(0.0);
+            self.sent.push(0);
+            self.sent_by_kind.push([0; 2]);
+            self.tunnel_broken.push(false);
+            self.far_leg.push(None);
+        }
+
         fn delivers(&mut self, i: usize, tunnel: bool) -> bool {
             self.sent[i] += 1;
             let n = &mut self.sent_by_kind[i][usize::from(tunnel)];
@@ -2683,6 +2820,86 @@ mod tests {
             after,
             vec![(relay_tls(1), SwitchReason::Unreachable)],
             "{after:?}"
+        );
+    }
+
+    /// A better path that has never answered is probed every second in its first minute, then on
+    /// Tailscale's schedule (ADR 0021): every 5 seconds while on a relay, every minute while on a direct
+    /// path, not at all while that direct path is within 5 ms.
+    #[test]
+    fn a_better_path_that_never_answers_is_probed_on_tailscales_schedule() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (lan("192.168.1.20"), PathKind::Lan),
+        ]);
+        sim.up[1] = false;
+        sim.run(Duration::from_secs(60));
+        let first = sim.sent[1];
+        assert!(first >= 30, "{first} probes in the first minute");
+        sim.run(Duration::from_secs(60));
+        let next = sim.sent[1] - first;
+        assert!(
+            (10..=13).contains(&next),
+            "{next} probes in the next minute on a relay"
+        );
+
+        for (rtt, expected) in [(20 * MS, 2..=4), (2 * MS, 0..=0)] {
+            let mut sim = Sim::new(vec![
+                (direct(), PathKind::Direct),
+                (lan("192.168.1.20"), PathKind::Lan),
+            ]);
+            sim.up[1] = false;
+            sim.rtt[0] = rtt;
+            sim.run(Duration::from_secs(61));
+            let first = sim.sent[1];
+            sim.run(Duration::from_secs(180));
+            let later = sim.sent[1] - first;
+            assert!(
+                expected.contains(&later),
+                "{later} probes in three minutes on a direct path of {rtt:?}"
+            );
+        }
+    }
+
+    /// The follower of two dial-only ends probes its LAN paths too, and takes the one that answers when
+    /// both move to a LAN path (design/mesh.md section 7.2).
+    #[test]
+    fn the_follower_takes_the_lan_path_that_answers() {
+        let mut sim = Sim::with_role(
+            vec![
+                (relay(1), PathKind::Relay),
+                (lan("172.20.0.3"), PathKind::Lan),
+                (lan("10.1.2.10"), PathKind::Lan),
+            ],
+            Role::FollowTogether,
+        );
+        sim.up[1] = false;
+        sim.run(Duration::from_secs(5));
+        assert!(sim.sent[2] > 0, "the follower probes its LAN paths");
+        assert_eq!(sim.paths.lan_index(), Some(2));
+    }
+
+    /// A LAN address learned from where the peer's probes come from is probed while they keep coming
+    /// from it, and no longer [`LEARNED_TTL`] after the last of them (design/mesh.md section 6).
+    #[test]
+    fn a_learned_lan_address_lapses_without_the_peers_probes() {
+        let mut sim = Sim::with_role(vec![(relay(1), PathKind::Relay)], Role::DecideTogether);
+        sim.run(Duration::from_secs(2));
+        let address = "10.1.3.6:61000".parse().expect("addr");
+        let i = sim.paths.learn_lan(address, sim.now);
+        sim.grow();
+        sim.up[i] = false;
+        sim.run(Duration::from_secs(30));
+        assert!(sim.sent[i] > 0, "probed after it is learned");
+        sim.run(LEARNED_TTL);
+        let lapsed = sim.sent[i];
+        sim.run(Duration::from_secs(60));
+        assert_eq!(sim.sent[i], lapsed, "not probed once it lapsed");
+        assert_eq!(sim.paths.learn_lan(address, sim.now), i, "the same slot");
+        sim.run(Duration::from_secs(5));
+        assert!(
+            sim.sent[i] > lapsed,
+            "probed again once the peer's probes come from it"
         );
     }
 }

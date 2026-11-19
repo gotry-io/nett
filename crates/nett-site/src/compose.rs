@@ -18,7 +18,7 @@ use nett_trust::revocation::Revocation;
 use crate::SiteError;
 use crate::state::{Machine, RelayKey, RelayRole, Selector, State};
 
-/// Most candidate paths of one connection (design/mesh.md section 6).
+/// Most candidate paths of one connection besides its LAN direct paths (design/mesh.md section 6).
 pub const MAX_CANDIDATES: usize = 6;
 
 /// A pair of machines that need a connection, sorted by node ID.
@@ -124,8 +124,9 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
     if a.policy.is_none() || b.policy.is_none() {
         return Vec::new();
     }
+    // The LAN direct paths come in addition to the limit (design/mesh.md section 6)
     let room =
-        MAX_CANDIDATES.saturating_sub(direct(state, a, b).len().max(direct(state, b, a).len()));
+        MAX_CANDIDATES.saturating_sub(public(state, a, b).len().max(public(state, b, a).len()));
     let mut relays: Vec<(&Machine, IpAddr, RelayRole)> = state
         .machines
         .values()
@@ -239,45 +240,41 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
     })
 }
 
-/// The LAN direct path to a peer (design/mesh.md section 6): both machines reported LAN addresses on
-/// the same network and reach the Hub from the same public IPv4 address (they are behind the same NAT),
-/// and the peer's WireGuard port is known. IPv4 comes first; there is at most one.
-fn lan(state: &State, me: &Machine, peer: &Machine) -> Option<Candidate> {
-    let same_nat = matches!(
-        (me.learned.ipv4, peer.learned.ipv4),
-        (Some(a), Some(b)) if a.ip == b.ip
-    );
-    if !same_nat {
-        return None;
-    }
-    let port = peer
+/// The LAN direct paths to a peer (design/mesh.md section 6): one for each LAN address the peer
+/// reported, at its WireGuard port, IPv4 first, whatever network the two are on: probes decide
+/// which ones work, as Tailscale tries every interface address of a peer. An address this machine
+/// has itself leads back to it and is left out.
+fn lan(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
+    let Some(port) = peer
         .listen_port(state.listen_port)
-        .or(peer.learned.listen_port)?;
-    let mut shared: Vec<IpAddr> = peer
+        .or(peer.learned.listen_port)
+    else {
+        return Vec::new();
+    };
+    let mut ips: Vec<IpAddr> = peer
         .learned
         .lan
         .iter()
-        .filter(|theirs| {
-            me.learned
-                .lan
-                .iter()
-                .any(|mine| mine.shares_network(theirs))
-        })
         .map(|theirs| theirs.addr)
+        .filter(|ip| !me.learned.lan.iter().any(|mine| mine.addr == *ip))
         .collect();
-    shared.sort_by_key(|ip| !ip.is_ipv4());
-    shared.first().map(|ip| Candidate::Lan {
-        endpoint: SocketAddr::new(*ip, port),
-    })
+    ips.sort_by_key(|ip| !ip.is_ipv4());
+    ips.dedup();
+    ips.into_iter()
+        .take(nett_mesh::lan::MAX_LAN_ADDRESSES)
+        .map(|ip| Candidate::Lan {
+            endpoint: SocketAddr::new(ip, port),
+        })
+        .collect()
 }
 
 /// Direct candidate paths from this machine to a peer (design/mesh.md section 6): the LAN direct
-/// path first; when the peer is `public`, connect directly to its public address (the one given, or
+/// paths first; when the peer is `public`, connect directly to its public address (the one given, or
 /// the one the Hub learned; one each for IPv4 and IPv6 when both exist); when both ends are
 /// `dial-only`, hole punching; when this machine is `public` and the peer is `dial-only`, nothing
 /// more, and the peer connects in (WireGuard roaming).
 fn direct(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
-    let mut out: Vec<Candidate> = lan(state, me, peer).into_iter().collect();
+    let mut out = lan(state, me, peer);
     out.extend(public(state, me, peer));
     out
 }

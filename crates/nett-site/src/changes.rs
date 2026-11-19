@@ -330,19 +330,15 @@ fn pair_text(state: &State, a: &NodeId, b: &NodeId) -> String {
 
 /// The kinds of path between a pair of machines (design/site.md section 6): direct when either end
 /// is `public`, hole punching when both ends are `dial-only`, and the relays it goes through, for
-/// example `punch, relay edge-vps (udp, tls)`. Only hole punching may not connect.
+/// example `punch, relay edge-vps (udp, tls)`. LAN paths are tried between every pair and are not
+/// listed (design/mesh.md section 6). Hole punching starts through a tunnel over a relay (section
+/// 6.1), so without a relay a pair of `dial-only` machines connects only over a LAN.
 pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
     let (Some(ma), Some(mb)) = (state.by_id(a), state.by_id(b)) else {
         return "-".to_owned();
     };
     let public = |m: &Machine| m.reachability == Reachability::Public;
     let mut parts = Vec::new();
-    if crate::compose::candidates(state, ma, mb)
-        .iter()
-        .any(|c| matches!(c, nett_mesh::config::Candidate::Lan { .. }))
-    {
-        parts.push("lan".to_owned());
-    }
     parts.push(if public(ma) || public(mb) {
         "direct".to_owned()
     } else {
@@ -367,7 +363,7 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
         parts.push(format!("relay {name} ({})", ways.join(", ")));
     }
     if parts == ["punch"] {
-        return "punch only; may not connect".to_owned();
+        return "punch only; connects over a LAN, or once a relay is added: nett site relay <machine>".to_owned();
     }
     parts.join(", ")
 }
