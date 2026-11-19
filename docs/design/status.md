@@ -21,7 +21,7 @@ Status comes from the mesh process's local interface. This is the local interfac
 ## 3. Local socket
 
 - **Location**: a Unix socket, `/run/nett/mesh.sock` on Linux and in the container, `/var/run/nett/mesh.sock` on macOS. `nett mesh --socket <path>` can move it elsewhere (a lab scenario runs several members on one host), and `nett status --socket <path>` matches it;
-- **Permissions**: the directory is `0700` (`0711` on Linux, for the helper socket of section 3.1) and the socket `0600`, owned by the mesh process's run identity; the mesh process additionally checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) and accepts only root and its own run identity. `nett status` therefore has to run with `sudo`, and in the container use `docker compose exec <service> nett status` (runs as root inside the container). Status contains no keys, but it does contain the public addresses of the members, the advertised routes and the access rule version, which is the structure of the whole network: ordinary users and programs on the machine cannot see it;
+- **Permissions**: the directory is `0711` (others reach a known name in it but cannot list it) and the socket `0666`, owned by the mesh process's run identity, as Tailscale's `tailscaled.sock` is `0666` on the platforms that check peer credentials (safesocket in tailscale main at c4d689c). The mesh process checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) on every connection: the queries that only read or probe (`status`, `whois`, `probe`) answer every local user, as Tailscale's LocalAPI gives every local user read access and its `ping` needs none; the queries that change something (`reload`, `coordinate`) answer only root and the mesh process's own run identity, and anyone else gets `permission_denied`. So `nett status`, `nett whois` and `nett ping` need no `sudo`, and `nett reload` does. Status contains no keys, tokens or other credentials (section 6); what it shows that an ordinary local user cannot learn otherwise is the members' public and LAN addresses, the relays, path measurements and traffic counts, which Tailscale's status shows to every local user too. Names, mesh addresses and advertised routes are visible without it, through the DNS responder and the routing table;
 - **Creation**: the socket is for inspection only; if it cannot be created, the mesh process logs a warning and the mesh keeps working (hard rule 8). When a socket already exists at the path, it first tries to connect: if a process answers, it does not take over; if nothing answers (left behind by an abnormal exit), it removes the socket and creates a new one; if the path holds some other kind of file, it leaves it alone. The socket is first created under a temporary name and set to `0600`, then renamed to the agreed path, so it is already `0600` when it appears. The mesh process removes it on exit. If the directory does not exist it is created with `0700`: the Linux systemd unit creates it in advance with `RuntimeDirectory=nett`, and on macOS and in containers the mesh process creates it itself;
 - The socket is local to the machine and is not a network listener (hard rule 2).
 
@@ -89,6 +89,16 @@ On Linux nett-relay and the transport adapter run as users systemd allocates and
 - nett-node sends `hub` when the connection opens and whenever its Hub session comes up or goes down; the mesh process uses the Hub path only while it is `true`. `path_switch` from the mesh process names the peer it is for, and from nett-node the peer it came from; the message is authenticated end to end and opaque to nett-node and the Hub;
 - One coordinator at a time: a new `coordinate` connection replaces the old one. Lines in each direction queue up to 16 and further ones are dropped (the sender retries); a line that is not valid is dropped and the connection kept.
 
+### 4.3 Probing a peer's paths now
+
+```json
+{"v": 1, "query": "probe", "peer": "node_01J…"}
+```
+
+- Probes every candidate path to that peer once, at once, outside the schedule of mesh.md section 7, and replies right away; the replies to the probes are handled as usual, so a path that now works is taken as if its scheduled probe had found it. At most once a second per peer: a request within a second of the last one is answered without probing again;
+- The reply is `{"v": 1, "probe": {"candidates": 3}}`, the number of paths probed, or the error `unknown_peer` when no member has that node ID;
+- `nett ping` sends it before each of its in-tunnel probes (names-and-diagnostics.md section 5), as each `tailscale ping` probes every address at once: moving to a better path takes two replies in a row (ADR 0021), which a few pings a second apart give.
+
 ## 5. Node names
 
 The desired state gains an unsigned `names` entry: a map from node ID to node name. The signing tool writes it from the names of the machines in the site (site.md section 4); after joining the Hub, the Hub delivers it, from the same source as hostnames (mesh.md section 11).
@@ -107,7 +117,7 @@ Times are UTC in RFC 3339 format; durations and relative times are computed by `
 
 | Part | Contents |
 |---|---|
-| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), LAN addresses with their prefix length (private IPv4 and IPv6 unique local addresses on interfaces other than the mesh interface and loopback, at most 8, used by the Hub for LAN direct candidates, mesh.md section 6), whether the clock is trusted (mesh.md section 8.4), the time the mesh process started |
+| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), LAN addresses with their prefix length (private IPv4 and IPv6 unique local addresses on interfaces other than the mesh interface, loopback and container or virtual machine bridges, at most 8, which the Hub hands to peers as LAN direct candidates, mesh.md section 6; a bridge address such as Docker's `172.17.0.1` is the same on many hosts and leads back to the machine itself, which is why bridges are left out where Tailscale lists every interface, and public addresses are covered by public direct and hole punching), whether the clock is trusted (mesh.md section 8.4), the time the mesh process started |
 | `relay` | On a relay: UDP and TLS ports, the number of members and links assigned, the TLS certificate fingerprint nett-relay reported and when it last fetched its assignment (mesh.md section 5.2); absent elsewhere |
 | `config` | The time the desired state in effect was accepted; the version of the access rule set. A rejected desired state is listed in `problems` (when a reload fails, the previous one stays in use) |
 | `peers` | One entry for each admitted member, see the table below |
@@ -136,7 +146,7 @@ Output is in English, following architecture.md section 14.3.
 ### 7.1 Overview
 
 ```
-$ sudo nett status
+$ nett status
 node     mac (node_01JD7M3XQ4W8N2K5R9T6V3B7C1)
 version  nett 0.2.0
 mesh     100.88.0.4, fd00:88::4
@@ -169,7 +179,7 @@ vps-02    100.88.0.6  connected    direct              31 ms   <1%   12s ago
 ### 7.2 One peer
 
 ```
-$ sudo nett status edge-vps
+$ nett status edge-vps
 peer       edge-vps (node_01JC4QK2ZB8X5R3N9T7V6W2Y1H)
 mesh       100.88.0.1, fd00:88::1
 edge       100.88.0.2, fd00:88::2
@@ -203,6 +213,8 @@ The argument is the peer's name or node ID; if not found, it reports an error an
   nett: permission denied for /run/nett/mesh.sock; run with sudo
   ```
 
+  The last one comes from `nett reload` run as an ordinary user, or from a mesh process whose socket predates section 3's permissions.
+
 ## 8. Implementation and resources
 
 - The mesh process has one more thread that accepts connections and handles them one at a time: it reads the request, sends a query to the runtime's background thread (through an existing bounded queue), the background thread builds a snapshot from the engine, the path selection state and the data plane's peer statistics and hands it back, and then it is written back to the client. When the queue is full, or no snapshot can be delivered within 2 seconds (for example the desired state is being applied), the reply is `busy`; reads and writes each have a 1-second timeout. After replying it first closes the write direction, then discards input from the other side that was not read (at most 64 KiB): when closing with unread data, Linux sends a reset to the other side, which may then be unable to read the reply;
@@ -218,11 +230,5 @@ The argument is the peer's name or node ID; if not found, it reports an error an
 |---|---|
 | Unit tests | Snapshot generation (the various peer states and paths, follower without probe data, peer without a path); no private keys or probe tokens in the serialized result; request validation (too long, not JSON, wrong version, unknown query, timeout); the results of `reload` (accepted with problems listed, whole document rejected, `busy`) and how the party that reads the desired state handles them; `nett status` layout (units, precision, relative times, missing fields, `problems`), comparing the output against fixed status documents |
 | Lab scenarios | In the admission scenario (`admission`, which CI runs on all three topologies), each member's `nett status --json` lists the other members and their names, a pair that has just connected has state `connected` and a path, and the negative case is listed as `member_rejected` on the first member; the same is readable on userspace members. When reloading a desired state that carries only lower-version material, `nett reload` reports `applied` and lists this rejection, and peers already in effect stay unchanged. The state attached to a failed scenario includes each member's status (there is no `wg show` on userspace members) |
-| Real machines | Run `nett status` on edge-vps (kernel WireGuard), the Mac native member (userspace) and a container (design/container.md), and compare with `wg show` and the logs; running as non-root yields a permission error |
+| Real machines | Run `nett status` on edge-vps (kernel WireGuard), the Mac native member (userspace) and a container (design/container.md), and compare with `wg show` and the logs; as an ordinary user `nett status` answers and `nett reload` is refused |
 | Resources | The memory target in section 8 |
-
-## 10. Open questions
-
-| Question | Notes |
-|---|---|
-| Non-root users viewing status | Currently root only. If needed, a group (for example `admin` on macOS) can be added, opening only queries and not the later desired state delivery |

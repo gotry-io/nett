@@ -53,7 +53,7 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 **Three principles**
 
 1. **Management and traffic are separate**: when the Hub and the nodes are both stopped, websites and the mesh keep working; changes are temporarily impossible.
-2. **Privileged components are not exposed; exposed components are not privileged**: nett-node and the mesh process listen on no public address (the mesh process provides DNS and probe responses only on the mesh address; probe responses on a LAN address are enabled only when a LAN direct candidate exists, and do not respond to unauthenticated probes); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the mesh process, answers only authenticated probes, and does not respond at all to unauthenticated packets.
+2. **Privileged components are not exposed; exposed components are not privileged**: nett-node and the mesh process listen on no public address (the mesh process provides DNS and probe responses only on the mesh address); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the mesh process, answers only authenticated probes, and does not respond at all to unauthenticated packets.
 3. **Decision and execution are separate; raising privileges requires a signature**: a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the content to be signed is computed and displayed locally by the signing tool, not through the Hub (ADR 0024, design/auth.md section 2). Mesh members, advertised routes and access rules are likewise composed of signed artifacts (ADR 0014).
 
 ## 3. nett-node
@@ -169,7 +169,7 @@ Control plane: Hub (addresses, public keys, candidate paths, relay list, link qu
 
 | Candidate path | Condition |
 |---|---|
-| LAN direct | Both nodes are on the same LAN (the Hub issues both sides' LAN addresses, and the mesh process confirms by probing) |
+| LAN direct | The peer's LAN addresses (the Hub issues each node's LAN addresses to its peers, and probing decides which ones work) |
 | Public direct | At least one end is reachable from outside (`public`; IPv4 and IPv6 are judged separately) |
 | Via relay | Forwarded through the nett-relay of some `public` node |
 | Multi-hop relay | Through two or more relays (for example, over a high-quality line when crossing borders) |

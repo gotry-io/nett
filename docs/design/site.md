@@ -132,10 +132,10 @@ When the desired state is composed (with a Hub, the Hub composes it with the sam
 
 1. **Every pair of machines involved in an access rule**: each selector on either side of a rule corresponds to one machine (`<machine>`, `<machine>.edge` and `<machine>.routes` all correspond to the machine itself), a connection is established between each pair across the two sides, except a machine with itself;
 2. **Every `dial-only` member with all `public` members**: used to determine the NAT type and mapped address (mesh.md section 6.1), and also redundancy on failure (architecture.md section 12.3);
-3. The candidate paths of each connection are generated per mesh.md section 6: when one end is `public`, the other end connects directly to its public address (generated separately when there are IPv4 and IPv6 addresses); when both ends are `dial-only`, hole punching is used for a direct connection; with a Hub, a LAN direct path when both ends report addresses in the same LAN prefix behind the same public address; then, when one end runs a relay with TLS and the other end decides the path (mesh.md section 8.3), that relay over TLS for the deciding end, which keeps the two connected when only TCP passes between them (mesh.md section 5.1); and through every relay other than the two ends (section 4.1), in the order of the relays' node IDs, UDP before TLS, until the connection has 6 candidates. Both ends get the same relays, except that an end never gets a path through its own relay, and each relay gets the connections that list it.
+3. The candidate paths of each connection are generated per mesh.md section 6: when one end is `public`, the other end connects directly to its public address (generated separately when there are IPv4 and IPv6 addresses); when both ends are `dial-only`, hole punching is used for a direct connection; with a Hub, a LAN direct path to each LAN address the other end reports (mesh.md section 6), which do not count toward the 6 candidates; then, when one end runs a relay with TLS and the other end decides the path (mesh.md section 8.3), that relay over TLS for the deciding end, which keeps the two connected when only TCP passes between them (mesh.md section 5.1); and through every relay other than the two ends (section 4.1), in the order of the relays' node IDs, UDP before TLS, until the connection has 6 candidates. Both ends get the same relays, except that an end never gets a path through its own relay, and each relay gets the connections that list it.
 
 - A connection is only a channel: access is still decided by the rules, denied by default (ADR 0023). There is no connection between two machines that no rule involves, and in `nett status` this pair is `no path`;
-- A connection with both ends `dial-only` and no relay in the site has only hole punching candidates: when both ends are behind symmetric NAT it cannot be punched through (mesh.md section 6.1). The change listing says `punch only; may not connect` for such a connection, and suggests `nett site relay`;
+- A connection with both ends `dial-only` and no relay in the site connects only over a LAN: hole punching starts through a tunnel over a relay (mesh.md section 6.1). The change listing says `punch only; connects over a LAN, or once a relay is added: nett site relay <machine>` for such a connection;
 - When rules change, connections are added or removed accordingly and listed in the same change:
 
   ```
@@ -143,7 +143,7 @@ When the desired state is composed (with a Hub, the Hub composes it with the sam
   Access rules v4 -> v5:
     + r5  mac (100.88.0.4) -> nas (100.88.0.6)  22/tcp
   Connections:
-    + mac - nas  punch only; may not connect
+    + mac - nas  punch only; connects over a LAN, or once a relay is added: nett site relay <machine>
   Sign? [y/N] y
   ```
 
