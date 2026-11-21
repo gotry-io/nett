@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-21
+
 - `nett` and `nett-hub` end quietly when the reader of their output goes away, such as
   `nett status --json | jq` where jq is not installed, or `| head -1`, instead of panicking.
 
