@@ -24,11 +24,11 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         return Err(arg.unexpected().into());
     }
     let Some(resolvectl) = RESOLVECTL.into_iter().find(|p| Path::new(p).exists()) else {
-        println!("systemd-resolved is not installed; names resolve with `dig @<mesh address>`");
+        outln!("systemd-resolved is not installed; names resolve with `dig @<mesh address>`");
         return Ok(());
     };
     if !Path::new("/run/systemd/resolve").exists() {
-        println!("systemd-resolved is not running; names resolve with `dig @<mesh address>`");
+        outln!("systemd-resolved is not running; names resolve with `dig @<mesh address>`");
         return Ok(());
     }
     let deadline = Instant::now() + WAIT;
@@ -40,7 +40,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             break ip;
         }
         if Instant::now() >= deadline {
-            println!("{INTERFACE} has no address yet; names under nett.internal are not routed");
+            outln!("{INTERFACE} has no address yet; names under nett.internal are not routed");
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -55,10 +55,10 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     for args in steps {
         match crate::install::run(resolvectl, args) {
             Ok(true) => {}
-            Ok(false) => println!("resolvectl {} did not succeed", args.join(" ")),
-            Err(e) => println!("resolvectl {}: {e:#}", args.join(" ")),
+            Ok(false) => outln!("resolvectl {} did not succeed", args.join(" ")),
+            Err(e) => outln!("resolvectl {}: {e:#}", args.join(" ")),
         }
     }
-    println!("names under nett.internal go to {ip} on {INTERFACE}");
+    outln!("names under nett.internal go to {ip} on {INTERFACE}");
     Ok(())
 }

@@ -70,6 +70,10 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 unwrap_used = "deny"
 dbg_macro = "deny"
+# println! and its kin panic when the reader of the output has gone; programs write through
+# nett_core::output instead
+print_stdout = "deny"
+print_stderr = "deny"
 
 [profile.release]
 lto = "fat"

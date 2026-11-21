@@ -4,6 +4,10 @@
 //! Commands fall into three groups by scope: the whole mesh, this machine, service processes
 //! (architecture.md section 13.4).
 
+// The output macros (out!, outln!, err!, errln!), which do not panic when the reader has gone
+#[macro_use]
+extern crate nett_core;
+
 use std::ffi::OsString;
 use std::process::ExitCode;
 
@@ -188,7 +192,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("nett: {e:#}");
+            errln!("nett: {e:#}");
             #[cfg(target_os = "macos")]
             if service {
                 system_log::error(&format!("nett: {e:#}"));
@@ -232,26 +236,26 @@ mod system_log {
 fn run() -> anyhow::Result<()> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let Some(first) = args.first().and_then(|a| a.to_str()) else {
-        print!("{}", help());
+        out!("{}", help());
         return Ok(());
     };
     match first {
         "help" | "--help" | "-h" => {
             match args.get(1).and_then(|a| a.to_str()) {
-                Some(name) => print!("{}", command_help(find(name)?)),
-                None => print!("{}", help()),
+                Some(name) => out!("{}", command_help(find(name)?)),
+                None => out!("{}", help()),
             }
             return Ok(());
         }
         "--version" | "-V" => {
-            println!("nett {}", env!("CARGO_PKG_VERSION"));
+            outln!("nett {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
         _ => {}
     }
     let command = find(first)?;
     if args[1..].iter().any(|a| a == "--help" || a == "-h") {
-        print!("{}", command_help(command));
+        out!("{}", command_help(command));
         return Ok(());
     }
     #[cfg(target_os = "linux")]

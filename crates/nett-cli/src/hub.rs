@@ -124,7 +124,7 @@ pub fn link(dir: &Path, code: &str) -> anyhow::Result<()> {
     // The Hub seals its backups to this key; the private half stays in the site directory
     if site.ensure_backup_key(&mut state)? {
         site.save(&state)?;
-        println!(
+        outln!(
             "Created {}: the Hub's backups open only with it. Keep a copy offline with {}.",
             site.path().join(nett_site::dir::BACKUP_FILE).display(),
             nett_site::dir::RECOVERY_FILE
@@ -133,7 +133,7 @@ pub fn link(dir: &Path, code: &str) -> anyhow::Result<()> {
     if let Some(old) = SiteHub::load(dir)?
         && old.url != code.url
     {
-        println!("Replacing the link to {}.", old.url);
+        outln!("Replacing the link to {}.", old.url);
     }
     let target = Target {
         url: code.url.clone(),
@@ -152,7 +152,7 @@ pub fn link(dir: &Path, code: &str) -> anyhow::Result<()> {
     };
     hub.save(dir)?;
     push(&hub, &state)?;
-    println!(
+    outln!(
         "Linked to {}. Pushed {} machines, {}.\nConnect each existing machine with `nett site invite <name>`.",
         hub.url,
         state.machines.len(),
@@ -394,9 +394,9 @@ pub fn push_and_wait(hub: &SiteHub, state: &State) -> anyhow::Result<(StatusResp
             )),
         }
     }
-    println!("Pushed. {applied} of {total} machines applied.");
+    outln!("Pushed. {applied} of {total} machines applied.");
     for note in notes {
-        println!("  {note}");
+        outln!("  {note}");
     }
     Ok((status, failed))
 }
@@ -461,7 +461,7 @@ pub fn enrollment_token(
 
 /// The one line to run on the new machine (design/hub.md section 3.3): the same on all platforms.
 pub fn print_enrollment(name: &NodeName, token: &str) {
-    println!(
+    outln!(
         "On {name}, run within 30 minutes (once):\n  {INSTALL_SCRIPT} && sudo nett install {token}"
     );
 }
@@ -482,7 +482,7 @@ pub fn status(
             .find(|m| m.name == name.as_str())
             .with_context(|| format!("the Hub has no machine named {name}"))?;
         if json {
-            println!("{}", serde_json::to_string_pretty(m)?);
+            outln!("{}", serde_json::to_string_pretty(m)?);
             return Ok(());
         }
         let mut lines = vec![
@@ -498,13 +498,13 @@ pub fn status(
         if let Some(upgrade) = upgrade_text(m) {
             lines.push(("upgrade", upgrade));
         }
-        print!("{}", key_values(&lines));
+        out!("{}", key_values(&lines));
         match m.status.clone().map(serde_json::from_value::<StatusDoc>) {
-            Some(Ok(doc)) => print!("\n{}", crate::status::overview(&doc, now)),
+            Some(Ok(doc)) => out!("\n{}", crate::status::overview(&doc, now)),
             Some(Err(_)) => {
-                println!("\nIts status is in a format this version cannot read; see --json.")
+                outln!("\nIts status is in a format this version cannot read; see --json.")
             }
-            None => println!("\nIt has not reported its status yet."),
+            None => outln!("\nIt has not reported its status yet."),
         }
         let events: Vec<Event> = request(
             &hub.target(),
@@ -522,12 +522,12 @@ pub fn status(
                     e.detail.clone(),
                 ]
             }));
-            println!("\nRecent events:\n{}", table(&rows).trim_end());
+            outln!("\nRecent events:\n{}", table(&rows).trim_end());
         }
         return Ok(());
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&reply)?);
+        outln!("{}", serde_json::to_string_pretty(&reply)?);
         return Ok(());
     }
     let backup = match (&reply.backup, state.backup_key) {
@@ -555,7 +555,7 @@ pub fn status(
         format!("{} machines, {}", state.machines.len(), rules_text(state)),
     ));
     lines.push(("backup", backup));
-    print!("{}", key_values(&lines));
+    out!("{}", key_values(&lines));
     let mut rows =
         vec![["MACHINE", "ADDRESS", "HUB", "VERSION", "CONFIG", "PROBLEMS"].map(String::from)];
     for m in &reply.machines {
@@ -581,7 +581,7 @@ pub fn status(
             problems,
         ]);
     }
-    println!("\n{}", table(&rows).trim_end());
+    outln!("\n{}", table(&rows).trim_end());
 
     let docs: BTreeMap<String, StatusDoc> = reply
         .machines
@@ -628,7 +628,7 @@ pub fn status(
         pairs.sort();
         let mut rows = vec![["PEER A", "PEER B", "STATE", "PATH", "RTT"].map(String::from)];
         rows.extend(pairs);
-        println!("\n{}", table(&rows).trim_end());
+        outln!("\n{}", table(&rows).trim_end());
     }
     Ok(())
 }

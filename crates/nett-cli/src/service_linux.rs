@@ -146,7 +146,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     ensure_dir(PROGRAM_DIR, 0o755)?;
     let binary_changed = copy_self(BINARY)?;
     if !ensure_link(LINK, BINARY)? {
-        println!("{LINK} belongs to another installer; the services run {BINARY}.");
+        outln!("{LINK} belongs to another installer; the services run {BINARY}.");
     }
     ensure_dir(nett_node::platform::linux::UNIT_DIR, 0o755)?;
     let write =
@@ -161,11 +161,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
 
     if !Path::new(DESIRED).exists() {
         crate::mesh::print_keys(Path::new(DIR), keys);
-        println!(
+        outln!(
             "Installed {BINARY} and {}. Not started: {DESIRED} does not exist yet.",
             mesh.name
         );
-        println!(
+        outln!(
             "Once the machine is in the site, copy its desired state here and run \
              `sudo nett install --config <desired.json>`."
         );
@@ -178,7 +178,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     }
     match ensure_running(&mesh, mesh_unit_changed || binary_changed, flavor)? {
         Some(m) => messages.push(m),
-        None if desired_changed => print!(
+        None if desired_changed => out!(
             "{}",
             crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
         ),
@@ -233,10 +233,10 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         ));
     }
     for m in messages {
-        println!("{m}");
+        outln!("{m}");
     }
     if mesh_unit_changed || node_unit_changed || binary_changed {
-        println!("Logs: journalctl -u nett-mesh -u nett-node");
+        outln!("Logs: journalctl -u nett-mesh -u nett-node");
     }
     Ok(())
 }
@@ -264,12 +264,12 @@ pub fn uninstall() -> anyhow::Result<()> {
     }
     remove_accounts()?;
     if kept {
-        println!(
+        outln!(
             "Removed nett. This machine's identity stays in {DIR}: `sudo nett install` brings it back \
              as the same member, and `sudo rm -r {DIR}` deletes it."
         );
     } else {
-        println!("Removed nett. Nothing of it remains on this machine.");
+        outln!("Removed nett. Nothing of it remains on this machine.");
     }
     Ok(())
 }
@@ -325,7 +325,7 @@ pub fn leave() -> anyhow::Result<()> {
     crate::install::remove_tree(RELAY_CERT_DIR)?;
     remove_old_layout(false)?;
     crate::install::remove_if_empty(DIR)?;
-    println!(
+    outln!(
         "Left the site: removed the services and the mesh interface, deleted the keys, the desired \
          state, the trust store and the Hub configuration. {BINARY} stays; `sudo nett uninstall` \
          removes it."
@@ -344,7 +344,7 @@ fn remove_boot_task() -> anyhow::Result<()> {
     if Flavor::detect() == Flavor::Dsm
         && let Some(m) = crate::dsm::remove_boot_task()?
     {
-        println!("{m}");
+        outln!("{m}");
     }
     Ok(())
 }

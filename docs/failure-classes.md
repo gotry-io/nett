@@ -207,7 +207,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: machine-readable output stays machine-readable; an error names what was being done and the likely cause; a diagnostic tests the component itself, not a proxy for it; output shows what the reader needs at that point (architecture.md section 14.3).
 
-**Breaks when** a report goes to standard output beside JSON; an error is wrapped as a generic one; a check asks a different component than the one it judges; output repeats what was needed only once.
+**Breaks when** a report goes to standard output beside JSON; a write to a reader that has gone panics; an error is wrapped as a generic one; a check asks a different component than the one it judges; output repeats what was needed only once.
 
 **Where it holds**
 
@@ -217,7 +217,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `sudo nett install` prints the machine's keys only while it has no desired state;
 - A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6);
 - Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file;
-- The change listing says that two `dial-only` machines without a relay connect only over a LAN, and gives the command that adds one (site.md section 6).
+- The change listing says that two `dial-only` machines without a relay connect only over a LAN, and gives the command that adds one (site.md section 6);
+- A command whose reader has gone ends quietly with success, a message that cannot be written leaves the exit status alone, and any other failure to write the output says why: the programs write through `nett_core::output`, and the workspace lints deny `println!` and its kin, which panic instead (architecture.md section 14.3).
 
 **Guards**
 
@@ -226,6 +227,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
 - `nett-hub:logs_carry_no_terminal_color_codes`
 - `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
+- `nett-cli:a_closed_output_ends_the_command_quietly`
+- `nett-cli:a_closed_error_output_keeps_the_failure`
+- `nett-cli:a_full_output_says_why_and_fails`
+- `nett-hub:a_closed_output_ends_the_command_quietly`
 - `ci:Full flow of sudo nett install (needs root)`
 
 **Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub, which needs a Hub that serves those updates to the command line in a test; the error for a download over the size limit, since the client fetches only `https://` URLs verified against the system's root certificates, which a test cannot serve (the limit itself is guarded by `nett-node:a_program_larger_than_any_release_is_refused`, and the error is one message naming the URL and the limit).

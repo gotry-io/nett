@@ -95,7 +95,7 @@ pub fn leave_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     // A machine set up with `nett join`: its services are not nett's to remove
     tell_hub(&dir)?;
     forget(&dir, &format!("{dir}/state"))?;
-    println!(
+    outln!(
         "Left the site: deleted the keys and configuration in {dir}. Stop its nett services yourself."
     );
     Ok(())
@@ -122,7 +122,7 @@ pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     if let Some(bytes) = outcome.desired {
         replace_if_changed(&Path::new(&dir).join("desired.json"), &bytes, 0o600)?;
     }
-    println!("Ready in {dir}: run `nett mesh` and `nett node` with this directory.");
+    outln!("Ready in {dir}: run `nett mesh` and `nett node` with this directory.");
     Ok(())
 }
 
@@ -224,11 +224,11 @@ pub fn apply_token(
     }
     let hub_changed = match crate::join::join(Path::new(dir), Path::new(state_dir), text)? {
         crate::join::Joined::New(url) => {
-            println!("Connecting this machine to the Hub at {url}.");
+            outln!("Connecting this machine to the Hub at {url}.");
             true
         }
         crate::join::Joined::Switched { from, to } => {
-            println!("Switching this machine from the Hub at {from} to {to}.");
+            outln!("Switching this machine from the Hub at {from} to {to}.");
             true
         }
         crate::join::Joined::Unchanged => false,
@@ -257,7 +257,7 @@ fn enroll(
             .map_err(anyhow::Error::msg)?
             .is_some_and(|c| c.node_id == token.node_id)
         {
-            println!("This machine has already joined the site through the Hub.");
+            outln!("This machine has already joined the site through the Hub.");
             return Ok(TokenOutcome::default());
         }
         bail!(
@@ -265,7 +265,7 @@ fn enroll(
              command again"
         );
     }
-    println!("Joining the site through the Hub at {}.", token.url);
+    outln!("Joining the site through the Hub at {}.", token.url);
     let enrolled = runtime()?.block_on(nett_node::join::enroll(dir, token, unix_now()))?;
     crate::site::check_desired_for(&enrolled.desired, mesh_public)
         .context("the Hub's desired state for this machine")?;
@@ -293,7 +293,7 @@ fn unix_now() -> i64 {
 /// unreachable, explains what to do on the computer afterwards and continues as usual.
 pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
     let Some(config) = HubConfig::load(Path::new(dir)).map_err(anyhow::Error::msg)? else {
-        println!(
+        outln!(
             "This machine has no Hub. On the computer that holds the site, remove it with \
              `nett site remove <name>`."
         );
@@ -306,16 +306,16 @@ pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
         tokio::time::timeout(LEAVE_TIMEOUT, nett_node::session::leave(&config, &secret)).await
     });
     match told {
-        Ok(Ok(())) => println!(
+        Ok(Ok(())) => outln!(
             "Told the Hub at {}: every member drops this machine.",
             config.url
         ),
-        Ok(Err(e)) => println!(
+        Ok(Err(e)) => outln!(
             "Could not tell the Hub at {} ({e}). On the computer that holds the site, remove this \
              machine with `nett site remove <name>`.",
             config.url
         ),
-        Err(_) => println!(
+        Err(_) => outln!(
             "The Hub at {} did not answer in time. On the computer that holds the site, remove this \
              machine with `nett site remove <name>`.",
             config.url

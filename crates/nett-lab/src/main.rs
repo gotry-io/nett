@@ -5,6 +5,10 @@
 //! root and runs only on Linux. The `nett` under test is built with the `lab` feature: `cargo build
 //! -p nett-cli --features lab`.
 
+// The output macros (out!, outln!, err!, errln!), which do not panic when the reader has gone
+#[macro_use]
+extern crate nett_core;
+
 #[cfg(target_os = "linux")]
 mod cmd;
 #[cfg(target_os = "linux")]
@@ -29,7 +33,7 @@ fn main() -> ExitCode {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(2),
         Err(e) => {
-            eprintln!("nett-lab: {e:#}");
+            errln!("nett-lab: {e:#}");
             ExitCode::FAILURE
         }
     }
@@ -132,7 +136,7 @@ fn run() -> anyhow::Result<bool> {
             Long("userspace") => userspace.push(parser.value()?.string()?),
             Long("soak") => soak = Some(parser.value()?.string()?.parse()?),
             Long("help") => {
-                println!("{USAGE}");
+                outln!("{USAGE}");
                 return Ok(true);
             }
             other => return Err(other.unexpected().into()),
@@ -294,14 +298,14 @@ fn run() -> anyhow::Result<bool> {
                 _ => anyhow::bail!("unknown scenario `{name}`\n{USAGE}"),
             };
             for check in &report.checks {
-                println!(
+                outln!(
                     "{} {} {}",
                     if check.passed { "PASS" } else { "FAIL" },
                     check.name,
                     check.detail
                 );
             }
-            println!(
+            outln!(
                 "{}: {}",
                 report.scenario,
                 if report.passed { "PASS" } else { "FAIL" }
@@ -317,7 +321,7 @@ fn run() -> anyhow::Result<bool> {
                     .node(&node.name)
                     .and_then(|n| n.ssh.clone())
                     .unwrap_or_default();
-                println!(
+                outln!(
                     "{} {ssh} {} {}",
                     node.name,
                     node.mesh_ipv4,

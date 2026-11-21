@@ -106,7 +106,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         }
         (None, false) => match &site {
             Some(site) => crate::site::find_desired_for(site, &keys.0)?.map(|(path, bytes)| {
-                println!("Using {}", path.display());
+                outln!("Using {}", path.display());
                 bytes
             }),
             None => None,
@@ -127,11 +127,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     if !Path::new(DESIRED).exists() {
         crate::mesh::print_keys(Path::new(DIR), keys);
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
-        println!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
-        println!(
+        outln!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
+        outln!(
             "Once the machine is in the site, run `sudo nett install` again: it imports its desired state."
         );
-        println!(
+        outln!(
             "If the site is on another machine, use `sudo nett install --config <desired.json>`."
         );
         return Ok(());
@@ -143,7 +143,7 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
             // Only the desired state changed: re-read through the local interface, without restart
             // or connection interruption, and show whether it was accepted (design/status.md
             // section 4.1)
-            print!(
+            out!(
                 "{}",
                 crate::status::reload_at(Path::new(nett_mesh::status::DEFAULT_SOCKET))?
             );
@@ -167,14 +167,14 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         messages.push("The services are running. Nothing changed.".to_owned());
     }
     for m in messages {
-        println!("{m}");
+        outln!("{m}");
     }
     if mesh_plist_changed || node_plist_changed || binary_changed {
-        println!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
+        outln!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
         if linked {
-            println!("Run `sudo nett install` again after upgrading nett.");
+            outln!("Run `sudo nett install` again after upgrading nett.");
         } else {
-            println!("Run `sudo nett install` again after the site changes or nett is upgraded.");
+            outln!("Run `sudo nett install` again after the site changes or nett is upgraded.");
         }
     }
     Ok(())
@@ -238,9 +238,9 @@ pub fn uninstall() -> anyhow::Result<()> {
         crate::install::remove_file(COMMAND)?;
     }
     if crate::install::remove_if_empty(DIR)? {
-        println!("Removed nett. Nothing of it remains on this machine.");
+        outln!("Removed nett. Nothing of it remains on this machine.");
     } else {
-        println!(
+        outln!(
             "Removed nett. This machine's identity stays in {DIR}: `sudo nett install` brings it back \
              as the same member, and `sudo rm -r '{DIR}'` deletes it."
         );
@@ -257,7 +257,7 @@ pub fn leave() -> anyhow::Result<()> {
     remove_installation()?;
     crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
     crate::install::remove_if_empty(DIR)?;
-    println!(
+    outln!(
         "Left the site: removed the services, deleted the keys, the desired state, the trust store \
          and the Hub configuration. `sudo nett uninstall` removes the nett command too."
     );

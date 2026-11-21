@@ -338,22 +338,22 @@ fn upgrade(dir: &Path, names: Vec<NodeName>, hub_only: bool, yes: bool) -> anyho
         .collect();
     let hub_too = (all || hub_only) && plan.hub_behind();
     if behind.is_empty() && !hub_too {
-        println!("Nothing to approve: they run {release} already.");
+        outln!("Nothing to approve: they run {release} already.");
         return Ok(());
     }
     let mut new = old.clone();
     new.approve_upgrade(release, &behind, hub_too)?;
     let lines = describe(&old, &new);
     if lines.is_empty() {
-        println!(
+        outln!(
             "The upgrade to {release} is approved already; `nett site status` shows how far it got."
         );
         return Ok(());
     }
     for line in &lines {
-        println!("{line}");
+        outln!("{line}");
     }
-    println!("Release notes: https://github.com/gotry-io/nett/releases/tag/v{release}");
+    outln!("Release notes: https://github.com/gotry-io/nett/releases/tag/v{release}");
     confirm(yes, "Approve and push?")?;
     save_with_outputs(&site, &old, &new, &outputs(&new)?)?;
     crate::hub::push(&hub, &new).with_context(|| {
@@ -361,12 +361,12 @@ fn upgrade(dir: &Path, names: Vec<NodeName>, hub_only: bool, yes: bool) -> anyho
          pushes it again"
     })?;
     if hub_too {
-        println!(
+        outln!(
             "Pushed. The Hub upgrades to {release} now, then the machines approved with it; \
              `nett site status` shows their versions."
         );
     } else {
-        println!(
+        outln!(
             "Pushed. The approved machines upgrade to {release} now; `nett site status` shows \
              their versions."
         );
@@ -384,7 +384,7 @@ fn devices_ready(dir: &Path) -> anyhow::Result<()> {
     match SiteHub::load(dir)? {
         Some(hub) => crate::hub::require_devices(&hub),
         None => {
-            println!(
+            outln!(
                 "Every machine needs nett {} or later for devices; older ones reject the new \
                  signed content.",
                 crate::hub::DEVICES_SINCE
@@ -453,11 +453,11 @@ fn devices(dir: &Path, json: bool) -> anyhow::Result<()> {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&list)?);
+        outln!("{}", serde_json::to_string_pretty(&list)?);
         return Ok(());
     }
     if state.devices.is_empty() {
-        println!("No devices. `nett site device add <name>` adds one.");
+        outln!("No devices. `nett site device add <name>` adds one.");
         return Ok(());
     }
     let mut rows = vec![["NAME", "ADDRESS", "GATEWAY", "ACCESS"].map(String::from)];
@@ -475,7 +475,7 @@ fn devices(dir: &Path, json: bool) -> anyhow::Result<()> {
             },
         ]);
     }
-    print!("{}", table(&rows));
+    out!("{}", table(&rows));
     Ok(())
 }
 
@@ -489,9 +489,9 @@ fn sync(dir: &Path, hub: &SiteHub, json: bool) -> anyhow::Result<()> {
     // With --json the report goes to standard error, so that standard output stays JSON
     let say = |line: String| {
         if json {
-            eprintln!("{line}");
+            errln!("{line}");
         } else {
-            println!("{line}");
+            outln!("{line}");
         }
     };
     let Ok(updates) = crate::hub::fetch_updates(hub) else {
@@ -637,7 +637,7 @@ fn modify(
         // the generation when the content is the same)
         let written = write_outputs(&site, &outputs)?;
         if written.is_empty() {
-            println!("Nothing changed.");
+            outln!("Nothing changed.");
         }
         match &hub {
             Some(hub) => {
@@ -648,7 +648,7 @@ fn modify(
         return Ok(());
     }
     for line in &lines {
-        println!("{line}");
+        outln!("{line}");
     }
     confirm(
         yes,
@@ -707,7 +707,7 @@ fn print_written(site: &SiteDir, written: &[NodeName]) {
         return;
     }
     let names: Vec<String> = written.iter().map(ToString::to_string).collect();
-    println!(
+    outln!(
         "Wrote the desired state for {} in {}/<machine>/desired.json.
 The files contain no private keys. To apply one on its machine:
   Linux      copy it to /etc/nett/desired.json, then run `sudo nett reload`
@@ -726,7 +726,7 @@ fn confirm(yes: bool, question: &str) -> anyhow::Result<()> {
         std::io::stdin().is_terminal(),
         "not signing: this is not a terminal; pass --yes to sign without asking"
     );
-    print!("{question} [y/N] ");
+    out!("{question} [y/N] ");
     std::io::stdout().flush().ok();
     let mut answer = String::new();
     std::io::stdin().lock().read_line(&mut answer)?;
@@ -739,7 +739,7 @@ fn confirm(yes: bool, question: &str) -> anyhow::Result<()> {
 
 fn init(dir: &Path, origin: &str) -> anyhow::Result<()> {
     SiteDir::init(dir, origin)?;
-    println!(
+    outln!(
         "Created a site in {}.
 recovery.pk8 signs everything in this network. Back it up offline now:
 without it, every machine has to leave and join again.
@@ -770,7 +770,7 @@ fn invite(dir: &Path, name: &NodeName, yes: bool) -> anyhow::Result<()> {
         // receives its desired state from there (design/hub.md section 3.5)
         crate::hub::push(&hub, &state)?;
         let token = crate::hub::join_token(&hub, &state, name)?;
-        println!("{name} is already a member. On {name}, run:\n  sudo nett install {token}");
+        outln!("{name} is already a member. On {name}, run:\n  sudo nett install {token}");
         return Ok(());
     }
     let node = {
@@ -787,7 +787,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
             Ok(()) => return Ok(()),
             // When the Hub is unreachable, the machines in the site are still listed
             Err(e) if machine.is_none() => {
-                eprintln!("Cannot reach the Hub: {e:#}\nShowing the site only.\n")
+                errln!("Cannot reach the Hub: {e:#}\nShowing the site only.\n")
             }
             Err(e) => return Err(e),
         },
@@ -797,14 +797,14 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
         None => {}
     }
     if json {
-        println!("{}", serde_json::to_string_pretty(&state.machines)?);
+        outln!("{}", serde_json::to_string_pretty(&state.machines)?);
         return Ok(());
     }
     let rules = match &state.access_rules {
         Some(r) => format!("access rules v{} ({} rules)", r.version, state.rules.len()),
         None => "no access rules".to_owned(),
     };
-    print!(
+    out!(
         "{}",
         key_values(&[(
             "site",
@@ -812,7 +812,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
         )])
     );
     if state.machines.is_empty() {
-        println!("\nNo machines. `nett site add <name> --keys \"…\"` adds one.");
+        outln!("\nNo machines. `nett site add <name> --keys \"…\"` adds one.");
         return Ok(());
     }
     let mut rows = vec![["MACHINE", "ADDRESS", "REACH", "EDGE", "ROUTES"].map(String::from)];
@@ -848,7 +848,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
             },
         ]);
     }
-    println!("\n{}", table(&rows).trim_end());
+    outln!("\n{}", table(&rows).trim_end());
     let name = |id: &NodeId| {
         state
             .name_of(id)
@@ -869,7 +869,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
         listed.sort();
         let mut rows = vec![["CONNECTION", "PATH"].map(String::from)];
         rows.extend(listed);
-        println!("\n{}", table(&rows).trim_end());
+        outln!("\n{}", table(&rows).trim_end());
     }
     Ok(())
 }
@@ -877,7 +877,7 @@ fn status(dir: &Path, machine: Option<&NodeName>, json: bool) -> anyhow::Result<
 fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
     let state = SiteDir::open(dir)?.load()?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&state.rules)?);
+        outln!("{}", serde_json::to_string_pretty(&state.rules)?);
         return Ok(());
     }
     let own: Vec<String> = state
@@ -887,7 +887,7 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
         .map(|(n, _)| n.to_string())
         .collect();
     if state.rules.is_empty() && own.is_empty() {
-        println!(
+        outln!(
             "No access rules: no connection is allowed. `nett site allow <from> <to> <ports>` adds one."
         );
         return Ok(());
@@ -919,7 +919,7 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
             r.note.clone().unwrap_or_default(),
         ]);
     }
-    print!("{}", table(&rows));
+    out!("{}", table(&rows));
     Ok(())
 }
 

@@ -17,9 +17,10 @@ workspace = true
 [dependencies]
 anyhow.workspace = true
 lexopt.workspace = true
+# The output macros, on every platform
+nett-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-nett-core.workspace = true
 nett-mesh.workspace = true
 nett-relay = { workspace = true, features = ["lab"] }
 # Hub scenarios (design/hub.md section 10): site state, join tokens, Hub configuration, and, when
