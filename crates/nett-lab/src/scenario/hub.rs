@@ -1022,6 +1022,6 @@ pub fn leave_here(dir: &Path) -> anyhow::Result<()> {
         &x25519_dalek::StaticSecret::from(*identity.as_bytes()),
     ))?;
     nett_mesh::linux::teardown()?;
-    println!("left");
+    outln!("left");
     Ok(())
 }

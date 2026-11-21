@@ -4,6 +4,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `nett` and `nett-hub` end quietly when the reader of their output goes away, such as
+  `nett status --json | jq` where jq is not installed, or `| head -1`, instead of panicking.
+
 ## [0.7.0] - 2026-11-19
 
 - Machines on one LAN connect over it wherever the Hub runs: every LAN address a machine reports is

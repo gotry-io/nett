@@ -185,13 +185,13 @@ pub(crate) fn print_keys(
     dir: &std::path::Path,
     (mesh, identity): (X25519PublicKey, X25519PublicKey),
 ) {
-    println!(
+    outln!(
         "Private keys are in {} (mode 0600) and stay on this machine.",
         dir.display()
     );
-    println!("On the computer that holds the site, add this machine with:");
-    println!("  nett site add <name> --keys \"{mesh} {identity}\"");
-    println!("(with --public --ipv4 <address> when other machines connect to it)");
+    outln!("On the computer that holds the site, add this machine with:");
+    outln!("  nett site add <name> --keys \"{mesh} {identity}\"");
+    outln!("(with --public --ipv4 <address> when other machines connect to it)");
 }
 
 /// Logs go to standard error (collected into the journal by systemd on Linux). When running as a

@@ -111,7 +111,7 @@ impl Drop for Lab {
             child.wait().ok();
         }
         if let Err(e) = self.underlay.down() {
-            eprintln!("nett-lab: tearing down the lab network failed: {e:#}");
+            errln!("nett-lab: tearing down the lab network failed: {e:#}");
         }
     }
 }

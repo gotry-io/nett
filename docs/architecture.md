@@ -454,7 +454,7 @@ Everything nett ships and documents is in English only, like common open-source 
 - Human-readable output is column-aligned, with units on values and a precision suited to reading, and times written as relative times (`12s ago`); where there is no value, write `-`;
 - Output meant for programs uses `--json`, with stable field names and a version number;
 - No colors and no emoji;
-- Exit codes: 0 for success, non-zero for failure, which scripts use to decide.
+- Exit codes: 0 for success, non-zero for failure, which scripts use to decide. When the reader of the output goes away (`nett status | head -1`, or `| jq` where jq is not installed), the command ends quietly with 0, as ripgrep does: it did what was asked, and the reader stopped. Go programs such as the Tailscale CLI are ended by SIGPIPE instead; nett keeps SIGPIPE ignored, as Rust programs do, because its sockets rely on writes returning errors. A message that cannot be written to standard error leaves the exit status as it was.
 
 ### 14.4 Telemetry
 

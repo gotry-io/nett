@@ -2,6 +2,10 @@
 //! section 8: `serve` runs the service, `init` prints a one-time link code, and `reset` invalidates
 //! the link with the site.
 
+// The output macros (out!, outln!, err!, errln!), which do not panic when the reader has gone
+#[macro_use]
+extern crate nett_core;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
@@ -55,7 +59,7 @@ fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("nett-hub: {e:#}");
+            errln!("nett-hub: {e:#}");
             std::process::ExitCode::FAILURE
         }
     }
@@ -86,7 +90,7 @@ fn run() -> anyhow::Result<()> {
             lexopt::Arg::Long("tls-key") => key = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("releases") => releases = parser.value()?.string()?,
             lexopt::Arg::Long("help") | lexopt::Arg::Short('h') => {
-                println!("{USAGE}");
+                outln!("{USAGE}");
                 return Ok(());
             }
             other => return Err(other.unexpected().into()),
@@ -119,14 +123,14 @@ fn run() -> anyhow::Result<()> {
             runtime.block_on(init(&data, &url, cert.as_deref()))
         }
         ["openapi"] => {
-            print!("{}", nett_hub::openapi::json()?);
+            out!("{}", nett_hub::openapi::json()?);
             Ok(())
         }
         ["restore", file] => runtime.block_on(restore(&data, Path::new(file))),
         ["reset"] => runtime.block_on(async {
             let db = db::Db::open(&data.join(DB_FILE)).await?;
             db.reset().await?;
-            println!("Forgot the linked site and its machines. Run `nett-hub init --url …` for a new link code.");
+            outln!("Forgot the linked site and its machines. Run `nett-hub init --url …` for a new link code.");
             anyhow::Ok(())
         }),
         _ => bail!(USAGE),
@@ -222,7 +226,7 @@ async fn restore(data: &Path, file: &Path) -> anyhow::Result<()> {
         .with_context(|| format!("reading {}", file.display()))?
         .with_context(|| format!("{} does not exist", file.display()))?;
     if std::io::stdin().is_terminal() {
-        eprint!("Backup key (the nett-backup-… line in backup.key of the site directory): ");
+        err!("Backup key (the nett-backup-… line in backup.key of the site directory): ");
         std::io::stderr().flush().ok();
     }
     let mut line = zeroize::Zeroizing::new(String::new());
@@ -251,7 +255,7 @@ async fn restore(data: &Path, file: &Path) -> anyhow::Result<()> {
         ),
         None => (0, 0),
     };
-    println!(
+    outln!(
         "Restored the Hub for {url} from a backup made at {}: {machines} machines, generation {generation}.
          Start `nett-hub serve --data {}` and point {url} at this host; the machines connect on their own.
          Then run any `nett site` command on the computer that holds the site: it pushes what changed since the backup.",
@@ -332,7 +336,7 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
         secret: Bytes32(secret),
         tls_fingerprint: cert.map(fingerprint).transpose()?.map(Bytes32),
     };
-    println!(
+    outln!(
         "Hub initialized. Link your site from the computer that holds it, within 1 hour:\n  nett site link {}",
         code.encode()
     );
@@ -340,7 +344,7 @@ async fn init(data: &Path, url: &str, cert: Option<&Path>) -> anyhow::Result<()>
         // Behind a reverse proxy (design/hub.md section 8): only these two path prefixes are
         // forwarded, and the user's other configuration is left untouched
         let host = url.trim_start_matches("https://").trim_end_matches('/');
-        println!(
+        outln!(
             "\nThe reverse proxy in front of the Hub forwards two paths to it, for example in Caddy:\n  \
              {host} {{\n      reverse_proxy /api/v1/* 127.0.0.1:8480\n      \
              reverse_proxy /node/v1/connect 127.0.0.1:8480\n  }}"

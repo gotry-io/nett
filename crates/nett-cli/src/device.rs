@@ -98,12 +98,10 @@ pub fn export(
     };
     let wireguard = config.wireguard();
     write_new(&files.wireguard, &wireguard)?;
-    println!("Wrote {} (WireGuard).", files.wireguard.display());
-    println!(
-        "It holds the device's private key, and nett keeps no copy: import it, then delete it."
-    );
+    outln!("Wrote {} (WireGuard).", files.wireguard.display());
+    outln!("It holds the device's private key, and nett keeps no copy: import it, then delete it.");
     if terminal {
-        print!("{}", qr(&wireguard)?.as_str());
+        out!("{}", qr(&wireguard)?.as_str());
     }
     Ok(())
 }

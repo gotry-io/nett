@@ -204,7 +204,7 @@ pub fn flood(to: SocketAddr, public_key: &[u8; 32], secs: u64) -> anyhow::Result
         }
         sent += packets.len() as u64;
     }
-    println!("sent {sent} initiations in {secs} s");
+    outln!("sent {sent} initiations in {secs} s");
     Ok(())
 }
 
@@ -229,8 +229,8 @@ pub fn accept_log(listen: SocketAddr, out: &Path) -> anyhow::Result<()> {
 /// otherwise `blocked <reason>`.
 pub fn connect(to: SocketAddr, timeout: Duration) -> anyhow::Result<()> {
     match TcpStream::connect_timeout(&to, timeout) {
-        Ok(_) => println!("connected"),
-        Err(e) => println!("blocked {:?}", e.kind()),
+        Ok(_) => outln!("connected"),
+        Err(e) => outln!("blocked {:?}", e.kind()),
     }
     Ok(())
 }

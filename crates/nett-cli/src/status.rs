@@ -37,15 +37,15 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         .context("the mesh service sent a status this version cannot read")?;
     let now = Timestamp::now();
     match (peer, json) {
-        (None, true) => println!("{}", serde_json::to_string_pretty(&raw)?),
-        (None, false) => print!("{}", overview(&doc, now)),
+        (None, true) => outln!("{}", serde_json::to_string_pretty(&raw)?),
+        (None, false) => out!("{}", overview(&doc, now)),
         (Some(wanted), json) => {
             let index = find_peer(&doc, &wanted)?;
             if json {
                 let peer = &raw["peers"][index];
-                println!("{}", serde_json::to_string_pretty(peer)?);
+                outln!("{}", serde_json::to_string_pretty(peer)?);
             } else {
-                print!("{}", peer_detail(&doc, &doc.peers[index], now));
+                out!("{}", peer_detail(&doc, &doc.peers[index], now));
             }
         }
     }
@@ -62,7 +62,7 @@ pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             _ => bail!("{RELOAD_USAGE}"),
         }
     }
-    print!("{}", reload_at(&socket)?);
+    out!("{}", reload_at(&socket)?);
     Ok(())
 }
 

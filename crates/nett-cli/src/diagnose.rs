@@ -44,7 +44,7 @@ pub fn whois(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         .context("an IPv4 or IPv6 address")?;
     let who = status::whois(&socket, address).map_err(|e| crate::status::explain(e, &socket))?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&who)?);
+        outln!("{}", serde_json::to_string_pretty(&who)?);
         return Ok(());
     }
     // The name is a label; the node ID is the identity (mesh.md section 11)
@@ -78,12 +78,12 @@ pub fn whois(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         }
         _ => format!("{address} belongs to no member this machine has verified"),
     };
-    println!("{line}");
+    outln!("{line}");
     if !who.mesh.is_empty() {
-        println!("  mesh   {}", crate::status::addresses(&who.mesh));
+        outln!("  mesh   {}", crate::status::addresses(&who.mesh));
     }
     if !roles.is_empty() {
-        println!("  roles  {}", roles.join(", "));
+        outln!("  roles  {}", roles.join(", "));
     }
     Ok(())
 }
@@ -117,7 +117,7 @@ pub fn ping(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     .context("opening a UDP socket")?;
     udp.set_read_timeout(Some(PING_WAIT))?;
     let to = SocketAddr::new(address, nett_mesh::probe::TUNNEL_PROBE_PORT);
-    println!("PING {label} ({address}) through the tunnel");
+    outln!("PING {label} ({address}) through the tunnel");
     let mut rtts = Vec::new();
     let seed = (std::process::id() & 0xffff) << 16;
     for i in 0..count {
@@ -138,26 +138,26 @@ pub fn ping(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                     .and_then(|id| current_path(&socket, id))
                     .map(|p| format!(", via {p}"))
                     .unwrap_or_default();
-                println!(
+                outln!(
                     "reply from {label}: {:.1} ms{path}",
                     rtt.as_secs_f64() * 1000.0
                 );
                 rtts.push(rtt);
             }
-            None => println!("no reply from {label} within {} s", PING_WAIT.as_secs()),
+            None => outln!("no reply from {label} within {} s", PING_WAIT.as_secs()),
         }
         if i + 1 < count {
             std::thread::sleep(PING_EVERY.saturating_sub(sent.elapsed()));
         }
     }
-    print!("{}", ping_summary(count, &rtts));
+    out!("{}", ping_summary(count, &rtts));
     if let Some(note) = doc
         .as_ref()
         .and_then(|d| d.peers.iter().find(|p| p.mesh.contains(&address)))
         .filter(|p| p.state == PeerState::NoPath)
         .map(|_| "no access rule connects this machine and the peer; the probes test the tunnel only")
     {
-        println!("{note}");
+        outln!("{note}");
     }
     if rtts.is_empty() {
         std::process::exit(1);
@@ -314,7 +314,7 @@ pub fn doctor(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     if cfg!(target_os = "linux") {
         findings.extend(check_host_firewall());
     }
-    print!("{}", report(&findings));
+    out!("{}", report(&findings));
     if findings.iter().any(|f| f.level == Level::Problem) {
         std::process::exit(1);
     }
