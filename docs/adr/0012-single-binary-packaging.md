@@ -5,13 +5,13 @@
 
 ## Context
 
-A node needs the command-line tool, the high-privilege nett-node, and the low-privilege nett-relay. ADR 0001 and 0011 require node and relay to be separate processes with separated privileges. The question is whether they should also be separate install packages.
+A node needs the command-line tool, the high-privilege nett daemon (the mesh and nett-node, ADR 0013), and the low-privilege nett-relay. ADR 0001 and 0011 require the daemon and the relay to be separate processes with separated privileges. The question is whether they should also be separate install packages.
 
 ## Decision
 
-- Only one executable, `nett`, is released for the node side, and it runs as the command line, `nett node`, `nett mesh` (mesh process), `nett transport` (transport adapter), or `nett relay` depending on the subcommand (ADR 0013);
+- Only one executable, `nett`, is released for the node side, and it runs as the command line, `nett daemon` (the nett daemon: the mesh, the TLS transport and nett-node, ADR 0013), `nett relay`, or `nett container` (the first process of nett's image, ADR 0016) depending on the subcommand;
 - The Hub is released separately as `nett-hub` and is installed only on the Hub host;
-- node, the mesh process, the transport adapter, and relay run as separate system services, each with its own identity and privileges (on macOS and Synology DSM the mesh process carries the TLS transport itself, ADR 0013);
+- the nett daemon and the relay run as separate system services, each with its own identity and privileges (ADR 0013);
 - Whether relay runs is decided by the Hub based on node reachability and signed policy, and relay is started and stopped by nett-node, not decided by the installation process;
 - New machines install from the project website (ADR 0020), and machines upgrade with programs fetched through their Hub (ADR 0025); release packages carry signatures;
 - **The release signing key belongs to the project, not to the user's Hub**. The public keys are embedded into `nett` at build time (two keys, primary and backup, ADR 0020), and nodes use them to verify every release package, wherever it came from;
@@ -20,7 +20,7 @@ A node needs the command-line tool, the high-privilege nett-node, and the low-pr
 
 ## Rationale
 
-- One installation and one upgrade, so processes cannot have mismatched versions; when the mesh process has not changed, an upgrade does not restart it (ADR 0013);
+- One installation and one upgrade, so processes cannot have mismatched versions;
 - Shared dependencies are stored once, and multiple processes share the code pages of the same file, so disk and memory usage are lower;
 - A node changing from `dial-only` to `public` needs no reinstallation;
 - Privilege isolation is guaranteed by the running user and privileges, regardless of whether the files are the same;

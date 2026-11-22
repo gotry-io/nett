@@ -240,7 +240,7 @@ A node's module permissions are not changed in `spec` but through `node-policies
 | `spec.modules` | Modules allowed to be enabled |
 | `spec.roles` | Roles: `relay`, `gateway` (mobile gateway), `subnet_router` (smart gateway), `edge` (runs Edge on this machine and declares how to recognize traffic sent by Edge: the address of the container Edge runs in, or the system user when running natively); signed by `node.set_roles` |
 | `spec.addresses` | Mesh address; with the `edge` role, also the Edge address |
-| `spec.serve` | TCP ports the mesh process forwards from the mesh address to the same port on `127.0.0.1` (ADR 0028) |
+| `spec.serve` | TCP ports the mesh forwards from the mesh address to the same port on `127.0.0.1` (ADR 0028) |
 | `spec.advertised_routes` | Advertised LAN prefixes (signed by `node.advertise_routes`) |
 | `spec.enrollment_public_key` | Enrollment public key, used to verify admission proofs |
 | `spec.policy_version` | Only increases |
@@ -328,7 +328,7 @@ The default is **deny** (`mesh.md` section 12, ADR 0023): connections between me
 
 The whole rule set is delivered as one versioned signed artifact (`auth.md` section 10.1). **The signed artifact holds the result after selector expansion** (member IDs, addresses, ports), and nodes enforce only the expansion result; when a label change makes the expansion larger, the Hub generates a new rule set, which waits for a signature as a change that widens access, and until it is signed the old expansion result stays in force. Changes that widen access are high-risk operations; adding a deny rule or deleting an allow rule is narrowing and is executed directly.
 
-**`whois`** (query interface): `GET /api/v1/mesh/whois?address=…` looks up which node, device or Edge a mesh address belongs to, for the console to display (the "identity lookup" in roadmap M1). This is a statement by the Hub; when a service or agent needs to confirm who the other side is, it uses the local `nett whois` (the mesh process answers from verified admission material, `mesh.md` section 11).
+**`whois`** (query interface): `GET /api/v1/mesh/whois?address=…` looks up which node, device or Edge a mesh address belongs to, for the console to display (the "identity lookup" in roadmap M1). This is a statement by the Hub; when a service or agent needs to confirm who the other side is, it uses the local `nett whois` (the mesh answers from verified admission material, `mesh.md` section 11).
 
 **`hostnames`**: hostnames within the mesh. Nodes automatically get a hostname (the node name); users can add aliases.
 

@@ -35,7 +35,7 @@ nett only does the mesh (ADR 0019). M1 is divided into stages that run in order,
 
 ## M1: Mesh
 
-The stages follow ADR 0022: the prototype gate first, then replacing hand-made tunnels with local signing, then the Hub, then devices and platforms. The architecture underneath is the same in every stage: the mesh process runs independently of nett-node, the TLS transport adapter runs separately with low privileges (ADR 0013), and the core logic is platform-independent with one data plane backend per platform (ADR 0018). The acceptance at the end of M1 shows which criteria are met and which stage verifies the rest.
+The stages follow ADR 0022: the prototype gate first, then replacing hand-made tunnels with local signing, then the Hub, then devices and platforms. The architecture underneath is the same in every stage: one nett daemon per machine runs the mesh, the TLS transport and nett-node, and the mesh keeps working while nett-node or the Hub is away (ADR 0013); the core logic is platform-independent with one data plane backend per platform (ADR 0018). The acceptance at the end of M1 shows which criteria are met and which stage verifies the rest.
 
 ### 1. Prototype gate
 
@@ -59,14 +59,14 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 
 [design/userspace.md](design/userspace.md).
 
-- [x] Userspace WireGuard (gotatun) in the mesh process with in-process filtering; a Linux TUN backend runs it in the lab and CI
+- [x] Userspace WireGuard (gotatun) in the mesh with in-process filtering; a Linux TUN backend runs it in the lab and CI
 - [x] macOS native member: utun, routes, binding to the physical interface, network changes, launchd service
 
 ### 4. Hub
 
 [design/hub.md](design/hub.md) section 9, [design/site.md](design/site.md), [design/release.md](design/release.md).
 
-- [x] H1 Distribution and status: `nett-hub`, nett-node (`nett node`), `nett site link`, `status`, `invite` for existing machines, `sudo nett install` on both platforms
+- [x] H1 Distribution and status: `nett-hub`, nett-node (in `nett daemon`), `nett site link`, `status`, `invite` for existing machines, `sudo nett install` on both platforms
 - [x] H2 Enrollment and leaving: the same one-line enrollment command on all platforms, the install script on the project website, public addresses learned by the Hub, `sudo nett leave`
 - [x] H3 Upgrade: machines upgrade themselves to signed releases the user approves, with downgrade protection and rollback (design/release.md section 7, ADR 0027)
 - [x] H4 Runtime coordination: relays (`nett site relay`) with UDP and TLS paths for every connection, LAN direct paths from the addresses machines report, `dial-only` pairs switching together through the Hub
@@ -74,7 +74,7 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 - [x] Site: machines, Edge, advertised routes (denied by default) and access rules maintained with `nett site` commands; connections derived from access rules
 - [x] Authentication: recovery key and backup key, the site's API token, node keys and admission proofs, trust anchors; signing on the user's own computer (ADR 0024)
 - [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, the Hub's image and Compose example in `packaging/`, upgrades and rollback
-- [x] Availability: nett-node and the mesh process apply the locally saved configuration at start-up
+- [x] Availability: the nett daemon applies the locally saved configuration at start-up, before nett-node connects to the Hub
 - [x] OpenAPI document of the Hub API (`docs/api/openapi.json`)
 
 ### 5. Names and diagnostics
@@ -93,12 +93,13 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [ ] Measurements on real machines: full-speed direct paths across the public internet against native WireGuard and Tailscale, the maximum forwarding throughput of a 1 vCPU relay, a Mac laptop changing networks and waking from sleep, coexistence with a proxy-style VPN app's enhanced mode
 - [x] Release key rotation: a release signed by the backup key (CI, `linux` job)
 - [x] Troubleshooting manual, including how to run alongside proxy-style VPN apps ([troubleshooting.md](troubleshooting.md))
-- [ ] Synology DSM member ([design/dsm.md](design/dsm.md)): the userspace data plane chosen when the kernel has no WireGuard, units for systemd 219 started by a boot task, the TLS transport in the mesh process; verified on a Virtual DSM, then services on a NAS reached by an Edge through the mesh
+- [ ] Synology DSM member ([design/dsm.md](design/dsm.md)): the userspace data plane chosen when the kernel has no WireGuard, the nett service for systemd 219 started by a boot task; verified on a Virtual DSM, then services on a NAS reached by an Edge through the mesh
 - [x] Upgrades fetch the program through the Hub (ADR 0025): the Hub mirrors the current release's programs, nodes fetch them over their session and from the website when the Hub does not have them, a program that cannot be fetched is fetched again later
 - [x] The container ([design/container.md](design/container.md), ADR 0016): one image from the registry, the token in the environment, services sharing its network and seeing each caller's mesh address (CI, `container` job)
 - [ ] The Hub and the container upgrade themselves from their state directory, and roll back a version that does not settle (ADR 0026; CI, `container` job); verified on the Hub host
 - [ ] Upgrades start when the user approves them (ADR 0027): `nett site upgrade` for every machine and the Hub, or for one machine first
 - [ ] Served ports (ADR 0028): `nett site serve` forwards a member's mesh port to a service on its `127.0.0.1` (CI, scenario 31), replacing hand-run forwarders on the site's machines
+- [ ] One nett daemon per machine (ADR 0013): one service on each machine, with nett-relay beside it where the machine relays; the site's machines move to it with `sudo nett uninstall` and `sudo nett install`, keeping their identity
 
 ### 7. Phones and restricted networks
 
@@ -109,7 +110,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [ ] Hostname aliases (`hostnames`) and names for devices
 - [ ] HTTPS CONNECT proxy in nett-relay (HTTP/2 only on entry nodes)
 - [ ] On entry nodes the reverse proxy hands the TLS transport and CONNECT to nett-relay by domain name, and members verify that relay by CA certificates and domain name; the Hub's Compose example with Caddy includes this section
-- [x] TLS transport on macOS (in the mesh process, ADR 0013)
+- [x] TLS transport on macOS (in the nett daemon, ADR 0013)
 
 ### 8. Home gateways and more platforms
 
@@ -140,7 +141,7 @@ Checked items are met; the others name the stage that verifies them.
 - [x] Replace the primary key with a release signed by the backup key: after installation, nodes reject packages signed by the old primary key; official builds refuse to install packages signed by the development key. *Stage 6 (CI, with test keys)*
 - [x] The Hub sends a peer without admission material: all members refuse to configure it; after a member is removed, the Hub resends its original admission material: all members refuse; a member that enrolled long ago can be verified normally by newly joined members. *Stages 1 and 4 (lab)*
 - [ ] Rebuild the Hub from backup on another host following the runbook, and all nodes reconnect automatically. The backup used is older than the nodes' state (changes were approved after the backup), and after restoration the user does not need to approve again (protocol.md section 6.4). *Met in the lab (stage 4). On another host, a member's copy of the backup restores the same machines, generation and Hub identity (stage 6); moving the machines over with the Hub's domain: stage 6*
-- [ ] Idle for 24 hours on a 1 vCPU / 1 GB machine: the memory of nett-node, mesh process, transport adapter and nett-relay each meets the resource budget; Hub ≤ 30–50 MB with memory not growing. *Stage 6*
+- [ ] Idle for 24 hours on a 1 vCPU / 1 GB machine: the memory of the nett daemon and of nett-relay each meets the resource budget; Hub ≤ 30–50 MB with memory not growing. *Stage 6*
 
 ## M2: Mesh enhancements
 

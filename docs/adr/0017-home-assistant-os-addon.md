@@ -7,14 +7,14 @@
 
 nett is designed as an open-source project and needs to cover the devices common among home users. Home Assistant OS (HAOS) runs on Raspberry Pi, mini PCs, official hardware or virtual machines, is usually powered on all the time, and sits on the home LAN, which makes it well suited as a mesh member and smart gateway.
 
-But HAOS is a closed system: it has no package manager, users cannot install programs directly on the system, and all extensions run as **add-ons** (containers managed by HA's Supervisor). architecture.md section 3 requires nett-node to run directly on the system, which is impossible on HAOS.
+But HAOS is a closed system: it has no package manager, users cannot install programs directly on the system, and all extensions run as **add-ons** (containers managed by HA's Supervisor). architecture.md section 3 requires the nett daemon to run directly on the system, which is impossible on HAOS.
 
 Home Assistant running on ordinary Linux (the Container or Core installation methods) is not affected; its host is treated as an ordinary Linux node.
 
 ## Decision
 
 - On HAOS, nett is provided as an **add-on**: the project maintains an HA add-on repository, with images covering the architectures HA supports (amd64, aarch64);
-- The add-on requests the minimum privileges needed to run: host network, `NET_ADMIN`, `/dev/net/tun`. The add-on runs nett-node and the mesh process (the mesh uses the WireGuard built into the HAOS kernel), and also the transport adapter and nett-relay when needed, each supervised by the process manager inside the add-on (ADR 0013);
+- The add-on requests the minimum privileges needed to run: host network, `NET_ADMIN`, `/dev/net/tun`. The add-on runs the nett daemon (the mesh, using the WireGuard built into the HAOS kernel, the TLS transport and nett-node, ADR 0013), and also nett-relay when needed, each supervised by the process manager inside the add-on;
 - Module scope:
 
 | Module | On HAOS | Notes |
@@ -40,4 +40,4 @@ Home Assistant running on ordinary Linux (the Container or Core installation met
 ## Consequences
 
 - The release artifacts gain an HA add-on image and an add-on repository (ADR 0012);
-- The statement in architecture.md that "nett-node must run directly on the system" gains HAOS as an exception.
+- The statement in architecture.md that the nett daemon must run directly on the system gains HAOS as an exception.

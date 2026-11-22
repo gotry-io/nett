@@ -16,7 +16,7 @@ Hostnames, the responder's scope and the identity rule are decided in mesh.md se
 
 ## 2. The DNS responder
 
-- **Where**: the mesh process answers on UDP port 53 of this machine's own mesh addresses (IPv4 and IPv6), and nowhere else (hard rule 2). With the userspace data plane, a query this machine sends to itself reaches the data plane, which answers it from the same names (userspace.md section 4). The socket is bound once the mesh interface has its addresses. On Linux the mesh service gets `CAP_NET_BIND_SERVICE` for it; on macOS and in containers the mesh process runs as root. If the port cannot be bound, status lists a problem and the mesh keeps working;
+- **Where**: the mesh answers on UDP port 53 of this machine's own mesh addresses (IPv4 and IPv6), and nowhere else (hard rule 2). With the userspace data plane, a query this machine sends to itself reaches the data plane, which answers it from the same names (userspace.md section 4). The socket is bound once the mesh interface has its addresses. The nett daemon runs as root; on Linux and in containers it keeps a few capabilities, `CAP_NET_BIND_SERVICE` among them for this port (ADR 0013). If the port cannot be bound, status lists a problem and the mesh keeps working;
 - **What**: `A` and `AAAA` for `<node name>.nett.internal`, for every admitted member: the name comes from the desired state (unsigned, mesh.md section 11), the addresses from the member's verified admission material, so a wrong name can only point at a real member, never at an address outside the mesh. Names are compared without regard to case;
 - **Answers**: an authoritative answer with a TTL of 60 seconds; a name under the suffix that is not a member, or a type other than `A`/`AAAA` for a member, gets an empty authoritative answer (`NXDOMAIN` for unknown names, `NOERROR` without records for other types); every other name gets `REFUSED`: the responder never forwards and never recurses. Malformed queries, responses, and anything but a standard query with one question get no reply;
 - **Bounds**: queries at most 512 bytes, replies at most 512 bytes (always enough for one name's two records), at most 1000 queries a second in total; above that, queries are dropped. Other members cannot reach it unless an access rule allows UDP 53, which no default does: each machine asks its own responder;
@@ -28,41 +28,40 @@ The system resolver sends only names under `nett.internal` to this machine's mes
 
 | Platform | How | Done by |
 |---|---|---|
-| macOS | `/etc/resolver/nett.internal` with `nameserver <mesh IPv4>` | the mesh process (it runs as root) when the interface is up; removed by `sudo nett leave` and `sudo nett uninstall` |
-| Linux with systemd-resolved | per-link settings on `nett0`: its DNS server is the mesh IPv4, the routing domain `~nett.internal`, not a default route. Programs reach them when `/etc/resolv.conf` points at systemd-resolved's stub (`127.0.0.53`); some images point it at the upstream servers instead, and then only `resolvectl query` sees the names: `nett doctor` says so and leaves the file as it is | `nett resolver`, run by the mesh unit after it starts (`ExecStartPost=+`, with root, through `resolvectl`); it waits up to 15 seconds for `nett0`, and never fails the unit |
+| macOS | `/etc/resolver/nett.internal` with `nameserver <mesh IPv4>` | the nett daemon (it runs as root) when the interface is up; removed by `sudo nett leave` and `sudo nett uninstall` |
+| Linux with systemd-resolved | per-link settings on `nett0`: its DNS server is the mesh IPv4, the routing domain `~nett.internal`, not a default route. Programs reach them when `/etc/resolv.conf` points at systemd-resolved's stub (`127.0.0.53`); some images point it at the upstream servers instead, and then only `resolvectl query` sees the names: `nett doctor` says so and leaves the file as it is | `nett resolver`, run by `nett.service` after the nett daemon starts (`ExecStartPost=+`, with full privileges, through `resolvectl`); it waits up to 15 seconds for `nett0`, and never fails the unit |
 | Linux without systemd-resolved | no split resolution in `/etc/resolv.conf`: names work with `dig @<mesh IPv4>` and in programs that take a DNS server; `nett doctor` says so | — |
 | Container (design/container.md) | the container's own resolver; services sharing its network use mesh addresses | — |
 
-The mesh process itself runs no external command (hard rule 1); `nett resolver` is part of the root-owned service setup, calls only `resolvectl` by absolute path with its arguments as an array (hard rule 9), and does nothing when systemd-resolved is not running.
+The mesh itself runs no external command (hard rule 1); `nett resolver` is a separate step of the service setup, run by systemd, calls only `resolvectl` by absolute path with its arguments as an array (hard rule 9), and does nothing when systemd-resolved is not running.
 
 ## 4. `nett whois <address>`
 
 - A query on the local socket, `{"v":1,"query":"whois","address":"100.88.0.6"}`, answered for every local user, as Tailscale's `whois` needs only read access (status.md section 3);
-- The mesh process answers from verified admission material only: the member whose mesh or Edge address it is (node ID, name, mesh addresses, roles), or, for an address inside a prefix a member advertises, that gateway; otherwise "not a member". The name is shown as a label; the node ID and the verified material are the identity (mesh.md section 11);
+- The mesh answers from verified admission material only: the member whose mesh or Edge address it is (node ID, name, mesh addresses, roles), or, for an address inside a prefix a member advertises, that gateway; otherwise "not a member". The name is shown as a label; the node ID and the verified material are the identity (mesh.md section 11);
 - `--json` prints the answer as is.
 
 ## 5. `nett ping <name or address>`
 
 - Sends in-tunnel probes (mesh.md section 7.2, `0x80`) to the peer's probe port on its mesh address, once a second, 4 by default (`-c <count>`), each waiting up to 2 seconds, and prints the round-trip time of each reply and a summary (sent, received, loss, min/avg/max);
 - The probe port is open between all members whatever the access rules say (design/mesh.md section 12), so a reply shows the tunnel works, not that a service port is open; the output says so when no rule allows anything to that peer;
-- A name is looked up in this machine's status; before each probe it asks the mesh process to probe every candidate path to that peer at once (status.md section 4.3), so a path that just started working, such as after a firewall in the way was opened, is taken during the ping instead of at the next scheduled probe, and each line shows the path the probe took: direct, LAN, or the relay and transport;
+- A name is looked up in this machine's status; before each probe it asks the mesh to probe every candidate path to that peer at once (status.md section 4.3), so a path that just started working, such as after a firewall in the way was opened, is taken during the ping instead of at the next scheduled probe, and each line shows the path the probe took: direct, LAN, or the relay and transport;
 - Needs no privileges, like `tailscale ping`: the status and the `probe` request answer every local user (status.md section 3), and the probes go from an ordinary UDP socket whose source is this machine's mesh address; the peer answers only probes from the mesh address of an admitted member.
 
 ## 6. `nett doctor`
 
-Runs a fixed list of checks on this machine, prints one line per check (`ok`, `warning`, `problem`) with what was found and, for anything not ok, what to do; exits 1 when there is a problem. It reads the local status, the configuration directory and the service manager; it changes nothing.
+Runs a fixed list of checks on this machine, prints one line per check (`ok`, `warning`, `problem`) with what was found and, for anything not ok, what to do; exits 1 when there is a problem. It reads the local status, the configuration directory and the unit directory; it changes nothing.
 
 | Check | Problem or warning when | Advice |
 |---|---|---|
-| Mesh service | the status socket does not answer | how to see the service's log |
+| nett service | the status socket does not answer | how to see the service's log |
 | Admission and desired state | not admitted; the desired state rejected; problems in status | each problem's reason, and the command that shows more |
 | Peers | a linked peer is unreachable or never connected | its candidates and their state: all relays failing points at the relay port, every direct candidate failing at the WireGuard port in the cloud's security group (the port list of mesh.md section 5.5) |
 | Clock | not synchronized | enable time synchronization; switching by time slot needs it (mesh.md section 8.4) |
-| Hub | `hub.json` present but the nett-node service is not running, or the last upgrade failed | the service's log; the reason recorded in `upgrade.json` |
+| Upgrade | the last upgrade failed | the reason recorded in `upgrade.json`; the next higher release is tried on its own |
 | Relay | this machine runs a relay but nett-relay has not fetched its assignment in the last minute | the relay service's log |
-| TLS transport | there is a TLS candidate but the transport adapter is not running | the transport service's log |
 | Names | the responder does not answer this machine's own name, or the system resolver does not send `nett.internal` to it | per section 3 |
-| Units (Linux) | a unit in `/etc/systemd/system` overrides nett's | move it away (release.md section 5) |
+| Units (Linux) | `nett.service` or `nett-relay.service` in `/etc/systemd/system` overrides nett's | move it away (release.md section 5) |
 | Host firewall (Linux) | ufw is on, denies incoming connections and has no rule for `nett0`: it drops what nett's own filter lets in, in-tunnel probes included, so other members see this machine as unreachable | `sudo ufw allow in on nett0`: nett filters the interface itself (mesh.md section 12), so this opens nothing the access rules do not allow; `sudo nett install` says the same when it finds this |
 
 Network probes from outside (is my WireGuard port reachable from the internet) need another member's help and are left to the Hub view in `nett site status`.

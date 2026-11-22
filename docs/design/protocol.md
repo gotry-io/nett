@@ -131,8 +131,8 @@ A fatal error (such as a revoked node or a refused enrollment) is sent and then 
 | Backup | node → Hub | `BackupFetch` | Asks for the latest encrypted backup of the Hub, with the SHA-256 of the one the node has; sent on connect and every 6 hours (the Hub never initiates connections to nodes, hub.md section 8.2) |
 | | Hub → node | `Backup` | The encrypted backup and its SHA-256, when the node does not have it yet; up to 4 MiB, sent in chunks (section 4.1) |
 | Mesh | Hub → node | The mesh partition in `DesiredState` | Addresses, peer public keys and admission material, candidate paths, relay list |
-| | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh process's local state (`status.md` section 6), sent when it changes |
-| | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4): node → Hub names the peer it is for, Hub → node the peer it came from, and carries the mesh process's message (at most 64 bytes), authenticated end to end with a key only the two members can derive. The Hub passes it on only between two members that the site connects (site.md section 6) and only to a node that is connected at the time; it is not queued, and the mesh processes resend |
+| | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh's status document (`status.md` section 6), which nett-node reads from the mesh in the same process, sent when it changes |
+| | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub (`mesh.md` section 8.4): node → Hub names the peer it is for, Hub → node the peer it came from, and carries the mesh's message (at most 64 bytes), authenticated end to end with a key only the two members can derive. The Hub passes it on only between two members that the site connects (site.md section 6) and only to a node that is connected at the time; it is not queued, and the two meshes resend |
 | Upgrades | node → Hub | `ProgramFetch` | Asks for the program of a release, by version and target; sent when the `release` partition names a higher version for this machine's target (release.md section 7, ADR 0025) |
 | | Hub → node | `ProgramPart` | The program from start to end, in parts of at most 48 KiB, each with its offset and the program's size, sent in order as the connection takes them; `Error` with `NOT_FOUND` when the Hub does not hold that program. One fetch per session at a time; a node whose session breaks fetches the program again |
 | Recovery | node → Hub | `ArtifactSync` | After the Hub is restored from a backup, the node sends back the signed artifacts and revocations in effect (section 6.4) |
@@ -149,7 +149,7 @@ The desired state is organized in partitions, each versioned independently:
 | `policy` | Node policy (signed when it raises privileges) | M1 |
 | `hub_endpoints` | The Hub's endpoint list: a JSON array of `https://` addresses | M1 |
 | `release` | The release manifest (`release.json`, release.md section 7), sent to a node once the user has approved its version for that machine: the version and, per target, the URL, SHA-256 and signature of the program; the node verifies the program with the project public keys (primary and backup) built into `nett` and installs only higher versions (`auth.md` section 11.3). This is the only path for upgrades. When only this partition changes, the Hub sends it as an increment (`base_generation` equal to `generation`) | M1 |
-| `mesh` | Mesh topology, admission material, and revocations. Members, advertised routes, and access rule sets are signed artifacts, verified independently by the mesh process (`mesh.md` section 4.1); node names are not signed and are used only for display (`status.md` section 5); nett-node only hands them over. The content is the mesh process's desired state file (JSON), identical to the file the signing tool writes when no Hub is used (`hub.md` section 4) | M1 |
+| `mesh` | Mesh topology, admission material, and revocations. Members, advertised routes, and access rule sets are signed artifacts, verified independently by the mesh (`mesh.md` section 4.1); node names are not signed and are used only for display (`status.md` section 5); nett-node only hands them over. The content is the mesh's desired state file (JSON), identical to the file the signing tool writes when no Hub is used (`hub.md` section 4) | M1 |
 
 - Each node has a monotonically increasing **generation**; a change in any partition increments it by one;
 - `DesiredState` carries `generation`, `base_generation`, and a number of partitions: when `base_generation` is empty it is a full snapshot, otherwise a delta relative to that generation;
@@ -217,7 +217,7 @@ message Task {
 - Protocol versions use "major.minor": different major versions are incompatible; minor versions make only incremental changes;
 - The Hub supports nodes of at least the current and the previous minor version; a node can likewise connect to a Hub of the previous minor version;
 - **Optional features** are negotiated through `capabilities` flags, for example `chunked_state`; both sides use only features both support;
-- A Hub that does not know `ProgramFetch` ignores it; the node then fetches the program from the URL in the manifest after 10 seconds (release.md section 7);
+- When the Hub does not hold a program, or sends nothing for 10 seconds after `ProgramFetch`, the node fetches the program from the URL in the manifest (release.md section 7);
 - When a node's version is too old to be compatible, the Hub returns `UPGRADE_REQUIRED` but still lets it into **upgrade-only mode**: it receives only the `release` partition and upgrade tasks, so that it can complete an approved upgrade.
 
 ## 10. Security
@@ -238,7 +238,7 @@ message Task {
 | Item | node-side limit |
 |---|---|
 | Single message | 60 KiB |
-| Chunk reassembly | 8 MiB per stream, reassembled in memory: the mesh process has to parse the whole desired state anyway, and the desired state file itself does not exceed 4 MiB (`mesh.md` section 17); 2 streams at the same time, released as soon as they are used |
+| Chunk reassembly | 8 MiB per stream, reassembled in memory: the mesh has to parse the whole desired state anyway, and the desired state file itself does not exceed 4 MiB (`mesh.md` section 17); 2 streams at the same time, released as soon as they are used |
 | Program download | Written to disk as it arrives, never held whole in memory; one at a time |
 | Completed task records | 7 days, at most 1000 entries; entries whose `deadline` has not passed are not evicted, and when full new tasks are rejected |
 

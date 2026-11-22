@@ -164,7 +164,7 @@ node                                              Hub
  │ ◄── Welcome ─────────────────────────────────────│
  │ ◄── Desired state (trust anchor list, admission material including this node) ─│
  │ Verify the trust anchor list fingerprint matches the token; check the node ID
- │ Discard the enrollment private key; save the desired state and Hub configuration → the mesh process verifies with the trust anchors and applies → report
+ │ Discard the enrollment private key; save the desired state and Hub configuration → the mesh verifies with the trust anchors and applies → report
 ```
 
 The signed policy plus the admission proof is the node's **admission material**: the Hub distributes it to the other members, and they use it to independently verify this node's mesh public key (ADR 0014, mesh.md section 4.1).
@@ -177,8 +177,8 @@ The signed policy plus the admission proof is the node's **admission material**:
 - Revoking a node: the Hub refuses the node's connection and removes its public key from the mesh topology;
 - **A node leaving on its own** (`nett leave`, run as root on the node):
   - Sends `Leave` to the Hub, which marks the node `removed`; this lowers privileges and needs no signature; if the Hub is unreachable, the remaining steps proceed anyway. For a site without a Hub, use `nett site remove` to remove the node, which generates a revocation (site.md section 4);
-  - Tears down the local mesh interface, filter rules, and routes. The mesh process deliberately leaves the interface in place when it normally exits (connections stay up across a restart, mesh.md section 4), so stopping the process is not enough;
-  - Deletes the local identity key, mesh private key, trust anchors, accepted signed artifacts and revocations, desired state, and Hub configuration, and stops and removes the nett-node and mesh process services. Afterwards the machine can join any mesh, generating all keys anew at enrollment, so the two meshes cannot link it across them;
+  - Tears down the local mesh interface, filter rules, and routes. On Linux the nett daemon deliberately leaves the interface in place when it exits normally (connections stay up across a restart, mesh.md section 4), so stopping the service is not enough;
+  - Deletes the local identity key, mesh private key, trust anchors, accepted signed artifacts and revocations, desired state, and Hub configuration, and stops and removes nett's services. Afterwards the machine can join any mesh, generating all keys anew at enrollment, so the two meshes cannot link it across them;
 - **Remote removal does not reset trust anchors**: a revocation delivered by the Hub or the site tool only makes the other members stop accepting this node, and the node keeps its original trust anchors. A compromised Hub therefore cannot first remove a node and then pull it into another mesh; resetting the trust anchors is possible only by running `nett leave` as root on the node.
 
 ## 9. Device credentials
@@ -269,7 +269,7 @@ Lowering privileges never requires a signature. When the Hub delivers such a cha
 
 ### 10.5 Encoding
 
-The byte-level format of signed payloads, admission proofs, and trust anchor lists. The signing tool generates them in this format, and all verifiers (Hub, nett-node, mesh process, nett-relay) share the same implementation in `nett-trust`.
+The byte-level format of signed payloads, admission proofs, and trust anchor lists. The signing tool generates them in this format, and all verifiers (the Hub, nett-node, the mesh, nett-relay) share the same implementation in `nett-trust`.
 
 - **Canonical JSON**: a subset of RFC 8785; numbers are only integers from 0 to 2⁵³−1, with no floating point. The verifier first confirms that the received bytes are exactly the canonical form of the parse result (duplicate keys, extra whitespace, and non-canonical escapes all fail), then verifies the signature; verification and storage both use only the received bytes, without re-serializing.
 - **Unrecognized content is rejected as a whole**: if a payload contains an unrecognized field, `kind`, or artifact kind, the entire payload is not accepted. Nodes of an older version accept artifacts of a new kind only after upgrading.

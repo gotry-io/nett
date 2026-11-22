@@ -9,7 +9,7 @@ Machines, containers and the Hub upgrade themselves from signed releases (ADR 00
 
 - A release that starts and settles but carries a bug (a path that is never chosen, memory that grows) reaches every machine and the Hub together; the rollback covers only a version that does not start or settle;
 - The user cannot choose when, try one machine first, or stay on a version; the only switch, `--releases off`, stops the whole site;
-- An upgrade restarts the mesh process, which interrupts traffic briefly on the userspace data plane (macOS, Synology DSM).
+- An upgrade restarts the nett daemon and its mesh, which interrupts traffic briefly on the userspace data plane (macOS, Synology DSM).
 
 Comparable products leave the decision to the administrator: automatic updates are a setting the administrator turns on, and servers are upgraded by their operator.
 
@@ -23,7 +23,7 @@ Comparable products leave the decision to the administrator: automatic updates a
 ## Rationale
 
 - One bad release reaches only what the user chose, when the user chose, and the user can try it on one machine first;
-- The mechanism stays the one machines already use: the Hub decides only whether to relay, so machines that run an earlier release need nothing new, and the Hub keeps holding the programs so that an approval does not wait for a download;
+- The mechanism stays the one machines already use: the Hub decides only whether to relay, so machines need nothing new, and the Hub keeps holding the programs so that an approval does not wait for a download;
 - An upgrade that the Hub could start without the user would bring back the risk this removes; a compromised Hub could still relay a genuine newer release early, not install anything else.
 
 ## Alternatives considered
@@ -34,6 +34,4 @@ Comparable products leave the decision to the administrator: automatic updates a
 
 ## Consequences
 
-- After each release the user runs `nett site upgrade`, or upgrades one machine first; until then `nett site status` shows the release as available;
-- The Hub's push accepts the approvals only from the release that adds them; the signing tool checks the Hub's version before it pushes one;
-- A site moving to the release that adds approvals still upgrades its Hub automatically once, as its Hub did before; that Hub then holds the release for the machines until the user approves it.
+- After each release the user runs `nett site upgrade`, or upgrades one machine first; until then `nett site status` shows the release as available.

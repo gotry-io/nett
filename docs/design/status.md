@@ -7,46 +7,44 @@
 
 See on a node, with one command, how the mesh is doing right now: the machine's addresses and how it runs, whether each peer is reachable, which path it uses and with what quality, why it last switched, and whether the desired state and access rules have been rejected. It does not depend on the Hub, so existing nodes can use it right away.
 
-Status comes from the mesh process's local interface. This is the local interface between nett-node and the mesh process described in ADR 0013: reading status, and asking the mesh process to re-read its desired state file (section 4.1). After joining the Hub, nett-node reads link status through the same interface and reports it to the Hub (`LinkReport`, protocol.md section 5), and after writing the desired state file it uses the same request to have the mesh process apply it (hub.md section 5). Identity lookup (`whois`), names, `nett ping` and `nett doctor` are in names-and-diagnostics.md.
+Status comes from the nett daemon's local interface, which the command line uses to read status and to ask the daemon to re-read its desired state file (section 4.1). nett-node runs in the same process (ADR 0013): after joining the Hub it reads the mesh's status directly and reports it to the Hub (`LinkReport`, protocol.md section 5), and after writing the desired state file it has the mesh re-read it directly, with the same result as `reload` (hub.md section 5). Identity lookup (`whois`), names, `nett ping` and `nett doctor` are in names-and-diagnostics.md.
 
 ## 2. Scope
 
 | Included | Not included |
 |---|---|
-| The mesh process's local socket: status query; re-reading the desired state file (`nett reload`) | Identity lookup, names, `nett ping`, `nett doctor` (names-and-diagnostics.md) |
+| The nett daemon's local socket: status query; re-reading the desired state file (`nett reload`) | Identity lookup, names, `nett ping`, `nett doctor` (names-and-diagnostics.md) |
 | Node name in the desired state (unsigned, for display only, section 5) | Continuously refreshing views |
 | `nett status`, `nett status <peer>`, `--json` | |
 | Linux (kernel and userspace WireGuard), macOS, the container | |
 
 ## 3. Local socket
 
-- **Location**: a Unix socket, `/run/nett/mesh.sock` on Linux and in the container, `/var/run/nett/mesh.sock` on macOS. `nett mesh --socket <path>` can move it elsewhere (a lab scenario runs several members on one host), and `nett status --socket <path>` matches it;
-- **Permissions**: the directory is `0711` (others reach a known name in it but cannot list it) and the socket `0666`, owned by the mesh process's run identity, as Tailscale's `tailscaled.sock` is `0666` on the platforms that check peer credentials (safesocket in tailscale main at c4d689c). The mesh process checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) on every connection: the queries that only read or probe (`status`, `whois`, `probe`) answer every local user, as Tailscale's LocalAPI gives every local user read access and its `ping` needs none; the queries that change something (`reload`, `coordinate`) answer only root and the mesh process's own run identity, and anyone else gets `permission_denied`. So `nett status`, `nett whois` and `nett ping` need no `sudo`, and `nett reload` does. Status contains no keys, tokens or other credentials (section 6); what it shows that an ordinary local user cannot learn otherwise is the members' public and LAN addresses, the relays, path measurements and traffic counts, which Tailscale's status shows to every local user too. Names, mesh addresses and advertised routes are visible without it, through the DNS responder and the routing table;
-- **Creation**: the socket is for inspection only; if it cannot be created, the mesh process logs a warning and the mesh keeps working (hard rule 8). When a socket already exists at the path, it first tries to connect: if a process answers, it does not take over; if nothing answers (left behind by an abnormal exit), it removes the socket and creates a new one; if the path holds some other kind of file, it leaves it alone. The socket is first created under a temporary name and set to `0600`, then renamed to the agreed path, so it is already `0600` when it appears. The mesh process removes it on exit. If the directory does not exist it is created with `0700`: the Linux systemd unit creates it in advance with `RuntimeDirectory=nett`, and on macOS and in containers the mesh process creates it itself;
+- **Location**: a Unix socket, `/run/nett/mesh.sock` on Linux and in the container, `/var/run/nett/mesh.sock` on macOS. `nett daemon --socket <path>` can move it elsewhere (a lab scenario runs several members on one host), and `nett status --socket <path>` matches it;
+- **Permissions**: the directory is `0711` (others reach a known name in it but cannot list it) and the socket `0666`, owned by the user the daemon runs as (root), as Tailscale's `tailscaled.sock` is `0666` on the platforms that check peer credentials (safesocket in tailscale main at c4d689c). The daemon checks peer credentials (`SO_PEERCRED` on Linux, `getpeereid` on macOS) on every connection: the queries that only read or probe (`status`, `whois`, `probe`) answer every local user, as Tailscale's LocalAPI gives every local user read access and its `ping` needs none; the query that changes something (`reload`) answers only root and the user the daemon runs as, and anyone else gets `permission_denied`. So `nett status`, `nett whois` and `nett ping` need no `sudo`, and `nett reload` does. Status contains no keys, tokens or other credentials (section 6); what it shows that an ordinary local user cannot learn otherwise is the members' public and LAN addresses, the relays, path measurements and traffic counts, which Tailscale's status shows to every local user too. Names, mesh addresses and advertised routes are visible without it, through the DNS responder and the routing table;
+- **Creation**: the socket is for inspection only; if it cannot be created, the daemon logs a warning and the mesh keeps working (hard rule 8). When a socket already exists at the path, it first tries to connect: if a process answers, it does not take over; if nothing answers (left behind by an abnormal exit), it removes the socket and creates a new one; if the path holds some other kind of file, it leaves it alone. The socket is first created under a temporary name and set to `0600`, then renamed to the agreed path, so it is already `0600` when it appears. The daemon removes it on exit. If the directory does not exist it is created with `0711`: the Linux systemd unit creates it in advance with `RuntimeDirectory=nett`, the container's first process creates it before it starts the daemon, and on macOS the daemon creates it itself;
 - The socket is local to the machine and is not a network listener (hard rule 2).
 
 ### 3.1 Helper socket
 
-On Linux nett-relay and the transport adapter run as users systemd allocates and fetch their configuration from the mesh process (ADR 0013) over a second socket, `helpers.sock` next to `mesh.sock`. The directory is `0711` (others can reach a known name but not list it) and both sockets are `0666`; on `helpers.sock` the mesh process checks the caller on every connection: root, or a process of the systemd unit the query belongs to (`nett-relay.service` or `nett-transport.service`), each for its own query. The two run as users systemd allocates (release.md section 8), so a caller is known by its unit: the peer's process ID (`SO_PEERCRED`) leads to `/proc/<pid>/cgroup`, where only root can place a process in a unit, and the user ID in `/proc/<pid>/status` must equal the peer's, so a process ID reused after the caller exited does not pass. Where `/proc` hides other users' processes, the helpers are refused. macOS runs neither helper and has no helper socket. One query per connection, as in section 4, at most 1 KiB:
+On Linux nett-relay runs as a user systemd allocates and fetches its assignment from the nett daemon (ADR 0013) over a second socket, `helpers.sock` next to `mesh.sock`. The directory is `0711` (others can reach a known name but not list it) and both sockets are `0666`; on `helpers.sock` the daemon checks the caller on every connection: root, or a process of `nett-relay.service`. The relay runs as a user systemd allocates (release.md section 8), so a caller is known by its unit: the peer's process ID (`SO_PEERCRED`) leads to `/proc/<pid>/cgroup`, where only root can place a process in a unit, and the user ID in `/proc/<pid>/status` must equal the peer's, so a process ID reused after the caller exited does not pass. Where `/proc` hides other users' processes, the relay is refused. macOS runs no relay and has no helper socket; the TLS transport in the daemon asks the mesh directly on every platform (mesh.md section 5.3). One query per connection, as in section 4, at most 1 KiB:
 
 ```json
 {"v": 1, "query": "relay", "fingerprint": "sha256:…"}
-{"v": 1, "query": "transport"}
 ```
 
-- `relay` (only from `nett-relay.service`): the reply is the relay assignment of mesh.md section 5.2 with each member's mesh public key resolved, or `null` when this machine is not a relay. The request carries the fingerprint of the relay's TLS certificate, which the mesh process shows in status (section 6);
-- `transport` (only from `nett-transport.service`): the reply is the transport adapter's configuration (mesh.md section 5.3): the WireGuard port, and for each TLS relay its loopback port, address and certificate fingerprint;
-- Both helpers ask again every 5 seconds and when they start, and apply the reply only when it changed. The replies hold probe tokens, which is why each query is limited to its own unit.
+- `relay` (only from `nett-relay.service`): the reply is the relay assignment of mesh.md section 5.2 with each member's mesh public key resolved, or `null` when this machine is not a relay. The request carries the fingerprint of the relay's TLS certificate, which the daemon shows in status (section 6);
+- nett-relay asks again every 5 seconds and when it starts, and applies the reply only when it changed. The replies hold probe tokens, which is why the query is answered only for the relay's unit.
 
 ## 4. Messages and versions
 
-- One query per connection: the client sends one line of JSON, the mesh process replies with one JSON document and closes the connection.
+- One query per connection: the client sends one line of JSON, the daemon replies with one JSON document and closes the connection.
 
   ```json
   {"v": 1, "query": "status"}
   ```
 
-- `v` is the major version of the interface, and the reply carries the same `v`. Within a major version only fields are added: the client ignores fields it does not recognize and shows missing fields as `-`. This way, after an upgrade and before the mesh process restarts, the new `nett` can still read the old process's status (adjacent versions interoperate, ADR 0013);
+- `v` is the major version of the interface, and the reply carries the same `v`. Within a major version only fields are added: the client ignores fields it does not recognize and shows missing fields as `-`. This way a `nett` command of a nearby version, such as the new one after an upgrade while the service has not restarted yet, still reads the daemon's status;
 - When the major version differs, the query is unknown, or the request is not valid JSON, the reply is an error and the connection is closed:
 
   ```json
@@ -61,7 +59,7 @@ On Linux nett-relay and the transport adapter run as users systemd allocates and
 {"v": 1, "query": "reload"}
 ```
 
-- The mesh process re-reads the file given by `--config` at startup, the same as on receiving `SIGHUP`; the request carries nothing itself and is only a trigger. The reply is sent after the background thread has finished applying:
+- The daemon re-reads `desired.json` in its directory, the same as on receiving `SIGHUP`; the request carries nothing itself and is only a trigger. The reply is sent after the background thread has finished applying:
 
   ```json
   {"v": 1, "reload": {"result": "applied", "problems": []}}
@@ -70,24 +68,20 @@ On Linux nett-relay and the transport adapter run as users systemd allocates and
 
   `applied`: this desired state is in effect, and `problems` lists situations that still need attention after applying (section 6, for example a member's admission material being rejected); `rejected`: the whole document is rejected and the previous one stays in use;
 - If applying has not finished within 10 seconds (for example a data plane operation is stuck), the reply is `busy`, and this desired state continues to be applied as usual;
-- `nett reload` sends this request and shows the result: the exit code is 0 for `applied`, listing `problems`; 1 for `rejected` or when the mesh process cannot be reached. In the container use `docker compose exec <service> nett reload`. **Do not use `docker kill -s HUP`**: whenever any signal is sent with `docker kill`, Docker records the container as manually stopped, and a `unless-stopped` container then does not start automatically after Docker restarts (host reboot);
-- On macOS, `sudo nett install` sends the same request when the desired state has changed (release.md section 4); `SIGHUP` still works (systemd's `systemctl reload`), only without a result to inspect.
+- `nett reload` sends this request and shows the result: the exit code is 0 for `applied`, listing `problems`; 1 for `rejected` or when the nett daemon cannot be reached. In the container use `docker compose exec <service> nett reload`. **Do not use `docker kill -s HUP`**: whenever any signal is sent with `docker kill`, Docker records the container as manually stopped, and a `unless-stopped` container then does not start automatically after Docker restarts (host reboot);
+- `sudo nett install` sends the same request when it has changed the desired state of a running service (release.md section 4); `SIGHUP` (`systemctl reload nett` on Linux) does the same without a result to inspect.
 
 ### 4.2 Coordination with nett-node
 
-```json
-{"v": 1, "query": "coordinate"}
-```
-
-- nett-node (root only) keeps this connection open while it runs; both sides then write one JSON object per line, each at most 1 KiB. It carries the switch proposals and confirmations that go through the Hub when both ends of a pair are `dial-only` (mesh.md section 8.4), so the mesh process never connects to the Hub:
+- nett-node and the mesh run in the same process (ADR 0013) and keep a coordination connection between them: a Unix socket pair, one end held by nett-node and the other read by the mesh on a thread of its own. Both sides write one JSON object per line, each at most 1 KiB. It carries the switch proposals and confirmations that go through the Hub when both ends of a pair are `dial-only` (mesh.md section 8.4), so the mesh never connects to the Hub:
 
   ```json
   {"hub": true}
   {"path_switch": {"peer": "node_01J…", "message": "<base64>"}}
   ```
 
-- nett-node sends `hub` when the connection opens and whenever its Hub session comes up or goes down; the mesh process uses the Hub path only while it is `true`. `path_switch` from the mesh process names the peer it is for, and from nett-node the peer it came from; the message is authenticated end to end and opaque to nett-node and the Hub;
-- One coordinator at a time: a new `coordinate` connection replaces the old one. Lines in each direction queue up to 16 and further ones are dropped (the sender retries); a line that is not valid is dropped and the connection kept.
+- nett-node sends `hub` when the connection opens and whenever its Hub session comes up or goes down; the mesh uses the Hub path only while it is `true`. `path_switch` from the mesh names the peer it is for, and from nett-node the peer it came from; the message is authenticated end to end and opaque to nett-node and the Hub;
+- One connection at a time: it outlives Hub sessions, and when nett-node starts again (architecture.md section 3) its new connection replaces the old one. Lines in each direction queue up to 16 and further ones are dropped (the sender retries); a line that is not valid is dropped and the connection kept.
 
 ### 4.3 Probing a peer's paths now
 
@@ -117,12 +111,12 @@ Times are UTC in RFC 3339 format; durations and relative times are computed by `
 
 | Part | Contents |
 |---|---|
-| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), the TCP ports it serves to `127.0.0.1` (`serve`, mesh.md section 12.1), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), LAN addresses with their prefix length (private IPv4 and IPv6 unique local addresses on interfaces other than the mesh interface, loopback and container or virtual machine bridges, at most 8, which the Hub hands to peers as LAN direct candidates, mesh.md section 6; a bridge address such as Docker's `172.17.0.1` is the same on many hosts and leads back to the machine itself, which is why bridges are left out where Tailscale lists every interface, and public addresses are covered by public direct and hole punching), whether the clock is trusted (mesh.md section 8.4), the time the mesh process started |
+| `node` | Node ID and name, `nett` version, mesh address, Edge address (with the `edge` role), the TCP ports it serves to `127.0.0.1` (`serve`, mesh.md section 12.1), reachability, data plane (`kernel` / `userspace`), WireGuard port, NAT type and mapped address (mesh.md section 6.1), LAN addresses with their prefix length (private IPv4 and IPv6 unique local addresses on interfaces other than the mesh interface, loopback and container or virtual machine bridges, at most 8, which the Hub hands to peers as LAN direct candidates, mesh.md section 6; a bridge address such as Docker's `172.17.0.1` is the same on many hosts and leads back to the machine itself, which is why bridges are left out where Tailscale lists every interface, and public addresses are covered by public direct and hole punching), whether the clock is trusted (mesh.md section 8.4), the time the mesh started |
 | `relay` | On a relay: UDP and TLS ports, the number of members and links assigned, the TLS certificate fingerprint nett-relay reported and when it last fetched its assignment (mesh.md section 5.2); absent elsewhere |
 | `config` | The time the desired state in effect was accepted; the version of the access rule set. A rejected desired state is listed in `problems` (when a reload fails, the previous one stays in use) |
 | `peers` | One entry for each admitted member, see the table below |
 | `problems` | Situations that need attention, each with a time and a reason: this machine is not among the admitted members, desired state rejected, a member's admission material rejected, access rule set or advertised routes rejected, data plane operation failed, trust store read or write failed (mesh.md section 4.2). The first five belong to one desired state: they are discarded when the next desired state is accepted, and those that still exist are reported again on application (material that fails verification is reported on every application). A data plane failure while applying a desired state is retried until it succeeds (mesh.md section 15) and stays listed until then; other data plane failures, on one peer and redone by later ticks, are listed if one happened in the last 5 minutes. A trust store read or write failure stays listed until the next successful write; a served port that cannot be bound stays listed until it is forwarded or no longer served |
-| `events` | The mesh process's 32 most recent events (path switches, hole punching, admission and rejection, and so on, the same as the events in the log), for investigating recent switches |
+| `events` | The mesh's 32 most recent events (path switches, hole punching, admission and rejection, and so on, the same as the events in the log), for investigating recent switches |
 
 For each peer:
 
@@ -204,24 +198,24 @@ The argument is the peer's name or node ID; if not found, it reports an error an
 
 ### 7.3 `--json` and exit codes
 
-- `--json` outputs the whole status the mesh process replied with (section 6), with field names and versions kept stable per section 4; used together with a peer name, it outputs only that peer;
-- Exit codes: 0 when status was obtained, even if some peers are unreachable; 1 when the mesh process cannot be reached, permissions are insufficient, or the peer is not found. Errors are written to standard error:
+- `--json` outputs the whole status the daemon replied with (section 6), with field names and versions kept stable per section 4; used together with a peer name, it outputs only that peer;
+- Exit codes: 0 when status was obtained, even if some peers are unreachable; 1 when the nett daemon cannot be reached, permissions are insufficient, or the peer is not found. Errors are written to standard error:
 
   ```
-  nett: the mesh service is not running (no socket at /run/nett/mesh.sock)
-  nett: the mesh service is not running (/run/nett/mesh.sock does not accept connections)
+  nett: the nett service is not running (no socket at /run/nett/mesh.sock)
+  nett: the nett service is not running (/run/nett/mesh.sock does not accept connections)
   nett: permission denied for /run/nett/mesh.sock; run with sudo
   ```
 
-  The last one comes from `nett reload` run as an ordinary user, or from a mesh process whose socket predates section 3's permissions.
+  The last one comes from `nett reload` run as an ordinary user.
 
 ## 8. Implementation and resources
 
-- The mesh process has one more thread that accepts connections and handles them one at a time: it reads the request, sends a query to the runtime's background thread (through an existing bounded queue), the background thread builds a snapshot from the engine, the path selection state and the data plane's peer statistics and hands it back, and then it is written back to the client. When the queue is full, or no snapshot can be delivered within 2 seconds (for example the desired state is being applied), the reply is `busy`; reads and writes each have a 1-second timeout. After replying it first closes the write direction, then discards input from the other side that was not read (at most 64 KiB): when closing with unread data, Linux sends a reset to the other side, which may then be unable to read the reply;
+- The daemon has one more thread that accepts connections and handles them one at a time: it reads the request, sends a query to the runtime's background thread (through an existing bounded queue), the background thread builds a snapshot from the engine, the path selection state and the data plane's peer statistics and hands it back, and then it is written back to the client. When the queue is full, or no snapshot can be delivered within 2 seconds (for example the desired state is being applied), the reply is `busy`; reads and writes each have a 1-second timeout. After replying it first closes the write direction, then discards input from the other side that was not read (at most 64 KiB): when closing with unread data, Linux sends a reset to the other side, which may then be unable to read the reply;
 - The thread that accepts connections checks every 500 milliseconds whether it should exit, without depending on the socket file still being there (exit does not hang when the file has been deleted);
 - The event ring buffer holds 32 entries; `problems` holds one entry each for the desired state and the access rule set, and at most 32 each for members and advertised routes (hard rule 14); a reply is at most 4 MiB, and `nett status` reads no more than that;
 - The thread that accepts connections uses a 256 KiB stack (only the pages actually used are resident); the extra memory when idle targets within 100 KB, measured on Linux (RSS, PSS) and macOS (RSS, `footprint`);
-- `nett status` is read-only and does not change any state of the mesh process;
+- `nett status` is read-only and does not change any state of the daemon;
 - `reload` is handed over a bounded channel to the party that reads the desired state, going the same way as `SIGHUP`: read the file, validate, hand to the background thread; after applying, the background thread hands the result back. At most 4 `reload` requests are in progress at once, and the rest get `busy`.
 
 ## 9. Verification

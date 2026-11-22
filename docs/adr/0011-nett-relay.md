@@ -48,7 +48,7 @@ Therefore, when handing over through Caddy only HTTP/2 CONNECT is offered; for o
 
 ## Alternatives considered
 
-- **Implement the relay in nett-node**: one process fewer, but violates ADR 0001.
+- **Implement the relay in the nett daemon**, as Tailscale's peer relay runs in `tailscaled`: one process fewer, but the process that listens on public ports would hold the mesh private key and root, which violates ADR 0001 (ADR 0013).
 - **Allocate two ports per relayed connection (like TURN)**: simple to implement, but a large range of ports must be opened in the security group, and a node with only one port mapped cannot act as a relay.
 - **A separate port for CONNECT**: not limited by the capabilities of the reverse proxy, but restricted networks often allow only 443. Measurement shows HTTP/2 CONNECT can share 443 with websites, so a separate port is not needed.
 - **Packet relay only**: clients that support only an HTTPS proxy cannot use it directly.
@@ -60,6 +60,6 @@ Therefore, when handing over through Caddy only HTTP/2 CONNECT is offered; for o
 - A CONNECT relay can see the destination address, and the contents of unencrypted traffic are visible too. Relays all run on the user's own machines, which is acceptable;
 - The CONNECT egress uses a dedicated mesh address (the CONNECT egress address) shared by all devices; the target node cannot tell devices apart from it, so nett-relay checks signed access rules per connection by credential; targets can only be mesh addresses, and it does not connect directly to the host where the relay runs or to its LAN (mesh.md section 5.4). A compromised nett-relay can reach all targets that CONNECT permits using this address;
 - A single-port relay has to handle session index collisions and entry aging, and the cost of trying `mac1` must have an upper bound; when switching to a relay that has not yet handled a given connection, a new handshake is needed to establish the index (mesh.md section 8.4);
-- At startup nett-relay obtains the relay assignment and the verified material needed by CONNECT from the mesh process, and does not depend on nett-node when restarting (ADR 0013);
+- At startup nett-relay obtains the relay assignment and the verified material needed by CONNECT from the mesh in the nett daemon over the helper socket (design/status.md section 3.1), and does not depend on nett-node when restarting (ADR 0013);
 - A nett-relay on a non-entry node binds 443 and needs `CAP_NET_BIND_SERVICE`;
 - One more process on `public` nodes, and its idle memory counts toward the resource budget.

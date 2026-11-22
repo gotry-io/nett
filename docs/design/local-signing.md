@@ -14,10 +14,10 @@ Signing, verification and mesh behavior are the same as after joining the Hub: t
 | Included | Not included |
 |---|---|
 | The signing tool `nett site`, running on the user's own computer: generates the recovery key and the trust anchor list, assigns addresses, signs node policy, advertised routes and access rule sets, generates a desired state file for each node; maintains the site with commands (site.md) | Hub, nett-node, console, passkey, upgrades through the Hub |
-| `nett mesh --config` in the official build: reads the local desired state file and reloads on `SIGHUP` | Device credentials, mobile gateway, hostnames and DNS, CONNECT |
+| `nett daemon --dir` in the official build: reads the desired state file in its directory and reloads on `SIGHUP` | Device credentials, mobile gateway, hostnames and DNS, CONNECT |
 | `nett keys`, which generates keys on the node (on macOS done by `sudo nett install`) | Native macOS member, DSM, Home Assistant OS |
 | Access control (mesh.md section 12), the Edge address (ADR 0015), a member forwarding Edge traffic to the routes it advertises (mesh.md section 10) | |
-| Deployment: the systemd unit on Linux (`packaging/systemd/nett-mesh.service`) | |
+| Deployment: the systemd unit on Linux (`packaging/systemd/nett.service`) | |
 
 Candidate paths, relays and transports are the same as in the prototype (mesh.md sections 5-9).
 
@@ -42,10 +42,10 @@ The site is maintained with the signing tool's commands (site.md): machines, Edg
 
 ## 5. Distribution and updates
 
-- Each modifying command rewrites the desired state file of the nodes whose desired state changed (site.md section 7); its format is the same as the `mesh` partition that nett-node hands to the mesh process after joining the Hub (protocol.md section 6). The file contains no private keys. A machine's first desired state fixes its trust anchor (mesh.md section 4.2) and must be delivered over a trusted channel; later updates carry signatures, and the mesh process verifies them against the pinned trust anchor and the effective version, so they can travel over untrusted channels;
+- Each modifying command rewrites the desired state file of the nodes whose desired state changed (site.md section 7); its format is the same as the `mesh` partition that nett-node writes for the mesh after joining the Hub (protocol.md section 6). The file contains no private keys. A machine's first desired state fixes its trust anchor (mesh.md section 4.2) and must be delivered over a trusted channel; later updates carry signatures, and the mesh verifies them against the pinned trust anchor and the effective version, so they can travel over untrusted channels;
 - The user copies the file to the node, replaces the old one, runs `nett reload` and sees whether it was accepted (status.md section 4.1); on macOS `sudo nett install` imports and reloads (release.md section 4);
 - The expiry of a signed payload is 30 days after generation: the node checks it when it first accepts its own node policy (auth.md section 10.2), so copy it to the node within 30 days of generation; when it has passed, `nett site invite <machine>` re-signs its node policy and rewrites its file. A node policy that was signed at generation and is less than 7 days from expiry is re-signed with a new version;
-- The mesh process verifies signatures, versions and revocations as usual. Parts that fail verification are not applied, the effective state stays unchanged, and an event is recorded (hard rules 3-6).
+- The mesh verifies signatures, versions and revocations as usual. Parts that fail verification are not applied, the effective state stays unchanged, and an event is recorded (hard rules 3-6).
 
 ## 6. Access control and Edge
 

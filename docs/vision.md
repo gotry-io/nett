@@ -23,9 +23,8 @@ nett is designed as an open-source project: anyone can deploy it on their own ma
 ## What it consists of
 
 - **Hub**: the center, that is, the mesh control plane. It handles node enrollment and signed admission, devices and credentials, access rules, hostnames and the external API; it is not on the data path, and the mesh keeps working while it is offline;
-- **nett-node**: one per machine, running directly on the system (not in a container). As the control agent it handles enrollment, connects to the Hub, upgrades, hands the signed mesh configuration to the mesh process, and reports status;
+- **The nett daemon**: one process per machine, running directly on the system (not in a container) (ADR 0013). Its **mesh** is responsible for WireGuard, path selection and switchover, DNS and access rules, and its TLS transport carries traffic when UDP is unavailable. **nett-node**, the control agent, runs beside the mesh on a thread of its own: it handles enrollment, connects to the Hub, upgrades, hands the signed mesh configuration to the mesh, and reports status. The mesh keeps working while nett-node or the Hub is away;
 - **nett-relay**: a low-privilege process on nodes that are reachable from outside, responsible for relay forwarding and the public transport entry point;
-- **Mesh process**: runs on nodes that join the mesh and is responsible for WireGuard, path selection and switchover, DNS and access rules. It is separate from nett-node, so the mesh keeps working while the node upgrades, crashes or restarts; when UDP is unavailable, a separate low-privilege **transport adapter** converts traffic to TLS;
 - **Command line `nett`**: the operating interface. On the user's computer it defines and signs the whole network and shows all machines; on each machine it handles installation and troubleshooting. What gets signed is computed and displayed by the command line locally, not through the Hub (ADR 0024). A web console is added later as a graphical interface on the same API. The mobile app arrives in M3; until then, phones join the mesh with any WireGuard client, from the standard configuration.
 
 The reverse proxy at the entry node (Edge) is run by the user and can be any implementation (Caddy, nginx, Traefik, and so on); nett neither generates nor manages its configuration. It only makes sure the proxy's origin traffic is encrypted through the mesh and lets services that need the real IP recognize it (ADR 0015, 0019).
@@ -64,7 +63,7 @@ When M1 is done: hand-written tunnels, home broadband port forwarding and existi
 
 | Constraint | Meaning |
 |---|---|
-| **Very low resource use** | When idle, each resident process on a node (node, mesh process, transport adapter, relay) holds ≤ 5 MB of its own memory, and all of them together ≤ 10 MB; the Hub uses ≤ 30–50 MB when running steadily |
+| **Very low resource use** | When idle, the nett daemon holds ≤ 8 MB of its own memory and nett-relay ≤ 5 MB, and all of nett's processes on a node together ≤ 10 MB; the Hub uses ≤ 30–50 MB when running steadily |
 | **High performance** | Mesh encryption uses WireGuard, done by the kernel on Linux; bulk traffic prefers the direct path and avoids relays |
 | **Adapts to complex networks** | LAN, public internet, mainland China, cross-border; home broadband without inbound 80/443, NAT-based VPSes, links where UDP is throttled or identified |
 | **High availability** | Automatic switching when a path jitters, breaks or a node goes offline, with connections kept alive; no single point; the mesh is unaffected when the Hub is offline |

@@ -18,7 +18,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0010](0010-ai-via-api-only.md) | AI connects only through the Hub API; node has no AI logic | Accepted |
 | [0011](0011-nett-relay.md) | nett-relay: independent low-privilege relay and transport entry point | Accepted |
 | [0012](0012-single-binary-packaging.md) | Single node-side executable, run as multiple processes by subcommand | Accepted; install script see 0024 |
-| [0013](0013-mesh-and-transport-processes.md) | Mesh process and transport adapter | Accepted |
+| [0013](0013-one-daemon-per-machine.md) | One nett daemon per machine | Accepted |
 | [0014](0014-signed-mesh-membership.md) | The mesh member table consists of signed artifacts | Accepted |
 | [0015](0015-origin-identity-and-lan-default-deny.md) | Origin identity and default deny for LAN prefixes | Accepted |
 | [0016](0016-containers.md) | Containers: one image, one container | Accepted |

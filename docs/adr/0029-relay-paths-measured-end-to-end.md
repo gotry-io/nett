@@ -16,14 +16,14 @@ How comparable products do it:
 
 1. **Through probes**: for a candidate through relay R, a member sends, besides its probe of R, a through probe that R forwards to the peer. The peer answers it, and R forwards the answer back. The round trip is the whole path, measured on the addresses WireGuard uses: R forwards the probe to the peer's bound address (section 5.2), where it forwards WireGuard's data.
 2. **Authentication**: the through probe carries two checksums: one with the sender's relay token, which R checks before forwarding, and one with the pair's direct probe key, which only the two members can compute and the peer checks. R forwards only between the two ends of a link assigned to it, and only a reply from the peer's bound address that matches a probe it forwarded in the last 2 seconds, once, back to where the probe came from. A message is 64 bytes in each direction, so R cannot be used to amplify traffic.
-3. **Use**: once a through reply has come back through R, the path through R is measured by through probes alone: its round trip, loss and freshness are the whole path's, and R answering this end's probe no longer counts as the path working. 30 seconds without a through reply through R while R answers, the path through R goes back to the halves and is held off as broken beyond R until B reports its leg to R without loss, as after a path through R fails while R answers (mesh.md section 8.2): a broken leg stays avoided, and a peer or relay gone back to an older release, which never answers through probes, reports its leg working and R is taken again.
-4. Every relay candidate is probed this way, the relay on the peer's own machine included: a through probe there also shows that the peer's mesh process and WireGuard answer, not only its relay.
+3. **Use**: once a through reply has come back through R, the path through R is measured by through probes alone: its round trip, loss and freshness are the whole path's, and R answering this end's probe no longer counts as the path working. 30 seconds without a through reply through R while R answers, the path through R goes back to the halves and is held off as broken beyond R until B reports its leg to R without loss, as after a path through R fails while R answers (mesh.md section 8.2): a broken leg stays avoided, and a working one whose relay or peer stops answering through probes is reported as working and R is taken again.
+4. Every relay candidate is probed this way, the relay on the peer's own machine included: a through probe there also shows that the peer's mesh and WireGuard answer, not only its relay.
 
 ## Rationale
 
 - **What is measured is what is used**: the path is taken because its whole round trip answered within the last probe interval, as Tailscale takes a relay path on a pong from the peer. Neither a stale report nor a relay that answers for its own leg can make a broken path look good.
 - **No new state on the relay beyond 2 seconds**: R keeps, for each forwarded probe, where it came from, and forgets it after 2 seconds; it holds no keys beyond the tokens it already has.
-- **Older releases keep working**: a relay before this release drops the unknown message type, and a member before it gets the forwarded probe on its WireGuard port, where kernel WireGuard or the userspace data plane drops it. Through probes are used only where they come back, and the halves stay as the way for everything else.
+- **Paths whose relay or peer does not answer through probes keep working**: a relay that does not forward them drops the message type it does not know, and a peer that does not answer them gets the forwarded probe on its WireGuard port, where kernel WireGuard or the userspace data plane drops it. Through probes are used only where they come back, and the halves stay as the way for everything else.
 - **The legs stay reported**: B still reports its legs, for paths through relays that do not forward through probes and for estimating a relay's quality before switching to it.
 
 ## Alternatives considered
@@ -34,7 +34,7 @@ How comparable products do it:
 
 ## Consequences
 
-- New probe types `0x92` (through probe) and `0x93` (through reply) (mesh.md sections 5.1, 7.1 and 7.2); the Linux rule that copies probe packets from the WireGuard port and the userspace data plane hand both to the mesh process;
+- New probe types `0x92` (through probe) and `0x93` (through reply) (mesh.md sections 5.1, 7.1 and 7.2); the Linux rule that copies probe packets from the WireGuard port and the userspace data plane hand both to the mesh;
 - nett-relay forwards through probes and their replies (mesh.md section 5.2) and keeps at most 4096 forwarded probes for 2 seconds;
 - Probe traffic toward relays doubles: one through probe with each probe of a relay candidate, 64 bytes each way, within the budget of mesh.md section 7;
 - The lab scenario `hub-relay` checks the case above, and the mesh simulator and nett-relay have tests for the forwarding, the authentication and going back to the halves.

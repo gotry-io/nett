@@ -21,8 +21,8 @@ The mesh is the most central and riskiest capability. The user decided that nett
   - Management: the deploy module (Compose, stack, deployment profiles, deployment hooks, encrypted secret delivery and `stack_spec`, CI identity), the ingress module (routes, certificates, Edge configuration generation, DNS provider integration), read-only container logs, importing from existing tools; multi-step change sets, impact analysis, auto-execution policy, active verification and rollback; AI operations (the MCP adapter layer, the operations agent, `ai`-type API tokens) and the MCP gateway.
 - **Components of nett**:
   - **nett-hub**: the control plane of the mesh and the Web console. It handles users and passkeys, recovery keys and backup keys, API tokens (only the `script` type), trust anchors, nodes and enrollment, node policy, devices and credentials, access rules, hostnames (node names and user-added aliases), links (`links`), `whois`, activity events, release package distribution, Hub backup, and change sets for mesh actions (single step, passkey signature when high risk);
-  - **nett-node**: the control agent. It only handles enrollment, connecting to the Hub, keeping local state, upgrades, handing signed material to the mesh process, reporting inventory (platform, capabilities, addresses) and link status, executing mesh actions, and pulling the Hub's encrypted backups; it does not access Docker;
-  - **The mesh process, the transport adapter, nett-relay, and the command-line `nett`**.
+  - **nett-node**: the control agent. It only handles enrollment, connecting to the Hub, keeping local state, upgrades, handing signed material to the mesh, reporting inventory (platform, capabilities, addresses) and link status, executing mesh actions, and pulling the Hub's encrypted backups; it does not access Docker;
+  - **The mesh and the TLS transport**, which run with nett-node in the nett daemon (ADR 0013), **nett-relay, and the command-line `nett`**.
 - **Origin traffic is a general mesh capability** (ADR 0015):
   - The Edge is the reverse proxy the user runs on the entry node; any implementation will do (Caddy, nginx, Traefik and so on). nett neither generates nor manages its configuration;
   - The `edge` role in the node policy (`node.set_roles`, requires a signature) declares that this machine runs an Edge and states how to identify the traffic the Edge sends: the address of the container the Edge runs in, or the system user when it runs natively. The Edge address is assigned accordingly;
@@ -31,7 +31,7 @@ The mesh is the most central and riskiest capability. The user decided that nett
 - **The Hub's own HTTPS**: the Hub install script generates the reverse proxy configuration for the Hub console's domain (Caddy by default, ADR 0009), and on the same port 443 hands the nett-relay domain over to nett-relay by SNI. This reverse proxy can also be the user's Edge, but nett generates only these two sections, for the Hub and nett-relay.
 - **Agent-to-agent access is to be discussed**: workload identity may become an extension of the mesh (reusing the Edge address mechanism, assigning a dedicated address to a single program); the MCP gateway does not belong to nett. Not scheduled.
 - **Phases**: P0 project start → M1 mesh → M2 mesh enhancements (multi-hop, QUIC and obfuscation, UDP support for CONNECT, hole punching when both ends are behind symmetric NAT) → M3 clients (iOS and Android apps and Windows).
-- Role boundaries and resource budget: when idle, nett-node, the mesh process, the transport adapter and nett-relay each hold <= 5 MB of private memory and <= 10 MB together, and the Hub <= 30-50 MB.
+- Role boundaries and resource budget: when idle, the nett daemon holds <= 8 MB of private memory and nett-relay <= 5 MB, all of nett's processes on one machine <= 10 MB together, and the Hub <= 30-50 MB.
 
 ## Rationale
 

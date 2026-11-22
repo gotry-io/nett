@@ -30,6 +30,6 @@ What a node installs is decided by the release signature, which binds the versio
 ## Consequences
 
 - The Hub host keeps one program per target of the current release, about 8 MB each, and the Hub holds the release public keys like nodes do. A Hub whose keys do not cover a release, as after a key rotation before the Hub is upgraded, does not mirror it, and nodes fetch that release from the website;
-- The protocol gains two messages; a Hub that does not know them ignores them, and the node then fetches from the URL (protocol.md section 9);
+- The protocol gains two messages; when the Hub does not hold the program or sends nothing for 10 seconds, the node fetches it from the URL (release.md section 7);
 - An upgrade costs the Hub host's uplink one program per machine, about 20–30 seconds at 3 Mbit/s;
-- ADR 0012's statement that the Hub caches and serves release packages holds again for upgrades; new machines install from the project website (ADR 0020).
+- ADR 0012's statement that the Hub caches and serves release packages holds for upgrades; new machines install from the project website (ADR 0020).

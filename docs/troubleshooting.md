@@ -33,7 +33,7 @@ dig @<this machine's mesh IPv4> <name>.nett.internal
 
 If that answers and programs still do not resolve the name, the system resolver does not send the suffix to it:
 
-- **macOS**: `/etc/resolver/nett.internal` should hold `nameserver <mesh IPv4>`; the mesh service writes it. Check with `scutil --dns | grep -A3 nett.internal`.
+- **macOS**: `/etc/resolver/nett.internal` should hold `nameserver <mesh IPv4>`; the nett service writes it. Check with `scutil --dns | grep -A3 nett.internal`.
 - **Linux with systemd-resolved**: `resolvectl status nett0` should list the mesh IPv4 as its DNS server and `~nett.internal` as its domain. Programs reach these settings only when `/etc/resolv.conf` points at systemd-resolved's stub (`nameserver 127.0.0.53`). Some images point it at the upstream servers instead; then only `resolvectl query <name>.nett.internal` resolves the names. To use them everywhere, point the file at the stub (this sends every program's queries through systemd-resolved):
 
   ```
@@ -63,12 +63,12 @@ nett's image runs as one container ([packaging/container/compose.example.yaml](.
 
 ## Upgrades
 
-Machines installed with `sudo nett install`, containers and the Hub upgrade themselves to a release once you approve it with `nett site upgrade` (all of them, or `nett site upgrade <machine>` to try one first), after checking its signature ([design/release.md](design/release.md) section 7); the Hub upgrades first. Until then `nett site status` shows the release as available. When an upgrade fails, `nett site status` shows the reason (for the Hub on its `hub upgrade` line) and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is. A container or Hub whose new version does not settle goes back to the version before it after three starts, without being recreated.
+Machines installed with `sudo nett install`, containers and the Hub upgrade themselves to a release once you approve it with `nett site upgrade` (all of them, or `nett site upgrade <machine>` to try one first), after checking its signature ([design/release.md](design/release.md) section 7); the Hub upgrades first. Until then `nett site status` shows the release as available. When an upgrade fails, `nett site status` shows the reason (for the Hub on its `hub upgrade` line) and `nett doctor` on the machine repeats it; that version is not tried again, and the next release is. A new version that does not settle goes back to the version before it by itself, on a machine, on the Hub and in a container, which is not recreated for it.
 
 ## What to collect for a report
 
 - `nett status --json` and `sudo nett doctor` on the machines involved;
-- the logs: `journalctl -u nett-mesh -u nett-node` on Linux, `log show --last 1h --predicate 'process == "nett"'` on macOS (with sudo);
+- the logs: `journalctl -u nett` on Linux (with `-u nett-relay` on a relay), `log show --last 1h --predicate 'process == "nett"'` on macOS (with sudo);
 - `nett site status --json` from the computer that holds the site.
 
 None of these contain keys or tokens.

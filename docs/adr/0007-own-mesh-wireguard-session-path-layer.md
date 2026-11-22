@@ -21,16 +21,16 @@ nett builds its own mesh, in three layers:
 
 - **Session layer: WireGuard**, responsible only for encryption. Linux uses the kernel implementation; platforms without a kernel module use a Rust userspace implementation. No other encryption protocol is maintained alongside.
 - **Transport layer: pluggable**. UDP is the default; when UDP is restricted, TCP/TLS 443 is used; QUIC and obfuscation wrappers are added later. Encrypted packets are placed into these transports, and WireGuard itself is unchanged.
-- **Path layer: the mesh process** (ADR 0013; originally designed as the mesh module in nett-node). For each pair of nodes it maintains candidate paths (direct LAN, direct public, through a relay, multi-hop relay), measures continuously, selects by score with hysteresis, and switches quickly when a path degrades. A switch only updates the peer address of the WireGuard session; the session and upper-layer connections are unaffected.
+- **Path layer: the mesh** in the nett daemon (ADR 0013). For each pair of nodes it maintains candidate paths (direct LAN, direct public, through a relay, multi-hop relay), measures continuously, selects by score with hysteresis, and switches quickly when a path degrades. A switch only updates the peer address of the WireGuard session; the session and upper-layer connections are unaffected.
 
 Supporting rules:
 
 - All `public` nodes have relay capability, and the Hub chooses which relays are actually used; a relay only forwards encrypted packets;
 - A `dial-only` node connects to at least two `public` nodes;
 - Topology and keys are persisted locally on nodes, and nodes keep selecting paths and switching when the Hub is offline;
-- A LAN joins through one host running nett-node acting as the smart gateway;
+- A LAN joins through one host running nett acting as the smart gateway;
 - tailscale is kept as an optional fallback, managed by the Hub and hidden from upper layers. The fallback is not scheduled; it runs only on nodes where the user explicitly enables it and is not bound by the node memory budget; Headscale's address pool must exclude nett's mesh prefixes.
-- The path layer and the userspace WireGuard run in a separate mesh process (ADR 0013); on macOS in M1 it joins as a native member (ADR 0018), and a container joins with nett's image (ADR 0016).
+- The path layer and the userspace WireGuard run in the nett daemon, the one nett process on a machine besides nett-relay (ADR 0013); on macOS in M1 it joins as a native member (ADR 0018), and a container joins with nett's image (ADR 0016).
 
 ## Rationale
 
@@ -49,4 +49,4 @@ Supporting rules:
 
 - The mesh is the largest piece of work in the project; M1 needs session management, the path layer, nett-relay and the TCP/TLS transport;
 - A Rust userspace WireGuard implementation needs to be evaluated and selected;
-- Links where both ends are behind NAT: hole-punched direct connection when at least one end has a cone NAT, or both ends have global IPv6 addresses (M1), otherwise connectivity goes through a relay; hole punching when both ends have symmetric NAT is in M2. The kernel WireGuard port belongs to the kernel; the mesh process sends probes using this port as the source port and receives copies of probes through nftables, and switches only after the hole-punched path has been verified, without interrupting the current connection (design/mesh.md sections 6.1 and 7.1, ADR 0021).
+- Links where both ends are behind NAT: hole-punched direct connection when at least one end has a cone NAT, or both ends have global IPv6 addresses (M1), otherwise connectivity goes through a relay; hole punching when both ends have symmetric NAT is in M2. The kernel WireGuard port belongs to the kernel; the mesh sends probes using this port as the source port and receives copies of probes through nftables, and switches only after the hole-punched path has been verified, without interrupting the current connection (design/mesh.md sections 6.1 and 7.1, ADR 0021).

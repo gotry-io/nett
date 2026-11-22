@@ -8,9 +8,7 @@ nett is for individuals and small teams with a few scattered machines, for examp
 - Command line: `nett`
 - Services:
   - `nett-hub`: the mesh control plane, operated with the `nett` command line; a web console comes later (ADR 0024)
-  - `nett-node`: the control agent on every machine; handles enrollment, the connection to the Hub and upgrades
-  - `nett-mesh`: the mesh process; handles WireGuard, path selection and switching, DNS and access rules
-  - `nett-transport`: a low-privilege transport adapter that runs on demand and carries traffic over TLS when UDP is unavailable
+  - the nett daemon (`nett daemon`): one process on every machine (ADR 0013). It runs the mesh, which handles WireGuard, path selection and switching, DNS and access rules, and carries traffic over TLS when UDP is unavailable; and nett-node, the control agent that handles enrollment, the connection to the Hub and upgrades
   - `nett-relay`: relay and public transport entry point on nodes that accept inbound connections
 - Status: **M1 in development** ([roadmap](docs/roadmap.md)). A mesh can be deployed with local signing ([design/local-signing.md](docs/design/local-signing.md)) or with a Hub ([design/hub.md](docs/design/hub.md)): Linux uses kernel WireGuard, macOS joins as a native member, and a container joins with nett's image, with its services sharing its network ([design/container.md](docs/design/container.md)).
 - License: [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option
@@ -33,7 +31,7 @@ The script installs only the `nett` program to `/usr/local/bin`, after checking 
    ```bash
    curl -fsSL https://nett.gotry.io/install.sh | sh && sudo nett install nett_enr_…
    ```
-4. Change the site with commands such as `nett site allow`, `routes` and `edge` ([design/site.md](docs/design/site.md)). Every change lists what will be signed, is signed once you confirm, and is pushed to the Hub; nett-node on each machine hands it to the mesh process, and the command reports which machines applied it.
+4. Change the site with commands such as `nett site allow`, `routes` and `edge` ([design/site.md](docs/design/site.md)). Every change lists what will be signed, is signed once you confirm, and is pushed to the Hub; nett-node on each machine hands it to the mesh, and the command reports which machines applied it.
 
 `nett site status` lists whether each machine is online and has applied the latest change, and the path and round-trip time between each pair. `nett site relay <machine>` makes a public Linux machine a relay, so machines that cannot reach each other directly, or cannot send UDP, connect through it over UDP or TLS ([design/site.md](docs/design/site.md) section 4.1); machines behind the same NAT connect over their LAN. Every machine keeps an encrypted backup of the Hub, which only `backup.key` in the site directory opens: keep a copy of it offline with `recovery.pk8`, and `nett-hub restore` rebuilds a lost Hub from any machine's copy ([design/hub.md](docs/design/hub.md) section 8.2). `nett site status` shows available releases. Approve upgrades with `nett site upgrade`. Each machine verifies the release signature before installing it ([design/release.md](docs/design/release.md) section 7). Machines that were already members before the Hub connect with `nett site invite <name>`. `sudo nett leave` takes a machine out of the site, and every member drops it. While the Hub is down the mesh keeps working, and changes catch up when it is back.
 
@@ -44,7 +42,7 @@ The script installs only the `nett` program to `/usr/local/bin`, after checking 
 3. On the computer: `nett site add <name> --keys "<that line>"` (with `--public --ipv4 <address>` for a machine others connect to).
 4. Give the machine its desired state: on a Mac that holds the site, run `sudo nett install` again, which finds it in the site directory; elsewhere, copy the generated `nodes/<name>/desired.json` over and run `sudo nett install --config desired.json`. Run the same command again after the desired state changes; it reloads without a restart.
 
-The mesh service runs as root from a copy in a root-only directory, so run `sudo nett install` again after upgrading nett ([design/release.md](docs/design/release.md) section 4).
+The nett service runs as root from a copy in a root-only directory, so run `sudo nett install` again after upgrading nett ([design/release.md](docs/design/release.md) section 4).
 
 ## Use
 
