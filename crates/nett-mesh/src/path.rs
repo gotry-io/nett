@@ -446,8 +446,9 @@ pub enum Action {
     /// [`PeerPaths::adopt`] (section 8.4). No other better-path selection happens before that.
     Propose { index: usize, reason: SwitchReason },
     /// Both sides are `dial-only`: the current path is broken and both ends must recover together (section
-    /// 8.4); the caller decides where to go.
-    Lost,
+    /// 8.4); the caller decides where to go, from the candidates that answered since `since`, when the
+    /// failure was first suspected ([`PeerPaths::best_other_relay`]).
+    Lost { since: Instant },
 }
 
 /// Waiting for a re-handshake to complete (section 8.4).
@@ -598,6 +599,60 @@ impl PeerPaths {
         self.tunnel_established
     }
 
+    /// The same pair's state for a changed candidate list from a new desired state (design/mesh.md
+    /// section 8.3): candidates that remain keep their measurements, the punched and learned direct
+    /// paths stay after the configured ones, and the pair stays on the path it uses, with the tunnel's
+    /// state, when that path remains. Starting over would move it to where a new pair starts, while the
+    /// other end of a two-ended pair stays where both were: the tunnel breaks until they meet again.
+    /// When the path in use is gone, the pair starts over as a new one. A two-ended switchover that was
+    /// waiting for its confirmation is dropped with the caller's proposal.
+    pub fn reconfigured(&self, routes: Vec<(Route, PathKind)>) -> Option<Self> {
+        let in_use = self.candidates.get(self.current).map(|c| (c.route, c.kind));
+        let mut next = self.clone();
+        let old = std::mem::take(&mut next.candidates);
+        next.candidates = routes
+            .iter()
+            .map(|&(route, kind)| {
+                old.iter()
+                    .find(|c| c.route == route && c.kind == kind)
+                    .cloned()
+                    .unwrap_or_else(|| Candidate::new(route, kind))
+            })
+            .collect();
+        // The extra paths, in the order they were added, which is the order the caller keeps them in
+        let mut extras: Vec<usize> = self
+            .punched
+            .into_iter()
+            .chain(self.learned.map(|(i, _)| i))
+            .collect();
+        extras.sort_unstable();
+        next.punched = None;
+        next.learned = None;
+        for i in extras {
+            next.candidates.push(old[i].clone());
+            let at = next.candidates.len() - 1;
+            if self.punched == Some(i) {
+                next.punched = Some(at);
+            }
+            if let Some((_, seen)) = self.learned.filter(|(l, _)| *l == i) {
+                next.learned = Some((at, seen));
+            }
+        }
+        let current = in_use.and_then(|(route, kind)| {
+            next.candidates
+                .iter()
+                .position(|c| c.route == route && c.kind == kind)
+        });
+        let Some(current) = current else {
+            return Self::new(routes, self.role);
+        };
+        next.current = current;
+        next.hold = false;
+        next.better_since = None;
+        next.faster_since = None;
+        Some(next)
+    }
+
     /// A direct path established by hole punching: added as a direct candidate (when one already exists it is
     /// replaced with the new address and measurement starts over), returns its index.
     pub fn set_punched(&mut self, endpoint: SocketAddr) -> usize {
@@ -614,6 +669,11 @@ impl PeerPaths {
         let i = self.candidates.len() - 1;
         self.punched = Some(i);
         i
+    }
+
+    /// Number of candidates, the configured ones and the punched and learned direct paths after them.
+    pub fn candidate_count(&self) -> usize {
+        self.candidates.len()
     }
 
     pub fn punched_index(&self) -> Option<usize> {
@@ -754,23 +814,15 @@ impl PeerPaths {
             .position(|c| matches!(c.route, Route::Relay { relay: r, .. } if r == relay))
     }
 
-    /// The relay to move to when the current path is down and the Hub relays the proposal (section 8.4):
-    /// the one with the shortest round-trip time among those whose last probe this end got a reply to,
-    /// otherwise the first other one in relay-number order.
-    pub fn best_other_relay(&self, now: Instant) -> Option<usize> {
-        let views = self.candidate_views(now);
-        let others: Vec<usize> = self
-            .relays_in_order()
-            .into_iter()
-            .filter(|&i| i != self.current)
-            .collect();
-        let rtt = |i: usize| views[i].rtt_ms.unwrap_or(f64::MAX);
-        others
-            .iter()
-            .copied()
-            .filter(|&i| views[i].state == CandidateState::Ok)
-            .min_by(|&x, &y| rtt(x).total_cmp(&rtt(y)))
-            .or_else(|| others.first().copied())
+    /// The relay path to move to when the current path is down and the Hub relays the proposal (section
+    /// 8.4): of those that answered since the failure was suspected (`since`, from [`Action::Lost`]), the
+    /// one a failover would take; otherwise the first other one in relay-number order.
+    pub fn best_other_relay(&self, since: Instant, now: Instant) -> Option<usize> {
+        self.failover_target(since, now, true).or_else(|| {
+            self.relays_in_order()
+                .into_iter()
+                .find(|&i| i != self.current)
+        })
     }
 
     /// Candidates via relays are sorted by relay number: the two ends' candidate lists may be in different
@@ -1115,7 +1167,14 @@ impl PeerPaths {
                 {
                     actions.extend(self.probe_candidate(self.current, now, false));
                 }
+                // Both ends switch together on a proposal through the tunnel: while the pair has traffic and the
+                // tunnel has not answered since it moved onto this path, the proposal could not arrive and the
+                // decider would switch alone; an outage there is reported and the choice goes through the Hub
+                // (section 8.4)
+                let proposable =
+                    self.role != Role::DecideTogether || self.tunnel_established || !active;
                 if !self.hold
+                    && proposable
                     && let Some(action) = self.check_improvement(now)
                 {
                     actions.push(action);
@@ -1292,10 +1351,14 @@ impl PeerPaths {
             }
             if self.role.together() {
                 // Recover together at both ends: record this failure and hand it to the caller; afterwards start a new
-                // round of detection
+                // round of detection. The decider learns from it what a failover does, as it chooses where both go
+                if self.role == Role::DecideTogether {
+                    self.mark_broken_beyond(since, now);
+                    self.void_unanswered(since);
+                }
                 self.record_failure(now);
                 self.reset_tunnel(self.tunnel.rtt_ms);
-                return Some(Action::Lost);
+                return Some(Action::Lost { since });
             }
             let current = &self.candidates[self.current];
             if current.kind.via_relay()
@@ -1369,13 +1432,31 @@ impl PeerPaths {
         fresh_since: Instant,
         reason: SwitchReason,
     ) -> Option<Action> {
-        let current = self.current;
-        // The relay still answered this end since the failure began: the break lies beyond it, on its leg to
-        // the peer, which every path through it shares
-        if let Route::Relay { relay, .. } = self.candidates[current].route
-            && self.candidates[current]
-                .last_reply
-                .is_some_and(|t| t >= fresh_since)
+        self.mark_broken_beyond(fresh_since, now);
+        let target = self.failover_target(fresh_since, now, false)?;
+        self.record_failure(now);
+        self.void_unanswered(fresh_since);
+        Some(self.decide(target, reason, now))
+    }
+
+    /// A candidate with no reply since suspected failure has its earlier run of consecutive replies voided:
+    /// otherwise probes that have not yet timed out would make a better path that has just gone down look
+    /// still healthy, and after switching away it would immediately be switched back.
+    fn void_unanswered(&mut self, fresh_since: Instant) {
+        for c in &mut self.candidates {
+            if !c.last_reply.is_some_and(|t| t >= fresh_since) {
+                c.stats.consecutive_successes = 0;
+                c.healthy_since = None;
+            }
+        }
+    }
+
+    /// The current path failed and its relay still answered this end since the failure began: the break
+    /// lies beyond it, on its leg to the peer, which every path through it shares.
+    fn mark_broken_beyond(&mut self, fresh_since: Instant, now: Instant) {
+        let current = &self.candidates[self.current];
+        if let Route::Relay { relay, .. } = current.route
+            && current.last_reply.is_some_and(|t| t >= fresh_since)
         {
             for c in &mut self.candidates {
                 if matches!(c.route, Route::Relay { relay: r, .. } if r == relay) {
@@ -1383,30 +1464,33 @@ impl PeerPaths {
                 }
             }
         }
-        // Paths through such a relay only when nothing else just replied
+    }
+
+    /// Where a failure of the current path moves (section 8.2): of the other candidates (only those via
+    /// relays with `relays_only`) that answered since `fresh_since`, a path measured end to end before one
+    /// measured only to its relay (section 7.2), then the best score; a path through a relay broken beyond
+    /// it only when nothing else answered. A candidate whose last reply came before the failure began is
+    /// not a target: it may have failed with the current path, and its probe since not yet timed out.
+    fn failover_target(
+        &self,
+        fresh_since: Instant,
+        now: Instant,
+        relays_only: bool,
+    ) -> Option<usize> {
         let best = |others: bool| {
             self.candidates
                 .iter()
                 .enumerate()
-                .filter(|(i, c)| *i != current && c.last_reply.is_some_and(|t| t >= fresh_since))
+                .filter(|(i, c)| {
+                    *i != self.current && c.last_reply.is_some_and(|t| t >= fresh_since)
+                })
+                .filter(|(_, c)| !relays_only || matches!(c.route, Route::Relay { .. }))
                 .filter(|(_, c)| !others || !c.broken_beyond(now))
-                // A path measured end to end before one measured only to its relay (section 7.2)
                 .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, !self.whole(c), s)))
                 .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
                 .map(|(i, _, _)| i)
         };
-        let target = best(true).or_else(|| best(false))?;
-        self.record_failure(now);
-        // A candidate with no reply since suspected failure has its earlier run of consecutive replies voided:
-        // otherwise probes that have not yet timed out would make a better path that has just gone down look
-        // still healthy, and after switching away it would immediately be switched back
-        for c in &mut self.candidates {
-            if !c.last_reply.is_some_and(|t| t >= fresh_since) {
-                c.stats.consecutive_successes = 0;
-                c.healthy_since = None;
-            }
-        }
-        Some(self.decide(target, reason, now))
+        best(true).or_else(|| best(false))
     }
 
     /// Decides to switch to candidate `target`: for a two-ended switchover, propose first.
@@ -1700,7 +1784,8 @@ mod tests {
         /// (delivery time, whether in-tunnel, index, sequence number)
         inflight: Vec<(Instant, bool, usize, u32)>,
         switches: Vec<(Instant, Route, bool, SwitchReason)>,
-        lost: Vec<Instant>,
+        /// When each outage was reported, and since when it was suspected.
+        lost: Vec<(Instant, Instant)>,
         proposals: Vec<(Instant, usize, SwitchReason)>,
         candidate_probes: usize,
         /// The peer's leg of each relay path, carried with candidate replies (`None`: not reported).
@@ -1870,7 +1955,7 @@ mod tests {
                             // After a switch, probes still in flight on the old path are voided
                             self.inflight.retain(|f| !f.1);
                         }
-                        Action::Lost => self.lost.push(now),
+                        Action::Lost { since } => self.lost.push((now, since)),
                         Action::Propose { index, reason } => {
                             self.proposals.push((now, index, reason));
                         }
@@ -2748,9 +2833,109 @@ mod tests {
             let down = sim.now;
             sim.run(Duration::from_secs(5));
             assert!(sim.switches.is_empty(), "{role:?}: {:?}", sim.switches);
-            let took = sim.lost[0].saturating_duration_since(down);
+            let took = sim.lost[0].0.saturating_duration_since(down);
             assert!(took <= Duration::from_secs(4), "{role:?}: took {took:?}");
         }
+    }
+
+    /// Both ends `dial-only` and the relay in use stops: the relay the decider proposes through the Hub
+    /// is one that answered since the failure was suspected, not the stopped relay's other transport,
+    /// whose last reply came before the relay stopped and whose probe has not timed out yet
+    /// (design/mesh.md section 8.4).
+    #[test]
+    fn a_lost_pair_moves_to_a_relay_that_answered_since_the_failure() {
+        let tls = Route::Relay {
+            relay: KeyId([1; 8]),
+            endpoint: SocketAddr::new([127, 0, 0, 1].into(), 41830),
+        };
+        let mut sim = Sim::with_role(
+            vec![
+                (relay(1), PathKind::Relay),
+                (tls, PathKind::RelayTls),
+                (relay(2), PathKind::Relay),
+            ],
+            Role::DecideTogether,
+        );
+        sim.rtt = vec![2 * MS, 2 * MS, 20 * MS];
+        sim.run(Duration::from_secs(20));
+        assert_eq!(sim.paths.current, 0);
+        sim.up[0] = false;
+        sim.up[1] = false;
+        while sim.lost.is_empty() {
+            sim.run(TICK);
+        }
+        let (_, since) = sim.lost[0];
+        assert_eq!(sim.paths.best_other_relay(since, sim.now), Some(2));
+    }
+
+    /// Both ends `dial-only` and all of this end's UDP stops: the pair moves to a relay over TLS, and a
+    /// relay over UDP whose replies came before the outage is not proposed as a better type right
+    /// after, while its probe since has not timed out yet (design/mesh.md section 8.2).
+    #[test]
+    fn a_lost_pair_does_not_return_to_a_path_that_went_down_with_it() {
+        let tls = Route::Relay {
+            relay: KeyId([2; 8]),
+            endpoint: SocketAddr::new([127, 0, 0, 1].into(), 41831),
+        };
+        let mut sim = Sim::with_role(
+            vec![
+                (relay(1), PathKind::Relay),
+                (tls, PathKind::RelayTls),
+                (relay(2), PathKind::Relay),
+            ],
+            Role::DecideTogether,
+        );
+        sim.run(Duration::from_secs(20));
+        assert_eq!(sim.paths.current, 0);
+        sim.up[0] = false;
+        sim.up[2] = false;
+        while sim.lost.is_empty() {
+            sim.run(TICK);
+        }
+        let (_, since) = sim.lost[0];
+        assert_eq!(sim.paths.best_other_relay(since, sim.now), Some(1));
+        // The peer is reached over the new path within milliseconds (its WireGuard roams to where the
+        // packets now come from): the handshake completes at once
+        sim.paths.adopt(1, SwitchReason::Unreachable, sim.now);
+        sim.paths.set_hold(false);
+        sim.paths.on_handshake();
+        let moved = sim.now;
+        sim.run(Duration::from_secs(5));
+        assert!(
+            sim.proposals.iter().all(|p| p.0 < moved),
+            "{:?}",
+            sim.proposals
+        );
+        assert_eq!(sim.paths.current, 1);
+    }
+
+    /// Both ends `dial-only`, with traffic, on a path whose tunnel has not answered since the pair moved
+    /// onto it: a better path is not proposed through that tunnel, where the proposal could not arrive
+    /// and the decider would end up switching alone; the outage is reported instead, and the choice goes
+    /// through the Hub (design/mesh.md section 8.4).
+    #[test]
+    fn a_pair_proposes_through_the_tunnel_only_once_it_answers() {
+        let tls = Route::Relay {
+            relay: KeyId([1; 8]),
+            endpoint: SocketAddr::new([127, 0, 0, 1].into(), 41830),
+        };
+        let mut sim = Sim::with_role(
+            vec![(tls, PathKind::RelayTls), (relay(2), PathKind::Relay)],
+            Role::DecideTogether,
+        );
+        assert_eq!(sim.paths.current, 0);
+        sim.tunnel_broken[0] = true;
+        sim.fix_on_rehandshake = false;
+        sim.run(Duration::from_secs(10));
+        assert!(sim.proposals.is_empty(), "{:?}", sim.proposals);
+        assert!(!sim.lost.is_empty());
+        // Once the tunnel answers, the better path is proposed through it
+        sim.tunnel_broken[0] = false;
+        sim.run(Duration::from_secs(10));
+        assert_eq!(
+            sim.proposals.first().map(|p| (p.1, p.2)),
+            Some((1, SwitchReason::BetterType))
+        );
     }
 
     #[test]
@@ -2983,6 +3168,61 @@ mod tests {
         let settled = sim.switches.len();
         sim.run(Duration::from_secs(30));
         assert_eq!(sim.switches.len(), settled, "{:?}", sim.switches);
+    }
+
+    /// A new candidate list keeps the pair on the path it uses, with what was measured of the paths that
+    /// remain; when that path is gone, the pair starts over as a new one does (design/mesh.md section
+    /// 8.3).
+    #[test]
+    fn a_new_candidate_list_keeps_the_path_in_use() {
+        let mut sim = Sim::with_role(
+            vec![(relay(1), PathKind::Relay), (relay(2), PathKind::Relay)],
+            Role::DecideTogether,
+        );
+        sim.run(Duration::from_secs(10));
+        let first = sim.paths.current();
+        let other = if first == relay(1) {
+            relay(2)
+        } else {
+            relay(1)
+        };
+        let i = sim
+            .paths
+            .candidates
+            .iter()
+            .position(|c| c.route == other)
+            .expect("other relay");
+        sim.paths.adopt(i, SwitchReason::Proposed, sim.now);
+        sim.run(Duration::from_secs(5));
+        let measured = sim.paths.candidates[i].stats.rtt_ms();
+        assert!(measured.is_some());
+
+        // The peer reports a LAN address: a new candidate, the relays stay
+        let lan = (lan("192.168.1.20"), PathKind::Lan);
+        let next = sim
+            .paths
+            .reconfigured(vec![
+                lan,
+                (relay(2), PathKind::Relay),
+                (relay(1), PathKind::Relay),
+            ])
+            .expect("paths");
+        assert_eq!(next.current(), other);
+        assert!(next.tunnel_established());
+        let kept = next
+            .candidates
+            .iter()
+            .find(|c| c.route == other)
+            .expect("kept");
+        assert_eq!(kept.stats.rtt_ms(), measured);
+
+        // The relay in use is gone: the pair starts over on the first relay, as a new pair does
+        let gone = sim
+            .paths
+            .reconfigured(vec![lan, (first, PathKind::Relay)])
+            .expect("paths");
+        assert_eq!(gone.current(), first);
+        assert!(!gone.tunnel_established());
     }
 
     /// The peer restarts while the pair is on the peer's own relay over TLS: that path fails for a

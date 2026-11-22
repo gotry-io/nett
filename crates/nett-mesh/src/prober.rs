@@ -465,36 +465,46 @@ impl Prober {
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
             let punch_wanted =
                 role.is_some_and(Role::together) && candidates.contains(&Candidate::Punch);
-            let previous = self.peers.remove(id).filter(|p| {
-                p.routes[..p.configured] == routes[..] && p.public_key == member.mesh_public_key
-            });
-            let kept = previous
+            // The same member keeps what was learned about it; its path selection state is kept when
+            // its candidates are unchanged, and reconfigured for the new ones otherwise, so the pair stays
+            // on the path it uses (both ends of a two-ended pair stay together)
+            let previous = self
+                .peers
+                .remove(id)
+                .filter(|p| p.public_key == member.mesh_public_key);
+            let unchanged = previous
                 .as_ref()
-                .and_then(|p| p.paths.as_ref().map(|paths| (paths, &p.together, &p.punch)))
-                .filter(|(paths, _, _)| Some(paths.role()) == role);
-            // When path selection state is kept, the punched direct path is kept too
-            if kept.is_some()
-                && let Some(prev) = &previous
+                .is_some_and(|p| p.routes[..p.configured] == routes[..]);
+            let before = previous
+                .as_ref()
+                .and_then(|p| p.paths.as_ref().map(|paths| (p, paths)))
+                .filter(|(_, paths)| Some(paths.role()) == role);
+            let paths = match (before, role) {
+                (Some((_, paths)), _) if unchanged => Some(paths.clone()),
+                (Some((_, paths)), _) => paths.reconfigured(routes.clone()),
+                (None, Some(role)) => PeerPaths::new(routes.clone(), role),
+                (None, None) => None,
+            };
+            // The punched and learned direct paths the state kept come after the configured ones
+            if let (Some((prev, _)), Some(next)) = (before, paths.as_ref())
+                && next.candidate_count() > configured
             {
                 for extra in &prev.routes[prev.configured..] {
                     routes.push(*extra);
                     meta.push(CandidateMeta::Direct);
                 }
             }
-            let punch = match kept {
-                Some((_, _, punch)) if punch_wanted => {
-                    punch.clone().or_else(|| Some(Punch::new(Instant::now())))
-                }
+            let together = match before {
+                Some((prev, _)) if unchanged => prev.together.clone(),
+                _ => role.and_then(|r| r.together().then(Together::default)),
+            };
+            let punch = match before {
+                Some((prev, _)) if punch_wanted => prev
+                    .punch
+                    .clone()
+                    .or_else(|| Some(Punch::new(Instant::now()))),
                 _ if punch_wanted => Some(Punch::new(Instant::now())),
                 _ => None,
-            };
-            let (paths, together) = match (kept, role) {
-                (Some((paths, together, _)), _) => (Some(paths.clone()), together.clone()),
-                (None, Some(role)) => (
-                    PeerPaths::new(routes.clone(), role),
-                    role.together().then(Together::default),
-                ),
-                (None, None) => (None, None),
             };
             let mut paths = paths;
             if let Some(p) = paths.as_mut() {
@@ -707,6 +717,10 @@ impl Prober {
 
         let ids: Vec<NodeId> = self.peers.keys().cloned().collect();
         for id in ids {
+            // A switch both ends agreed on is carried out before this tick measures: what the tick
+            // finds is then about the path the pair is on, and an outage of the path it just left
+            // does not start a recovery of its own (section 8.4)
+            let mut actions = self.coordinate(&id, now, now_ms);
             let Some(peer) = self.peers.get_mut(&id) else {
                 continue;
             };
@@ -720,8 +734,7 @@ impl Prober {
                 continue;
             };
             paths.set_busy(busy);
-            let mut actions = paths.tick(now, active);
-            actions.extend(self.coordinate(&id, now, now_ms));
+            actions.extend(paths.tick(now, active));
             for action in actions {
                 match action {
                     Action::TunnelProbe { seq } => {
@@ -818,7 +831,7 @@ impl Prober {
                             switches.push(switch);
                         }
                     }
-                    Action::Lost => self.lost(&id, now, now_ms),
+                    Action::Lost { since } => self.lost(&id, since, now, now_ms),
                 }
             }
             // A new proposal is sent immediately; those already waiting are resent at intervals
@@ -912,9 +925,10 @@ impl Prober {
     }
 
     /// Both sides `dial-only` and the current path is broken (section 8.4): with the Hub up, the decider
-    /// proposes the best other relay through it and the follower waits for that proposal; otherwise both
-    /// rotate by time slot. A recovery already under way continues.
-    fn lost(&mut self, id: &NodeId, now: Instant, now_ms: u64) {
+    /// proposes through it the relay that answered best since the failure was suspected (`since`), and the
+    /// follower waits for that proposal; otherwise both rotate by time slot. A recovery already under way
+    /// continues.
+    fn lost(&mut self, id: &NodeId, since: Instant, now: Instant, now_ms: u64) {
         let round = self.next_round(now_ms);
         let hub = self.hub;
         let Some(peer) = self.peers.get_mut(id) else {
@@ -930,7 +944,7 @@ impl Prober {
         if hub && peer.switch_key.is_some() {
             match paths.role() {
                 Role::DecideTogether => {
-                    if let Some(index) = paths.best_other_relay(now)
+                    if let Some(index) = paths.best_other_relay(since, now)
                         && let Some((Route::Relay { relay, .. }, _)) = peer.routes.get(index)
                     {
                         paths.set_hold(true);
@@ -2245,6 +2259,13 @@ mod tests {
         direct_sent: [usize; 2],
         /// nett-node and the Hub relay switch messages between the two ends.
         hub: bool,
+        /// How long a message through the Hub takes, and those on their way (due, from a, data).
+        hub_delay: Duration,
+        hub_queue: Vec<(Instant, bool, Vec<u8>)>,
+        /// B starts ticking this much later than A, so the two probe out of phase.
+        b_from: Instant,
+        /// The admitted members, for configuring an end again.
+        members: BTreeMap<NodeId, Member>,
     }
 
     impl Pair {
@@ -2363,6 +2384,41 @@ mod tests {
                 opened: Default::default(),
                 direct_sent: [0, 0],
                 hub: false,
+                hub_delay: Duration::ZERO,
+                hub_queue: Vec::new(),
+                b_from: now,
+                members,
+            }
+        }
+
+        /// A new desired state for B: its candidates to A are now `candidates`.
+        fn reconfigure_b(&mut self, candidates: Vec<Candidate>) {
+            let (b_priv, _) = keypair(2);
+            let paths = [(
+                node_id(1),
+                PeerPathConfig {
+                    reachability: Reachability::DialOnly,
+                    candidates,
+                },
+            )]
+            .into();
+            let b = self.b.id.clone();
+            self.b.prober.update(
+                &b,
+                Reachability::DialOnly,
+                &b_priv,
+                &self.members,
+                &paths,
+                &BTreeMap::new(),
+            );
+        }
+
+        /// B's candidate through relay `i`, as configured at the start.
+        fn b_relay(&self, i: usize) -> Candidate {
+            Candidate::Relay {
+                relay: node_id(9 + u8::try_from(i).expect("small")),
+                endpoint: self.relays[i],
+                token: ProbeToken(TOKEN_B),
             }
         }
 
@@ -2448,26 +2504,14 @@ mod tests {
                     }
                 }
                 Outgoing::Hub { peer, data } => {
-                    if !self.hub {
+                    let dst = if from_a { &self.b } else { &self.a };
+                    if !self.hub || peer != dst.id {
                         return;
                     }
-                    let (src, dst) = if from_a {
-                        (&mut self.a, &mut self.b)
+                    if self.hub_delay.is_zero() {
+                        self.through_hub(from_a, data);
                     } else {
-                        (&mut self.b, &mut self.a)
-                    };
-                    if peer != dst.id {
-                        return;
-                    }
-                    let src_id = src.id.clone();
-                    let dst_id = dst.id.clone();
-                    for reply in dst.prober.on_hub_message(&src_id, &data, now, now_ms) {
-                        if let Outgoing::Hub { peer, data } = reply
-                            && peer == src_id
-                        {
-                            let src = if from_a { &mut self.a } else { &mut self.b };
-                            src.prober.on_hub_message(&dst_id, &data, now, now_ms);
-                        }
+                        self.hub_queue.push((now + self.hub_delay, from_a, data));
                     }
                 }
                 Outgoing::WgPort { to, data } => {
@@ -2508,13 +2552,46 @@ mod tests {
             }
         }
 
+        /// A message through the Hub reaches the other end; its reply comes back the same way.
+        fn through_hub(&mut self, from_a: bool, data: Vec<u8>) {
+            let (now, now_ms) = (self.now, self.now_ms);
+            let (src, dst) = if from_a {
+                (&mut self.a, &mut self.b)
+            } else {
+                (&mut self.b, &mut self.a)
+            };
+            let src_id = src.id.clone();
+            for reply in dst.prober.on_hub_message(&src_id, &data, now, now_ms) {
+                if let Outgoing::Hub { peer, data } = reply
+                    && peer == src_id
+                {
+                    self.deliver(!from_a, Outgoing::Hub { peer, data });
+                }
+            }
+        }
+
         fn run(&mut self, d: Duration) {
             let end = self.now + d;
             while self.now < end {
                 self.now += Duration::from_millis(100);
                 self.now_ms += 100;
+                let now = self.now;
+                let due: Vec<(Instant, bool, Vec<u8>)> = self
+                    .hub_queue
+                    .iter()
+                    .filter(|(t, _, _)| *t <= now)
+                    .cloned()
+                    .collect();
+                self.hub_queue.retain(|(t, _, _)| *t > now);
+                for (_, from_a, data) in due {
+                    self.through_hub(from_a, data);
+                }
                 let (a_out, a_sw) = self.a.prober.tick(self.now, self.now_ms);
-                let (b_out, b_sw) = self.b.prober.tick(self.now, self.now_ms);
+                let (b_out, b_sw) = if self.now >= self.b_from {
+                    self.b.prober.tick(self.now, self.now_ms)
+                } else {
+                    Default::default()
+                };
                 let now = self.now;
                 self.switches
                     .extend(a_sw.into_iter().map(|s| (now, true, s)));
@@ -2837,6 +2914,43 @@ mod tests {
         assert!(gap <= Duration::from_millis(500), "gap {gap:?}");
     }
 
+    /// The pair has moved together off the relay it started on; then a new desired state changes B's
+    /// candidates to A (a LAN address A reports), which builds B's path selection state anew. B stays on
+    /// the relay the pair is on: starting again from the first relay, as both ends do when they start,
+    /// would leave A on the other one, and B would find its path broken and rotate on its own.
+    #[test]
+    fn dial_only_pair_stays_together_when_one_ends_candidates_change() {
+        let mut pair = Pair::new();
+        pair.run(Duration::from_secs(10));
+        let (start, _) = pair.endpoints();
+        let current = pair
+            .relays
+            .iter()
+            .position(|r| Some(*r) == start)
+            .expect("on a relay");
+        pair.lossy = Some((current, 2));
+        pair.run(Duration::from_secs(20));
+        pair.lossy = None;
+        let (a, b) = pair.endpoints();
+        assert_eq!(a, b);
+        assert_ne!(a, start, "{:?}", pair.switches);
+        let before = pair.switches.len();
+
+        let lan = Candidate::Lan {
+            endpoint: addr("192.168.1.20:41820"),
+        };
+        pair.reconfigure_b(vec![pair.b_relay(1), pair.b_relay(0), lan]);
+        assert_eq!(pair.endpoints().1, b, "B stays on the relay the pair uses");
+        pair.run(Duration::from_secs(30));
+        let (a2, b2) = pair.endpoints();
+        assert_eq!((a2, b2), (a, b), "{:?}", &pair.switches[before..]);
+        let rotations: Vec<_> = pair.switches[before..]
+            .iter()
+            .filter(|(_, _, s)| s.reason == SwitchReason::Rotation)
+            .collect();
+        assert!(rotations.is_empty(), "{rotations:?}");
+    }
+
     #[test]
     fn dial_only_pair_switches_through_the_hub_after_an_outage() {
         let mut pair = Pair::new();
@@ -2888,6 +3002,51 @@ mod tests {
             "both ends moved {:?} after the outage",
             moved - down
         );
+    }
+
+    /// The follower carries out the decider's proposal through the Hub in the same tick as it finds
+    /// the path it leaves broken: that outage is of a path the pair no longer uses, and the follower
+    /// stays on the new one instead of waiting for another proposal and then rotating on its own
+    /// (design/mesh.md section 8.4). Whatever the Hub's delay within the decider's 3 sends a second
+    /// apart, the pair moves once, together.
+    #[test]
+    fn a_proposal_carried_out_with_an_outage_of_the_path_left_is_not_undone() {
+        for (lag_ms, delay_ms) in (0..1000)
+            .step_by(100)
+            .flat_map(|lag| (0..=1000).step_by(100).map(move |delay| (lag, delay)))
+        {
+            let mut pair = Pair::new();
+            pair.hub = true;
+            pair.hub_delay = Duration::from_millis(delay_ms);
+            pair.b_from = pair.now + Duration::from_millis(lag_ms);
+            pair.a.prober.set_hub(true);
+            pair.b.prober.set_hub(true);
+            pair.run(Duration::from_secs(10));
+            let (start, _) = pair.endpoints();
+            let failed = pair
+                .relays
+                .iter()
+                .position(|r| Some(*r) == start)
+                .expect("on a relay");
+            pair.relay_up[failed] = false;
+            let down = pair.now;
+            pair.run(Duration::from_secs(20));
+            let after: Vec<(bool, SwitchReason)> = pair
+                .switches
+                .iter()
+                .filter(|(t, _, _)| *t > down)
+                .map(|(_, from_a, s)| (*from_a, s.reason))
+                .collect();
+            let (a, b) = pair.endpoints();
+            assert_eq!(
+                a, b,
+                "B {lag_ms} ms behind, Hub delay {delay_ms} ms: {after:?}"
+            );
+            assert!(
+                !after.iter().any(|(_, r)| *r == SwitchReason::Rotation),
+                "B {lag_ms} ms behind, Hub delay {delay_ms} ms: {after:?}"
+            );
+        }
     }
 
     #[test]

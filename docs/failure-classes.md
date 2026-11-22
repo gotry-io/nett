@@ -57,6 +57,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
+- A new desired state that changes a pair's candidates keeps the pair on the path it uses, with what was measured and reported of it, instead of starting the pair over: one end of a two-ended pair starting from the first relay while the other stays split the pair until it met again (mesh.md section 8.4);
 - `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4).
 
 **Guards**
@@ -75,6 +76,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-hub:only_verified_programs_are_served`
 - `nett-site:advertised_routes_keep_counting_after_they_are_removed`
 - `nett-cli:problems_after_applying_follow_the_reported_status`
+- `nett-mesh:dial_only_pair_stays_together_when_one_ends_candidates_change`
+- `nett-mesh:a_new_candidate_list_keeps_the_path_in_use`
 - `lab:port-change`, `lab:relay-restart`
 
 **Not yet guarded**: the restart of the helpers by `sudo nett install` with a new program, and the unload and load of a changed launchd configuration. Each needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, both are watched when each release is installed on real machines.
@@ -83,14 +86,17 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: a pair leaves a path only for a failure that another path can help, and returns only on evidence that covers the condition it left for. A hold waits on the improvement, not on one candidate. A re-handshake counts as done only when WireGuard confirms it.
 
-**Breaks when** queueing is read as loss (every path shares the bottleneck); a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure.
+**Breaks when** queueing is read as loss (every path shares the bottleneck); a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure; a failover target is chosen on replies from before the failure, so the relay that stopped with the current path is taken again over its other transport; a two-ended switch is proposed through a tunnel that has not answered on the current path, and the decider switches alone; an outage the follower measured on the path it is leaving is acted on after it carried out the decider's proposal, and it waits for another proposal and then rotates away on its own.
 
 **Where it holds**
 
 - Late replies are queueing, not loss, and a path whose peer's packets still arrive has not failed (mesh.md sections 7 and 8.2);
 - A path left while losing packets returns only once at most 2 of its last 60 probes are lost (mesh.md section 8.2);
 - The 30-second holds last while some candidate qualifies, and the switch goes to the best one when they end (mesh.md section 8.2);
-- After a re-handshake, completion is confirmed and the handshake repeated once on the same relay; a peer under load gets the time WireGuard's cookie retry needs (mesh.md section 8.4).
+- After a re-handshake, completion is confirmed and the handshake repeated once on the same relay; a peer under load gets the time WireGuard's cookie retry needs (mesh.md section 8.4);
+- A failover, and the relay a `dial-only` decider proposes through the Hub, take only a path that answered since the failure was suspected, and the earlier replies of the paths that did not answer no longer make them a better path (mesh.md sections 8.2 and 8.4);
+- A `dial-only` decider whose pair has traffic proposes a better path through the tunnel only once the tunnel has answered since the pair moved onto the current path (mesh.md section 8.4);
+- A `dial-only` end carries out a switch both ends agreed on before it measures in the same step, so what it measures is about the path the pair is on (mesh.md section 8.4).
 
 **Guards**
 
@@ -109,6 +115,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:only_a_handshake_after_the_rehandshake_confirms_it`
 - `nett-mesh:waits_for_the_cookie_retry_when_the_peer_is_under_load`
 - `nett-mesh:waits_for_at_most_two_cookie_rounds`
+- `nett-mesh:a_lost_pair_moves_to_a_relay_that_answered_since_the_failure`
+- `nett-mesh:a_lost_pair_does_not_return_to_a_path_that_went_down_with_it`
+- `nett-mesh:a_pair_proposes_through_the_tunnel_only_once_it_answers`
+- `nett-mesh:a_proposal_carried_out_with_an_outage_of_the_path_left_is_not_undone`
 - `lab:congestion`, `lab:lossy-direct`, `lab:faster-relay`, `lab:wg-cookie`, `lab:wg-rehandshake`
 
 ## 4. Waits are bounded and nothing slow holds up a loop that must keep going

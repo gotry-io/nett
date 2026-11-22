@@ -4,6 +4,20 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Right after two dial-only machines moved together to another relay through the Hub, the follower
+  could still act on the outage it had measured on the relay they left: it waited for another
+  proposal, then rotated through relays on its own and split the pair for several seconds. A
+  switch both ends agreed on is now carried out before the follower measures.
+- When the relay two dial-only machines were using stopped, the pair could be moved onto the same
+  relay over TLS, which had stopped with it but still counted as working from an answer before the
+  outage; the pair then stayed disconnected for several more seconds, and one end started rotating
+  through relays on its own. The relay proposed through the Hub is now one that answered since the
+  outage began, a path that stopped with it is not taken back on its earlier answers, and a better
+  path is proposed through the tunnel only once that tunnel answers.
+- Two dial-only machines could lose their connection for several seconds after a change on the
+  Hub, such as a LAN address one of them reported: a new list of paths started one end over from the
+  first relay while the other stayed on the relay both were using, and that end then rotated on its
+  own. A pair now stays on the path it uses when its paths change, with what was measured of them.
 - A path through a relay is measured end to end: with each probe of the relay, a member sends a
   through probe the relay forwards to the peer, and the peer's answer comes back through the relay
   (ADR 0029). Before, a member judged the path from the relay's answer and the peer's report of its
