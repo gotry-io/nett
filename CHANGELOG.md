@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-23
+
 This release changes how nett runs on a machine, and a machine on 0.8 moves to it by hand: run
 `sudo nett uninstall` with 0.8, install 0.9 with the install script, and run `sudo nett install`.
 The keys, the desired state and the Hub configuration stay, and the machine comes back as the same
