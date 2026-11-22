@@ -9,7 +9,7 @@
 # and signatures are also published at https://github.com/gotry-io/nett/releases.
 #
 # On Linux the program goes to /usr/local/lib/nett/nett, linked from /usr/local/bin/nett: the
-# services run it from its own directory, where nett-node replaces it when it upgrades itself.
+# nett service runs it from its own directory and replaces it there when it upgrades itself.
 # On macOS it goes to /usr/local/bin/nett.
 set -eu
 

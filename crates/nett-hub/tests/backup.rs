@@ -54,7 +54,7 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
         },
         identity: identity(2),
         desired: dir.join("desired.json"),
-        socket: dir.join("mesh.sock"),
+        mesh: no_mesh(),
         upgrader: None,
         link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,

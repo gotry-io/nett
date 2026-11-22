@@ -13,8 +13,8 @@ use crate::net::Underlay;
 /// whole when lifted.
 const FAULT_TABLE: &str = "nettlab_fault";
 // Inbound blocking hooks prerouting at priority -300: before connection tracking, and before the
-// rule with which the mesh process copies probe packets (input, -150). Hooked on input, a blocked
-// probe would still be copied to the mesh process and get a reply, which does not match "the packet
+// rule with which the mesh copies probe packets (input, -150). Hooked on input, a blocked
+// probe would still be copied to the mesh and get a reply, which does not match "the packet
 // did not arrive".
 
 /// Quality of a link. Items that are empty are not set.

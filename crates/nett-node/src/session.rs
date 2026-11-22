@@ -1,8 +1,8 @@
 //! The nett-node main loop (design/hub.md section 5, design/protocol.md sections 6, 8): connects to
-//! the Hub, and when it receives the desired state writes it as the mesh process's desired state
-//! file, asks the mesh process to reload it over the local interface, and reports the result to the
-//! Hub as `StateAck`; periodically reads the mesh process's local status and reports it when it
-//! changes; after a disconnect it reconnects with exponential backoff. The mesh keeps working while
+//! the Hub, and when it receives the desired state writes it as the mesh's desired state file, has
+//! the mesh in the same process read it again, and reports the result to the Hub as `StateAck`;
+//! periodically reads the mesh's status and reports it when it changes; after a disconnect it
+//! reconnects with exponential backoff. The mesh keeps working while
 //! the Hub is away (hard rule 8); this loop only delivers and reports.
 
 use std::future::Future;
@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use nett_mesh::config::{DesiredMeshDoc, MAX_DESIRED_BYTES, read_bounded};
-use nett_mesh::status::{QueryError, ReloadOutcome};
+use nett_mesh::status::{ReloadOutcome, StatusSource};
 use nett_proto::api::CONNECT_PATH;
 use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
@@ -35,7 +35,7 @@ use crate::tls::connector;
 use crate::upgrade::{Plan, Upgrader};
 use crate::url::HubUrl;
 
-/// Interval for reading the mesh process's local status once (design/hub.md section 5).
+/// Interval for reading the mesh's local status once (design/hub.md section 5).
 pub const STATUS_EVERY: Duration = Duration::from_secs(15);
 /// Keepalive (protocol.md section 8): one Ping every 25 seconds; 3 consecutive missed replies count
 /// as a disconnect.
@@ -66,17 +66,17 @@ pub enum SessionError {
 pub struct Node {
     pub config: HubConfig,
     pub identity: StaticSecret,
-    /// The desired state file read by the mesh process.
+    /// The desired state file the mesh reads.
     pub desired: PathBuf,
-    /// The mesh process's local socket (design/status.md section 3).
-    pub socket: PathBuf,
+    /// The mesh in the same process (ADR 0013).
+    pub mesh: Arc<dyn StatusSource + Sync>,
     /// Installs new releases (design/release.md section 7); `None` where this machine does not
     /// upgrade itself.
     pub upgrader: Option<Arc<Upgrader>>,
     /// How the upgrade fetches the program from whichever session is connected (ADR 0025).
     pub link: Arc<crate::fetch::HubLink>,
-    /// Starts and stops the relay and the transport adapter with the desired state (design/hub.md
-    /// section 5); `None` where nett did not install the services. Holds what was last set up.
+    /// Starts and stops the relay with the desired state (design/hub.md section 5); `None` where
+    /// nett did not install the services. Holds what was last set up.
     pub services: Option<std::sync::Mutex<Option<crate::services::Wants>>>,
 }
 
@@ -120,7 +120,7 @@ pub async fn run(node: Node, shutdown: impl Future<Output = ()>) -> Exit {
     }
     let mut upgrading: Upgrading = None;
     let mut backoff = Backoff::new();
-    let coordination = crate::coord::Coordination::start(node.socket.clone());
+    let coordination = crate::coord::Coordination::start(Arc::clone(&node.mesh));
     loop {
         let started = tokio::time::Instant::now();
         let result = tokio::select! {
@@ -429,7 +429,7 @@ pub async fn leave(config: &HubConfig, identity: &StaticSecret) -> Result<(), Se
 
 impl Node {
     /// One connection, until it ends. `upgrading` outlives the connection; `coordination` passes switch
-    /// messages between the mesh process and the Hub (design/mesh.md section 8.4).
+    /// messages between the mesh and the Hub (design/mesh.md section 8.4).
     pub async fn session(
         &self,
         upgrading: &mut Upgrading,
@@ -437,7 +437,7 @@ impl Node {
     ) -> Result<Exit, SessionError> {
         let (mut ws, transport, local) = connect(&self.config, &self.identity, Vec::new()).await?;
         tracing::info!(url = %self.config.url, "connected to the Hub");
-        // The mesh process may relay switch messages through the Hub while this session lasts
+        // The mesh may relay switch messages through the Hub while this session lasts
         let _hub_up = HubUp::new(&coordination.hub);
         let mut from_mesh = coordination.from_mesh.lock().await;
         // Messages from before this session are stale: their rounds have passed
@@ -462,7 +462,7 @@ impl Node {
         status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut missed = 0u32;
         let mut reported: Option<Vec<u8>> = None;
-        // A generation whose file is written but for which the mesh process has not yet given a
+        // A generation whose file is written but for which the mesh has not yet given a
         // result: ask it to read again when reading status
         let mut pending: Option<u64> = None;
         loop {
@@ -582,7 +582,7 @@ impl Node {
                                 out.send(&mut ws, Body::BackupFetch(BackupFetch { have })).await?;
                             }
                         }
-                        // From another member's mesh process: checked and handed over as data; only the mesh
+                        // From another member's mesh: checked and handed over as data; only the mesh
                         // process can authenticate it (hard rule 13)
                         Some(Body::PathSwitch(p)) => {
                             if let Ok(peer) = p.node_id.parse()
@@ -689,12 +689,11 @@ impl Node {
     }
 
     async fn read_status(&self) -> Option<Vec<u8>> {
-        let socket = self.socket.clone();
-        let value = tokio::task::spawn_blocking(move || nett_mesh::status::query_raw(&socket))
+        let mesh = Arc::clone(&self.mesh);
+        let doc = tokio::task::spawn_blocking(move || mesh.snapshot())
             .await
-            .ok()?
-            .ok()?;
-        serde_json::to_vec(&value).ok()
+            .ok()??;
+        serde_json::to_vec(&doc).ok()
     }
 
     /// Applies a desired state and acknowledges it per partition (protocol.md section 6.2).
@@ -774,9 +773,9 @@ impl Node {
         }
     }
 
-    /// Writes the mesh process's desired state file (a temporary file first, then rename), asks it
+    /// Writes the mesh's desired state file (a temporary file first, then rename), asks it
     /// over the local interface to read again, and maps the result to `StateAck`: `applied` (with
-    /// issues) → applied, `rejected` → rejected, `busy` or no answer from the mesh process →
+    /// issues) → applied, `rejected` → rejected, `busy` or no answer from the mesh →
     /// pending (design/hub.md section 5).
     async fn apply_mesh(&self, content: &[u8]) -> (AckResult, String) {
         if content.len() as u64 > MAX_DESIRED_BYTES {
@@ -801,9 +800,9 @@ impl Node {
             .ok()
             .flatten()
             .and_then(|b| serde_json::from_slice(&b).ok());
-        // When the file already holds this version it is not rewritten, but the mesh process is
+        // When the file already holds this version it is not rewritten, but the mesh is
         // still asked to read again: it may have rejected this version, and when the Hub sends it
-        // again after a reconnect, the acknowledgment must be the result the mesh process gives
+        // again after a reconnect, the acknowledgment must be the result the mesh gives
         if current.as_ref() != Some(&doc) {
             let json = match serde_json::to_vec_pretty(&doc) {
                 Ok(j) => j,
@@ -818,8 +817,7 @@ impl Node {
         ack
     }
 
-    /// Enables or disables the relay and the transport adapter when what the desired state needs
-    /// changed.
+    /// Enables or disables the relay when the desired state's need for it changed.
     async fn follow_services(&self, doc: &DesiredMeshDoc) {
         let Some(last) = &self.services else {
             return;
@@ -839,17 +837,17 @@ impl Node {
         }
     }
 
-    /// Asks the mesh process to read the desired state file again.
+    /// Asks the mesh to read the desired state file again.
     async fn reload(&self) -> (AckResult, String) {
-        let socket = self.socket.clone();
-        match tokio::task::spawn_blocking(move || nett_mesh::status::reload(&socket)).await {
+        let mesh = Arc::clone(&self.mesh);
+        match tokio::task::spawn_blocking(move || mesh.reload()).await {
             Ok(outcome) => ack_for(outcome),
             Err(e) => (AckResult::Pending, e.to_string()),
         }
     }
 }
 
-/// Tells the mesh process the Hub session is up for as long as this lives.
+/// Tells the mesh the Hub session is up for as long as this lives.
 struct HubUp<'a>(&'a tokio::sync::watch::Sender<bool>);
 
 impl<'a> HubUp<'a> {
@@ -866,12 +864,12 @@ impl Drop for HubUp<'_> {
 }
 
 /// The acknowledgment corresponding to the result of the re-read (design/hub.md section 5):
-/// `applied` (with issues) → applied, `rejected` → rejected; `busy`, or no answer from the mesh
-/// process → pending: the file is already written, and the mesh process reads it at startup or on
-/// the next request.
-pub fn ack_for(outcome: Result<ReloadOutcome, QueryError>) -> (AckResult, String) {
+/// `applied` (with issues) → applied, `rejected` → rejected; no result in time (too many waiting or
+/// still applying) → pending: the file is already written, and the mesh reads it on the next
+/// request.
+pub fn ack_for(outcome: Option<ReloadOutcome>) -> (AckResult, String) {
     match outcome {
-        Ok(ReloadOutcome::Applied { problems }) => {
+        Some(ReloadOutcome::Applied { problems }) => {
             tracing::info!(problems = problems.len(), "desired state applied");
             let reason = problems
                 .iter()
@@ -881,16 +879,13 @@ pub fn ack_for(outcome: Result<ReloadOutcome, QueryError>) -> (AckResult, String
                 .join("; ");
             (AckResult::Applied, reason)
         }
-        Ok(ReloadOutcome::Rejected { reason }) => {
-            tracing::warn!(%reason, "desired state rejected by the mesh process");
+        Some(ReloadOutcome::Rejected { reason }) => {
+            tracing::warn!(%reason, "desired state rejected by the mesh");
             (AckResult::Rejected, reason)
         }
-        Err(QueryError::Refused { code, message }) if code == "busy" => {
-            (AckResult::Pending, message)
-        }
-        Err(e) => (
+        None => (
             AckResult::Pending,
-            format!("written; the mesh process loads it when it starts: {e}"),
+            "written; the mesh is still applying the previous desired state".to_owned(),
         ),
     }
 }
@@ -1030,11 +1025,11 @@ mod tests {
             reason: "node nas: the policy has expired".into(),
         };
         assert_eq!(
-            ack_for(Ok(ReloadOutcome::Applied { problems: vec![] })),
+            ack_for(Some(ReloadOutcome::Applied { problems: vec![] })),
             (AckResult::Applied, String::new())
         );
         assert_eq!(
-            ack_for(Ok(ReloadOutcome::Applied {
+            ack_for(Some(ReloadOutcome::Applied {
                 problems: vec![problem]
             })),
             (
@@ -1043,21 +1038,12 @@ mod tests {
             )
         );
         assert_eq!(
-            ack_for(Ok(ReloadOutcome::Rejected {
+            ack_for(Some(ReloadOutcome::Rejected {
                 reason: "version 3 is older than 4".into()
             })),
             (AckResult::Rejected, "version 3 is older than 4".into())
         );
-        let busy = QueryError::Refused {
-            code: "busy".into(),
-            message: "applying the previous desired state".into(),
-        };
-        assert_eq!(ack_for(Err(busy)).0, AckResult::Pending);
-        let down = QueryError::Connect {
-            path: "/run/nett/mesh.sock".into(),
-            source: std::io::Error::from(std::io::ErrorKind::NotFound),
-        };
-        let (result, reason) = ack_for(Err(down));
+        let (result, reason) = ack_for(None);
         assert_eq!(result, AckResult::Pending);
         assert!(reason.starts_with("written;"), "{reason}");
     }
@@ -1155,7 +1141,7 @@ mod apply_tests {
             .expect("signed")
     }
 
-    /// Also ask the mesh process when the file already holds this version: it may have rejected it,
+    /// Also ask the mesh when the file already holds this version: it may have rejected it,
     /// and after a reconnect it must not be reported as applied.
     #[tokio::test]
     async fn an_unchanged_file_is_still_confirmed_by_the_mesh_process() {
@@ -1176,8 +1162,7 @@ mod apply_tests {
             },
             identity: StaticSecret::from([9; 32]),
             desired: dir.join("desired.json"),
-            // No mesh process answers here
-            socket: dir.join("mesh.sock"),
+            mesh: Arc::new(NoMesh),
             upgrader: None,
             link: Arc::new(crate::fetch::HubLink::new()),
             services: None,
@@ -1208,13 +1193,31 @@ mod apply_tests {
     struct NoServices;
 
     impl crate::upgrade::Services for NoServices {
-        fn restart_mesh(&self) -> Result<(), String> {
-            Err("not in this test".into())
-        }
         fn mesh_answers(&self) -> bool {
             false
         }
         fn restart_helpers(&self) {}
+    }
+
+    /// A mesh that does not answer in these tests.
+    struct NoMesh;
+
+    impl StatusSource for NoMesh {
+        fn snapshot(&self) -> Option<nett_mesh::status::StatusDoc> {
+            None
+        }
+        fn reload(&self) -> Option<ReloadOutcome> {
+            None
+        }
+        fn coordinate(&self, _: std::os::unix::net::UnixStream) -> std::io::Result<()> {
+            Err(std::io::Error::other("not in this test"))
+        }
+        fn whois(&self, _: std::net::IpAddr) -> Option<nett_mesh::status::Whois> {
+            None
+        }
+        fn probe(&self, _: nett_core::id::NodeId) -> Option<Option<usize>> {
+            None
+        }
     }
 
     /// A newer release replaces an upgrade that is still fetching its program, and leaves one that is
@@ -1246,7 +1249,7 @@ mod apply_tests {
             },
             identity: StaticSecret::from([9; 32]),
             desired: dir.join("desired.json"),
-            socket: dir.join("mesh.sock"),
+            mesh: Arc::new(NoMesh),
             upgrader: Some(Arc::new(Upgrader {
                 keys: nett_trust::release::ReleaseKeys::parse(&pair.public_key()).expect("keys"),
                 target: target.into(),

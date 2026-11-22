@@ -1,5 +1,5 @@
 //! This machine's LAN addresses (design/status.md section 6): private IPv4 addresses and IPv6 unique
-//! local addresses on its interfaces, with their prefix lengths. The mesh process lists them in status,
+//! local addresses on its interfaces, with their prefix lengths. The mesh lists them in status,
 //! and the Hub composes LAN direct candidates from them (design/mesh.md section 6).
 //!
 //! `unsafe` is allowed in this module only: the standard library cannot list interface addresses, so it

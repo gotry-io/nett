@@ -1,7 +1,7 @@
 //! Relays through the Hub (design/hub.md section 9 H4, design/mesh.md sections 5.2, 5.3 and 8.4):
 //! the site and the Hub run in h; r1, r2, a and b join through the Hub with `nett join`; `nett site
-//! relay` makes r1 and r2 relays. nett-relay and the transport adapter run in service mode and fetch
-//! their configuration from the mesh process's helper socket. Checks:
+//! relay` makes r1 and r2 relays. nett-relay runs in service mode and fetches its assignment from
+//! the nett daemon's helper socket; the daemons carry the TLS transport. Checks:
 //!
 //! - Each relay fetches its assignment and reports its certificate; the Hub learns the fingerprint and
 //!   the members then get TLS candidates;
@@ -155,20 +155,8 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             // `--userspace <node>` puts that node on the userspace data plane, as on macOS
             userspace: topo.node(name).is_some_and(|n| n.userspace),
         };
+        // Joined: the daemon also connects to the Hub (ADR 0013)
         lab.spawn(&node, nett)?;
-        let child = spawn_in(
-            &ns(name)?,
-            nett,
-            [
-                "node".as_ref(),
-                "--dir".as_ref(),
-                dir.as_os_str(),
-                "--socket".as_ref(),
-                dir.join("mesh.sock").as_os_str(),
-            ],
-            &dir.join("node.log"),
-        )?;
-        lab.processes.push((format!("node:{name}"), child));
         nodes.push(node);
     }
     let (a, b, c) = (&nodes[2], &nodes[3], &nodes[4]);
@@ -176,25 +164,12 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         nodes.iter().find(|n| n.name == name).context("relay node")
     };
 
-    // nett-relay and the transport adapter in service mode: they fetch their configuration from the
-    // helper socket next to each mesh process's status socket
+    // nett-relay in service mode: it fetches its assignment from the helper socket next to each
+    // daemon's status socket; the daemons carry the TLS transport themselves
     for name in RELAYS {
         let r = relay_node(name)?;
         let relay = spawn_relay(nett, &ns(name)?, r)?;
         lab.relays.push((name.into(), relay));
-    }
-    for node in [a, b] {
-        let child = spawn_in(
-            &ns(&node.name)?,
-            nett,
-            [
-                "transport".as_ref(),
-                "--socket".as_ref(),
-                node.dir.join("helpers.sock").as_os_str(),
-            ],
-            &node.dir.join("transport.log"),
-        )?;
-        lab.helpers.push(child);
     }
 
     for name in RELAYS {
@@ -529,9 +504,6 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     for (name, child) in &lab.relays {
         report.record(&format!("memory:relay:{name}"), memory(child.id()));
     }
-    for child in &lab.helpers {
-        report.record("memory:transport", memory(child.id()));
-    }
 
     // Both relays stop: they leave every connection, and the dial-only pair is back to punching only
     h.site_cmd(&["relay", "r2", "--off", "--yes"])?;
@@ -553,8 +525,8 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     Ok(report)
 }
 
-/// nett-relay in service mode on a relay node, with its certificate created beforehand as nett-node
-/// does (design/mesh.md section 5.3).
+/// nett-relay in service mode on a relay node, with its certificate created beforehand as the nett
+/// service does (design/mesh.md section 5.3).
 fn spawn_relay(nett: &Path, ns: &str, node: &LabNode) -> anyhow::Result<std::process::Child> {
     let cert = node.dir.join("relay");
     nett_relay::cert::RelayCert::load_or_create(&cert).context("the relay's certificate")?;

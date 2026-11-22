@@ -105,7 +105,7 @@ enum PartitionKind {
 }
 
 // One partition of the desired state. The content of the mesh partition is the desired state file
-// of local signing (JSON, protocol.md section 6), which nett-node writes to the mesh process as is;
+// of local signing (JSON, protocol.md section 6), which nett-node writes for the mesh as is;
 // the hub_endpoints partition is a JSON array of strings
 message Partition {
   PartitionKind kind = 1;
@@ -146,7 +146,7 @@ message Inventory {
   repeated string addresses = 3;
 }
 
-// node → Hub: the mesh process's local status (JSON in design/status.md section 6), displayed by
+// node → Hub: the mesh's local status (JSON in design/status.md section 6), displayed by
 // nett site status
 message LinkReport {
   bytes status = 1;
@@ -154,7 +154,7 @@ message LinkReport {
 
 // Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
 // down (design/mesh.md section 8.4). node → Hub: node_id is the peer it is for; Hub → node: the
-// peer it came from. The message is authenticated end to end by the two mesh processes and opaque
+// peer it came from. The message is authenticated end to end by the two meshes and opaque
 // to nett-node and the Hub, which passes it on only between members the site connects
 message PathSwitch {
   string node_id = 1;

@@ -1,40 +1,39 @@
-//! The coordination connection to the mesh process (design/status.md section 4.2): nett-node keeps it
-//! open, tells the mesh process whether the Hub session is up, and passes switch messages between it and
-//! the Hub (design/mesh.md section 8.4). The connection is local and outlives Hub sessions; it reconnects
-//! when the mesh process restarts.
+//! The coordination connection to the mesh in the same process (design/status.md section 4.2):
+//! nett-node keeps it open, tells the mesh whether the Hub session is up, and passes switch messages
+//! between it and the Hub (design/mesh.md section 8.4). It is a socket pair whose other end the mesh
+//! reads on a thread of its own; it outlives Hub sessions, and a new one replaces it when nett-node
+//! starts again.
 
-use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use nett_mesh::coord::{ACCEPTED, Line, MAX_LINE, PathSwitchLine};
+use nett_mesh::coord::{Line, MAX_LINE, PathSwitchLine};
+use nett_mesh::status::StatusSource;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::{mpsc, watch};
 
 /// Bound of the queues in each direction (design/status.md section 4.2).
 pub const QUEUE: usize = 16;
-/// Wait before connecting again after the mesh process could not be reached.
+/// Wait before connecting again after the connection ended or could not be made.
 const RETRY: Duration = Duration::from_secs(5);
-/// Time limit for the mesh process to accept the connection.
-const ACCEPT_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// nett-node's end: what goes to the mesh process and what comes from it.
+/// nett-node's end: what goes to the mesh and what comes from it.
 pub struct Coordination {
-    /// Whether the Hub session is up; the mesh process gets it on every change and every reconnect.
+    /// Whether the Hub session is up; the mesh gets it on every change and every new connection.
     pub hub: watch::Sender<bool>,
-    /// Switch messages from the Hub for the mesh process.
+    /// Switch messages from the Hub for the mesh.
     pub to_mesh: mpsc::Sender<PathSwitchLine>,
-    /// Switch messages from the mesh process for the Hub.
+    /// Switch messages from the mesh for the Hub.
     pub from_mesh: tokio::sync::Mutex<mpsc::Receiver<PathSwitchLine>>,
 }
 
 impl Coordination {
-    /// Starts the task that keeps the connection to the mesh process at `socket`.
-    pub fn start(socket: PathBuf) -> Self {
+    pub fn start(mesh: Arc<dyn StatusSource + Sync>) -> Self {
         let (hub, hub_rx) = watch::channel(false);
         let (to_mesh, to_mesh_rx) = mpsc::channel(QUEUE);
         let (from_mesh_tx, from_mesh) = mpsc::channel(QUEUE);
-        tokio::spawn(keep(socket, hub_rx, to_mesh_rx, from_mesh_tx));
+        tokio::spawn(keep(mesh, hub_rx, to_mesh_rx, from_mesh_tx));
         Self {
             hub,
             to_mesh,
@@ -44,22 +43,21 @@ impl Coordination {
 }
 
 async fn keep(
-    socket: PathBuf,
+    mesh: Arc<dyn StatusSource + Sync>,
     mut hub: watch::Receiver<bool>,
     mut to_mesh: mpsc::Receiver<PathSwitchLine>,
     from_mesh: mpsc::Sender<PathSwitchLine>,
 ) {
     loop {
-        match connect(&socket).await {
+        match connect(&*mesh) {
             Ok(connected) => {
-                tracing::debug!("coordinating with the mesh process");
+                tracing::debug!("coordinating with the mesh");
                 if let Err(e) = serve(connected, &mut hub, &mut to_mesh, &from_mesh).await {
-                    tracing::debug!(error = %e, "coordination with the mesh process ended");
+                    tracing::debug!(error = %e, "coordination with the mesh ended");
                 }
             }
-            Err(e) => tracing::debug!(error = %e, "coordination with the mesh process"),
+            Err(e) => tracing::warn!(error = %e, "coordination with the mesh"),
         }
-        // The task ends with the runtime; nothing else owns it
         if from_mesh.is_closed() {
             return;
         }
@@ -67,33 +65,21 @@ async fn keep(
     }
 }
 
-/// A connection the mesh process accepted: the reader of its lines and the writer.
 struct Connected {
     reader: BufReader<tokio::net::unix::OwnedReadHalf>,
     writer: tokio::net::unix::OwnedWriteHalf,
 }
 
-async fn connect(socket: &std::path::Path) -> std::io::Result<Connected> {
-    let (read, mut writer) = UnixStream::connect(socket).await?.into_split();
-    writer
-        .write_all(b"{\"v\":1,\"query\":\"coordinate\"}\n")
-        .await?;
-    let mut reader = BufReader::new(read);
-    let mut line = String::new();
-    tokio::time::timeout(
-        ACCEPT_TIMEOUT,
-        (&mut reader).take(MAX_LINE as u64).read_line(&mut line),
-    )
-    .await
-    .map_err(|_| std::io::Error::other("the mesh process did not accept in time"))??;
-    if line.trim_end() != ACCEPTED {
-        // An older mesh process without coordination answers with an error
-        return Err(std::io::Error::other(format!(
-            "the mesh process does not coordinate: {}",
-            line.trim_end().chars().take(200).collect::<String>()
-        )));
-    }
-    Ok(Connected { reader, writer })
+/// A socket pair: the mesh takes one end, this end is nett-node's.
+fn connect(mesh: &dyn StatusSource) -> std::io::Result<Connected> {
+    let (ours, theirs) = std::os::unix::net::UnixStream::pair()?;
+    mesh.coordinate(theirs)?;
+    ours.set_nonblocking(true)?;
+    let (read, writer) = UnixStream::from_std(ours)?.into_split();
+    Ok(Connected {
+        reader: BufReader::new(read),
+        writer,
+    })
 }
 
 async fn serve(
@@ -106,7 +92,7 @@ async fn serve(
         mut reader,
         mut writer,
     } = connected;
-    // The lines from the mesh process are read on their own task, so that a partly read line is never
+    // The lines from the mesh are read on their own task, so that a partly read line is never
     // dropped by the writes below
     let forward = from_mesh.clone();
     let mut reading = tokio::spawn(async move {
@@ -123,7 +109,7 @@ async fn serve(
                 Ok(_) => {}
             }
             if let Some(p) = Line::decode(&line).and_then(|l| l.path_switch) {
-                // Dropped when the Hub session does not keep up: the mesh process resends
+                // Dropped when the Hub session does not keep up: the mesh resends
                 let _ = forward.try_send(p);
             }
         }

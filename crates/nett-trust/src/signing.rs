@@ -1,6 +1,6 @@
 //! Generating signatures (`signing` feature): the signing tool signs with the recovery key, and a
 //! new machine signs the admission proof at enrollment with the enrollment private key from the
-//! token; lab tools and tests use them to construct material. The mesh process only verifies
+//! token; lab tools and tests use them to construct material. The mesh only verifies
 //! signatures.
 
 use nett_core::id::PasskeyId;

@@ -200,7 +200,7 @@ pub struct AppliedMembers {
     by_node: BTreeMap<NodeId, AppliedRecord>,
 }
 
-/// A member's material in effect: the version and the hashes of the two payloads. The mesh process
+/// A member's material in effect: the version and the hashes of the two payloads. The mesh
 /// keeps it in the local trust store, and after a restart uses it to reject older versions
 /// (design/mesh.md section 4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

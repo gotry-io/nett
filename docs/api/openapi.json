@@ -135,7 +135,7 @@
             ]
           },
           "status": {
-            "description": "The mesh process's local status (design/status.md section 6), and the time it was reported\n(Unix seconds)."
+            "description": "The mesh's local status (design/status.md section 6), and the time it was reported\n(Unix seconds)."
           },
           "status_at": {
             "format": "int64",

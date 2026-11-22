@@ -1,5 +1,5 @@
-//! `nett resolver` (design/names-and-diagnostics.md section 3): run by the mesh unit after the mesh
-//! service starts (`ExecStartPost=+`, as root). It sends names under `nett.internal` to this
+//! `nett resolver` (design/names-and-diagnostics.md section 3): run by the nett unit after the
+//! service starts (`ExecStartPost=+`, with full privileges). It sends names under `nett.internal` to this
 //! machine's DNS responder through systemd-resolved: on `nett0`, the mesh IPv4 as its DNS server, the
 //! routing domain `~nett.internal`, and no default route. It never fails the unit: without
 //! systemd-resolved, or when `nett0` does not come up in time, it says so and exits 0.
@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 const INTERFACE: &str = "nett0";
 /// Fixed locations of resolvectl (hard rule 9).
 const RESOLVECTL: [&str; 2] = ["/usr/bin/resolvectl", "/bin/resolvectl"];
-/// How long it waits for the mesh process to bring up its interface.
+/// How long it waits for the mesh to bring up its interface.
 const WAIT: Duration = Duration::from_secs(15);
 
 pub const USAGE: &str = "usage: nett resolver\n\n\

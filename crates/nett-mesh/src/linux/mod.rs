@@ -56,11 +56,11 @@ pub(crate) fn peer_cred(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<(u32
     sys::peer_cred(fd)
 }
 
-/// Tears down what the mesh process leaves in the system (`nett leave`, design/auth.md section 8.3): the
-/// mesh process normally keeps the interface on exit, so connections are not interrupted during a
+/// Tears down what the mesh leaves in the system (`nett leave`, design/auth.md section 8.3): the
+/// mesh normally keeps the interface on exit, so connections are not interrupted during a
 /// restart (design/mesh.md section 4). Delete the interface first, and delete the filter rules once
 /// there is no traffic; if deleting the interface fails, the filter rules stay, keeping deny (hard rule
-/// 6). The mesh process must be stopped first.
+/// 6). The mesh must be stopped first.
 pub fn teardown() -> Result<(), DataPlaneError> {
     let mut route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
     rtnl::del_link(&mut route, INTERFACE_NAME).map_err(kernel("delete the mesh interface"))?;
@@ -75,7 +75,7 @@ pub fn teardown() -> Result<(), DataPlaneError> {
 
 /// Whether this machine can hold nett's nftables tables, from whether kernel WireGuard opens: only the
 /// kernel data plane creates them, and the userspace one (Synology DSM, old kernels) filters in the
-/// mesh process. Its kernel may have no nftables at all, and then does not even answer a request.
+/// mesh. Its kernel may have no nftables at all, and then does not even answer a request.
 fn has_nft_tables(kernel: Result<(), DataPlaneError>) -> Result<bool, DataPlaneError> {
     match kernel {
         Ok(()) => Ok(true),
@@ -377,7 +377,7 @@ impl DataPlane for KernelWireGuard {
             return Ok(());
         }
         // Forwarding is decided by this network namespace's settings (in a container, enable it with Compose
-        // sysctls); the mesh process only checks and does not modify
+        // sysctls); the mesh only checks and does not modify
         let path = "/proc/sys/net/ipv4/ip_forward";
         if !forwarding(path)? {
             let what = if carry {
@@ -435,7 +435,7 @@ impl DataPlane for KernelWireGuard {
         let os = |op| move |source| DataPlaneError::Os { op, source };
         let send = WgPort::open(listen_port)
             .map_err(os("open raw sockets for probes from the WireGuard port"))?;
-        // The log group is the WireGuard port number: one per mesh process on the same host
+        // The log group is the WireGuard port number: one per mesh on the same host
         nft::install_probe_copy(listen_port, listen_port).map_err(kernel(
             "install the nftables rules that copy probes on the WireGuard port",
         ))?;

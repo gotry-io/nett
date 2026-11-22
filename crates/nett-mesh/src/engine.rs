@@ -90,7 +90,7 @@ pub struct Engine<D> {
     dataplane: D,
     members: MemberSet,
     interface: Option<Interface>,
-    /// The configuration most recently handed to the transport adapter.
+    /// The configuration most recently handed to the TLS transport.
     transport: Option<TransportConfig>,
     /// The assignment of the relay on this machine (design/mesh.md section 5.2), and the fingerprint and
     /// time nett-relay reported when it last fetched it.
@@ -110,7 +110,7 @@ pub struct Engine<D> {
     rehandshaked_at: HashMap<X25519PublicKey, u64>,
     last_stats: Option<Instant>,
     clock_trusted: bool,
-    /// Loopback endpoints of TLS relays on the transport adapter, and the idle ports most recently set
+    /// Loopback endpoints of TLS relays on the TLS transport, and the idle ports most recently set
     /// (design/mesh.md section 5.3).
     tls_endpoints: BTreeSet<SocketAddr>,
     tls_guarded: Option<Vec<u16>>,
@@ -132,7 +132,7 @@ pub struct Engine<D> {
     /// The desired state to apply again after a data plane failure; what the failure left closed stays
     /// closed until then (hard rule 6).
     retry: Option<Retry>,
-    /// Loopback ports of TLS relays on the transport adapter -> the relay's TLS address: local status shows
+    /// Loopback ports of TLS relays on the TLS transport -> the relay's TLS address: local status shows
     /// the latter.
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
     /// This machine's trust store: the pinned trust anchors and the versions in effect for each artifact
@@ -672,9 +672,9 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// Configuration of the transport adapter (design/mesh.md section 5.3): TLS targets and the actual
+    /// Configuration of the TLS transport (design/mesh.md section 5.3): TLS targets and the actual
     /// WireGuard port, handed out when changed. Called before peers are configured: when packets that
-    /// WireGuard sends to the loopback port arrive, the transport adapter is already listening.
+    /// WireGuard sends to the loopback port arrive, the TLS transport is already listening.
     fn update_transport(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
         let Some(interface) = &self.interface else {
             return;
@@ -749,7 +749,7 @@ impl<D: DataPlane> Engine<D> {
         self.relay.clone()
     }
 
-    /// The transport adapter fetches its configuration.
+    /// The TLS transport asks for its configuration.
     pub fn transport_config(&self) -> Option<TransportConfig> {
         self.transport.clone().map(|config| TransportConfig {
             interface: self.dataplane.underlay_interface(),
@@ -1251,7 +1251,7 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// The address shown in local status: a TLS relay shows its TLS address, not the transport adapter's
+    /// The address shown in local status: a TLS relay shows its TLS address, not the TLS transport's
     /// loopback port.
     fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
         let endpoint = route.endpoint();
@@ -1565,7 +1565,7 @@ mod tests {
         assert!(events.0.contains(&Event::PeersApplied { peers: 2 }));
     }
 
-    /// The transport adapter's configuration names the interface the underlay sockets are bound to
+    /// The TLS transport's configuration names the interface the underlay sockets are bound to
     /// at the time it fetches it, so its TLS connections take the same way out (design/userspace.md
     /// section 6.2).
     #[test]
@@ -1629,7 +1629,7 @@ mod tests {
         assert!(events.0.contains(&Event::InterfaceReady {
             listen_port: FAKE_AUTO_PORT
         }));
-        // The transport adapter gets the actual port, and before the peers are configured
+        // The TLS transport gets the actual port, and before the peers are configured
         let at = |pred: &dyn Fn(&Event) -> bool| events.0.iter().position(pred);
         let transport = at(
             &|e| matches!(e, Event::TransportConfigChanged { config } if config.wireguard_port == FAKE_AUTO_PORT),
@@ -1700,7 +1700,7 @@ mod tests {
         );
     }
 
-    /// The interface cannot be created when the mesh process starts (on Synology DSM the TUN device
+    /// The interface cannot be created when the mesh starts (on Synology DSM the TUN device
     /// appeared 32 seconds after it): the desired state in effect is applied again, waiting twice as
     /// long each time up to 30 seconds, until the interface comes up, with no new desired state
     #[test]

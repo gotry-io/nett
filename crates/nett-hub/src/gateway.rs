@@ -686,7 +686,7 @@ async fn handle(
                 }
             }
         }
-        // Opaque to the Hub: authenticated end to end by the two mesh processes (design/mesh.md section
+        // Opaque to the Hub: authenticated end to end by the two meshes (design/mesh.md section
         // 8.4); checked here only for size and that the pair is connected
         Some(Body::PathSwitch(p)) => {
             if let Ok(to) = p.node_id.parse::<NodeId>()

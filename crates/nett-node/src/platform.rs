@@ -1,6 +1,6 @@
 //! Where nett's services live on each platform (design/release.md sections 4, 5 and 7), and the
-//! way their service managers are called. `sudo nett install` writes this layout and nett-node
-//! upgrades the program in it, so both read the paths and names from here.
+//! way their service managers are called. `sudo nett install` writes this layout and the nett
+//! service upgrades the program in it, so both read the paths and names from here.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -12,12 +12,10 @@ pub mod linux {
     pub const PROGRAM_DIR: &str = "/usr/local/lib/nett";
     pub const PROGRAM: &str = "/usr/local/lib/nett/nett";
     pub const LINK: &str = "/usr/local/bin/nett";
-    pub const MESH_UNIT: &str = "nett-mesh.service";
-    pub const NODE_UNIT: &str = "nett-node.service";
+    pub const DAEMON_UNIT: &str = "nett.service";
     pub const RELAY_UNIT: &str = nett_mesh::helper::RELAY_UNIT;
-    pub const TRANSPORT_UNIT: &str = nett_mesh::helper::TRANSPORT_UNIT;
-    /// Where `sudo nett install` writes the units and nett-node refreshes them after an upgrade:
-    /// the directory for units of locally installed software (files of the same name in
+    /// Where `sudo nett install` writes the units and the nett service refreshes them after an
+    /// upgrade: the directory for units of locally installed software (files of the same name in
     /// `/etc/systemd/system` override them).
     pub const UNIT_DIR: &str = "/usr/local/lib/systemd/system";
 
@@ -37,42 +35,27 @@ pub mod linux {
         }
     }
 
-    pub const MESH: Unit = Unit {
-        name: MESH_UNIT,
-        content: include_str!("../../../packaging/systemd/nett-mesh.service"),
-        what: "the mesh service",
-    };
-    pub const NODE: Unit = Unit {
-        name: NODE_UNIT,
-        content: include_str!("../../../packaging/systemd/nett-node.service"),
-        what: "nett-node",
+    pub const DAEMON: Unit = Unit {
+        name: DAEMON_UNIT,
+        content: include_str!("../../../packaging/systemd/nett.service"),
+        what: "the nett service",
     };
     pub const RELAY: Unit = Unit {
         name: RELAY_UNIT,
         content: include_str!("../../../packaging/systemd/nett-relay.service"),
         what: "the relay",
     };
-    pub const TRANSPORT: Unit = Unit {
-        name: TRANSPORT_UNIT,
-        content: include_str!("../../../packaging/systemd/nett-transport.service"),
-        what: "the transport adapter",
-    };
-    pub const UNITS: [Unit; 4] = [MESH, NODE, RELAY, TRANSPORT];
+    pub const UNITS: [Unit; 2] = [DAEMON, RELAY];
     /// The units whose files exist only while the desired state needs them (design/release.md
     /// section 8).
-    pub const OPTIONAL: [Unit; 2] = [RELAY, TRANSPORT];
+    pub const OPTIONAL: [Unit; 1] = [RELAY];
 
-    /// The units on Synology DSM (design/dsm.md section 6): same names, written for its systemd 219,
-    /// running as root with bounded capabilities and started by the boot task.
-    pub const DSM_MESH: Unit = Unit {
-        name: MESH_UNIT,
-        content: include_str!("../../../packaging/systemd/dsm/nett-mesh.service"),
-        what: "the mesh service",
-    };
-    pub const DSM_NODE: Unit = Unit {
-        name: NODE_UNIT,
-        content: include_str!("../../../packaging/systemd/dsm/nett-node.service"),
-        what: "nett-node",
+    /// The unit on Synology DSM (design/dsm.md section 6): the same name, written for its systemd
+    /// 219, running as root with bounded capabilities and started by the boot task.
+    pub const DSM_DAEMON: Unit = Unit {
+        name: DAEMON_UNIT,
+        content: include_str!("../../../packaging/systemd/dsm/nett.service"),
+        what: "the nett service",
     };
     /// Files that exist on Synology DSM and nowhere else; `os_name` and the other keys have moved
     /// between DSM versions, the files have not.
@@ -83,7 +66,7 @@ pub mod linux {
     pub enum Flavor {
         /// systemd as current distributions ship it (design/release.md section 5).
         Systemd,
-        /// Synology DSM: systemd 219, no system accounts, a boot task (design/dsm.md section 6).
+        /// Synology DSM: systemd 219, a boot task (design/dsm.md section 6).
         Dsm,
     }
 
@@ -96,17 +79,10 @@ pub mod linux {
             }
         }
 
-        pub fn mesh(self) -> Unit {
+        pub fn daemon(self) -> Unit {
             match self {
-                Self::Systemd => MESH,
-                Self::Dsm => DSM_MESH,
-            }
-        }
-
-        pub fn node(self) -> Unit {
-            match self {
-                Self::Systemd => NODE,
-                Self::Dsm => DSM_NODE,
+                Self::Systemd => DAEMON,
+                Self::Dsm => DSM_DAEMON,
             }
         }
 
@@ -114,34 +90,21 @@ pub mod linux {
         pub fn units(self) -> &'static [Unit] {
             match self {
                 Self::Systemd => &UNITS,
-                Self::Dsm => &[DSM_MESH, DSM_NODE],
+                Self::Dsm => &[DSM_DAEMON],
             }
         }
 
-        /// The units that follow the desired state. DSM has none: the mesh process carries the TLS
-        /// transport there, and relays run elsewhere (design/dsm.md sections 2 and 7).
+        /// The units that follow the desired state. DSM has none: relays run elsewhere
+        /// (design/dsm.md section 2).
         pub fn optional(self) -> &'static [Unit] {
             match self {
                 Self::Systemd => &OPTIONAL,
                 Self::Dsm => &[],
             }
         }
-
-        /// Whether the mesh process carries the TLS transport itself (ADR 0013).
-        pub fn mesh_carries_tls(self) -> bool {
-            self == Self::Dsm
-        }
     }
-    /// The trust store, in the identity directory; the mesh service writes it (design/release.md
-    /// section 8).
-    pub const STATE_DIR: &str = "/etc/nett/state";
     /// The relay's TLS certificate, root only: systemd hands it to the relay.
     pub const RELAY_CERT_DIR: &str = "/etc/nett/relay";
-    /// Where 0.3.13 and earlier kept the trust store and the relay's certificate and bindings, and
-    /// the system users the relay and the transport adapter ran as (design/release.md section 8).
-    pub const OLD_STATE_DIR: &str = "/var/lib/nett";
-    pub const OLD_RELAY_DIR: &str = "/var/lib/nett-relay";
-    pub const OLD_ACCOUNTS: [&str; 2] = ["nett-relay", "nett-transport"];
 
     /// The optional units installed now.
     pub fn installed_optional() -> Vec<Unit> {
@@ -171,8 +134,8 @@ pub mod macos {
     pub const PROGRAM: &str = "/Library/Application Support/nett/nett";
     pub const COMMAND: &str = "/usr/local/bin/nett";
     pub const LAUNCHCTL: &str = "/bin/launchctl";
-    pub const MESH_LABEL: &str = "io.gotry.nett.mesh";
-    pub const NODE_LABEL: &str = "io.gotry.nett.node";
+    /// The launchd service that runs `nett daemon` (ADR 0013).
+    pub const LABEL: &str = "io.gotry.nett";
 }
 
 /// The most of a command's standard output nett reads (hard rule 14).
@@ -257,7 +220,7 @@ pub fn run(program: &str, args: &[&str], timeout: Duration) -> Result<bool, Stri
 
 #[cfg(test)]
 mod tests {
-    use super::linux::{DSM_MESH, DSM_NODE, Flavor, MESH, NODE, PROGRAM, Unit};
+    use super::linux::{DAEMON, DSM_DAEMON, Flavor, PROGRAM, RELAY, Unit};
 
     /// `Section.Directive` for each setting in a unit file.
     fn directives(unit: &Unit) -> Vec<String> {
@@ -280,23 +243,20 @@ mod tests {
     /// DSM's systemd accepts a directive it does not implement with only a warning, so a unit
     /// could look confined and not be (design/dsm.md section 3)
     #[test]
-    fn dsm_units_use_only_what_systemd_219_implements() {
+    fn the_dsm_unit_uses_only_what_systemd_219_implements() {
         let known: Vec<&str> = include_str!("systemd-219.txt")
             .lines()
             .filter(|l| !l.starts_with('#'))
             .collect();
-        for unit in [&DSM_MESH, &DSM_NODE] {
-            for directive in directives(unit) {
-                assert!(
-                    known.contains(&directive.as_str()),
-                    "{}: {directive} is not implemented by systemd 219",
-                    unit.name
-                );
-            }
+        for directive in directives(&DSM_DAEMON) {
+            assert!(
+                known.contains(&directive.as_str()),
+                "{directive} is not implemented by systemd 219"
+            );
         }
         // The check bites: the unit for current systemd uses what 219 lacks
         assert!(
-            directives(&MESH)
+            directives(&DAEMON)
                 .iter()
                 .any(|d| !known.contains(&d.as_str()))
         );
@@ -312,55 +272,57 @@ mod tests {
         }
     }
 
-    /// The boot task starts them, root with bounded capabilities, the file system read-only but for
-    /// their own directories (design/dsm.md section 6.1)
+    /// The nett service runs as root with only the network capabilities it uses, the file system
+    /// read-only but for its own directories, and starts again after it exits to run a new release
+    /// (ADR 0013, design/release.md section 7, design/dsm.md section 6.1)
     #[test]
-    fn dsm_units_are_root_with_bounded_capabilities() {
-        for unit in [&DSM_MESH, &DSM_NODE] {
-            assert!(!unit.content.contains("[Install]"), "{}", unit.name);
+    fn the_nett_service_is_root_with_bounded_capabilities() {
+        for unit in [&DAEMON, &DSM_DAEMON] {
             assert!(!unit.content.contains("\nUser="), "{}", unit.name);
+            assert!(
+                unit.content.contains(
+                    "\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE\n"
+                ),
+                "{}",
+                unit.name
+            );
             assert!(
                 unit.content.contains("\nNoNewPrivileges=yes\n"),
                 "{}",
                 unit.name
             );
+            assert!(unit.content.contains("\nRestart=always\n"), "{}", unit.name);
             assert!(
-                unit.content.contains("\nReadOnlyDirectories=/\n"),
-                "{}",
-                unit.name
-            );
-            assert!(
-                unit.content.contains(&format!("\nExecStart={PROGRAM} ")),
+                unit.content
+                    .contains(&format!("\nExecStart={PROGRAM} daemon --dir /etc/nett\n")),
                 "{}",
                 unit.name
             );
         }
+        assert!(DAEMON.content.contains("\nProtectSystem=strict\n"));
+        assert!(DAEMON.content.contains(
+            "\nReadWritePaths=/etc/nett /usr/local/lib/nett /usr/local/lib/systemd/system\n"
+        ));
+        assert!(!DSM_DAEMON.content.contains("[Install]"));
+        assert!(DSM_DAEMON.content.contains("\nReadOnlyDirectories=/\n"));
+        assert!(DSM_DAEMON.content.contains(
+            "\nReadWriteDirectories=/etc/nett /usr/local/lib/nett /usr/local/lib/systemd/system /run/nett\n"
+        ));
+        // The relay is the one service that listens publicly: a user of its own, no root
+        assert!(RELAY.content.contains("\nDynamicUser=yes\n"));
         assert!(
-            DSM_MESH.content.contains(
-                "\nCapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE\n"
-            )
-        );
-        assert!(DSM_MESH.content.contains("--key /etc/nett/mesh.key"));
-        assert!(
-            DSM_MESH
+            RELAY
                 .content
-                .contains("\nReadWriteDirectories=/etc/nett/state /run/nett\n")
-        );
-        assert!(
-            DSM_NODE
-                .content
-                .contains("\nCapabilityBoundingSet=CAP_DAC_OVERRIDE\n")
+                .contains("\nAfter=network-online.target nett.service\n")
         );
     }
 
     #[test]
     fn flavors_share_unit_names() {
         for flavor in [Flavor::Systemd, Flavor::Dsm] {
-            assert_eq!(flavor.mesh().name, MESH.name);
-            assert_eq!(flavor.node().name, NODE.name);
+            assert_eq!(flavor.daemon().name, DAEMON.name);
         }
         assert!(Flavor::Dsm.optional().is_empty());
-        assert_eq!(Flavor::Dsm.units(), &[DSM_MESH, DSM_NODE]);
-        assert!(Flavor::Dsm.mesh_carries_tls() && !Flavor::Systemd.mesh_carries_tls());
+        assert_eq!(Flavor::Dsm.units(), &[DSM_DAEMON]);
     }
 }

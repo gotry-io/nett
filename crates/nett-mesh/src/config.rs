@@ -1,5 +1,5 @@
-//! Desired state of the mesh process: the parts of the desired state's `trust` and `mesh` partitions that
-//! the mesh process uses (design/protocol.md section 6).
+//! Desired state of the mesh: the parts of the desired state's `trust` and `mesh` partitions that
+//! the mesh uses (design/protocol.md section 6).
 //!
 //! Sources only deliver documents ([`crate::source`]); validation happens once here at the boundary, and
 //! only validated types are passed on afterwards.
@@ -71,7 +71,7 @@ pub struct DeviceDoc {
 }
 
 /// Relay assignment in the desired state (design/mesh.md section 5.2). Members are named by node ID;
-/// the mesh process resolves them to mesh public keys from the verified admission material.
+/// the mesh resolves them to mesh public keys from the verified admission material.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelayDoc {
@@ -138,7 +138,7 @@ pub enum Candidate {
     },
     /// TLS transport via a relay (design/mesh.md section 5.3): the relay's TLS address and certificate
     /// fingerprint; the token is the same as for the UDP relay and authenticates the first probe on the
-    /// WebSocket connection. The endpoint in WireGuard is the transport adapter's loopback port.
+    /// WebSocket connection. The endpoint in WireGuard is the TLS transport's loopback port.
     RelayTls {
         relay: NodeId,
         address: SocketAddr,
@@ -153,8 +153,8 @@ pub enum Candidate {
     Punch,
 }
 
-/// The transport adapter's loopback ports start here and are allocated in order of the relays' node IDs
-/// (ADR 0013: allocated by the mesh process).
+/// The TLS transport's loopback ports start here and are allocated in order of the relays' node IDs
+/// (ADR 0013: allocated by the mesh).
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
@@ -194,7 +194,7 @@ pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Ports the mesh process and the transport adapter use locally: the probe port on the mesh address and
+/// Ports the mesh and the TLS transport use locally: the probe port on the mesh address and
 /// the loopback ports of TLS relays. The WireGuard socket binds all local addresses; when it uses one of
 /// them, the party that binds later fails (design/site.md section 4).
 pub fn is_reserved_port(port: u16) -> bool {
@@ -268,7 +268,7 @@ pub struct DesiredMesh {
     pub devices: Vec<DeviceDoc>,
     pub names: BTreeMap<NodeId, NodeName>,
     pub relay: Option<RelayDoc>,
-    /// TLS targets of the transport adapter, coming from the same place as [`DesiredMesh::tls_endpoints`].
+    /// TLS targets of the TLS transport, coming from the same place as [`DesiredMesh::tls_endpoints`].
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
     /// The document before validation: saved into the trust store after the whole is accepted, and used when
@@ -281,17 +281,17 @@ impl DesiredMesh {
         &self.doc
     }
 
-    /// The endpoint in WireGuard of each TLS relay: the loopback port the transport adapter opens for it.
+    /// The endpoint in WireGuard of each TLS relay: the loopback port the TLS transport opens for it.
     pub fn tls_endpoints(&self) -> &BTreeMap<NodeId, SocketAddr> {
         &self.tls_endpoints
     }
 
-    /// TLS targets of the transport adapter: loopback port and the relay's TLS address.
+    /// TLS targets of the TLS transport: loopback port and the relay's TLS address.
     pub fn tls_targets(&self) -> &[TlsTarget] {
         &self.tls_targets
     }
 
-    /// Configuration handed to the transport adapter: the WireGuard port is the port the interface actually
+    /// Configuration handed to the TLS transport: the WireGuard port is the port the interface actually
     /// listens on (possibly assigned by the system); the data plane fills in the interface when it hands
     /// the configuration out.
     pub fn transport(&self, wireguard_port: u16) -> TransportConfig {

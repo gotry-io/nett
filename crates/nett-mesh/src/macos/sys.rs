@@ -331,10 +331,10 @@ pub(crate) fn max_clock_error() -> io::Result<Duration> {
     Ok(Duration::from_micros(micros))
 }
 
-/// Opens the system log: afterwards [`syslog`] is tagged with `nett-mesh` and the process ID.
+/// Opens the system log: afterwards [`syslog`] is tagged with `nett` and the process ID.
 pub(crate) fn openlog() {
     // SAFETY: the identifier is a static NUL-terminated string, valid for the whole life of the process
-    unsafe { libc::openlog(c"nett-mesh".as_ptr(), libc::LOG_PID, libc::LOG_DAEMON) };
+    unsafe { libc::openlog(c"nett".as_ptr(), libc::LOG_PID, libc::LOG_DAEMON) };
 }
 
 /// Writes a system log entry. NULs in the message are removed (a C string cannot contain them).

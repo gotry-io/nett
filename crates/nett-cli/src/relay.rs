@@ -1,5 +1,5 @@
 //! `nett relay`: the relay service (design/mesh.md section 5.2). It fetches its assignment from the
-//! mesh process over the helper socket, takes its TLS certificate from `--cert` (systemd's
+//! nett daemon over the helper socket, takes its TLS certificate from `--cert` (systemd's
 //! credentials) and saves its bindings to `--state`; the lab build can instead read the assignment
 //! from a local file (`--config`). Exits on `SIGTERM` or `SIGINT`, and when the assignment changes its
 //! ports (the service manager starts it again).
@@ -9,12 +9,7 @@ use std::path::PathBuf;
 use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
-/// Where the units of 0.3.13 and earlier kept the certificate and the bindings, which they start the
-/// relay without paths for (design/release.md section 8); there the certificate is created when
-/// missing.
-const OLD_DIR: &str = nett_node::platform::linux::OLD_RELAY_DIR;
-
-pub const USAGE: &str = "usage: nett relay [--socket <helpers.sock>] [--cert <dir>] [--state <file>]\n\n\
+pub const USAGE: &str = "usage: nett relay --cert <dir> --state <file> [--socket <helpers.sock>]\n\n\
 Started by systemd on a machine that runs a relay (`nett site relay`).";
 #[cfg(feature = "lab")]
 const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-state.json>] reads its assignment from a file, again on SIGHUP";
@@ -58,13 +53,11 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         if let Some(config) = config {
             return lab(config, state, shutdown).await;
         }
-        let cert = match cert {
-            Some(dir) => nett_relay::cert::RelayCert::load(&dir),
-            None => nett_relay::cert::RelayCert::load_or_create(std::path::Path::new(OLD_DIR)),
-        }
-        .context("the relay's TLS certificate")?;
-        let state = state
-            .unwrap_or_else(|| std::path::Path::new(OLD_DIR).join(nett_relay::service::STATE_FILE));
+        let (Some(cert), Some(state)) = (cert, state) else {
+            anyhow::bail!(USAGE);
+        };
+        let cert =
+            nett_relay::cert::RelayCert::load(&cert).context("the relay's TLS certificate")?;
         let ended = nett_relay::service::run(socket, cert, state, shutdown)
             .await
             .context("relay")?;

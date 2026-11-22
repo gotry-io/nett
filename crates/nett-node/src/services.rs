@@ -1,12 +1,11 @@
 //! nett's services on a machine set up by `sudo nett install` (design/hub.md section 5, design/
-//! release.md section 7): on Linux the relay and the transport adapter run only while the desired
-//! state needs them, and the units follow the program through upgrades. macOS runs neither: the mesh
-//! process carries the TLS transport itself (ADR 0013). Every call is blocking (it runs systemctl,
-//! launchctl or dscl): async callers use a blocking thread.
+//! release.md section 7): the nett service itself and, on Linux, the relay, which runs only while
+//! the desired state needs it; the units follow the program through upgrades. Every call is
+//! blocking (it runs systemctl or launchctl): async callers use a blocking thread.
 
 use std::path::Path;
 
-use nett_mesh::config::{Candidate, DesiredMeshDoc};
+use nett_mesh::config::DesiredMeshDoc;
 
 #[cfg(not(target_os = "macos"))]
 pub use systemd::{reconcile, refresh_units};
@@ -16,35 +15,28 @@ pub use systemd::{reconcile, refresh_units};
 pub struct Wants {
     /// This machine runs a relay.
     pub relay: bool,
-    /// This machine has a path over TLS.
-    pub transport: bool,
 }
 
 impl Wants {
     pub fn of(doc: &DesiredMeshDoc) -> Self {
         Self {
             relay: doc.relay.is_some(),
-            transport: doc
-                .paths
-                .iter()
-                .flat_map(|p| &p.candidates)
-                .any(|c| matches!(c, Candidate::RelayTls { .. })),
         }
     }
 }
 
 /// Whether nett's services on this machine are the ones `sudo nett install` set up: systemd units
-/// on Linux, launchd services on macOS.
+/// on Linux, the launchd service on macOS.
 pub fn managed() -> bool {
     #[cfg(target_os = "macos")]
     return Path::new(crate::platform::macos::PROGRAM).exists()
-        && Path::new(crate::launchd::MESH.plist).exists();
+        && Path::new(crate::launchd::DAEMON.plist).exists();
     #[cfg(not(target_os = "macos"))]
     {
         use crate::platform::linux;
         cfg!(target_os = "linux")
             && Path::new(linux::PROGRAM).exists()
-            && Path::new(&linux::MESH.path()).exists()
+            && Path::new(&linux::DAEMON.path()).exists()
             && linux::systemctl().is_some()
     }
 }
@@ -55,12 +47,11 @@ pub fn reconcile(_wants: Wants) -> Vec<String> {
     Vec::new()
 }
 
-/// After an upgrade the launchd configuration follows the program, and what earlier releases placed
-/// goes (design/release.md sections 7 and 8). nett-node keeps running: launchd reads its new
-/// configuration the next time it loads it.
+/// After an upgrade the launchd configuration follows the program (design/release.md section 7);
+/// launchd reads it the next time it loads the service. Returns `false`: the service keeps
+/// running.
 #[cfg(target_os = "macos")]
 pub fn refresh_units() -> Result<bool, String> {
-    crate::launchd::remove_transport_service()?;
     crate::launchd::refresh()?;
     Ok(false)
 }
@@ -73,7 +64,7 @@ mod systemd {
     use std::path::Path;
 
     use super::Wants;
-    use crate::platform::linux::{self, Flavor, RELAY, TRANSPORT, Unit};
+    use crate::platform::linux::{self, Flavor, RELAY, Unit};
 
     /// Time limit of one systemctl call (hard rule 14).
     const SYSTEMCTL_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,28 +74,25 @@ mod systemd {
         crate::platform::run(program, args, SYSTEMCTL_TIMEOUT)
     }
 
-    /// Runs the relay and the transport adapter to match `wants`: one that is wanted gets its unit
-    /// and is enabled and started; one that is not is stopped and disabled, and its unit deleted
-    /// (design/release.md section 8). Returns what it could not do.
+    /// Runs the relay to match `wants`: wanted, it gets its unit and is enabled and started;
+    /// otherwise it is stopped and disabled, and its unit deleted (design/release.md section 8).
+    /// Returns what it could not do.
     pub fn reconcile(wants: Wants) -> Vec<String> {
         let optional = Flavor::detect().optional();
         let mut problems = Vec::new();
-        // On DSM the mesh process carries the TLS transport, and nothing runs a relay
-        // (design/dsm.md sections 2 and 7)
-        if wants.relay && !optional.contains(&RELAY) {
-            problems.push(
-                "this machine's desired state runs a relay, which nett does not run on Synology DSM"
-                    .to_owned(),
-            );
+        // Nothing runs a relay on DSM (design/dsm.md section 2)
+        if !optional.contains(&RELAY) {
+            if wants.relay {
+                problems.push(
+                    "this machine's desired state runs a relay, which nett does not run on Synology DSM"
+                        .to_owned(),
+                );
+            }
+            return problems;
         }
-        for (unit, want) in [(RELAY, wants.relay), (TRANSPORT, wants.transport)] {
-            if !optional.contains(&unit) {
-                continue;
-            }
-            if let Err(e) = set_running(unit, want) {
-                tracing::warn!(unit = unit.name, error = %e, "changing an optional service");
-                problems.push(e);
-            }
+        if let Err(e) = set_running(RELAY, wants.relay) {
+            tracing::warn!(unit = RELAY.name, error = %e, "changing the relay service");
+            problems.push(e);
         }
         problems
     }
@@ -113,7 +101,7 @@ mod systemd {
         let path = unit.path();
         #[cfg(target_os = "linux")]
         if want && unit == RELAY {
-            crate::layout::ensure_relay_cert(&crate::layout::Layout::system())?;
+            crate::layout::ensure_relay_cert(Path::new(linux::RELAY_CERT_DIR))?;
         }
         if want {
             if std::fs::read(&path).ok().as_deref() != Some(unit.content.as_bytes()) {
@@ -137,7 +125,7 @@ mod systemd {
                     unit.what, unit.name
                 ));
             }
-            tracing::info!(unit = unit.name, action, "optional service changed");
+            tracing::info!(unit = unit.name, action, "relay service changed");
         }
         if !want {
             std::fs::remove_file(&path).map_err(|e| format!("removing {path}: {e}"))?;
@@ -155,16 +143,11 @@ mod systemd {
     }
 
     /// After an upgrade the units may have changed with the program (design/release.md section 7):
-    /// rewrites the ones that differ from the embedded copies, reloads systemd, and restarts the changed
-    /// services that are running. The relay's and the transport adapter's are only rewritten while
-    /// they exist. Returns whether nett-node's own unit changed: it then exits, and systemd starts it
-    /// again with the new unit.
+    /// rewrites the ones that differ from the embedded copies, reloads systemd, and restarts the relay
+    /// when its unit changed and it runs; the relay's is only rewritten while it exists. Returns
+    /// whether the nett service's own unit changed: it then exits, and systemd starts it again with
+    /// the new unit.
     pub fn refresh_units() -> Result<bool, String> {
-        // The relay's unit of this program takes its certificate from the identity directory: copy it
-        // there from the layout of 0.3.13 first; the mesh service's unit copies the trust store
-        // itself (design/release.md section 8)
-        #[cfg(target_os = "linux")]
-        crate::layout::Layout::system().copy_old_relay()?;
         let flavor = Flavor::detect();
         let mut changed = Vec::new();
         for &unit in flavor.units() {
@@ -185,7 +168,7 @@ mod systemd {
         let mut own = false;
         for unit in changed {
             tracing::info!(unit = unit.name, "unit updated with the program");
-            if unit.name == linux::NODE_UNIT {
+            if unit.name == linux::DAEMON_UNIT {
                 own = true;
             } else if !systemctl(&["try-restart", unit.name])? {
                 tracing::warn!(
@@ -217,7 +200,7 @@ mod systemd {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::platform::linux::{RELAY, TRANSPORT, UNITS};
+    use crate::platform::linux::{RELAY, UNITS};
 
     #[test]
     fn services_follow_the_desired_state() {
@@ -280,34 +263,8 @@ mod tests {
             .set_relay(&name("vps"), Some(role(None)), RelayKey([9; 32]))
             .expect("relay");
         sign(&mut state);
-        let relay_only = Wants {
-            relay: true,
-            transport: false,
-        };
-        assert_eq!(Wants::of(&desired(&state, "vps")), relay_only);
-        assert_eq!(
-            Wants::of(&desired(&state, "mac")),
-            Wants::default(),
-            "no TLS path before the relay's fingerprint is known"
-        );
-        let fingerprint = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-            .parse()
-            .expect("fingerprint");
-        state
-            .set_relay(
-                &name("vps"),
-                Some(role(Some(fingerprint))),
-                RelayKey([9; 32]),
-            )
-            .expect("relay");
-        sign(&mut state);
-        assert_eq!(
-            Wants::of(&desired(&state, "mac")),
-            Wants {
-                relay: false,
-                transport: true
-            }
-        );
+        assert_eq!(Wants::of(&desired(&state, "vps")), Wants { relay: true });
+        assert_eq!(Wants::of(&desired(&state, "mac")), Wants::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -320,15 +277,13 @@ mod tests {
                 unit.name
             );
         }
-        // Users systemd allocates while they run (design/release.md section 8)
+        // The relay runs as a user systemd allocates while it runs (design/release.md section 8)
         assert!(RELAY.content.contains("\nDynamicUser=yes\n"));
-        assert!(TRANSPORT.content.contains("\nDynamicUser=yes\n"));
-        assert!(TRANSPORT.content.contains("\nCapabilityBoundingSet=\n"));
         assert!(
-            crate::platform::linux::NODE
+            crate::platform::linux::DAEMON
                 .content
                 .contains(crate::platform::linux::UNIT_DIR),
-            "nett-node may write the unit directory"
+            "the nett service may write the unit directory"
         );
     }
 }

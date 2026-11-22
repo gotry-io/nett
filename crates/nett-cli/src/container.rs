@@ -1,8 +1,7 @@
 //! `nett container`: the first process of nett's image (design/container.md, ADR 0016). It joins the
-//! site on the first start, runs the mesh process and nett-node with only the capabilities each
-//! uses, restarts one that exits, and runs a new version in this process when nett-node has placed
-//! one in the volume (ADR 0026). It reads nothing from the network and runs nothing but this
-//! program.
+//! site on the first start, runs the nett daemon with only the capabilities it uses, restarts it
+//! when it exits, and runs a new version in this process when the daemon has placed one in the
+//! volume (ADR 0026). It reads nothing from the network and runs nothing but this program.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -27,14 +26,14 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(120);
 const RESTART_FIRST: Duration = Duration::from_secs(2);
 const RESTART_MAX: Duration = Duration::from_secs(30);
 const RAN_LONG: Duration = Duration::from_secs(60);
-/// How long a new version's mesh process has to answer on its local interface.
+/// How long a new version's mesh has to answer on its local interface.
 const MESH_START: Duration = nett_node::upgrade::MESH_START;
 /// How long each process has to stop after `SIGTERM`, within Docker's stop timeout of 10 seconds.
 const STOP_GRACE: Duration = Duration::from_secs(4);
 
 pub const USAGE: &str = "usage: nett container\n\n\
 The first process of nett's image: joins the site with NETT_TOKEN on the first start, then runs the\n\
-mesh process and nett-node, and keeps them running. The state lives in NETT_STATE_DIR, which the\n\
+nett daemon and keeps it running. The state lives in NETT_STATE_DIR, which the\n\
 image sets to the volume /var/lib/nett.";
 
 /// The container's state directory, when this program runs in nett's image.
@@ -88,11 +87,11 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     if let Some(arg) = parser.next()? {
         return Err(arg.unexpected().into());
     }
-    crate::mesh::init_logging();
+    crate::daemon::init_logging();
     let state = state_dir().with_context(|| {
         format!("{STATE_ENV} is not set: `nett container` is the entry point of nett's image")
     })?;
-    // It keeps what the mesh process needs, and the right to drop capabilities for each process
+    // It keeps what the daemon needs, and the right to drop capabilities for the processes it starts
     keep_only(mesh_caps() | CapabilitySet::SETPCAP);
     let runtime_dir = Path::new(nett_mesh::status::DEFAULT_SOCKET)
         .parent()
@@ -226,23 +225,7 @@ fn keep_only(keep: CapabilitySet) {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    Mesh,
-    Node,
-}
-
-impl Role {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Mesh => "the mesh process",
-            Self::Node => "nett-node",
-        }
-    }
-}
-
 struct Process {
-    role: Role,
     pid: Option<Pid>,
     started: Instant,
     backoff: Duration,
@@ -251,62 +234,34 @@ struct Process {
 
 enum Outcome {
     Stopped,
-    /// Every process has stopped; the installed program's check runs next, and why.
+    /// The daemon has stopped; the installed program's check runs next, and why.
     Relaunch(String),
 }
 
 struct Supervisor<'a> {
     state: &'a Path,
     staged: &'a Staged,
-    processes: Vec<Process>,
+    daemon: Process,
 }
 
 impl<'a> Supervisor<'a> {
     fn new(state: &'a Path, staged: &'a Staged) -> Self {
-        let process = |role| Process {
-            role,
-            pid: None,
-            started: Instant::now(),
-            backoff: RESTART_FIRST,
-            restart_at: Some(Instant::now()),
-        };
         Self {
             state,
             staged,
-            processes: vec![process(Role::Mesh), process(Role::Node)],
+            daemon: Process {
+                pid: None,
+                started: Instant::now(),
+                backoff: RESTART_FIRST,
+                restart_at: Some(Instant::now()),
+            },
         }
     }
 
-    fn args(&self, role: Role) -> Vec<String> {
-        let at = |name: &str| self.state.join(name).to_string_lossy().into_owned();
-        match role {
-            Role::Mesh => vec![
-                "mesh".into(),
-                "--config".into(),
-                at("desired.json"),
-                "--key".into(),
-                at("mesh.key"),
-                "--state".into(),
-                at("state"),
-            ],
-            Role::Node => vec![
-                "node".into(),
-                "--dir".into(),
-                self.state.to_string_lossy().into_owned(),
-            ],
-        }
-    }
-
-    fn start(&mut self, i: usize) -> anyhow::Result<()> {
-        let role = self.processes[i].role;
-        let args = self.args(role);
-        let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let keep = match role {
-            Role::Mesh => mesh_caps(),
-            Role::Node => CapabilitySet::empty(),
-        };
-        let child = spawn(&args, keep, false)?;
-        let p = &mut self.processes[i];
+    fn start(&mut self) -> anyhow::Result<()> {
+        let dir = self.state.to_string_lossy();
+        let child = spawn(&["daemon", "--dir", &dir], mesh_caps(), false)?;
+        let p = &mut self.daemon;
         p.pid = Some(Pid::from_child(&child));
         p.started = Instant::now();
         p.restart_at = None;
@@ -319,31 +274,29 @@ impl<'a> Supervisor<'a> {
             signal(SignalKind::interrupt()).context("installing the SIGINT handler")?;
         let mut child = signal(SignalKind::child()).context("installing the SIGCHLD handler")?;
         let current = self.staged.current;
-        // A new version proves itself before its processes are restarted one by one
+        // A new version proves itself before it is restarted
         let mut mesh_check =
             (self.staged.pending() == Some(current)).then(|| Instant::now() + MESH_START);
         loop {
             let now = Instant::now();
-            for i in 0..self.processes.len() {
-                if self.processes[i].restart_at.is_some_and(|at| at <= now) {
-                    self.start(i)?;
-                }
+            if self.daemon.restart_at.is_some_and(|at| at <= now) {
+                self.start()?;
             }
             if mesh_check.is_some_and(|at| at <= now) {
                 mesh_check = None;
                 if self.staged.pending() == Some(current) && !mesh_answers().await {
                     return Ok(self
                         .stop(format!(
-                            "the mesh process of {current} did not answer within {} seconds",
+                            "the mesh of {current} did not answer within {} seconds",
                             MESH_START.as_secs()
                         ))
                         .await);
                 }
             }
             let next = self
-                .processes
-                .iter()
-                .filter_map(|p| p.restart_at)
+                .daemon
+                .restart_at
+                .into_iter()
                 .chain(mesh_check)
                 .min()
                 .unwrap_or_else(|| now + Duration::from_secs(3600));
@@ -354,11 +307,10 @@ impl<'a> Supervisor<'a> {
                 () = tokio::time::sleep_until(next.into()) => {}
             }
             for (pid, status) in reap() {
-                let Some(i) = self.processes.iter().position(|p| p.pid == Some(pid)) else {
+                if self.daemon.pid != Some(pid) {
                     continue;
-                };
-                let role = self.processes[i].role;
-                self.processes[i].pid = None;
+                }
+                self.daemon.pid = None;
                 match self.staged.pending() {
                     Some(placed) if placed > current => {
                         return Ok(self.stop(format!("{placed} is in place")).await);
@@ -366,31 +318,29 @@ impl<'a> Supervisor<'a> {
                     Some(placed) if placed == current => {
                         return Ok(self
                             .stop(format!(
-                                "{} of {current} exited ({status:?}) before it settled",
-                                role.name()
+                                "the nett daemon of {current} exited ({status:?}) before it settled"
                             ))
                             .await);
                     }
                     _ => {}
                 }
-                let p = &mut self.processes[i];
+                let p = &mut self.daemon;
                 p.backoff = if p.started.elapsed() >= RAN_LONG {
                     RESTART_FIRST
                 } else {
                     (p.backoff * 2).min(RESTART_MAX)
                 };
                 tracing::warn!(
-                    process = role.name(),
                     ?status,
                     restart_secs = p.backoff.as_secs(),
-                    "exited; starting it again"
+                    "the nett daemon exited; starting it again"
                 );
                 p.restart_at = Some(Instant::now() + p.backoff);
             }
         }
     }
 
-    /// Stops every process for the installed program's check.
+    /// Stops the daemon for the installed program's check.
     async fn stop(&mut self, why: String) -> Outcome {
         tracing::info!(%why, "stopping to run the version in place");
         self.stop_processes().await;
@@ -403,17 +353,12 @@ impl<'a> Supervisor<'a> {
         Outcome::Stopped
     }
 
-    /// nett-node first, then the mesh process; then, as the container's first process, every
-    /// other process in the container, so that nothing runs while the next version is checked.
+    /// The daemon; then, as the container's first process, every other process in the container,
+    /// so that nothing runs while the next version is checked.
     async fn stop_processes(&mut self) {
-        for role in [Role::Node, Role::Mesh] {
-            let Some(p) = self.processes.iter_mut().find(|p| p.role == role) else {
-                continue;
-            };
-            p.restart_at = None;
-            if let Some(pid) = p.pid.take() {
-                end(pid, STOP_GRACE).await;
-            }
+        self.daemon.restart_at = None;
+        if let Some(pid) = self.daemon.pid.take() {
+            end(pid, STOP_GRACE).await;
         }
         if rustix::process::getpid().is_init() {
             for pid in others() {

@@ -1,7 +1,7 @@
 //! The coordination connection with nett-node (design/status.md section 4.2): nett-node keeps it open
-//! and passes switch proposals and confirmations between this mesh process and the Hub, so the mesh
+//! and passes switch proposals and confirmations between this mesh and the Hub, so the mesh
 //! process never connects to the Hub (design/mesh.md section 8.4). One JSON object per line in each
-//! direction; the messages themselves are authenticated end to end by the two mesh processes.
+//! direction; the messages themselves are authenticated end to end by the two meshes.
 
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::os::unix::net::UnixStream;
@@ -15,8 +15,6 @@ use serde::{Deserialize, Serialize};
 pub const MAX_LINE: usize = 1024;
 /// Longest switch message (design/protocol.md section 5).
 pub const MAX_MESSAGE: usize = 64;
-/// The first line the mesh process sends after accepting a `coordinate` query.
-pub const ACCEPTED: &str = "{\"v\":1,\"coordinating\":true}";
 /// Stack of the thread that reads a coordination connection: it only parses short lines.
 const READER_STACK: usize = 64 * 1024;
 
@@ -31,7 +29,7 @@ pub struct Line {
     pub path_switch: Option<PathSwitchLine>,
 }
 
-/// A switch message: from the mesh process, the peer it is for; from nett-node, the peer it came from.
+/// A switch message: from the mesh, the peer it is for; from nett-node, the peer it came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathSwitchLine {
@@ -76,7 +74,7 @@ impl Line {
     }
 }
 
-/// What nett-node tells the mesh process.
+/// What nett-node tells the mesh.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inbound {
     Hub(bool),
@@ -117,7 +115,7 @@ impl Coordinator {
         }
     }
 
-    /// Takes over a `coordinate` connection: the previous one is closed, and this one is read on a thread of
+    /// Takes over a coordination connection: the previous one is closed, and this one is read on a thread of
     /// its own until nett-node closes it. Each line read is handed to `inbound`; when the connection ends,
     /// the Hub path is gone with it.
     pub fn attach(

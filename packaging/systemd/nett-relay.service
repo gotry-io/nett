@@ -1,12 +1,12 @@
 # The nett relay: forwards encrypted WireGuard packets between members that cannot reach each other
 # directly, over UDP and TLS. It holds no keys of the mesh and sees only ciphertext.
-# nett-node enables it while this machine runs a relay (`nett site relay`). It fetches its assignment
-# from the mesh service through /run/nett/helpers.sock. Its TLS certificate, created by nett-node in
-# /etc/nett/relay, reaches it through LoadCredential; it saves its bindings in /run/nett-relay, which
-# is kept while the service restarts.
+# The nett service enables it while this machine runs a relay (`nett site relay`). It fetches its
+# assignment from the nett service through /run/nett/helpers.sock. Its TLS certificate, created by
+# the nett service in /etc/nett/relay, reaches it through LoadCredential; it saves its bindings in
+# /run/nett-relay, which is kept while the service restarts.
 [Unit]
 Description=nett relay
-After=network-online.target nett-mesh.service
+After=network-online.target nett.service
 Wants=network-online.target
 
 [Service]

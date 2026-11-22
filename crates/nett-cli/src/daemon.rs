@@ -1,14 +1,15 @@
-//! `nett mesh`: the mesh process, run by the service manager. The desired state comes from a
-//! local file and is re-read on `SIGHUP` or a `reload` on the local interface
-//! (design/local-signing.md section 5, status.md section 4.1). On macOS, Synology DSM and in the
-//! container it also carries the TLS transport (ADR 0013). `nett keys` generates the mesh private
-//! key and the identity private key on this machine (local-signing.md section 3). The event file,
-//! simulated clock skew and transport adapter configuration exist only in the lab build (the `lab`
-//! feature).
+//! `nett daemon`: the nett service, one process per machine run by the service manager (ADR 0013).
+//! It runs the mesh, whose desired state comes from a local file and is re-read on `SIGHUP` or a
+//! `reload` on the local interface (design/local-signing.md section 5, status.md section 4.1), and
+//! the TLS transport; with a Hub configuration in its directory it also runs nett-node, which
+//! connects the machine to its Hub, on a thread of its own. `nett keys` generates the mesh private
+//! key and the identity private key on this machine (local-signing.md section 3). The event file
+//! and simulated clock skew exist only in the lab build (the `lab` feature).
 
 #[cfg(target_os = "macos")]
 use std::io::IsTerminal as _;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
@@ -18,7 +19,7 @@ use nett_mesh::event::{EventSink, LogSink};
 use nett_mesh::helper::HelperServer;
 use nett_mesh::key::PrivateKey;
 #[cfg(feature = "lab")]
-use nett_mesh::lab::{JsonLinesSink, LabClock, TransportConfigWriter};
+use nett_mesh::lab::{JsonLinesSink, LabClock};
 #[cfg(target_os = "linux")]
 use nett_mesh::linux::tun::LinuxTun;
 #[cfg(target_os = "linux")]
@@ -28,18 +29,22 @@ use nett_mesh::macos::{MacTun, SystemClock};
 use nett_mesh::runtime::Runtime;
 use nett_mesh::source::FileSource;
 use nett_mesh::status::StatusServer;
-use nett_mesh::store::{DirBackend, TrustStore};
+use nett_mesh::store::{DirBackend, STATE_DIR, TrustStore};
 use nett_mesh::userspace::UserspaceDataPlane;
+use nett_node::daemon::Ended;
 use nett_trust::keys::X25519PublicKey;
 use tokio::signal::unix::{SignalKind, signal};
 
+/// The files in the daemon's directory (design/release.md section 8).
+pub const DESIRED_FILE: &str = "desired.json";
+pub const MESH_KEY_FILE: &str = "mesh.key";
+pub const IDENTITY_KEY_FILE: &str = "identity.key";
+
 struct Args {
-    config: PathBuf,
-    key: PathBuf,
+    /// The keys, the desired state, the Hub configuration and the trust store.
+    dir: PathBuf,
     /// Local status socket (design/status.md section 3).
     socket: PathBuf,
-    /// Directory of the trust store (design/mesh.md section 4.2).
-    state: PathBuf,
     #[cfg(feature = "lab")]
     lab: LabArgs,
 }
@@ -52,45 +57,29 @@ struct LabArgs {
     /// Simulated clock skew (design/prototype.md scenario 17).
     clock_offset_ms: i64,
     clock_trusted: Option<bool>,
-    /// The transport adapter configuration is written here (design/mesh.md section 5.3).
-    transport_config: Option<PathBuf>,
     /// Uses the userspace data plane instead of kernel WireGuard (design/userspace.md section 8).
     userspace: bool,
 }
 
-pub const USAGE: &str = "usage: nett mesh --config <desired-state.json> --key <mesh.key> [--socket <path>] [--state <dir>]\n\
-       nett mesh --prepare-state <dir>\n\n\
-Started by systemd, launchd or `nett container`; to install the service on macOS, use `sudo nett install`.\n\
---prepare-state, run by systemd with full privileges before the service starts on Linux, gives the\n\
-trust store's directory to the service's user and moves the trust store of nett 0.3.13 into it.";
+pub const USAGE: &str = "usage: nett daemon --dir <directory> [--socket <path>]\n\n\
+The nett service: the mesh, the TLS transport and, with hub.json in the directory, the connection\n\
+to the Hub. Started by systemd, launchd or `nett container`; `sudo nett install` installs it. The\n\
+directory holds mesh.key, identity.key, desired.json, hub.json and the trust store (state/).";
 pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
 Existing keys are kept and the same line is printed again. On macOS, `sudo nett install` does this.";
 #[cfg(feature = "lab")]
-const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--transport-config <transport.json>] \
-[--clock-offset-ms <ms>] [--clock-trusted <yes|no>] [--userspace]";
+const LAB_USAGE: &str = "lab options: [--events <events.jsonl>] [--clock-offset-ms <ms>] \
+[--clock-trusted <yes|no>] [--userspace]";
 
-/// What `nett mesh` was asked to do.
-enum Parsed {
-    Run(Args),
-    /// Ready the trust store's directory (design/release.md section 8).
-    PrepareState(PathBuf),
-}
-
-fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Parsed> {
-    let (mut config, mut key) = (None, None);
+fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Args> {
+    let mut dir = None;
     let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
-    let mut state = PathBuf::from(nett_mesh::store::DEFAULT_STATE_DIR);
     #[cfg(feature = "lab")]
     let mut lab = LabArgs::default();
     while let Some(arg) = parser.next()? {
         match arg {
-            lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
-            lexopt::Arg::Long("key") => key = Some(PathBuf::from(parser.value()?)),
+            lexopt::Arg::Long("dir") => dir = Some(PathBuf::from(parser.value()?)),
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
-            lexopt::Arg::Long("state") => state = PathBuf::from(parser.value()?),
-            lexopt::Arg::Long("prepare-state") => {
-                return Ok(Parsed::PrepareState(PathBuf::from(parser.value()?)));
-            }
             #[cfg(feature = "lab")]
             lexopt::Arg::Long(name) => {
                 let name = name.to_owned();
@@ -101,20 +90,18 @@ fn parse(mut parser: lexopt::Parser) -> anyhow::Result<Parsed> {
             other => return Err(other.unexpected().into()),
         }
     }
-    match (config, key) {
-        (Some(config), Some(key)) => Ok(Parsed::Run(Args {
-            config,
-            key,
-            socket,
-            state,
-            #[cfg(feature = "lab")]
-            lab,
-        })),
+    let Some(dir) = dir else {
         #[cfg(feature = "lab")]
-        _ => bail!("{USAGE}\n{LAB_USAGE}"),
+        bail!("{USAGE}\n{LAB_USAGE}");
         #[cfg(not(feature = "lab"))]
-        _ => bail!(USAGE),
-    }
+        bail!(USAGE);
+    };
+    Ok(Args {
+        dir,
+        socket,
+        #[cfg(feature = "lab")]
+        lab,
+    })
 }
 
 /// One option of the lab build; returns `false` if it is not recognized.
@@ -123,7 +110,6 @@ fn parse_lab(lab: &mut LabArgs, name: &str, parser: &mut lexopt::Parser) -> anyh
     use lexopt::ValueExt as _;
     match name {
         "events" => lab.events = Some(PathBuf::from(parser.value()?)),
-        "transport-config" => lab.transport_config = Some(PathBuf::from(parser.value()?)),
         "userspace" => lab.userspace = true,
         "clock-offset-ms" => lab.clock_offset_ms = parser.value()?.parse()?,
         "clock-trusted" => {
@@ -161,7 +147,7 @@ pub fn keys(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 pub(crate) fn node_keys(
     dir: &std::path::Path,
 ) -> anyhow::Result<(X25519PublicKey, X25519PublicKey)> {
-    let (mesh, identity) = (dir.join("mesh.key"), dir.join("identity.key"));
+    let (mesh, identity) = (dir.join(MESH_KEY_FILE), dir.join(IDENTITY_KEY_FILE));
     match (mesh.exists(), identity.exists()) {
         (true, true) => Ok((
             PrivateKey::load(&mesh)?.public_key(),
@@ -291,19 +277,20 @@ fn node_id(config: &Path) -> anyhow::Result<NodeId> {
 }
 
 pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
-    let args = match parse(parser)? {
-        Parsed::Run(args) => args,
-        Parsed::PrepareState(dir) => return prepare_state(dir),
-    };
+    let args = parse(parser)?;
     init_logging();
+    let config = args.dir.join(DESIRED_FILE);
+    // nett-node in this process, with a Hub: a newly installed version counts its starts before the
+    // mesh comes up, so that one whose mesh exits goes back too (design/release.md section 7)
+    let node = crate::node::InDaemon::prepare(&args.dir)?;
 
     // Read the trust store first, then the desired state (design/mesh.md section 4.2)
-    let trust = TrustStore::open(Box::new(DirBackend::new(args.state.clone())));
+    let trust = TrustStore::open(Box::new(DirBackend::new(args.dir.join(STATE_DIR))));
     let node_id = match trust.node_id() {
         Some(id) => id.clone(),
-        None => node_id(&args.config)?,
+        None => node_id(&config)?,
     };
-    let key = PrivateKey::load(&args.key)?;
+    let key = PrivateKey::load(&args.dir.join(MESH_KEY_FILE))?;
     // Install the signal handlers first: a SIGHUP (for example `systemctl reload`) at any later
     // moment only triggers a re-read and does not end the process
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -314,8 +301,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let (source, mut terminate, mut interrupt) = {
         let _context = runtime.enter();
         (
-            FileSource::new(args.config.clone(), reload_rx)
-                .context("installing the SIGHUP handler")?,
+            FileSource::new(config.clone(), reload_rx).context("installing the SIGHUP handler")?,
             signal(SignalKind::terminate()).context("installing the SIGTERM handler")?,
             signal(SignalKind::interrupt()).context("installing the SIGINT handler")?,
         )
@@ -326,11 +312,6 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             JsonLinesSink::create(path).with_context(|| format!("opening {}", path.display()))?,
         ),
         None => Box::new(LogSink),
-    };
-    #[cfg(feature = "lab")]
-    let sink: Box<dyn EventSink + Send> = match args.lab.transport_config.clone() {
-        Some(path) => Box::new(TransportConfigWriter::new(sink, path)),
-        None => sink,
     };
     #[cfg(not(feature = "lab"))]
     let sink: Box<dyn EventSink + Send> = Box::new(LogSink);
@@ -389,8 +370,8 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         runtime.handle().clone(),
     );
     let worker = worker.context("starting the mesh worker thread")?;
-    // The local interface is only for people and nett-node: if the socket cannot be created, record
-    // it and continue meshing as usual (hard rule 8)
+    // The local interface is for people and the relay: if a socket cannot be created, record it and
+    // continue meshing as usual (hard rule 8)
     #[cfg(target_os = "linux")]
     let helpers_path = nett_mesh::helper::socket_path(&args.socket);
     #[cfg(target_os = "linux")]
@@ -398,27 +379,46 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     {
         Ok(server) => Some(server),
         Err(e) => {
-            tracing::warn!(socket = %helpers_path.display(), error = %e, "helper socket unavailable; nett-relay and the transport adapter cannot fetch their configuration");
+            tracing::warn!(socket = %helpers_path.display(), error = %e, "helper socket unavailable; nett-relay cannot fetch its assignment");
             None
         }
     };
-    // On macOS, Synology DSM and in the container this process carries the TLS transport itself
-    // and asks its worker thread for the configuration (ADR 0013)
-    #[cfg(target_os = "macos")]
-    let carries_tls = true;
-    #[cfg(target_os = "linux")]
-    let carries_tls = nett_node::platform::linux::Flavor::detect().mesh_carries_tls()
-        || crate::container::state_dir().is_some();
-    let transport = carries_tls.then(|| {
-        nett_transport::forward::ConfigSource::Mesh(std::sync::Arc::new(
-            worker.status_source(reload_tx.clone()),
-        ))
-    });
+    // This process carries the TLS transport and asks its worker thread for the configuration
+    // (ADR 0013)
+    let transport: Arc<dyn nett_mesh::helper::HelperSource + Sync> =
+        Arc::new(worker.status_source(reload_tx.clone()));
+    let mesh: Arc<dyn nett_mesh::status::StatusSource + Sync> =
+        Arc::new(worker.status_source(reload_tx.clone()));
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
         Ok(server) => Some(server),
         Err(e) => {
             tracing::warn!(socket = %args.socket.display(), error = %e, "status socket unavailable; `nett status` will not work");
             None
+        }
+    };
+    // The mesh runs: nett-node starts beside it, and the service exits when nett-node has a new
+    // program in place, put the previous one back, or found its own unit changed
+    let (ended, node_ended) = tokio::sync::oneshot::channel();
+    let node = node.and_then(|n| match n.spawn(mesh, ended) {
+        Ok(thread) => Some(thread),
+        Err(e) => {
+            tracing::error!(error = %e, "starting nett-node's thread; this machine is not connected to its Hub");
+            None
+        }
+    });
+    let restart = async move {
+        match node_ended.await {
+            Ok(Ended::Upgraded) => tracing::info!("nett exits to run the new version"),
+            Ok(Ended::RolledBack(reason)) => {
+                tracing::error!(%reason, "nett exits to run the previous version");
+            }
+            Ok(Ended::UnitChanged) => {
+                tracing::info!(
+                    "nett's unit changed; it exits so that systemd starts it with the new one"
+                );
+            }
+            // nett-node ends on its own only for these; it stops when the service does
+            Ok(Ended::Stopped) | Err(_) => std::future::pending::<()>().await,
         }
     };
 
@@ -427,25 +427,30 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             tokio::select! {
                 _ = terminate.recv() => {}
                 _ = interrupt.recv() => {}
+                () = restart => {}
             }
         };
-        let transport = transport.map(|transport| {
-            let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-            let task = tokio::spawn(async move {
-                let stopped = async {
-                    let _ = stopped.await;
-                };
-                if let Err(error) = nett_transport::forward::run(transport, stopped).await {
-                    tracing::error!(%error, "the TLS transport stopped; paths over TLS stay down until the mesh service restarts");
-                }
-            });
-            (stop, task)
+        let (stop_transport, stopped) = tokio::sync::oneshot::channel::<()>();
+        let transport = tokio::spawn(async move {
+            let stopped = async {
+                let _ = stopped.await;
+            };
+            if let Err(error) = nett_transport::forward::run(transport, stopped).await {
+                tracing::error!(%error, "the TLS transport stopped; paths over TLS stay down until nett restarts");
+            }
         });
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
-        if let Some((stop, task)) = transport {
-            drop(stop);
-            let _ = task.await;
+        if let Some(node) = node {
+            let stopped =
+                tokio::task::spawn_blocking(move || node.stop(nett_node::daemon::STOP_WAIT))
+                    .await
+                    .unwrap_or(false);
+            if !stopped {
+                tracing::warn!("nett-node did not stop in time");
+            }
         }
+        drop(stop_transport);
+        let _ = transport.await;
         drop(status);
         #[cfg(target_os = "linux")]
         drop(helpers);
@@ -453,30 +458,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             .await
             .context("stopping the mesh worker")?
             .map_err(anyhow::Error::msg)?;
-        tracing::info!("mesh process stopped; the interface stays up");
+        tracing::info!("nett stopped");
         anyhow::Ok(())
     })
-}
-
-/// `nett mesh --prepare-state <dir>` (design/release.md section 8): with full privileges, gives the
-/// trust store's directory to the user the service runs as and copies the trust store of 0.3.13
-/// and earlier into it. Only systemd runs it, on Linux.
-fn prepare_state(dir: PathBuf) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        let layout = nett_node::layout::Layout {
-            state: dir,
-            ..nett_node::layout::Layout::system()
-        };
-        let owner = nett_node::layout::mesh_owner()
-            .context("the user the mesh service runs as is not in /etc/passwd")?;
-        layout
-            .prepare_state(Some(owner))
-            .map_err(anyhow::Error::msg)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = dir;
-        anyhow::bail!("--prepare-state is only used by the Linux service")
-    }
 }

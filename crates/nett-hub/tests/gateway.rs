@@ -30,8 +30,8 @@ fn node(url: &str, node_id: &str, identity: StaticSecret, dir: &Path) -> Node {
         },
         identity,
         desired: dir.join("desired.json"),
-        // No mesh process: after the desired state is written it is acknowledged as pending
-        socket: dir.join("mesh.sock"),
+        // No mesh: after the desired state is written it is acknowledged as pending
+        mesh: no_mesh(),
         upgrader: None,
         link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,
@@ -82,11 +82,7 @@ async fn nodes_receive_apply_and_acknowledge_the_desired_state() {
     }));
 
     let row = acked(&hub, &mac, 1).await;
-    assert_eq!(
-        row.ack_result.as_deref(),
-        Some("pending"),
-        "no mesh process here"
-    );
+    assert_eq!(row.ack_result.as_deref(), Some("pending"), "no mesh here");
     assert_eq!(row.platform.as_deref().map(|p| p.contains('-')), Some(true));
     let expected = nett_site::compose::desired(&state, &name("mac"))
         .expect("composed")
@@ -145,10 +141,7 @@ async fn unknown_or_mismatched_machines_are_refused() {
     assert_eq!(
         refused(
             node(&url, &mac, identity(9), &dir)
-                .session(
-                    &mut None,
-                    &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
-                )
+                .session(&mut None, &nett_node::coord::Coordination::start(no_mesh()))
                 .await
         ),
         ErrorCode::NodeUnknown
@@ -157,10 +150,7 @@ async fn unknown_or_mismatched_machines_are_refused() {
     assert_eq!(
         refused(
             node(&url, &nas, identity(2), &dir)
-                .session(
-                    &mut None,
-                    &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
-                )
+                .session(&mut None, &nett_node::coord::Coordination::start(no_mesh()))
                 .await
         ),
         ErrorCode::NodeUnknown
@@ -170,10 +160,7 @@ async fn unknown_or_mismatched_machines_are_refused() {
     wrong.config.hub_key = Bytes32([7; 32]);
     assert!(matches!(
         wrong
-            .session(
-                &mut None,
-                &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
-            )
+            .session(&mut None, &nett_node::coord::Coordination::start(no_mesh()))
             .await,
         Err(SessionError::Connect(_))
     ));
@@ -182,10 +169,7 @@ async fn unknown_or_mismatched_machines_are_refused() {
     wrong.config.tls_fingerprint = Some(Bytes32([1; 32]));
     assert!(matches!(
         wrong
-            .session(
-                &mut None,
-                &nett_node::coord::Coordination::start(dir.join("mesh.sock"))
-            )
+            .session(&mut None, &nett_node::coord::Coordination::start(no_mesh()))
             .await,
         Err(SessionError::Connect(_))
     ));
@@ -354,7 +338,7 @@ async fn nodes_fetch_the_program_of_a_release_from_the_hub() {
         .expect("no panic");
 }
 
-/// A coordination with the mesh process replaced by channels the test holds: what the mesh process
+/// A coordination with the mesh replaced by channels the test holds: what the mesh
 /// would send, and what it would receive.
 fn coordination() -> (
     nett_node::coord::Coordination,

@@ -62,7 +62,7 @@ async fn a_connected_machine_has_events_through_the_api() {
         config,
         identity: identity(2),
         desired: dir.join("desired.json"),
-        socket: dir.join("mesh.sock"),
+        mesh: no_mesh(),
         upgrader: None,
         link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
         services: None,

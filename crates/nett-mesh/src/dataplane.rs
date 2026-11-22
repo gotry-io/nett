@@ -22,7 +22,7 @@ pub const INTERFACE_NAME: &str = "nett0";
 const PORT_ATTEMPTS: usize = 8;
 
 /// When the desired state carries no port, the system assigns the WireGuard port (design/mesh.md section
-/// 5.5). `assign` obtains a port and the handle that holds it; when it lands on a port the mesh process
+/// 5.5). `assign` obtains a port and the handle that holds it; when it lands on a port the mesh
 /// uses itself (the Linux ephemeral port range includes them), it takes another. Handles that landed on
 /// reserved ports are kept until a port is chosen and then released, so the system does not hand out the
 /// same port again.
@@ -141,7 +141,7 @@ pub trait DataPlane: Send {
     fn kind(&self) -> crate::status::DataPlaneKind;
 
     /// Creates or reuses the mesh interface, sets the private key, listen port, MTU and address, and enables
-    /// it. Existing peers are kept unchanged: when the mesh process restarts, connections in progress are
+    /// it. Existing peers are kept unchanged: when the mesh restarts, connections in progress are
     /// not interrupted.
     fn ensure_interface(
         &mut self,
@@ -215,7 +215,7 @@ pub trait DataPlane: Send {
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket>;
 
     /// Index of the interface the underlay sockets are bound to now; `None` where the routing table
-    /// decides. The transport adapter binds its TLS connections to it (design/userspace.md section 6.2).
+    /// decides. The TLS transport binds its TLS connections to it (design/userspace.md section 6.2).
     fn underlay_interface(&self) -> Option<u32> {
         None
     }

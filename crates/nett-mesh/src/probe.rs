@@ -32,7 +32,7 @@ pub const THROUGH_REPLY: u8 = 0x93;
 
 /// Probe messages that arrive on the WireGuard port (design/mesh.md section 7.1): a peer's direct probe,
 /// the replies to this machine's direct and UDP relay probes, and through probes and replies, which a
-/// relay forwards there over UDP or the transport adapter hands there from TLS; each [`OUTER_LEN`]
+/// relay forwards there over UDP or the TLS transport hands there from TLS; each [`OUTER_LEN`]
 /// bytes long.
 pub const WG_PORT_MESSAGES: [u8; 5] = [
     DIRECT_PROBE,
@@ -42,7 +42,7 @@ pub const WG_PORT_MESSAGES: [u8; 5] = [
     THROUGH_REPLY,
 ];
 
-/// WireGuard's cookie reply: type and length (WireGuard protocol). The mesh process gets a copy of it from
+/// WireGuard's cookie reply: type and length (WireGuard protocol). The mesh gets a copy of it from
 /// the WireGuard port, and from it learns that the peer is under load and WireGuard will retry with the
 /// cookie (design/mesh.md section 8.4).
 pub const WG_COOKIE_REPLY: u8 = 3;

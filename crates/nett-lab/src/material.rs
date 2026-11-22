@@ -2,7 +2,7 @@
 //! state (design/prototype.md section 4).
 //!
 //! In lab runs these keys are generated centrally by `nett-lab` and used only for lab runs. The
-//! mesh process verifies every item as usual and does not skip checks because the source is a local
+//! mesh verifies every item as usual and does not skip checks because the source is a local
 //! file.
 
 use std::collections::BTreeMap;
@@ -99,7 +99,7 @@ pub struct LabNode {
     #[serde(default)]
     pub edge_ipv4: Option<Ipv4Addr>,
     pub dir: PathBuf,
-    /// Has a candidate through TLS: needs a transport adapter.
+    /// Has a candidate through TLS: needs the TLS transport.
     #[serde(default)]
     pub tls: bool,
     /// Userspace data plane: there is no kernel WireGuard interface, so `wg show` cannot read it.

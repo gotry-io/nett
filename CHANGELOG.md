@@ -4,6 +4,26 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+This release changes how nett runs on a machine, and a machine on 0.8 moves to it by hand: run
+`sudo nett uninstall` with 0.8, install 0.9 with the install script, and run `sudo nett install`.
+The keys, the desired state and the Hub configuration stay, and the machine comes back as the same
+member. Upgrade the Hub first.
+
+- nett runs as one service on every machine, `nett daemon`, as Tailscale runs `tailscaled`
+  (ADR 0013): the mesh, the TLS transport and, with a Hub, the connection to it, in one process.
+  On Linux it is `nett.service`, as root with only the network capabilities it uses; on macOS the
+  launchd service `io.gotry.nett`; in the container the one process under `nett container`.
+  nett-relay stays a service of its own on machines that relay. Logs are in `journalctl -u nett`
+  on Linux. `nett-mesh.service`, `nett-node.service`, `nett-transport.service`, the launchd
+  services `io.gotry.nett.mesh` and `io.gotry.nett.node`, the system user `nett` and
+  `/etc/sysusers.d/nett.conf` are gone, and so are the commands `nett mesh`, `nett node` and
+  `nett transport`. A machine set up with `nett join` runs `nett daemon --dir <directory>`.
+- Upgrades restart that one service: the new program checks itself when it starts, and goes back
+  to the previous one when it keeps exiting or its mesh does not answer within 60 seconds. On
+  Linux connections continue through the restart; on macOS they pause until the service is back.
+- A panic in the connection to the Hub ends only that part, on its own thread: the mesh keeps
+  working, and the connection starts again after 5 seconds.
+
 ## [0.8.2] - 2026-11-22
 
 - Right after two dial-only machines moved together to another relay through the Hub, the follower

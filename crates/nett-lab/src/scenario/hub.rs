@@ -2,7 +2,7 @@
 //! commands (`nett keys`, `nett site add`, `allow`), and the members run from the locally signed
 //! desired state; then `nett-hub` runs in one member's namespace (self-signed certificate, verified
 //! by fingerprint), `nett site link` links it, `nett site invite` lets existing members attach, and
-//! each member runs `nett node`. Checks:
+//! each member's daemon then connects to the Hub. Checks:
 //!
 //! - After a push the members apply it, the desired state the Hub composes is identical to what is
 //!   written in the site directory, file by file, and `nett site status` lists all machines;
@@ -361,7 +361,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
     linked?;
 
     // Existing members attach: the token printed by invite is given to each machine (what install
-    // writes is this configuration), and each runs nett node
+    // writes is this configuration), and each daemon starts again with it
     for node in &lab_nodes {
         let invite = h.site_cmd(&["invite", &node.name])?;
         let token = invite
@@ -382,19 +382,7 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
         }
         .save(&node.dir)
         .map_err(anyhow::Error::msg)?;
-        let child = spawn_in(
-            &ns(&node.name)?,
-            nett,
-            [
-                "node".as_ref(),
-                "--dir".as_ref(),
-                node.dir.as_os_str(),
-                "--socket".as_ref(),
-                node.dir.join("mesh.sock").as_os_str(),
-            ],
-            &node.dir.join("node.log"),
-        )?;
-        lab.processes.push((format!("node:{}", node.name), child));
+        lab.restart_with_hub(node, nett)?;
     }
     let connected = h.wait_acked("applied", Duration::from_secs(30));
     report.check(
@@ -451,13 +439,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
             status.machines.len()
         ),
     );
-    for (name, pid) in lab
-        .processes
-        .iter()
-        .filter(|(n, _)| n.starts_with("node:"))
-        .map(|(n, c)| (n.clone(), c.id()))
-    {
-        report.record(&format!("memory:{name}"), memory(pid));
+    for (name, pid) in lab.processes.iter().map(|(n, c)| (n.clone(), c.id())) {
+        report.record(&format!("memory:daemon:{name}"), memory(pid));
     }
     if let Some(hub) = &h.hub {
         report.record("memory:nett-hub", memory(hub.id()));
@@ -665,16 +648,14 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
         reachable.unwrap_or_else(|e| format!("{e:#}")),
     );
 
-    // Leave: first stop b's processes (`nett leave` deletes the services first), then tell the Hub
-    // and tear down the interface
+    // Leave: first stop b's daemon (`nett leave` deletes the service first), then tell the Hub and
+    // tear down the interface
     let lab_bin = std::env::current_exe().context("locating nett-lab")?;
     let ns_b = ns(&b.name)?;
-    for process in [b.name.clone(), format!("node:{}", b.name)] {
-        if let Some(i) = lab.processes.iter().position(|(n, _)| *n == process) {
-            let (_, mut child) = lab.processes.remove(i);
-            run("kill", ["-TERM", &child.id().to_string()]).ok();
-            child.wait().ok();
-        }
+    if let Some(i) = lab.processes.iter().position(|(n, _)| *n == b.name) {
+        let (_, mut child) = lab.processes.remove(i);
+        run("kill", ["-TERM", &child.id().to_string()]).ok();
+        child.wait().ok();
     }
     let left = run_in(
         &ns_b,
@@ -799,20 +780,8 @@ pub fn hub(topology: &Path, nett: &Path, out: &Path, soak: Option<u64>) -> anyho
         tls: false,
         userspace: false,
     };
+    // The directory has the Hub configuration from joining: the daemon also connects to the Hub
     lab.spawn(&rejoined, nett)?;
-    let child = spawn_in(
-        &ns_b,
-        nett,
-        [
-            "node".as_ref(),
-            "--dir".as_ref(),
-            new_dir.as_os_str(),
-            "--socket".as_ref(),
-            new_dir.join("mesh.sock").as_os_str(),
-        ],
-        &new_dir.join("node.log"),
-    )?;
-    lab.processes.push((format!("node:{}", b.name), child));
     // The new machine does not have the old rules (design/site.md section 4): it can only connect
     // after they are allowed
     let allowed = h.site_cmd(&["allow", &all, &all, "--yes"]);
@@ -878,8 +847,7 @@ type Samples = Vec<(String, super::Memory)>;
 /// added or removed again, pushed through the Hub, and one member pings the other; the memory of
 /// every nett process is sampled into `soak.csv`. Then the lab rests for 10 minutes and the idle
 /// memory is measured: anonymous memory must be flat against the first sample after a 10-minute
-/// warm-up, and nett-node and the mesh process must hold no more private memory than their idle
-/// budget.
+/// warm-up, and each nett daemon must hold no more private memory than its idle budget.
 fn soak_phase(
     h: &HubLab<'_>,
     lab: &Lab,
@@ -893,14 +861,7 @@ fn soak_phase(
     let mut pids: Vec<(String, u32)> = lab
         .processes
         .iter()
-        .map(|(name, child)| {
-            let name = if name.starts_with("node:") {
-                name.clone()
-            } else {
-                format!("mesh:{name}")
-            };
-            (name, child.id())
-        })
+        .map(|(name, child)| (format!("daemon:{name}"), child.id()))
         .collect();
     if let Some(hub) = &h.hub {
         pids.push(("nett-hub".to_owned(), hub.id()));
@@ -990,13 +951,13 @@ fn soak_phase(
             "idle RSS {} KiB, PSS {} KiB, anonymous {} KiB",
             m.rss, m.pss, m.anon
         );
-        if name.starts_with("node:") || name.starts_with("mesh:") {
+        if name.starts_with("daemon:") {
             report.check(
                 &format!("soak:{name}:budget"),
-                m.anon <= super::PRIVATE_BUDGET_KIB,
+                m.anon <= super::DAEMON_BUDGET_KIB,
                 format!(
                     "{detail}; budget {} KiB of private memory",
-                    super::PRIVATE_BUDGET_KIB
+                    super::DAEMON_BUDGET_KIB
                 ),
             );
         } else {
@@ -1007,7 +968,7 @@ fn soak_phase(
 }
 
 /// `nett-lab leave`: tells the Hub this machine is leaving, and tears down the mesh interface and
-/// filter rules (the same library code as `sudo nett leave`). The mesh process must be stopped
+/// filter rules (the same library code as `sudo nett leave`). The mesh must be stopped
 /// first.
 pub fn leave_here(dir: &Path) -> anyhow::Result<()> {
     let config = HubConfig::load(dir)

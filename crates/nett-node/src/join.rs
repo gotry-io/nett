@@ -39,7 +39,7 @@ pub enum EnrollError {
 }
 
 /// The result of enrollment: the Hub's configuration and the first desired state (the content of
-/// the mesh process's desired state file).
+/// the mesh's desired state file).
 #[derive(Debug)]
 pub struct Enrolled {
     pub config: HubConfig,
@@ -86,7 +86,7 @@ pub async fn enroll(dir: &Path, token: &JoinToken, now: i64) -> Result<Enrolled,
 
 /// The desired state is for this node, and the fingerprint of its trust anchor list equals the one
 /// in the token (auth.md section 8.2): the Hub cannot change the site this machine trusts. The rest
-/// of the content is verified by the mesh process using this trust anchor.
+/// of the content is verified by the mesh using this trust anchor.
 fn check(desired: &[u8], node_id: &NodeId, anchors: &str) -> Result<(), EnrollError> {
     let doc: DesiredMeshDoc = serde_json::from_slice(desired)
         .map_err(|e| EnrollError::Mismatch(format!("is not valid: {e}")))?;

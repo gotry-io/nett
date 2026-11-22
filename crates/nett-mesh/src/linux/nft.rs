@@ -1,7 +1,7 @@
 //! Manages nftables through netlink (`include/uapi/linux/netfilter/nf_tables.h`), and receives packets
-//! copied by rules through nfnetlink_log. The mesh process does not call the `nft` command (hard rule 1).
+//! copied by rules through nfnetlink_log. The mesh does not call the `nft` command (hard rule 1).
 //!
-//! There are two chains here: one hands the mesh process a copy of UDP packets sent to the WireGuard port
+//! There are two chains here: one hands the mesh a copy of UDP packets sent to the WireGuard port
 //! whose first payload byte is a probe type (design/mesh.md section 7.1); other packets only incur a few
 //! extra rule matches and are not copied; `log` only copies and does not affect connection tracking.
 //! The other drops packets entering the WireGuard port from idle TLS loopback ports (section 5.3).
@@ -158,7 +158,7 @@ pub(super) fn delete_table(name: &str) -> Result<(), NlError> {
     }
 }
 
-/// All nftables tables the mesh process creates.
+/// All nftables tables the mesh creates.
 pub(super) fn tables() -> [&'static str; 4] {
     [
         TABLE,

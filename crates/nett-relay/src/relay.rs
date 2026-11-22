@@ -445,7 +445,7 @@ impl Relay {
 
     /// Verifies a relay probe and returns the member that sent it and the reply. The reply echoes
     /// the WireGuard address bound for this member, which is its mapped address (design/mesh.md
-    /// section 6.1): the probe itself is sent from the mesh process's own port, so its source is
+    /// section 6.1): the probe itself is sent from the mesh's own port, so its source is
     /// not the WireGuard mapping. When no UDP address is bound yet, the probe's source is echoed;
     /// over TLS there is no mapped address.
     fn verify_probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Option<(usize, Vec<u8>)> {
@@ -969,7 +969,7 @@ mod tests {
 
     /// The relay's own machine is assigned its WireGuard port on loopback (design/mesh.md section
     /// 5.1): that address holds over a binding learned or saved before, such as the public address
-    /// an older mesh process assigned.
+    /// an older mesh assigned.
     #[test]
     fn the_relays_own_machine_stays_on_loopback() {
         let key = X25519PublicKey::from_bytes;
@@ -1285,7 +1285,7 @@ mod tests {
             seq: 1,
             sent_ms: 1_000,
         };
-        // The probe is sent from the mesh process's own port; what is echoed is the WireGuard
+        // The probe is sent from the mesh's own port; what is echoed is the WireGuard
         // mapping bound during the handshake
         let Outcome::Reply(reply) = r.probe(addr("203.0.113.5:40999"), &probe.encode(&key), 1_000)
         else {

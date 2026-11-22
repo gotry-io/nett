@@ -185,7 +185,7 @@ pub struct Machine {
     pub upgrade_to: Option<Version>,
     /// Highest version of advertised routes ever signed. When all routes are removed, the signed
     /// artifact is removed with them, but the version stays here: advertising again continues to
-    /// increase it, and the mesh process only accepts higher versions (design/mesh.md section 4.2).
+    /// increase it, and the mesh only accepts higher versions (design/mesh.md section 4.2).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub routes_version: u64,
 }

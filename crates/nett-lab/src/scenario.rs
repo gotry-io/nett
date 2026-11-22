@@ -36,7 +36,7 @@ pub use throughput::throughput;
 /// Maximum wait for connectivity checks.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);
 
-/// Upper bound for waiting for the mesh process to apply the desired state.
+/// Upper bound for waiting for the mesh to apply the desired state.
 const APPLY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Serialize)]
@@ -147,12 +147,7 @@ fn diagnose(lab: &Lab, nodes: &[LabNode]) -> String {
     let mut out = String::from("lab state:");
     for node in nodes {
         out.push_str(&format!("\n  [{}]", node.name));
-        for (file, n) in [
-            ("events.jsonl", 8),
-            ("mesh.log", 4),
-            ("relay.log", 4),
-            ("transport.log", 4),
-        ] {
+        for (file, n) in [("events.jsonl", 8), ("nett.log", 4), ("relay.log", 4)] {
             let path = node.dir.join(file);
             if path.exists() {
                 out.push_str(&format!("\n   {file}:\n    {}", tail(&path, n)));
@@ -328,7 +323,7 @@ fn start(
     start_with(topo, generated, underlay, nett, |_| Vec::new())
 }
 
-/// `extra(node name)` is the extra command line arguments of this node's mesh process.
+/// `extra(node name)` is the extra command line arguments of this node's mesh.
 fn start_with(
     topo: &Topology,
     generated: &Generated,
@@ -346,8 +341,8 @@ fn start_with(
     for node in &generated.nodes {
         // Keys and the trust anchor are regenerated for every lab run: the trust store left by the
         // previous run would cause the new desired state to be rejected (design/mesh.md section
-        // 4.2), and the mesh process appends to its event log, so the previous run's events would
-        // count as this run's. Restarting a mesh process within the same run does not go through
+        // 4.2), and the mesh appends to its event log, so the previous run's events would
+        // count as this run's. Restarting a mesh within the same run does not go through
         // here, and both are kept
         let state = node.dir.join("state");
         match std::fs::remove_dir_all(&state) {
@@ -377,47 +372,34 @@ impl Lab {
         self.spawn_with(node, nett, &[])
     }
 
+    /// Starts a node's nett daemon on its directory; it carries the TLS transport, and runs nett-node
+    /// once the directory has a Hub configuration (ADR 0013).
     fn spawn_with(&mut self, node: &LabNode, nett: &Path, extra: &[String]) -> anyhow::Result<()> {
         let net = self.underlay.node(&node.name).context("planned node")?;
         let dir = &node.dir;
-        let transport_config = dir.join("transport.json");
         let mut args: Vec<std::ffi::OsString> = vec![
-            "mesh".into(),
-            "--config".into(),
-            dir.join("desired.json").into(),
-            "--key".into(),
-            dir.join("mesh.key").into(),
+            "daemon".into(),
+            "--dir".into(),
+            dir.into(),
             "--events".into(),
             dir.join("events.jsonl").into(),
-            "--transport-config".into(),
-            transport_config.clone().into(),
             "--socket".into(),
             dir.join("mesh.sock").into(),
-            "--state".into(),
-            dir.join("state").into(),
         ];
         if node.userspace {
             args.push("--userspace".into());
         }
         args.extend(extra.iter().map(Into::into));
-        let child = spawn_in(&net.netns, nett, &args, &dir.join("mesh.log"))?;
+        let child = spawn_in(&net.netns, nett, &args, &dir.join("nett.log"))?;
         self.processes.push((node.name.clone(), child));
-        // The transport adapter reads the configuration written by the mesh process (design/mesh.md
-        // section 5.3)
-        if node.tls {
-            let child = spawn_in(
-                &net.netns,
-                nett,
-                [
-                    "transport".as_ref(),
-                    "--config".as_ref(),
-                    transport_config.as_os_str(),
-                ],
-                &dir.join("transport.log"),
-            )?;
-            self.helpers.push(child);
-        }
         Ok(())
+    }
+
+    /// A node whose directory now has a Hub configuration: its daemon starts again and connects to
+    /// the Hub, as `sudo nett install <token>` restarts the service (design/hub.md section 7).
+    fn restart_with_hub(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
+        self.stop(&node.name)?;
+        self.spawn(node, nett)
     }
 
     /// Starts a measurement helper process (a subcommand of `nett-lab` itself) in the node's
@@ -480,7 +462,7 @@ impl Lab {
         self.spawn_relay(node, nett)
     }
 
-    /// Ends a node's mesh process and waits for it to exit.
+    /// Ends a node's nett daemon and waits for it to exit.
     fn stop(&mut self, name: &str) -> anyhow::Result<()> {
         let i = self
             .processes
@@ -489,7 +471,7 @@ impl Lab {
             .context("no such process")?;
         let (_, mut child) = self.processes.remove(i);
         run("kill", ["-TERM", &child.id().to_string()])?;
-        child.wait().context("waiting for the mesh process")?;
+        child.wait().context("waiting for the nett daemon")?;
         Ok(())
     }
 }
@@ -690,7 +672,7 @@ pub fn admission(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
         std::fs::write(&desired_a, &original).context("restoring desired state")?;
     }
 
-    // While the mesh process is stopped, WireGuard in the kernel keeps working; after the restart
+    // While the mesh is stopped, WireGuard in the kernel keeps working; after the restart
     // it keeps the existing interface and peers
     lab.stop(&a.name)?;
     let while_stopped = ping(&ns_a, &b.mesh_ipv4.to_string());
@@ -2630,7 +2612,7 @@ pub fn wg_port(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
         format!("{leaked} packets sent to the outsider"),
     );
 
-    // Throughput: with the mesh process running (raw sockets and filters at work) and after it is
+    // Throughput: with the mesh running (raw sockets and filters at work) and after it is
     // stopped (kernel WireGuard keeps working)
     let server = spawn_in(
         &ns_b,
@@ -3686,7 +3668,7 @@ pub fn wg_rehandshake(
             anyhow::bail!("a did not switch away from {relay}");
         };
         // The kernel sends the handshake initiation immediately when the peer is added back, which
-        // may be a millisecond earlier than the mesh process records the switch event
+        // may be a millisecond earlier than the mesh records the switch event
         let seen = run_.handshakes_since(switch_at.saturating_sub(100));
         let inits: Vec<u64> = seen
             .iter()
@@ -4098,24 +4080,17 @@ impl Lab {
         }
     }
 
-    /// Processes whose memory is measured: (name, pid).
-    fn measured(&self) -> Vec<(String, u32)> {
-        let mut out: Vec<(String, u32)> = self
-            .processes
+    /// Processes whose memory is measured: (name, pid, budget).
+    fn measured(&self) -> Vec<(String, u32, u64)> {
+        self.processes
             .iter()
-            .map(|(n, c)| (format!("mesh@{n}"), c.id()))
+            .map(|(n, c)| (format!("daemon@{n}"), c.id(), DAEMON_BUDGET_KIB))
             .chain(
                 self.relays
                     .iter()
-                    .map(|(n, c)| (format!("relay@{n}"), c.id())),
+                    .map(|(n, c)| (format!("relay@{n}"), c.id(), RELAY_BUDGET_KIB)),
             )
-            .collect();
-        for child in &self.helpers {
-            if cmdline(child.id()).iter().any(|a| a == "transport") {
-                out.push(("transport".to_owned(), child.id()));
-            }
-        }
-        out
+            .collect()
     }
 }
 
@@ -4160,10 +4135,12 @@ fn mem_available_kib() -> Option<u64> {
         .ok()
 }
 
-/// Idle budget (hard rule 14): each nett process holds at most 5 MB of private memory, its anonymous
-/// pages. RSS is recorded beside it but not judged: it also counts the code pages of the one program
-/// all of them run, which they share and the kernel reclaims under memory pressure.
-pub(crate) const PRIVATE_BUDGET_KIB: u64 = 5 * 1024;
+/// Idle budgets (hard rule 14): the nett daemon holds at most 8 MB of private memory, its anonymous
+/// pages, and nett-relay at most 5 MB. RSS is recorded beside it but not judged: it also counts the
+/// code pages of the one program both run, which they share and the kernel reclaims under memory
+/// pressure.
+pub(crate) const DAEMON_BUDGET_KIB: u64 = 8 * 1024;
+pub(crate) const RELAY_BUDGET_KIB: u64 = 5 * 1024;
 /// Amount of data transferred in each load phase.
 const RESOURCE_BULK: u64 = 128 * 1024 * 1024;
 
@@ -4224,7 +4201,7 @@ pub fn resources(
     std::thread::sleep(idle);
     let mut over = Vec::new();
     let mut pss_total = 0;
-    for (name, pid) in lab.measured() {
+    for (name, pid, budget) in lab.measured() {
         let Some(m) = memory_kib(pid) else {
             report.check(
                 &format!("{name}:measured"),
@@ -4233,7 +4210,7 @@ pub fn resources(
             );
             continue;
         };
-        if m.anon > PRIVATE_BUDGET_KIB {
+        if m.anon > budget {
             over.push(name.clone());
         }
         pss_total += m.pss;
@@ -4261,7 +4238,7 @@ pub fn resources(
     // For anything over budget, find the cause before entering the next phase (design/prototype.md
     // section 6.3)
     report.check(
-        "idle-private-memory-within-5-mb",
+        "idle-private-memory-within-budget",
         over.is_empty(),
         format!("over budget: {over:?}"),
     );

@@ -266,3 +266,29 @@ pub async fn serve_until(
 pub fn hub_key() -> nett_proto::token::Bytes32 {
     nett_proto::token::Bytes32(PublicKey::from(&StaticSecret::from([200; 32])).to_bytes())
 }
+
+/// The mesh beside nett-node in these tests: none answers (ADR 0013).
+pub struct NoMesh;
+
+impl nett_mesh::status::StatusSource for NoMesh {
+    fn snapshot(&self) -> Option<nett_mesh::status::StatusDoc> {
+        None
+    }
+    fn reload(&self) -> Option<nett_mesh::status::ReloadOutcome> {
+        None
+    }
+    fn coordinate(&self, _: std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        Err(std::io::Error::other("no mesh in this test"))
+    }
+    fn whois(&self, _: std::net::IpAddr) -> Option<nett_mesh::status::Whois> {
+        None
+    }
+    fn probe(&self, _: nett_core::id::NodeId) -> Option<Option<usize>> {
+        None
+    }
+}
+
+/// A mesh for a nett-node session in these tests.
+pub fn no_mesh() -> Arc<dyn nett_mesh::status::StatusSource + Sync> {
+    Arc::new(NoMesh)
+}

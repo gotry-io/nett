@@ -68,7 +68,7 @@ struct Conn {
     authenticated: bool,
 }
 
-/// A changed assignment from the mesh process (design/mesh.md section 5.2).
+/// A changed assignment from the mesh (design/mesh.md section 5.2).
 #[derive(Debug, Clone)]
 pub struct Assignment {
     pub members: Vec<AssignedMember>,

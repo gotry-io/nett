@@ -378,7 +378,7 @@ pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>,
         names,
         relay: relay_doc(state, me),
     };
-    // The generated desired state must be accepted by the mesh process
+    // The generated desired state must be accepted by the mesh
     DesiredMesh::from_doc(doc.clone()).map_err(|e| {
         SiteError::invalid(format!("machine `{name}`: generated desired state: {e}"))
     })?;

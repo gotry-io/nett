@@ -38,7 +38,7 @@ pub struct Node {
     pub behind: Option<String>,
     #[serde(default)]
     pub roles: Vec<String>,
-    /// Userspace data plane (design/userspace.md): `nett mesh --userspace`. Kernel WireGuard by
+    /// Userspace data plane (design/userspace.md): `nett daemon --userspace`. Kernel WireGuard by
     /// default.
     #[serde(default)]
     pub userspace: bool,

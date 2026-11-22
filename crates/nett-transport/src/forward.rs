@@ -1,15 +1,14 @@
 //! Forwarding between loopback ports and TLS connections (design/mesh.md section 5.3).
 //!
-//! One task per TLS relay: it connects to the relay when the first packet arrives and stays
-//! connected afterwards (keepalive every 25 seconds, i.e. a standby connection), and reconnects
-//! when a packet arrives after a disconnect. The first message on a connection must be a relay
-//! probe sent by the mesh process (the relay authenticates it from this); before then other packets
-//! are held in a bounded queue.
+//! It runs in the nett daemon, which asks the mesh for its configuration (ADR 0013). One task per
+//! TLS relay: it connects to the relay when the first packet arrives and stays connected afterwards
+//! (keepalive every 25 seconds, i.e. a standby connection), and reconnects when a packet arrives
+//! after a disconnect. The first message on a connection must be a relay probe sent by the mesh
+//! (the relay authenticates it from this); before then other packets are held in a bounded queue.
 
 use std::collections::VecDeque;
 use std::future::Future;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -38,106 +37,41 @@ const MAX_HELD: usize = 64;
 /// task.
 const CONN_QUEUE: usize = 256;
 const EVENT_QUEUE: usize = 256;
-/// Interval for checking whether the configuration file, or the mesh process this runs in, has a
-/// new configuration.
+/// Interval for asking the mesh whether it has a new configuration: each question is a message to
+/// its worker thread.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {
-    #[error("reading the transport config {path}: {source}")]
-    Read {
-        path: String,
-        source: std::io::Error,
-    },
-    #[error("transport config is not valid: {0}")]
+    #[error("asking the mesh for the transport config: {0}")]
     Invalid(String),
 }
 
-/// Where the configuration comes from (ADR 0013).
-#[derive(Clone)]
-pub enum ConfigSource {
-    /// The helper socket of the mesh process (design/status.md section 3.1), asked every 5 seconds.
-    Helper(PathBuf),
-    /// The mesh process this forwarding runs in (macOS, design/mesh.md section 5.3), asked every
-    /// second: each question is a message to its worker thread.
-    Mesh(Arc<dyn HelperSource + Sync>),
-    /// A local file written by the mesh process (lab builds), checked every second.
-    File(PathBuf),
-}
-
-impl ConfigSource {
-    fn interval(&self) -> Duration {
-        match self {
-            Self::Helper(_) => nett_mesh::helper::FETCH_INTERVAL,
-            Self::Mesh(_) | Self::File(_) => CONFIG_POLL,
-        }
-    }
-
-    /// The current configuration; `None` while there is none yet. An unreachable mesh process is not
-    /// an error: the adapter keeps its configuration and asks again.
-    async fn fetch(&self) -> Result<Option<TransportConfig>, ForwardError> {
-        match self {
-            Self::Helper(path) => {
-                let owned = path.clone();
-                let got =
-                    tokio::task::spawn_blocking(move || nett_mesh::helper::fetch_transport(&owned))
-                        .await
-                        .map_err(|e| ForwardError::Invalid(e.to_string()))?;
-                match got {
-                    Ok(config) => Ok(config),
-                    Err(error) => {
-                        tracing::debug!(%error, "fetching the transport config");
-                        Ok(None)
-                    }
-                }
-            }
-            // The worker thread answers within its query timeout; a busy one is asked again
-            Self::Mesh(mesh) => {
-                let mesh = Arc::clone(mesh);
-                tokio::task::spawn_blocking(move || mesh.transport().flatten())
-                    .await
-                    .map_err(|e| ForwardError::Invalid(e.to_string()))
-            }
-            Self::File(path) => {
-                let owned = path.clone();
-                let read = tokio::task::spawn_blocking(move || std::fs::read(owned))
-                    .await
-                    .map_err(|e| ForwardError::Read {
-                        path: path.display().to_string(),
-                        source: std::io::Error::other(e),
-                    })?;
-                let bytes = match read {
-                    Ok(bytes) => bytes,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                    Err(source) => {
-                        return Err(ForwardError::Read {
-                            path: path.display().to_string(),
-                            source,
-                        });
-                    }
-                };
-                serde_json::from_slice(&bytes)
-                    .map(Some)
-                    .map_err(|e| ForwardError::Invalid(e.to_string()))
-            }
-        }
-    }
+/// The current configuration; `None` while there is none yet. The worker thread answers within its
+/// query timeout; a busy one is asked again.
+async fn fetch(
+    mesh: &Arc<dyn HelperSource + Sync>,
+) -> Result<Option<TransportConfig>, ForwardError> {
+    let mesh = Arc::clone(mesh);
+    tokio::task::spawn_blocking(move || mesh.transport().flatten())
+        .await
+        .map_err(|e| ForwardError::Invalid(e.to_string()))
 }
 
 /// Runs until `shutdown` completes. When there is no configuration yet it waits, and when the
 /// configuration changes it rebuilds all forwarding tasks with the new one.
 pub async fn run(
-    source: ConfigSource,
+    mesh: Arc<dyn HelperSource + Sync>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ForwardError> {
     tokio::pin!(shutdown);
     let mut current: Option<(TransportConfig, Vec<JoinHandle<()>>)> = None;
-    let mut poll = tokio::time::interval(source.interval());
+    let mut poll = tokio::time::interval(CONFIG_POLL);
     loop {
         tokio::select! {
             () = &mut shutdown => break,
             _ = poll.tick() => {
-                let Some(config) = source.fetch().await? else { continue };
+                let Some(config) = fetch(&mesh).await? else { continue };
                 if current.as_ref().is_some_and(|(seen, _)| *seen == config) {
                     continue;
                 }
@@ -215,7 +149,7 @@ async fn target_loop(
     let mut connecting = false;
     let mut next_attempt = Instant::now();
     let mut held: VecDeque<Vec<u8>> = VecDeque::new();
-    // The mesh process port that sent the probe: relay replies go back to it
+    // The mesh port that sent the probe: relay replies go back to it
     let mut probe_source: Option<SocketAddr> = None;
     let mut buf = vec![0u8; MAX_MESSAGE];
     let mut keepalive = tokio::time::interval(KEEPALIVE);
@@ -358,7 +292,7 @@ mod tests {
 
     use super::*;
 
-    /// The mesh process answering for the forwarding that runs inside it.
+    /// The mesh answering for the forwarding that runs inside it.
     struct Mesh(TransportConfig);
 
     impl HelperSource for Mesh {
@@ -371,7 +305,7 @@ mod tests {
         }
     }
 
-    /// Inside the mesh process (macOS) the forwarding takes the mesh process's configuration: a
+    /// Inside the mesh (macOS) the forwarding takes the mesh's configuration: a
     /// packet sent to the loopback port it names makes it connect to that relay
     #[tokio::test]
     async fn forwarding_in_the_mesh_process_follows_its_configuration() {
@@ -391,12 +325,9 @@ mod tests {
             interface: None,
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let forwarding = tokio::spawn(run(
-            ConfigSource::Mesh(Arc::new(Mesh(config))),
-            async move {
-                let _ = stopped.await;
-            },
-        ));
+        let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {
+            let _ = stopped.await;
+        }));
         let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("sender");
         let deadline = Instant::now() + Duration::from_secs(5);
         let connected = loop {
@@ -438,12 +369,9 @@ mod tests {
             interface: None,
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let forwarding = tokio::spawn(run(
-            ConfigSource::Mesh(Arc::new(Mesh(config))),
-            async move {
-                let _ = stopped.await;
-            },
-        ));
+        let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {
+            let _ = stopped.await;
+        }));
         // The forwarding meets the held port first
         tokio::time::sleep(Duration::from_millis(300)).await;
         drop(holder);

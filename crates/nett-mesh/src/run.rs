@@ -1,8 +1,8 @@
-//! Main loop of the mesh process: takes the desired state from the configuration source, hands it to the
+//! Main loop of the mesh: takes the desired state from the configuration source, hands it to the
 //! background thread to apply, until an exit signal is received.
 //!
 //! On exit the mesh interface is not deleted: WireGuard in the kernel keeps working, and connections in
-//! progress are not interrupted while the mesh process restarts.
+//! progress are not interrupted while the mesh restarts.
 
 use std::future::Future;
 
@@ -24,7 +24,7 @@ pub trait ConfigSource {
     fn next(&mut self) -> impl Future<Output = Option<Delivery>> + Send;
 }
 
-/// The party that receives the desired state (the mesh process's background thread). A call may block and
+/// The party that receives the desired state (the mesh's background thread). A call may block and
 /// is run by [`run`] on the blocking thread pool.
 pub trait Applier: Send + 'static {
     fn apply(&mut self, delivery: Delivery);

@@ -230,7 +230,7 @@ impl<S: Sessions> Plane<S> {
         now: Instant,
         out: &mut Vec<Action>,
     ) {
-        // Probe messages are not WireGuard's: they reach the mesh process from an idle TLS loopback
+        // Probe messages are not WireGuard's: they reach the mesh from an idle TLS loopback
         // port too, as the kernel's copy rule takes them before its guard (design/mesh.md section 7.1)
         if let Some(kind) = datagram.first()
             && WG_PORT_MESSAGES.contains(kind)
@@ -708,7 +708,7 @@ mod tests {
         b.plane
             .from_udp(sa("127.0.0.1:50001"), &datagram, Instant::now(), &mut at_b);
         assert!(!at_b.is_empty(), "other loopback ports are used by TLS");
-        // A probe message from an idle TLS port still reaches the mesh process: a through reply comes
+        // A probe message from an idle TLS port still reaches the mesh: a through reply comes
         // back over the TLS connection of a candidate not in use (ADR 0029), as the kernel's copy rule
         // takes it before its guard
         let mut at_b = Vec::new();

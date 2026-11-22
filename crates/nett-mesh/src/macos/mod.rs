@@ -1,5 +1,5 @@
 //! Platform backend for macOS native members (design/userspace.md section 6): utun, addresses and routes
-//! use only system calls (hard rule 1: the mesh process does not execute external commands); the
+//! use only system calls (hard rule 1: the mesh does not execute external commands); the
 //! sockets toward the underlying network bind to the physical interface carrying the default route and
 //! do not enter the proxy app's TUN, and rebind when the physical interface changes.
 
@@ -389,12 +389,12 @@ pub const RESOLVER_FILE: &str = "/etc/resolver/nett.internal";
 /// failure leaves names unresolved by the system resolver and is logged.
 pub fn point_resolver(ipv4: std::net::Ipv4Addr) {
     let content = format!(
-        "# Written by the nett mesh service: names under nett.internal resolve through this machine's\n\
+        "# Written by the nett service: names under nett.internal resolve through this machine's\n\
          # mesh address.\nnameserver {ipv4}\n"
     );
     let written = (|| {
         use std::os::unix::fs::PermissionsExt as _;
-        // Readable by everyone like the rest of /etc: the mesh process's umask keeps its own files
+        // Readable by everyone like the rest of /etc: the mesh's umask keeps its own files
         // private, and tools other than the system resolver read these as ordinary users
         let readable = |path: &str, mode: u32| {
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))

@@ -24,7 +24,7 @@ use nett_site::state::State;
 
 use super::hub::{HUB_PORT, HubLab, desired};
 use super::{Lab, LabNode, Report, nett_status};
-use crate::cmd::{run, run_in, spawn_in};
+use crate::cmd::{run, run_in};
 use crate::net::{DEVICE_NETNS, INET_NETNS, Underlay, add_netns, attach};
 use crate::topology::Topology;
 
@@ -152,20 +152,8 @@ pub fn devices(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Repor
             tls: false,
             userspace: false,
         };
+        // Joined: the daemon also connects to the Hub (ADR 0013)
         lab.spawn(&node, nett)?;
-        let child = spawn_in(
-            &ns(name)?,
-            nett,
-            [
-                "node".as_ref(),
-                "--dir".as_ref(),
-                dir.as_os_str(),
-                "--socket".as_ref(),
-                dir.join("mesh.sock").as_os_str(),
-            ],
-            &dir.join("node.log"),
-        )?;
-        lab.processes.push((format!("node:{name}"), child));
         nodes.push(node);
     }
     let (g, m) = (&nodes[0], &nodes[1]);

@@ -116,7 +116,7 @@ pub fn connector(fingerprint: CertFingerprint) -> Result<TlsConnector, ConnectEr
 }
 
 /// Connects to the TLS relay and completes the WebSocket handshake; the TCP connection is bound to
-/// `interface` when the mesh process names one (design/userspace.md section 6.2).
+/// `interface` when the mesh names one (design/userspace.md section 6.2).
 pub async fn connect(
     addr: SocketAddr,
     interface: Option<u32>,
@@ -172,7 +172,7 @@ fn bind_to_interface(socket: &TcpSocket, index: u32, v6: bool) -> std::io::Resul
     nett_mesh::macos::bind_to_interface(socket.as_fd(), index, v6)
 }
 
-/// Only the macOS mesh process names an interface.
+/// Only the macOS mesh names an interface.
 #[cfg(not(target_os = "macos"))]
 fn bind_to_interface(_socket: &TcpSocket, _index: u32, _v6: bool) -> std::io::Result<()> {
     Err(std::io::Error::new(

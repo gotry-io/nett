@@ -1,4 +1,4 @@
-//! Local status (design/status.md): the mesh process answers read-only status queries on the local socket.
+//! Local status (design/status.md): the mesh answers read-only status queries on the local socket.
 //!
 //! - [`StatusDoc`] is the reply format, read by `nett status` (and later nett-node). Within the same major
 //!   version only fields are added: the reader ignores fields it does not recognize, and fields added
@@ -72,7 +72,7 @@ const ACCEPT_POLL: Duration = Duration::from_millis(500);
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusDoc {
     pub v: u32,
-    /// `nett` version of the mesh process.
+    /// `nett` version of the mesh.
     pub version: String,
     pub node: NodeStatus,
     pub config: ConfigStatus,
@@ -119,7 +119,7 @@ pub struct RelayStatus {
     pub links: usize,
     /// The fingerprint of the TLS certificate nett-relay reported when it last fetched its assignment.
     pub fingerprint: Option<nett_core::transport::CertFingerprint>,
-    /// When nett-relay last fetched its assignment; empty when it has not since the mesh process started.
+    /// When nett-relay last fetched its assignment; empty when it has not since the mesh started.
     pub fetched_at: Option<Timestamp>,
 }
 
@@ -694,7 +694,7 @@ pub(crate) struct ErrorBody {
     message: String,
 }
 
-/// The mesh process behind the interface.
+/// The mesh behind the interface.
 pub trait StatusSource: Send + 'static {
     /// The current snapshot; `None` when the background thread is busy and cannot hand one over within
     /// [`QUERY_TIMEOUT`].
@@ -702,7 +702,8 @@ pub trait StatusSource: Send + 'static {
     /// Re-reads the desired state file and waits for it to finish applying; `None` when too many are already
     /// waiting or applying did not finish within [`RELOAD_TIMEOUT`].
     fn reload(&self) -> Option<ReloadOutcome>;
-    /// Takes over a `coordinate` connection from nett-node (design/status.md section 4.2).
+    /// Takes over the coordination connection from nett-node in the same process (design/status.md
+    /// section 4.2).
     fn coordinate(&self, stream: UnixStream) -> std::io::Result<()>;
     /// Who `address` belongs to; `None` when the background thread is busy.
     fn whois(&self, address: IpAddr) -> Option<Whois>;
@@ -850,17 +851,17 @@ fn bind(path: &Path, mode: u32) -> std::io::Result<UnixListener> {
     Ok(listener)
 }
 
-/// The caller is root or the mesh process's own running identity, which may also change what the
-/// mesh process does (section 3).
+/// The caller is root or the mesh's own running identity, which may also change what the
+/// mesh does (section 3).
 fn privileged(stream: &UnixStream) -> std::io::Result<bool> {
     let uid = peer_uid(stream)?;
     Ok(uid == 0 || uid == rustix::process::geteuid().as_raw())
 }
 
-/// Queries that change what the mesh process does, which only a privileged caller may send; every
-/// local user may read and probe, as with Tailscale's LocalAPI (section 3).
+/// Queries that change what the mesh does, which only a privileged caller may send; every local user
+/// may read and probe, as with Tailscale's LocalAPI (section 3).
 fn changes_something(query: &str) -> bool {
-    matches!(query, "reload" | "coordinate")
+    query == "reload"
 }
 
 #[cfg(target_os = "linux")]
@@ -880,12 +881,7 @@ pub(crate) fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
 /// peer may not have read the reply yet.
 fn handle(stream: UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let result = match answer(&stream, source) {
-        // The connection now belongs to the coordinator and stays open
-        Ok(true) => return Ok(()),
-        Ok(false) => Ok(()),
-        Err(e) => Err(e),
-    };
+    let result = answer(&stream, source);
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = std::io::copy(
         &mut Deadline::new(&stream).take(MAX_DRAIN),
@@ -925,82 +921,69 @@ impl std::io::Read for Deadline<'_> {
     }
 }
 
-/// Answers one query; returns whether the connection is kept (a `coordinate` connection).
-fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bool> {
-    let done = |r: std::io::Result<()>| r.map(|()| false);
+/// Answers one query.
+fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<()> {
     let privileged = privileged(stream)?;
     let mut line = String::new();
     BufReader::new(Deadline::new(stream).take(MAX_REQUEST)).read_line(&mut line)?;
     let request: Request = match serde_json::from_str(line.trim_end()) {
         Ok(r) => r,
         Err(_) => {
-            return done(reply_error(
-                stream,
-                "bad_request",
-                "the request is not valid JSON",
-            ));
+            return reply_error(stream, "bad_request", "the request is not valid JSON");
         }
     };
     if changes_something(&request.query) && !privileged {
-        return done(reply_error(
+        return reply_error(
             stream,
             "permission_denied",
-            "only root can change what the mesh process does",
-        ));
+            "only root can change what nett does",
+        );
     }
     if request.v != VERSION {
-        return done(reply_error(
+        return reply_error(
             stream,
             "unsupported_version",
             &format!(
                 "interface version {} is not supported; this process speaks {VERSION}",
                 request.v
             ),
-        ));
+        );
     }
     if request.query == "whois" {
         let Some(address) = request.address else {
-            return done(reply_error(stream, "bad_request", "whois needs an address"));
+            return reply_error(stream, "bad_request", "whois needs an address");
         };
         let Some(whois) = source.whois(address) else {
-            return done(reply_error(
-                stream,
-                "busy",
-                "the mesh process is busy; try again",
-            ));
+            return reply_error(stream, "busy", "nett is busy; try again");
         };
         let mut bytes =
             serde_json::to_vec(&WhoisReply { v: VERSION, whois }).map_err(std::io::Error::other)?;
         bytes.push(b'\n');
         let mut out = stream;
-        return done(out.write_all(&bytes));
+        return out.write_all(&bytes);
     }
     if request.query == "probe" {
         let Some(peer) = request.peer else {
-            return done(reply_error(stream, "bad_request", "probe needs a peer"));
+            return reply_error(stream, "bad_request", "probe needs a peer");
         };
         let Ok(peer) = peer.parse::<NodeId>() else {
             let shown: String = peer.chars().take(40).collect();
-            return done(reply_error(
+            return reply_error(
                 stream,
                 "bad_request",
                 &format!("`{shown}` is not a node ID"),
-            ));
+            );
         };
         let reply = match source.probe(peer.clone()) {
             None => {
-                return done(reply_error(
-                    stream,
-                    "busy",
-                    "the mesh process is busy; try again",
-                ));
+                return reply_error(stream, "busy", "nett is busy; try again");
             }
             Some(None) => {
-                return done(reply_error(
+                return reply_error(
                     stream,
                     "unknown_peer",
                     &format!("no member has the node ID {peer}"),
-                ));
+                );
             }
             Some(Some(candidates)) => ProbeReply {
                 v: VERSION,
@@ -1010,23 +993,15 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bo
         let mut bytes = serde_json::to_vec(&reply).map_err(std::io::Error::other)?;
         bytes.push(b'\n');
         let mut out = stream;
-        return done(out.write_all(&bytes));
-    }
-    if request.query == "coordinate" {
-        let mut out = stream;
-        let mut accepted = crate::coord::ACCEPTED.as_bytes().to_vec();
-        accepted.push(b'\n');
-        out.write_all(&accepted)?;
-        source.coordinate(stream.try_clone()?)?;
-        return Ok(true);
+        return out.write_all(&bytes);
     }
     if request.query == "reload" {
         let Some(outcome) = source.reload() else {
-            return done(reply_error(
+            return reply_error(
                 stream,
                 "busy",
-                "the mesh process did not finish applying in time; check again with nett status",
-            ));
+                "nett did not finish applying in time; check again with nett status",
+            );
         };
         let mut bytes = serde_json::to_vec(&ReloadReplyDoc {
             v: VERSION,
@@ -1035,34 +1010,26 @@ fn answer(stream: &UnixStream, source: &impl StatusSource) -> std::io::Result<bo
         .map_err(std::io::Error::other)?;
         bytes.push(b'\n');
         let mut out = stream;
-        return done(out.write_all(&bytes));
+        return out.write_all(&bytes);
     }
     if request.query != "status" {
         let query: String = request.query.chars().take(32).collect();
-        return done(reply_error(
-            stream,
-            "unknown_query",
-            &format!("unknown query `{query}`"),
-        ));
+        return reply_error(stream, "unknown_query", &format!("unknown query `{query}`"));
     }
     let Some(doc) = source.snapshot() else {
-        return done(reply_error(
-            stream,
-            "busy",
-            "the mesh process is busy; try again",
-        ));
+        return reply_error(stream, "busy", "nett is busy; try again");
     };
     let mut bytes = serde_json::to_vec(&doc).map_err(std::io::Error::other)?;
     if bytes.len() as u64 > MAX_REPLY {
-        return done(reply_error(
+        return reply_error(
             stream,
             "too_large",
             "the status is larger than the reply limit",
-        ));
+        );
     }
     bytes.push(b'\n');
     let mut out = stream;
-    done(out.write_all(&bytes))
+    out.write_all(&bytes)
 }
 
 pub(crate) fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std::io::Result<()> {
@@ -1083,25 +1050,25 @@ pub(crate) fn reply_error(stream: &UnixStream, code: &str, message: &str) -> std
 
 #[derive(Debug, thiserror::Error)]
 pub enum QueryError {
-    #[error("cannot reach the mesh service at {}: {source}", path.display())]
+    #[error("cannot reach the nett service at {}: {source}", path.display())]
     Connect {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("talking to the mesh service at {}: {source}", path.display())]
+    #[error("talking to the nett service at {}: {source}", path.display())]
     Io {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
-    #[error("the mesh service answered {code}: {message}")]
+    #[error("the nett service answered {code}: {message}")]
     Refused { code: String, message: String },
-    #[error("the mesh service sent a reply this version cannot read: {0}")]
+    #[error("the nett service sent a reply this version cannot read: {0}")]
     Reply(String),
 }
 
-/// Queries the status of the mesh process at `path`.
+/// Queries the status of the mesh at `path`.
 pub fn query(path: &Path) -> Result<StatusDoc, QueryError> {
     let value = query_raw(path)?;
     serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))
@@ -1113,7 +1080,7 @@ pub fn query_raw(path: &Path) -> Result<serde_json::Value, QueryError> {
     request(path, "status", QUERY_TIMEOUT)
 }
 
-/// Asks the mesh process at `path` who `address` belongs to (design/names-and-diagnostics.md section 4).
+/// Asks the mesh at `path` who `address` belongs to (design/names-and-diagnostics.md section 4).
 pub fn whois(path: &Path, address: IpAddr) -> Result<Whois, QueryError> {
     let value = send(
         path,
@@ -1125,7 +1092,7 @@ pub fn whois(path: &Path, address: IpAddr) -> Result<Whois, QueryError> {
     Ok(reply.whois)
 }
 
-/// Asks the mesh process at `path` to probe every path to `peer` now (design/status.md section 4.3).
+/// Asks the mesh at `path` to probe every path to `peer` now (design/status.md section 4.3).
 pub fn probe(path: &Path, peer: &NodeId) -> Result<Probed, QueryError> {
     let value = send(
         path,
@@ -1137,7 +1104,7 @@ pub fn probe(path: &Path, peer: &NodeId) -> Result<Probed, QueryError> {
     Ok(reply.probe)
 }
 
-/// Asks the mesh process at `path` to re-read the desired state file and waits for it to finish applying
+/// Asks the mesh at `path` to re-read the desired state file and waits for it to finish applying
 /// (design/status.md section 4.1).
 pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
     let value = request(path, "reload", RELOAD_TIMEOUT)?;
@@ -1146,7 +1113,7 @@ pub fn reload(path: &Path) -> Result<ReloadOutcome, QueryError> {
     Ok(doc.reload)
 }
 
-/// Sends a request and reads back the reply; the mesh process side handles it for at most `wait`.
+/// Sends a request and reads back the reply; the mesh side handles it for at most `wait`.
 fn request(path: &Path, query: &str, wait: Duration) -> Result<serde_json::Value, QueryError> {
     send(
         path,
@@ -1295,7 +1262,7 @@ mod tests {
         }
     }
 
-    /// The directory the mesh process makes for its sockets lets others reach a socket by name but
+    /// The directory the mesh makes for its sockets lets others reach a socket by name but
     /// not list it, whatever mode mkdir got
     #[test]
     fn the_socket_directory_is_passable_but_not_listable() {
@@ -1309,16 +1276,14 @@ mod tests {
         assert_eq!(mode & 0o777, 0o711);
     }
 
-    /// Every local user may read and probe; only root and the mesh process's own identity may change
+    /// Every local user may read and probe; only root and the mesh's own identity may change
     /// what it does (section 3), as Tailscale's LocalAPI gives every local user read access
     #[test]
     fn only_queries_that_change_something_need_privileges() {
         for query in ["status", "whois", "probe"] {
             assert!(!changes_something(query), "{query}");
         }
-        for query in ["reload", "coordinate"] {
-            assert!(changes_something(query), "{query}");
-        }
+        assert!(changes_something("reload"));
     }
 
     /// A short directory for tests (Unix socket paths on macOS are at most 104 bytes), removed with
@@ -1356,7 +1321,7 @@ mod tests {
         stream.write_all(reply.as_bytes()).expect("reply");
     }
 
-    /// nett-node in one container and the mesh process in another: the kernel reports the peer's PID
+    /// nett-node in one container and the mesh in another: the kernel reports the peer's PID
     /// as 0 when the peer is outside the server's PID namespace, and its user ID must still be read.
     /// Creating a PID namespace needs root, so this runs in the lab containers, not as an ordinary
     /// user.
@@ -1403,7 +1368,7 @@ mod tests {
         let path = dir.join("mesh.sock");
         let server = StatusServer::spawn(&path, Fixed(Some(sample()))).expect("spawn");
         let mode = |p: &Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
-        // Others reach the socket by name, and the mesh process decides per query what they may do
+        // Others reach the socket by name, and the mesh decides per query what they may do
         assert_eq!(mode(&dir), 0o711);
         assert_eq!(mode(&path), 0o666);
         assert_eq!(query(&path).expect("query"), sample());

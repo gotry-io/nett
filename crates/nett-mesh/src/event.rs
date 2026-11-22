@@ -1,4 +1,4 @@
-//! Events reported by the mesh process. Every event is also written to the log; lab builds additionally
+//! Events reported by the mesh. Every event is also written to the log; lab builds additionally
 //! write a JSON-lines copy for `nett-lab` to collect.
 
 use nett_core::id::{CredentialId, NodeId};
@@ -63,7 +63,7 @@ pub enum Event {
     InterfaceReady {
         listen_port: u16,
     },
-    /// The configuration handed to the transport adapter changed (design/mesh.md section 5.3; lab builds
+    /// The configuration handed to the TLS transport changed (design/mesh.md section 5.3; lab builds
     /// write it to a local file).
     TransportConfigChanged {
         config: nett_core::transport::TransportConfig,

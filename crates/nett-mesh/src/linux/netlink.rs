@@ -1,4 +1,4 @@
-//! Minimal netlink implementation: encodes only the few kinds of messages the mesh process uses
+//! Minimal netlink implementation: encodes only the few kinds of messages the mesh uses
 //! (rtnetlink interfaces and addresses, WireGuard's generic netlink).
 //!
 //! For the message format see Linux's `include/uapi/linux/netlink.h`. All fields are in host byte order;

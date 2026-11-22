@@ -35,7 +35,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_relay_whose_through_probes_stop_is_measured_from_its_segments_again`
 - `nett-relay:through_probes_reach_the_peers_bound_address_and_one_reply_comes_back`
 - `nett-relay:through_probes_need_the_senders_token_an_assigned_link_and_a_bound_receiver`
-- `nett-mesh:idle_tls_ports_are_dropped` (a through reply from an idle TLS port still reaches the mesh process on the userspace data plane, as the kernel's copy rule takes it before its guard)
+- `nett-mesh:idle_tls_ports_are_dropped` (a through reply from an idle TLS port still reaches the mesh on the userspace data plane, as the kernel's copy rule takes it before its guard)
 - `nett-mesh:a_relay_the_followers_wireguard_port_cannot_reach_is_not_used`
 - `nett-mesh:a_break_beyond_a_relay_moves_to_another_relay`
 - `nett-mesh:a_relay_that_never_answered_is_reported_lost`
@@ -53,7 +53,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A relay binds a `public` member where a changed assignment puts it, and restores a saved binding only while the assignment still gives the address it gave when saved; the relay's own machine stays on loopback over saved and learned bindings (mesh.md sections 5.1 and 5.2);
 - On Linux, the probes on the WireGuard port move with the port when it changes (mesh.md section 5.5);
 - A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way, as is a failure the mobile gateway's periodic check of its forwarding finds (mesh.md section 15, devices.md section 6);
-- After an upgrade settles, and after `sudo nett install` brings a new program, the relay and the transport adapter restart on it; a changed launchd configuration is unloaded and loaded again (release.md sections 4 and 7);
+- After an upgrade settles, and after `sudo nett install` brings a new program, the relay restarts on it; after an upgrade the nett service rewrites a unit or launchd configuration that differs from its program's, starts again with its own changed unit on Linux, and launchd reads the rewritten configuration when it next loads the service (release.md sections 4 and 7);
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
@@ -65,7 +65,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-relay:a_member_whose_assigned_address_changed_is_bound_there`
 - `nett-relay:a_saved_binding_yields_to_a_changed_assignment`
 - `nett-relay:the_relays_own_machine_stays_on_loopback`
-- `nett-node:a_new_node_that_keeps_exiting_is_rolled_back` (the helpers restart once per settled upgrade)
+- `nett-node:a_new_version_that_keeps_exiting_is_rolled_back` (the relay restarts once per settled upgrade)
 - `nett-transport:a_port_held_by_another_process_is_opened_once_free`
 - `nett-mesh:a_failed_interface_comes_up_on_a_retry`
 - `nett-mesh:a_new_desired_state_replaces_a_pending_retry`
@@ -78,9 +78,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:problems_after_applying_follow_the_reported_status`
 - `nett-mesh:dial_only_pair_stays_together_when_one_ends_candidates_change`
 - `nett-mesh:a_new_candidate_list_keeps_the_path_in_use`
+- `ci:sudo nett install <token> (join the Hub, needs root)` (the service rewrites a launchd configuration that differs)
 - `lab:port-change`, `lab:relay-restart`
 
-**Not yet guarded**: the restart of the helpers by `sudo nett install` with a new program, and the unload and load of a changed launchd configuration. Each needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, both are watched when each release is installed on real machines.
+**Not yet guarded**: the restart of the relay by `sudo nett install` with a new program. It needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, it is watched when each release is installed on real machines.
 
 ## 3. A switch acts on evidence that covers its reason
 
@@ -133,6 +134,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The local socket gives each request and the input after it a total time limit (status.md section 4);
 - The userspace data plane caps handshake messages per source and in total before the session layer (userspace.md section 4.1);
 - nett-node's reconnect wait starts over after a session that outlasted the longest wait (protocol.md section 8);
+- nett-node runs on a thread of its own in the nett daemon: a panic there ends that run only, the mesh keeps working, and nett-node starts again after 5 seconds; stopping the service ends it and the wait before its next run (ADR 0013);
 - A program download is abandoned after 60 seconds without data, from the Hub or the website, and runs in its own task beside the session (release.md section 7);
 - `sudo nett uninstall` waits until launchd no longer has the service;
 - The Hub says goodbye to each session and waits for it to record its end before exiting (hub.md section 8).
@@ -144,6 +146,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:handshake_floods_are_capped_per_source_and_in_total`
 - `nett-mesh:over_budget_handshakes_get_no_response`
 - `nett-node:reconnecting_starts_over_after_a_lasting_session`
+- `nett-node:a_panicking_run_starts_again`
+- `nett-node:stopping_ends_a_run_and_the_wait_before_the_next`
 - `nett-node:what_the_hub_does_not_deliver_is_unavailable`
 - `nett-hub:a_stopping_hub_says_goodbye_and_records_the_disconnection`
 - `nett-lab:a_sender_connects_once_its_receiver_appears`
@@ -164,7 +168,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - On macOS, a dual-stack underlay socket sets only `IPV6_BOUND_IF`, which also binds its IPv4 traffic (userspace.md section 6.2);
 - A key in the service's systemd credentials directory is accepted when others cannot enter that directory;
 - The peer of a local socket in another PID namespace, which the kernel reports with PID 0, is identified by its user ID;
-- On Synology DSM the units use only directives its systemd 219 implements, taken from its source, because it accepts any other with a warning and does not apply it (dsm.md section 3);
+- On Synology DSM the unit uses only directives its systemd 219 implements, taken from its source, because it accepts any other with a warning and does not apply it (dsm.md section 3);
 - On Synology DSM, which loads the TUN driver only for packages that need it, `nett install` loads it before it starts the services (dsm.md section 6.2);
 - A kernel without the WireGuard family gets the userspace data plane, and tearing down there leaves nftables alone: only the kernel data plane makes nett's tables, and a kernel without nftables may not answer at all (dsm.md section 5).
 
@@ -176,7 +180,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:underlay_follows_the_physical_interface_for_ipv4_too`
 - `nett-mesh:a_group_readable_key_passes_only_in_the_services_credentials_directory`
 - `nett-mesh:a_peer_in_another_pid_namespace_is_identified`
-- `nett-node:dsm_units_use_only_what_systemd_219_implements`
+- `nett-node:the_dsm_unit_uses_only_what_systemd_219_implements`
 - `nett-mesh:a_kernel_without_the_wireguard_family_means_userspace`
 - `nett-mesh:teardown_leaves_nftables_alone_without_kernel_wireguard`
 - `nett-cli:tun_is_prepared_before_the_services_start`

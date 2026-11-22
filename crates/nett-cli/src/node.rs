@@ -1,48 +1,119 @@
-//! `nett node`: the control agent nett-node (design/hub.md sections 5 and 7), run as root by
-//! systemd or launchd. Reads this machine's Hub configuration and identity key, connects to the
-//! Hub, hands the desired state to the mesh process, reports status and installs new releases
-//! (design/release.md section 7). Tokio single-threaded runtime.
+//! nett-node inside the nett daemon (design/hub.md sections 5 and 7, ADR 0013): with a Hub
+//! configuration in the daemon's directory it connects this machine to its Hub, hands the desired
+//! state to the mesh in the same process, reports status and installs new releases
+//! (design/release.md section 7), on a thread of its own with a single-threaded runtime.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use nett_mesh::key::PrivateKey;
+use nett_mesh::status::StatusSource;
 use nett_node::config::{HUB_FILE, HubConfig};
+use nett_node::daemon::{Ended, NodeThread};
 use nett_node::session::{Exit, Node};
 use nett_node::upgrade::{Install, ServiceManager, Start, Upgrader};
-use tokio::signal::unix::{SignalKind, signal};
 
-/// This machine's configuration directory: Hub configuration, identity key and desired state.
+use crate::daemon::{DESIRED_FILE, IDENTITY_KEY_FILE};
+
+/// This machine's directory where `sudo nett install` puts it: keys, desired state, Hub
+/// configuration and trust store.
 #[cfg(target_os = "linux")]
-pub const DEFAULT_DIR: &str = "/etc/nett";
+pub const DEFAULT_DIR: &str = nett_node::platform::linux::CONFIG_DIR;
 #[cfg(target_os = "macos")]
-pub const DEFAULT_DIR: &str = "/Library/Application Support/nett";
+pub const DEFAULT_DIR: &str = nett_node::platform::macos::DIR;
 
-pub const USAGE: &str = "usage: nett node [--dir <directory>] [--socket <path>] [--tidy]\n\n\
-Connects this machine to its Hub and hands the desired state to the mesh service. Started by\n\
-systemd or launchd after `sudo nett install <token>`. The directory holds hub.json,\n\
-identity.key and desired.json; it defaults to /etc/nett on Linux and\n\
-/Library/Application Support/nett on macOS. --tidy, run by systemd with full privileges before\n\
-nett-node starts on Linux, removes what nett 0.3.13 and earlier left once an upgrade has settled.";
+/// nett-node in the daemon, before and after the mesh starts.
+pub(crate) struct InDaemon {
+    dir: PathBuf,
+    services: Arc<ServiceManager>,
+    upgrader: Option<Arc<Upgrader>>,
+}
 
-pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
-    let mut dir = PathBuf::from(DEFAULT_DIR);
-    let mut socket = PathBuf::from(nett_mesh::status::DEFAULT_SOCKET);
-    let mut tidy = false;
-    while let Some(arg) = parser.next()? {
-        match arg {
-            lexopt::Arg::Long("dir") => dir = PathBuf::from(parser.value()?),
-            lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
-            lexopt::Arg::Long("tidy") => tidy = true,
-            other => return Err(other.unexpected().into()),
+impl InDaemon {
+    /// Before the mesh starts: `None` without a Hub configuration in `dir`; otherwise the start of a
+    /// newly installed version is counted, so that one whose mesh exits goes back too. An error is
+    /// a rollback: the service exits so that the service manager starts the restored program.
+    pub(crate) fn prepare(dir: &Path) -> anyhow::Result<Option<Self>> {
+        if !dir.join(HUB_FILE).exists() {
+            return Ok(None);
         }
+        let services = Arc::new(ServiceManager::default());
+        let upgrader = upgrader(dir, Arc::clone(&services)).map(Arc::new);
+        if let Some(upgrader) = &upgrader
+            && let Start::RolledBack(reason) = upgrader.on_start()
+        {
+            anyhow::bail!("{reason}");
+        }
+        Ok(Some(Self {
+            dir: dir.to_path_buf(),
+            services,
+            upgrader,
+        }))
     }
-    crate::mesh::init_logging();
-    if tidy {
-        return tidy_up(&dir);
+
+    /// Once the mesh runs: nett-node on its own thread; `ended` hears when the service is to exit.
+    pub(crate) fn spawn(
+        self,
+        mesh: Arc<dyn StatusSource + Sync>,
+        ended: tokio::sync::oneshot::Sender<Ended>,
+    ) -> std::io::Result<NodeThread> {
+        self.services.attach(Arc::clone(&mesh));
+        NodeThread::spawn(
+            move |stop| {
+                self.run_once(Arc::clone(&mesh), stop)
+                    .map_err(|e| format!("{e:#}"))
+            },
+            nett_node::daemon::RESTART_AFTER,
+            ended,
+        )
     }
-    let config = HubConfig::load(&dir)
+
+    fn run_once(
+        &self,
+        mesh: Arc<dyn StatusSource + Sync>,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) -> anyhow::Result<Ended> {
+        if let Some(upgrader) = &self.upgrader
+            && let Start::RolledBack(reason) = upgrader.check_started()
+        {
+            return Ok(Ended::RolledBack(reason));
+        }
+        // The units follow the program (design/release.md section 7)
+        let managed = nett_node::services::managed();
+        if managed {
+            match nett_node::services::refresh_units() {
+                Ok(true) => return Ok(Ended::UnitChanged),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "refreshing nett's units"),
+            }
+        }
+        let node = load(&self.dir, mesh, self.upgrader.clone(), managed)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("starting nett-node's runtime")?;
+        tracing::info!(version = env!("CARGO_PKG_VERSION"), "nett-node starting");
+        let exit = runtime.block_on(nett_node::session::run(node, async move {
+            let _ = stop.wait_for(|stop| *stop).await;
+        }));
+        // An upgrade's install runs on a blocking thread and finishes before the service exits
+        runtime.shutdown_timeout(nett_node::daemon::STOP_WAIT);
+        Ok(match exit {
+            Exit::Shutdown => Ended::Stopped,
+            Exit::Upgraded => Ended::Upgraded,
+        })
+    }
+}
+
+/// nett-node from this machine's Hub configuration and identity key in `dir`.
+fn load(
+    dir: &Path,
+    mesh: Arc<dyn StatusSource + Sync>,
+    upgrader: Option<Arc<Upgrader>>,
+    managed: bool,
+) -> anyhow::Result<Node> {
+    let config = HubConfig::load(dir)
         .map_err(anyhow::Error::msg)?
         .with_context(|| {
             format!(
@@ -50,58 +121,15 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 dir.join(HUB_FILE).display()
             )
         })?;
-    let identity = PrivateKey::load(&dir.join("identity.key"))?;
-    // The units follow the program (design/release.md section 7). Done before the upgrade check: a
-    // start that only picks up its own new unit does not count against the new version
-    let managed = nett_node::services::managed();
-    if managed {
-        match nett_node::services::refresh_units() {
-            Ok(true) => {
-                tracing::info!(
-                    "nett-node's unit changed; exiting so that systemd starts it with the new one"
-                );
-                return Ok(());
-            }
-            Ok(false) => {}
-            Err(e) => tracing::warn!(error = %e, "refreshing nett's units"),
-        }
-    }
-    let upgrader = upgrader(&dir, &socket).map(Arc::new);
-    if let Some(upgrader) = &upgrader
-        && let Start::RolledBack(reason) = upgrader.on_start()
-    {
-        // Exit so that the service manager starts the restored program
-        anyhow::bail!("{reason}");
-    }
-    let node = Node {
+    let identity = PrivateKey::load(&dir.join(IDENTITY_KEY_FILE))?;
+    Ok(Node {
         config,
         identity: x25519_dalek::StaticSecret::from(*identity.as_bytes()),
-        desired: dir.join("desired.json"),
-        socket,
+        desired: dir.join(DESIRED_FILE),
+        mesh,
         upgrader,
-        link: std::sync::Arc::new(nett_node::fetch::HubLink::new()),
+        link: Arc::new(nett_node::fetch::HubLink::new()),
         services: managed.then(|| std::sync::Mutex::new(None)),
-    };
-    drop(identity);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("starting the async runtime")?;
-    runtime.block_on(async {
-        let mut term = signal(SignalKind::terminate()).context("installing the SIGTERM handler")?;
-        let shutdown = async move {
-            tokio::select! {
-                _ = term.recv() => {}
-                _ = tokio::signal::ctrl_c() => {}
-            }
-        };
-        tracing::info!(version = env!("CARGO_PKG_VERSION"), "nett-node starting");
-        match nett_node::session::run(node, shutdown).await {
-            Exit::Shutdown => tracing::info!("nett-node stopped"),
-            // The service manager starts nett-node again from the new program
-            Exit::Upgraded => tracing::info!("nett-node exits to run the new version"),
-        }
-        anyhow::Ok(())
     })
 }
 
@@ -109,7 +137,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
 /// install the services (a lab, another service manager), or when this build has no release
 /// target or its release keys do not parse. In the container it places the new version in the
 /// volume (design/container.md section 6).
-fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader> {
+fn upgrader(dir: &Path, services: Arc<ServiceManager>) -> Option<Upgrader> {
     #[cfg(target_os = "linux")]
     if let Some(state) = crate::container::state_dir()
         && state == dir
@@ -125,9 +153,9 @@ fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader>
         });
     }
     let installed = if cfg!(target_os = "macos") {
-        std::path::Path::new(nett_node::platform::macos::PROGRAM).exists()
+        Path::new(nett_node::platform::macos::PROGRAM).exists()
     } else {
-        std::path::Path::new(nett_node::platform::linux::PROGRAM).exists()
+        Path::new(nett_node::platform::linux::PROGRAM).exists()
             && nett_node::platform::linux::systemctl().is_some()
     };
     if !installed {
@@ -158,30 +186,8 @@ fn upgrader(dir: &std::path::Path, socket: &std::path::Path) -> Option<Upgrader>
         dir: dir.to_path_buf(),
         install: Install::Replace {
             command,
-            services: Arc::new(ServiceManager {
-                socket: socket.to_path_buf(),
-            }),
+            services,
             mesh_start: nett_node::upgrade::MESH_START,
         },
     })
-}
-
-/// `nett node --tidy` (design/release.md section 8): the second step of the move from the layout of
-/// 0.3.13, which deletes what the rollback of an upgrade would still need, so not while an upgrade
-/// has not settled.
-fn tidy_up(dir: &std::path::Path) -> anyhow::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        if dir.join(nett_node::upgrade::MARKER_FILE).exists() {
-            return Ok(());
-        }
-        let done = nett_node::layout::tidy(&nett_node::layout::Layout::system())
-            .map_err(anyhow::Error::msg)?;
-        for what in done {
-            tracing::info!(%what, "removed what nett 0.3.13 left");
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = dir;
-    Ok(())
 }

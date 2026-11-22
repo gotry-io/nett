@@ -3246,7 +3246,7 @@ mod tests {
         sim.tunnel_broken[3] = true;
         sim.fix_on_rehandshake = false;
         sim.run(Duration::from_secs(5));
-        // The peer restarts: its relay answers again before its mesh process does
+        // The peer restarts: its relay answers again before its mesh does
         sim.tunnel_broken[0] = true;
         sim.run(Duration::from_secs(5));
         sim.tunnel_broken[0] = false;

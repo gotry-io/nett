@@ -123,7 +123,7 @@ pub fn ping(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     for i in 0..count {
         let seq = seed | i;
         // Every path to the peer is probed now, as `tailscale ping` does, so a path that just started
-        // working is taken during the ping (design/status.md section 4.3); a mesh process that does not
+        // working is taken during the ping (design/status.md section 4.3); a mesh that does not
         // know the request leaves the paths to their schedule
         if let Some(id) = &peer_id {
             let _ = status::probe(&socket, id);
@@ -302,12 +302,11 @@ pub fn doctor(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         Ok(doc) => {
             findings.extend(check_status(&doc, nett_trust::encoding::Timestamp::now()));
             findings.push(check_names(&doc));
-            findings.extend(check_services(&doc));
         }
         Err(e) => findings.push(Finding::problem(
-            "mesh service",
+            "nett service",
             crate::status::explain(e, &socket).to_string(),
-            service_log_hint("nett-mesh", "io.gotry.nett.mesh"),
+            service_log_hint("nett", nett_node::platform::macos::LABEL),
         )),
     }
     findings.extend(check_install());
@@ -326,7 +325,7 @@ pub fn check_status(doc: &StatusDoc, now: nett_trust::encoding::Timestamp) -> Ve
     let mut out = Vec::new();
     if doc.node.admitted {
         out.push(Finding::ok(
-            "mesh service",
+            "nett service",
             format!(
                 "nett {}, {} peers, {} connected",
                 doc.version,
@@ -528,7 +527,7 @@ fn names_finding(
         return Finding::problem(
             "names",
             format!("the DNS responder on {} does not answer {full}", at.ip()),
-            "no name under nett.internal resolves on this machine; the mesh service's log may \
+            "no name under nett.internal resolves on this machine; the nett service's log may \
              say why",
         );
     }
@@ -537,12 +536,12 @@ fn names_finding(
         Platform::MacOs => Finding::warn(
             "names",
             found,
-            "restart the mesh service: it writes /etc/resolver/nett.internal",
+            "restart the nett service: it writes /etc/resolver/nett.internal",
         ),
         Platform::Linux(Resolver::Stub) => Finding::warn(
             "names",
             found,
-            "restart the mesh service: it routes nett.internal to nett0 through systemd-resolved",
+            "restart the nett service: it routes nett.internal to nett0 through systemd-resolved",
         ),
         Platform::Linux(Resolver::Absent) => Finding::warn(
             "names",
@@ -564,48 +563,11 @@ fn names_finding(
     }
 }
 
-/// The services this status needs are running (Linux; macOS runs only the mesh and node services).
-fn check_services(doc: &StatusDoc) -> Vec<Finding> {
-    let mut out = Vec::new();
-    let Some(systemctl) =
-        nett_node::platform::linux::systemctl().filter(|_| cfg!(target_os = "linux"))
-    else {
-        return out;
-    };
-    let active = |unit: &str| {
-        crate::install::run(systemctl, &["is-active", "--quiet", unit]).unwrap_or(false)
-    };
-    let tls = doc
-        .peers
-        .iter()
-        .flat_map(|p| &p.candidates)
-        .any(|c| c.kind == PathKindDoc::RelayTls);
-    // Where the mesh process carries the TLS transport (Synology DSM) there is no adapter to run
-    let adapter = !nett_node::platform::linux::Flavor::detect().mesh_carries_tls();
-    if tls && adapter && !active("nett-transport.service") {
-        out.push(Finding::problem(
-            "TLS transport",
-            "there are paths over TLS but the transport adapter is not running",
-            service_log_hint("nett-transport", "-"),
-        ));
-    }
-    if Path::new(&format!("{}/hub.json", crate::node::DEFAULT_DIR)).exists()
-        && !active("nett-node.service")
-    {
-        out.push(Finding::problem(
-            "Hub connection",
-            "this machine is connected to a Hub but nett-node is not running",
-            service_log_hint("nett-node", "io.gotry.nett.node"),
-        ));
-    }
-    out
-}
-
 /// Leftovers that keep an older setup running, and upgrades that failed.
 fn check_install() -> Vec<Finding> {
     let mut out = Vec::new();
     if cfg!(target_os = "linux") {
-        let overrides: Vec<String> = ["nett-mesh", "nett-node", "nett-relay", "nett-transport"]
+        let overrides: Vec<String> = ["nett", "nett-relay"]
             .iter()
             .map(|u| format!("/etc/systemd/system/{u}.service"))
             .filter(|p| Path::new(p).exists())
@@ -771,7 +733,7 @@ mod tests {
             Platform::Linux(Resolver::Stub),
         );
         assert!(
-            stub.advice.contains("restart the mesh service"),
+            stub.advice.contains("restart the nett service"),
             "{}",
             stub.advice
         );

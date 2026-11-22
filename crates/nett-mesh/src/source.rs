@@ -1,7 +1,7 @@
 //! Reads the desired state from a local file (design/local-signing.md section 5): read once at startup,
 //! and re-read on every `SIGHUP`, or on every `reload` request received through the local interface
 //! (design/status.md section 4.1). Once joined to the Hub, nett-node writes the desired state into this
-//! file and then uses `reload` to make the mesh process apply it (design/hub.md section 5).
+//! file and then uses `reload` to make the mesh apply it (design/hub.md section 5).
 
 use std::path::PathBuf;
 

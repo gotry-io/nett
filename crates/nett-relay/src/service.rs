@@ -1,6 +1,7 @@
-//! nett-relay as a service (design/mesh.md section 5.2): with the TLS certificate it is given, it fetches
-//! its assignment from the mesh process over the helper socket (design/status.md section 3.1) when it
-//! starts and every 5 seconds, and applies changes in place. It does not depend on nett-node.
+//! nett-relay as a service (design/mesh.md section 5.2): with the TLS certificate it is given, it
+//! fetches its assignment from the nett daemon over the helper socket (design/status.md section
+//! 3.1) when it starts and every 5 seconds, and applies changes in place. It does not depend on the
+//! daemon's connection to the Hub.
 
 use std::future::Future;
 use std::net::{Ipv6Addr, SocketAddr};
@@ -16,16 +17,13 @@ use crate::server::{
     ASSIGNMENT_QUEUE, Assignment, TlsIngress, TlsSetupError, cert_acceptor, serve, tls_listener,
 };
 
-/// File holding the index table and bindings, in the relay's runtime directory.
-pub const STATE_FILE: &str = "relay-state.json";
-
 #[derive(Debug, thiserror::Error)]
 pub enum ServiceError {
     #[error(transparent)]
     Cert(#[from] CertError),
     #[error(transparent)]
     Tls(#[from] TlsSetupError),
-    #[error("the relay assignment from the mesh process is not valid: {0}")]
+    #[error("the relay assignment from the nett service is not valid: {0}")]
     Assignment(#[from] AssignmentError),
     #[error("binding {what} port {port}: {source}")]
     Bind {
@@ -58,7 +56,7 @@ pub async fn run(
     let fingerprint = cert.fingerprint();
     tracing::info!(%fingerprint, "relay TLS certificate");
     tokio::pin!(shutdown);
-    // Wait for an assignment: the service may start before the mesh process has its desired state
+    // Wait for an assignment: the service may start before the mesh has its desired state
     let assignment = loop {
         if let Some(a) = fetch(&helpers, fingerprint).await {
             break a;
@@ -120,7 +118,7 @@ pub async fn run(
     Ok(ended)
 }
 
-/// Asks the mesh process again every 5 seconds and passes on changed assignments; a change of ports
+/// Asks the mesh again every 5 seconds and passes on changed assignments; a change of ports
 /// ends the relay so that it binds the new ones.
 async fn follow(
     helpers: PathBuf,
@@ -151,7 +149,7 @@ async fn follow(
     }
 }
 
-/// One fetch over the helper socket, on a blocking thread. `None` when the mesh process cannot be
+/// One fetch over the helper socket, on a blocking thread. `None` when the mesh cannot be
 /// reached or this machine is not a relay right now.
 async fn fetch(helpers: &Path, fingerprint: CertFingerprint) -> Option<RelayAssignment> {
     let path = helpers.to_owned();

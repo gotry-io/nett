@@ -76,7 +76,7 @@ const RANDOM_RETRY_MAX: Duration = Duration::from_secs(15);
 pub enum Outgoing {
     /// Sent through `nett0` to the probe port on the peer's mesh address.
     Tunnel { to: SocketAddr, data: Vec<u8> },
-    /// Sent from the mesh process's own port to a TLS relay's loopback port, which the TLS transport
+    /// Sent from the mesh's own port to a TLS relay's loopback port, which the TLS transport
     /// carries to the relay (section 5.3).
     Transport { to: SocketAddr, data: Vec<u8> },
     /// Sent from the WireGuard port (section 7.1): direct probes, and probes of UDP relays.
@@ -90,7 +90,7 @@ pub enum Outgoing {
 pub enum Incoming {
     /// The probe port on the mesh address.
     Tunnel,
-    /// The socket the mesh process uses to send to TLS relays' loopback ports.
+    /// The socket the mesh uses to send to TLS relays' loopback ports.
     Transport,
     /// The copy on the WireGuard port.
     WgPort,
@@ -131,7 +131,7 @@ pub struct Switch {
 
 enum CandidateMeta {
     Direct,
-    /// `tls`: TLS transport via the transport adapter; the measurement is not counted as this machine's UDP
+    /// `tls`: TLS transport via the TLS transport; the measurement is not counted as this machine's UDP
     /// measurement to this relay.
     Relay {
         relay: KeyId,
@@ -309,7 +309,7 @@ pub fn is_decider(
 }
 
 /// A candidate's endpoint in WireGuard and the information used for measurement. The endpoint of a TLS
-/// candidate is the transport adapter's loopback port, given by `tls`; a TLS candidate that was not
+/// candidate is the TLS transport's loopback port, given by `tls`; a TLS candidate that was not
 /// assigned a port is not used.
 fn routes(
     candidates: &[Candidate],
@@ -444,7 +444,7 @@ impl Prober {
 
     /// Updates from the admitted members and the candidate paths in the desired state. Peers whose candidate
     /// list has not changed keep their path selection state. `tls` is the loopback port of each TLS relay
-    /// on the transport adapter ([`crate::config::DesiredMesh::tls_endpoints`]).
+    /// on the TLS transport ([`crate::config::DesiredMesh::tls_endpoints`]).
     #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,

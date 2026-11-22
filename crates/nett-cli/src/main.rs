@@ -1,6 +1,6 @@
 //! `nett` executable: the command line (including the signing tool `nett site`) and the entry
-//! points of the `nett mesh`, `nett node`, `nett transport` and `nett relay` processes (ADR 0012),
-//! and of the container (`nett container`, ADR 0016).
+//! points of the nett service (`nett daemon`, ADR 0013), the relay (`nett relay`) and the container
+//! (`nett container`, ADR 0016) (ADR 0012).
 //! Commands fall into three groups by scope: the whole mesh, this machine, service processes
 //! (architecture.md section 13.4).
 
@@ -13,6 +13,8 @@ use std::process::ExitCode;
 
 #[cfg(target_os = "linux")]
 mod container;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod daemon;
 mod device;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod diagnose;
@@ -26,8 +28,6 @@ mod install;
 mod join;
 mod layout;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-mod mesh;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod node;
 #[cfg(target_os = "linux")]
 mod relay;
@@ -40,8 +40,6 @@ mod service_linux;
 mod site;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod status;
-#[cfg(target_os = "linux")]
-mod transport;
 
 /// One command: name, group in the help, one-line description and usage. The usage text lives in
 /// the module that implements it.
@@ -134,21 +132,14 @@ const COMMANDS: &[Command] = &[
         name: "keys",
         group: Group::Machine,
         summary: "Create this node's keys and print the line for the site description",
-        usage: mesh::KEYS_USAGE,
+        usage: daemon::KEYS_USAGE,
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
-        name: "mesh",
+        name: "daemon",
         group: Group::Service,
-        summary: "The mesh process",
-        usage: mesh::USAGE,
-    },
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
-    Command {
-        name: "node",
-        group: Group::Service,
-        summary: "The control agent that connects this machine to its Hub",
-        usage: node::USAGE,
+        summary: "The nett service: the mesh and the connection to the Hub",
+        usage: daemon::USAGE,
     },
     #[cfg(target_os = "linux")]
     Command {
@@ -163,13 +154,6 @@ const COMMANDS: &[Command] = &[
         group: Group::Service,
         summary: "Points names under nett.internal at this machine's responder",
         usage: resolver::USAGE,
-    },
-    #[cfg(target_os = "linux")]
-    Command {
-        name: "transport",
-        group: Group::Service,
-        summary: "The transport adapter that carries WireGuard over TLS",
-        usage: transport::USAGE,
     },
     #[cfg(target_os = "linux")]
     Command {
@@ -216,7 +200,7 @@ mod system_log {
                 .nth(1)
                 .as_deref()
                 .and_then(|a| a.to_str()),
-            Some("mesh" | "node")
+            Some("daemon")
         ) && !std::io::stderr().is_terminal();
         if service {
             let default = std::panic::take_hook();
@@ -282,15 +266,11 @@ fn run() -> anyhow::Result<()> {
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "join" => install::join_command(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        "keys" => mesh::keys(parser),
+        "keys" => daemon::keys(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
-        "mesh" => mesh::run(parser),
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
-        "node" => node::run(parser),
+        "daemon" => daemon::run(parser),
         #[cfg(target_os = "linux")]
         "relay" => relay::run(parser),
-        #[cfg(target_os = "linux")]
-        "transport" => transport::run(parser),
         #[cfg(target_os = "linux")]
         "resolver" => resolver::run(parser),
         #[cfg(target_os = "linux")]

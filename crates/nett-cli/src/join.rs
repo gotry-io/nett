@@ -4,7 +4,7 @@
 //! versions, and connects to the Hub with its identity key.
 //!
 //! The node ID in the token must be this machine's; the fingerprint of the trust anchor list must
-//! equal the trust anchor pinned on this machine (the mesh process's trust store first, then the
+//! equal the trust anchor pinned on this machine (the mesh's trust store first, then the
 //! desired state file if there is none yet). So a token issued by a compromised Hub cannot switch
 //! this machine to a site it does not recognize; switching to another Hub is likewise only possible
 //! with root on this machine (section 8.1).

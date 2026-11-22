@@ -1,9 +1,10 @@
-//! The control agent nett-node on each machine (design/hub.md section 5): connects to the Hub,
-//! hands the desired state to the mesh process, and reports status. It also provides the client the
-//! signing tool uses to call the Hub API.
+//! nett-node, the part of the nett daemon that connects a machine to its Hub (design/hub.md section
+//! 5, ADR 0013): it hands the desired state to the mesh in the same process, reports status and
+//! installs new releases. It also provides the client the signing tool uses to call the Hub API.
 
 pub mod config;
 pub mod coord;
+pub mod daemon;
 pub mod fetch;
 pub mod http;
 pub mod join;

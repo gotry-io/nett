@@ -22,21 +22,22 @@ use crate::service as platform;
 use crate::service_linux as platform;
 
 /// Upper bound for waiting on service manager commands to return (hard rule 14).
+#[cfg(target_os = "linux")]
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound for `nett leave` waiting for the Hub to confirm: if the Hub is unreachable, it exits
 /// as usual (design/hub.md section 7).
 const LEAVE_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub const INSTALL_USAGE: &str = "usage: sudo nett install [<token>] [--config <desired-state.json>]\n\n\
-Creates this machine's keys (or keeps them), installs nett and starts the mesh service.\n\
+Creates this machine's keys (or keeps them), installs nett and starts the nett service.\n\
 With a token from `nett site add <name>` or `nett site invite <name>`, it also connects this\n\
 machine to the Hub (a new machine joins the site through it): the desired state then comes\n\
-from the Hub, and the nett-node service runs next to the mesh service.\n\
+from the Hub, through the nett service.\n\
 Without a Hub, the desired state comes from --config or, on macOS, from the site directory of\n\
 the user running sudo. Run it again after upgrading nett.";
 pub const UNINSTALL_USAGE: &str = "usage: sudo nett uninstall\n\n\
-Stops and removes the services. Keys, the desired state and the Hub configuration stay;\n\
-`sudo nett install` brings the services back.";
+Stops and removes the nett service. Keys, the desired state and the Hub configuration stay;\n\
+`sudo nett install` brings it back.";
 pub const LEAVE_USAGE: &str = "usage: sudo nett leave [--dir <directory>]\n\n\
 Leaves the site: tells the Hub, which removes this machine from every member, stops and\n\
 removes the services, removes the mesh interface, and deletes the keys, the desired state,\n\
@@ -48,7 +49,7 @@ pub const JOIN_USAGE: &str = "usage: nett join [<token>] [--dir <directory>]\n\n
 Joins this machine to the site through the Hub without installing services, for service managers\n\
 other than systemd and launchd. Creates the keys in the directory (or keeps them), joins with the\n\
 token from `nett site add` or `nett site invite` (from NETT_TOKEN when it is not given), and\n\
-writes hub.json and desired.json there; then run `nett mesh` and `nett node` with that directory.\n\
+writes hub.json and desired.json there; then run `nett daemon --dir` with that directory.\n\
 The directory defaults to /etc/nett, and in the container to its volume.";
 
 pub struct InstallArgs {
@@ -94,9 +95,9 @@ pub fn leave_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     // A machine set up with `nett join`: its services are not nett's to remove
     tell_hub(&dir)?;
-    forget(&dir, &format!("{dir}/state"))?;
+    forget(&dir)?;
     outln!(
-        "Left the site: deleted the keys and configuration in {dir}. Stop its nett services yourself."
+        "Left the site: deleted the keys and configuration in {dir}. Stop its `nett daemon` yourself."
     );
     Ok(())
 }
@@ -117,12 +118,16 @@ pub fn join_command(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         .or_else(|| std::env::var("NETT_TOKEN").ok())
         .ok_or_else(|| anyhow::anyhow!(JOIN_USAGE))?;
     ensure_dir(&dir, 0o700)?;
-    let keys = crate::mesh::node_keys(Path::new(&dir))?;
-    let outcome = apply_token(&dir, &format!("{dir}/state"), Some(&token), &keys.0)?;
+    let keys = crate::daemon::node_keys(Path::new(&dir))?;
+    let outcome = apply_token(&dir, Some(&token), &keys.0)?;
     if let Some(bytes) = outcome.desired {
-        replace_if_changed(&Path::new(&dir).join("desired.json"), &bytes, 0o600)?;
+        replace_if_changed(
+            &Path::new(&dir).join(crate::daemon::DESIRED_FILE),
+            &bytes,
+            0o600,
+        )?;
     }
-    outln!("Ready in {dir}: run `nett mesh` and `nett node` with this directory.");
+    outln!("Ready in {dir}: run `nett daemon --dir {dir}`.");
     Ok(())
 }
 
@@ -137,7 +142,7 @@ fn default_join_dir() -> String {
 
 pub fn require_root() -> anyhow::Result<()> {
     if !rustix::process::geteuid().is_root() {
-        bail!("the services run as root; run this command with sudo");
+        bail!("the nett service runs as root; run this command with sudo");
     }
     Ok(())
 }
@@ -192,6 +197,7 @@ pub fn copy_self(target: &str) -> anyhow::Result<bool> {
 
 /// Runs a service manager command with an argument array (hard rule 9: the program is a fixed
 /// absolute path, no shell), with a timeout; returns whether it succeeded.
+#[cfg(target_os = "linux")]
 pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
     nett_node::platform::run(program, args, COMMAND_TIMEOUT).map_err(anyhow::Error::msg)
 }
@@ -199,7 +205,7 @@ pub fn run(program: &str, args: &[&str]) -> anyhow::Result<bool> {
 /// Result when there is a token.
 #[derive(Default)]
 pub struct TokenOutcome {
-    /// The Hub configuration changed: nett-node must restart.
+    /// The Hub configuration changed: the nett service restarts to connect with it.
     pub hub_changed: bool,
     /// The first desired state the Hub sends when a new machine joins; the caller writes it as the
     /// desired state file.
@@ -211,18 +217,18 @@ pub struct TokenOutcome {
 /// 3.5) only checks that this machine is already a member.
 pub fn apply_token(
     dir: &str,
-    state_dir: &str,
     token: Option<&str>,
     mesh_public: &X25519PublicKey,
 ) -> anyhow::Result<TokenOutcome> {
+    let state_dir = Path::new(dir).join(nett_mesh::store::STATE_DIR);
     let Some(text) = token else {
         return Ok(TokenOutcome::default());
     };
     let token = JoinToken::decode(text)?;
     if token.enroll.is_some() {
-        return enroll(dir, state_dir, &token, mesh_public);
+        return enroll(dir, &state_dir, &token, mesh_public);
     }
-    let hub_changed = match crate::join::join(Path::new(dir), Path::new(state_dir), text)? {
+    let hub_changed = match crate::join::join(Path::new(dir), &state_dir, text)? {
         crate::join::Joined::New(url) => {
             outln!("Connecting this machine to the Hub at {url}.");
             true
@@ -243,15 +249,13 @@ pub fn apply_token(
 /// machine retries the same token, it completes as usual.
 fn enroll(
     dir: &str,
-    state_dir: &str,
+    state_dir: &Path,
     token: &JoinToken,
     mesh_public: &X25519PublicKey,
 ) -> anyhow::Result<TokenOutcome> {
     let dir = Path::new(dir);
-    let member = Path::new(state_dir)
-        .join(nett_mesh::store::TRUST_FILE)
-        .exists()
-        || dir.join("desired.json").exists();
+    let member =
+        state_dir.join(nett_mesh::store::TRUST_FILE).exists() || dir.join("desired.json").exists();
     if member {
         if HubConfig::load(dir)
             .map_err(anyhow::Error::msg)?
@@ -326,7 +330,7 @@ pub fn tell_hub(dir: &str) -> anyhow::Result<()> {
 
 /// Last step of `nett leave`: deletes the keys, the desired state, the Hub configuration and the
 /// copy of the Hub's backup, the upgrade records and the trust store (design/auth.md section 8.3).
-pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
+pub fn forget(dir: &str) -> anyhow::Result<()> {
     remove_files(
         dir,
         &[
@@ -338,7 +342,11 @@ pub fn forget(dir: &str, state_dir: &str) -> anyhow::Result<()> {
         ],
     )?;
     forget_upgrades(dir)?;
-    remove_tree(state_dir)
+    remove_tree(
+        &Path::new(dir)
+            .join(nett_mesh::store::STATE_DIR)
+            .to_string_lossy(),
+    )
 }
 
 /// Deletes the upgrade records next to the identity (design/release.md section 8).
@@ -412,8 +420,8 @@ mod tests {
             fs::write(dir.join(name), b"x").expect("write");
         }
         fs::write(state.join("trust.json"), b"{}").expect("write");
-        let (dir_s, state_s) = (dir.to_string_lossy(), state.to_string_lossy());
-        forget(&dir_s, &state_s).expect("forget");
+        let dir_s = dir.to_string_lossy();
+        forget(&dir_s).expect("forget");
         assert!(!state.exists());
         let left: Vec<_> = fs::read_dir(&dir)
             .expect("read")

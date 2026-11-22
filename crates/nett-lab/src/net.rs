@@ -479,7 +479,7 @@ impl Underlay {
 
 /// Attaches a "container" behind a node running Edge: a veth pair; the node side enables forwarding
 /// and, like Docker, masquerades the container's traffic to other interfaces (priority 100). The
-/// mesh process's Edge source NAT must take effect before it (ADR 0015).
+/// mesh's Edge source NAT must take effect before it (ADR 0015).
 fn edge_container(name: &str, node_ns: &str, container: Ipv4Addr) -> anyhow::Result<()> {
     let ns = edge_netns(name);
     add_netns(&ns)?;

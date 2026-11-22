@@ -133,14 +133,12 @@ jobs:
           sudo "$nett" install | tee install.log
           grep -F "$HOME/.config/nett/nodes/ci/desired.json" install.log
           for _ in $(seq 20); do
-            sudo launchctl print system/io.gotry.nett.mesh | grep -q 'state = running' && break
+            sudo launchctl print system/io.gotry.nett | grep -q 'state = running' && break
             sleep 0.5
           done
-          sudo launchctl print system/io.gotry.nett.mesh | grep 'state = running'
-          # Logs go to the system log only: no log files, no stderr path (design/release.md section 8)
-          test ! -e /Library/Logs/nett
-          test ! -e /etc/newsyslog.d/nett.conf
-          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.mesh.plist; then exit 1; fi
+          sudo launchctl print system/io.gotry.nett | grep 'state = running'
+          # Logs go to the system log only: no stderr path (design/release.md section 8)
+          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.plist; then exit 1; fi
           # Local status (design/status.md)
           for _ in $(seq 20); do
             sudo test -S /var/run/nett/mesh.sock && break
@@ -163,13 +161,13 @@ jobs:
           "$nett" status | grep -F 'No peers.'
           if "$nett" reload 2> reload.err; then exit 1; fi
           grep -F 'run with sudo' reload.err
-          sudo "$nett" install | grep -F 'The services are running. Nothing changed.'
+          sudo "$nett" install | grep -F 'The service is running. Nothing changed.'
           # The desired state changed (same content, different bytes): reload over the local
           # interface and report the result
           python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json
           sudo "$nett" install --config reformatted.json | grep -F 'Reloaded the desired state.'
           sudo "$nett" reload | grep -F 'Reloaded the desired state.'
-          # A public relay with TLS gives this machine a path over TLS: the mesh process carries it
+          # A public relay with TLS gives this machine a path over TLS: the nett service carries it
           # itself, on a loopback port of its own; others reach the socket directory's names but
           # cannot list it
           relay_keys=$("$nett" keys --dir "$RUNNER_TEMP/relay1" \
@@ -183,35 +181,15 @@ jobs:
             sleep 1
           done
           log show --last 2m --predicate 'process == "nett"' | grep -F 'transport config applied'
-          mesh_pid=$(sudo launchctl print system/io.gotry.nett.mesh \
+          pid=$(sudo launchctl print system/io.gotry.nett \
             | sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p')
-          sudo lsof -nP -a -p "$mesh_pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
+          sudo lsof -nP -a -p "$pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
           [ "$(sudo stat -f %Lp /var/run/nett)" = 711 ]
-          # What earlier releases left on a Mac is removed by the next install: the start-up failure
-          # logs with their rotation, and the transport service of 0.3.11 with an account and a group
-          # of its own. The directory service refuses an ID another record has, and macOS uses the
-          # IDs just below 400, so the copy takes one far above
-          sudo mkdir -p /Library/Logs/nett
-          sudo touch /Library/Logs/nett/mesh.log /etc/newsyslog.d/nett.conf
-          sudo dscl . -create /Users/_nett-transport UniqueID 3999
-          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
-          sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
-            -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /bin/sleep' \
-            -c 'Add :ProgramArguments:1 string 3600' -c 'Add :RunAtLoad bool true' \
-            /Library/LaunchDaemons/io.gotry.nett.transport.plist
-          sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.transport.plist
-          sudo "$nett" install | grep -F 'Removed the transport service of nett 0.3.11'
-          if sudo launchctl print system/io.gotry.nett.transport 2>/dev/null; then exit 1; fi
-          if test -e /Library/LaunchDaemons/io.gotry.nett.transport.plist; then exit 1; fi
-          if dscl . -read /Users/_nett-transport 2>/dev/null; then exit 1; fi
-          if dscl . -read /Groups/_nett-transport 2>/dev/null; then exit 1; fi
-          test ! -e /Library/Logs/nett
-          test ! -e /etc/newsyslog.d/nett.conf
           # Uninstalling removes nett and keeps the identity (design/release.md section 8)
           sudo "$nett" uninstall | tee uninstall.log
           grep -F "This machine's identity stays in /Library/Application Support/nett" uninstall.log
-          if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
-          for path in /Library/LaunchDaemons/io.gotry.nett.mesh.plist \
+          if sudo launchctl print system/io.gotry.nett 2>/dev/null; then exit 1; fi
+          for path in /Library/LaunchDaemons/io.gotry.nett.plist \
             '/Library/Application Support/nett/nett' /etc/resolver/nett.internal /var/run/nett; do
             if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
           done
@@ -241,45 +219,20 @@ jobs:
           done
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +[0-9.]+ +current' site-status.log
-          sudo launchctl print system/io.gotry.nett.node | grep 'state = running'
-          # nett-node brings the launchd configuration up to its program when it starts, as after an
-          # upgrade: it reloads the mesh service with it, and removes the log files of earlier
-          # releases and what nett 0.3.11 left
-          sudo /usr/libexec/PlistBuddy \
-            -c 'Add :StandardErrorPath string /Library/Logs/nett/mesh.log' \
-            /Library/LaunchDaemons/io.gotry.nett.mesh.plist
-          sudo mkdir -p /Library/Logs/nett
-          sudo launchctl bootout system/io.gotry.nett.mesh
-          # bootout returns before launchd has let the service go, and loading it again meanwhile fails
-          for _ in $(seq 40); do sudo launchctl print system/io.gotry.nett.mesh > /dev/null 2>&1 || break; sleep 0.5; done
-          sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.mesh.plist
-          sudo launchctl print system/io.gotry.nett.mesh | grep -F 'stderr path'
-          sudo dscl . -create /Users/_nett-transport UniqueID 3999
-          sudo dscl . -create /Groups/_nett-transport PrimaryGroupID 3999
-          sudo /usr/libexec/PlistBuddy -c 'Add :Label string io.gotry.nett.transport' \
-            -c 'Add :ProgramArguments array' -c 'Add :ProgramArguments:0 string /bin/sleep' \
-            -c 'Add :ProgramArguments:1 string 3600' -c 'Add :RunAtLoad bool true' \
-            /Library/LaunchDaemons/io.gotry.nett.transport.plist
-          sudo launchctl bootstrap system /Library/LaunchDaemons/io.gotry.nett.transport.plist
-          sudo launchctl kickstart -k system/io.gotry.nett.node
-          for _ in $(seq 40); do
-            test -e /Library/LaunchDaemons/io.gotry.nett.transport.plist || break
-            sleep 0.5
-          done
-          if test -e /Library/LaunchDaemons/io.gotry.nett.transport.plist; then exit 1; fi
-          if sudo launchctl print system/io.gotry.nett.transport 2>/dev/null; then exit 1; fi
-          if dscl . -read /Users/_nett-transport 2>/dev/null; then exit 1; fi
-          if dscl . -read /Groups/_nett-transport 2>/dev/null; then exit 1; fi
-          for _ in $(seq 40); do test -e /Library/Logs/nett || break; sleep 0.5; done
-          test ! -e /Library/Logs/nett
-          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.mesh.plist; then exit 1; fi
-          mesh=$(sudo launchctl print system/io.gotry.nett.mesh)
-          grep 'state = running' <<< "$mesh"
-          if grep -F 'stderr path' <<< "$mesh"; then exit 1; fi
-          # On a machine joined to the Hub, the desired state is written only by nett-node
+          # One service: it runs nett-node too (ADR 0013)
+          log show --last 5m --predicate 'process == "nett"' | grep -F 'nett-node starting'
+          # The service brings its launchd configuration up to its program when it starts, as after
+          # an upgrade; launchd reads it the next time it loads the service
+          sudo /usr/libexec/PlistBuddy -c 'Add :StandardErrorPath string /dev/null' \
+            /Library/LaunchDaemons/io.gotry.nett.plist
+          sudo launchctl kickstart -k system/io.gotry.nett
+          for _ in $(seq 40); do grep -qF StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.plist || break; sleep 0.5; done
+          if grep -F StandardErrorPath /Library/LaunchDaemons/io.gotry.nett.plist; then exit 1; fi
+          sudo launchctl print system/io.gotry.nett | grep 'state = running'
+          # On a machine joined to the Hub, the desired state is written only by the nett service
           if sudo "$nett" install --config ~/.config/nett/nodes/ci/desired.json; then exit 1; fi
           sudo "$nett" uninstall
-          if sudo launchctl print system/io.gotry.nett.node 2>/dev/null; then exit 1; fi
+          if sudo launchctl print system/io.gotry.nett 2>/dev/null; then exit 1; fi
           # After leaving, the same Mac joins via the Hub as a new machine (design/hub.md sections
           # 3.3, 6), then leaves again
           sudo "$nett" leave | tee leave.log
@@ -300,21 +253,19 @@ jobs:
           # machine using it is refused, which the Hub's enrollment tests cover
           sudo "$nett" install "$token" | grep -F 'This machine has already joined the site through the Hub.'
           sudo "$nett" leave
-          if sudo launchctl print system/io.gotry.nett.mesh 2>/dev/null; then exit 1; fi
+          if sudo launchctl print system/io.gotry.nett 2>/dev/null; then exit 1; fi
           # After leaving and uninstalling, nothing of nett remains (design/release.md section 8)
           sudo "$nett" uninstall | grep -F 'Nothing of it remains on this machine.'
-          for path in '/Library/Application Support/nett' /Library/LaunchDaemons/io.gotry.nett.mesh.plist \
-            /Library/LaunchDaemons/io.gotry.nett.node.plist /etc/resolver/nett.internal /var/run/nett \
-            /Library/Logs/nett /etc/newsyslog.d/nett.conf; do
+          for path in '/Library/Application Support/nett' /Library/LaunchDaemons/io.gotry.nett.plist \
+            /etc/resolver/nett.internal /var/run/nett; do
             if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
           done
 
 
   # Linux with real systemd (design/hub.md section 7, design/release.md sections 7 and 8): a new
-  # machine joins through the Hub with `sudo nett install <token>` from 0.3.13, the last release with
-  # the earlier layout, waits for approval, then upgrades itself to newer releases that a local
-  # website serves (signed with keys generated for this test and built into each version) and the
-  # Hub mirrors, and leaves again
+  # machine joins through the Hub with `sudo nett install <token>`, waits for approval, then upgrades
+  # itself to newer releases that a local website serves (signed with keys generated for this test
+  # and built into each version) and the Hub mirrors, and leaves again
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
@@ -345,7 +296,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            ${{ runner.temp }}/previous-target/
             ${{ runner.temp }}/next-target/
           key: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.deps.outputs.key }}
           restore-keys: cargo-${{ github.job }}-${{ runner.os }}-${{ runner.arch }}-
@@ -357,16 +307,10 @@ jobs:
           for key in old-primary old-backup new-primary new-backup; do
             minisign-linux/x86_64/minisign -G -W -p "$RUNNER_TEMP/$key.pub" -s "$RUNNER_TEMP/$key.key"
           done
-      - name: Build 0.3.13 and this version with the old keys, and 99.0.0, 99.2.0 and the Hub with the new ones
+      - name: Build this version with the old keys, and 99.0.0, 99.2.0 and the Hub with the new ones
         run: |
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
             cargo build --locked -p nett-cli
-          # The machine starts on 0.3.13, the last release with the earlier layout
-          git fetch --depth 1 origin tag v0.3.13
-          git worktree add "$RUNNER_TEMP/previous" v0.3.13
-          (cd "$RUNNER_TEMP/previous" \
-            && NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/old-primary.pub" "$RUNNER_TEMP/old-backup.pub")" \
-              CARGO_TARGET_DIR="$RUNNER_TEMP/previous-target" cargo build --locked -p nett-cli)
           NETT_RELEASE_PUBLIC_KEYS="$(cat "$RUNNER_TEMP/new-primary.pub" "$RUNNER_TEMP/new-backup.pub")"
           export NETT_RELEASE_PUBLIC_KEYS
           # The Hub trusts the keys of 99.x, as one upgraded to a release that carries them: it
@@ -401,7 +345,6 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-            ${{ runner.temp }}/previous-target/
             ${{ runner.temp }}/next-target/
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Serve the newer release over HTTPS
@@ -456,23 +399,21 @@ jobs:
           "$nett" site link "$code" | grep -F 'Linked to https://127.0.0.1:8443'
           "$nett" site add ci --yes | tee add.log
           token=$(grep -o 'nett_enr_[A-Za-z0-9_-]*' add.log)
-          sudo "$RUNNER_TEMP/previous-target/debug/nett" install "$token" | tee install.log
+          own=$("$nett" --version | awk '{print $2}')
+          sudo "$nett" install "$token" | tee install.log
           grep -F 'Joining the site through the Hub at https://127.0.0.1:8443' install.log
-          # The layout of 0.3.13: the trust store in /var/lib/nett, users for the helpers
-          sudo test -f /var/lib/nett/trust.json
-          getent passwd nett-relay nett-transport
           test "$(readlink /usr/local/bin/nett)" = /usr/local/lib/nett/nett
-          systemctl is-active --quiet nett-mesh.service
-          # The desired state is readable by the mesh service's group only
-          test "$(sudo stat -c '%a %G' /etc/nett/desired.json)" = "640 nett"
-          test "$(sudo stat -c '%a %G' /etc/nett)" = "2750 nett"
-          # The relay's and the transport adapter's units exist only while the desired state needs
-          # them (design/release.md section 8)
+          # One service, as root; the identity is root's alone (ADR 0013)
+          systemctl is-active --quiet nett.service
+          [ "$(ps -o uid= -p "$(systemctl show -p MainPID --value nett.service)" | tr -d ' ')" = 0 ]
+          test "$(sudo stat -c '%a %U' /etc/nett)" = "700 root"
+          test "$(sudo stat -c '%a %U' /etc/nett/desired.json)" = "600 root"
+          # The relay's unit exists only while the desired state needs it (design/release.md section 8)
           units=/usr/local/lib/systemd/system
           test ! -e "$units/nett-relay.service"
-          test ! -e "$units/nett-transport.service"
           # The Hub holds 99.0.0, signed by the old backup key, and relays it once it is approved
-          # (ADR 0027): nett-node verifies it, installs it, restarts the mesh service and itself
+          # (ADR 0027): the nett service verifies it, installs it and exits, and systemd starts the
+          # new program
           wait_for() {
             for _ in $(seq 120); do
               "$nett" site status --json | jq -e ".machines[] | select(.name == \"ci\") | $1" && return 0
@@ -494,33 +435,17 @@ jobs:
           done
           sleep 5
           "$nett" site status | grep -F '99.0.0 available for the Hub and 1 machine: nett site upgrade'
-          wait_for '.online and .nett_version == "0.3.13"'
+          wait_for ".online and .nett_version == \"$own\""
           approve 99.0.0
           wait_for '.online and .nett_version == "99.0.0"'
           "$nett" site status | tee site-status.log
           grep -E '^ci +100\.88\.[0-9.]+ +online +99\.0\.0 ' site-status.log
           test -f /usr/local/lib/nett/nett.previous
-          systemctl is-active --quiet nett-mesh.service nett-node.service
-          # The upgrade moves the machine to one directory and one account (design/release.md
-          # section 8): the mesh unit's privileged start step copies the trust store into
-          # /etc/nett/state, and once the upgrade has settled nett-node's removes the old directory
-          # and users
-          test "$(sudo stat -c '%a %U' /etc/nett/state)" = "700 nett"
+          systemctl is-active --quiet nett.service
+          sudo journalctl -u nett --no-pager | grep -F 'nett exits to run the new version'
+          test "$(sudo stat -c '%a %U' /etc/nett/state)" = "700 root"
           sudo test -f /etc/nett/state/trust.json
-          grep -F -- '--state /etc/nett/state' /usr/local/lib/systemd/system/nett-mesh.service
-          for _ in $(seq 90); do
-            if ! getent passwd nett-relay > /dev/null && ! sudo test -e /var/lib/nett; then break; fi
-            sleep 1
-          done
-          sudo journalctl -u nett-node --no-pager | grep -F 'removed what nett 0.3.13 left'
-          if sudo test -e /var/lib/nett; then exit 1; fi
-          for account in nett-relay nett-transport; do
-            if getent passwd "$account" || getent group "$account"; then exit 1; fi
-          done
-          if grep -F nett-relay /etc/sysusers.d/nett.conf; then exit 1; fi
-          getent passwd nett
-          systemctl is-active --quiet nett-mesh.service nett-node.service
-          wait_for '.online and .result == "applied"' 
+          wait_for '.online and .result == "applied"'
           # 99.0.0 trusts only the new keys: 99.1.0 signed by the old primary key is refused
           sh "$RUNNER_TEMP/offer.sh" 99.1.0 old-primary
           kill "$hub_pid"; wait "$hub_pid" || true
@@ -538,38 +463,30 @@ jobs:
           approve 99.2.0
           wait_for '.online and .nett_version == "99.2.0"'
           grep -F 'holding the program of the release' hub.log | grep -F 99.2.0
-          sudo journalctl -u nett-node --no-pager | grep -F 'fetched and verified the new version' \
+          sudo journalctl -u nett --no-pager | grep -F 'fetched and verified the new version' \
             | grep -F 99.2.0 | grep -F 'the Hub'
-          sudo journalctl -u nett-node --no-pager | tail -20
-          # A public relay with TLS gives this machine a path over TLS: nett-node writes and starts
-          # the transport adapter's unit, and deletes it when the path goes
+          sudo journalctl -u nett --no-pager | tail -20
+          # A public relay with TLS gives this machine a path over TLS: the nett service carries it
+          # itself, with no unit of its own
           relay_keys=$("$nett" keys --dir "$RUNNER_TEMP/relay1" \
             | sed -n 's/^  nett site add <name> --keys "\(.*\)"$/\1/p')
           "$nett" site add relay1 --keys "$relay_keys" --public --ipv4 198.51.100.7 --yes
           "$nett" site relay relay1 --fingerprint "sha256:$(printf '%064d' 0)" --yes
-          for _ in $(seq 60); do systemctl is-active --quiet nett-transport.service && break; sleep 1; done
-          systemctl is-active --quiet nett-transport.service
-          test -f "$units/nett-transport.service"
-          # It runs as a user systemd allocates, and the mesh process knows it by its unit
-          pid=$(systemctl show -p MainPID --value nett-transport.service)
-          [ "$(ps -o uid= -p "$pid" | tr -d ' ')" -ge 61184 ]
-          for _ in $(seq 30); do
-            sudo journalctl -u nett-transport --no-pager | grep -q 'transport config applied' && break
+          for _ in $(seq 60); do
+            sudo journalctl -u nett --no-pager | grep -q 'transport config applied' && break
             sleep 1
           done
-          sudo journalctl -u nett-transport --no-pager | grep -F 'transport config applied' 
-          "$nett" site remove relay1 --yes
-          for _ in $(seq 60); do test -e "$units/nett-transport.service" || break; sleep 1; done
+          sudo journalctl -u nett --no-pager | grep -F 'transport config applied'
           test ! -e "$units/nett-transport.service"
-          if systemctl is-active --quiet nett-transport.service; then exit 1; fi
+          "$nett" site remove relay1 --yes
           sudo nett leave | tee leave.log
           grep -F 'Told the Hub at https://127.0.0.1:8443' leave.log
-          if systemctl is-active --quiet nett-mesh.service; then exit 1; fi
+          if systemctl is-active --quiet nett.service; then exit 1; fi
           if ip link show nett0 2>/dev/null; then exit 1; fi
           test ! -e /etc/nett/identity.key
-          # Joined again as a public machine, it runs a relay: nett-node creates the certificate in
-          # /etc/nett/relay, the relay runs as a user systemd allocates, and the mesh process, which
-          # knows it by its unit, hands it its assignment
+          # Joined again as a public machine, it runs a relay: the nett service creates the
+          # certificate in /etc/nett/relay, the relay runs as a user systemd allocates, and the nett
+          # service, which knows it by its unit, hands it its assignment
           "$nett" site add ci-relay --public --ipv4 198.51.100.8 --yes | tee add-relay.log
           token=$(grep -o 'nett_enr_[A-Za-z0-9_-]*' add-relay.log)
           sudo nett install "$token"
@@ -589,20 +506,18 @@ jobs:
           # After leaving and uninstalling, nothing of nett remains (design/release.md section 8)
           sudo nett uninstall | tee uninstall.log
           grep -F 'Nothing of it remains on this machine.' uninstall.log
-          for path in /usr/local/lib/nett /usr/local/bin/nett /etc/nett /var/lib/nett \
-            /var/lib/nett-relay /etc/sysusers.d/nett.conf /run/nett /run/nett-relay "$units/nett-mesh.service" \
-            "$units/nett-node.service"; do
+          for path in /usr/local/lib/nett /usr/local/bin/nett /etc/nett /run/nett /run/nett-relay \
+            "$units/nett.service" "$units/nett-relay.service"; do
             if sudo test -e "$path"; then echo "$path remains"; exit 1; fi
           done
-          for account in nett nett-relay nett-transport; do
-            if getent passwd "$account" || getent group "$account"; then exit 1; fi
-          done
+          # nett adds no account to the system
+          if getent passwd nett || getent group nett; then exit 1; fi
           if command -v nft > /dev/null && sudo nft list tables | grep -F nett_; then exit 1; fi
       - name: Logs on failure
         if: failure()
         run: |
           cat hub.log site.log || true
-          sudo journalctl -u nett-mesh -u nett-node --no-pager | tail -80 || true
+          sudo journalctl -u nett -u nett-relay --no-pager | tail -80 || true
 
   # The container and the Hub upgrade themselves (design/container.md, ADR 0026): nett's image joins
   # through a Hub with NETT_TOKEN, two dial-only containers on one network with the Hub and no relay
@@ -748,15 +663,13 @@ jobs:
           # Both stay dial-only and the site has no relay: the Hub sees each at its own address on the
           # network they share, and they connect over it
           "$nett" site allow peer box 8080/tcp --yes
-          # The three processes, each with only its own capabilities
+          # The first process and the nett daemon, which holds only NET_ADMIN, NET_RAW and
+          # NET_BIND_SERVICE (ADR 0013)
           docker top box | tee top.log
-          grep -F 'nett mesh --config /var/lib/nett/desired.json' top.log
-          grep -F 'nett node --dir /var/lib/nett' top.log
-          node=$(docker top box -eo pid,args | awk '/nett node/ { print $1 }')
-          grep -E '^CapEff:\s+0+$' "/proc/$node/status"
-          # NET_ADMIN, NET_RAW and NET_BIND_SERVICE
-          mesh=$(docker top box -eo pid,args | awk '/nett mesh/ { print $1 }')
-          grep -E '^CapEff:\s+0+3400$' "/proc/$mesh/status"
+          grep -F 'nett daemon --dir /var/lib/nett' top.log
+          if grep -E 'nett (mesh|node|transport)' top.log; then exit 1; fi
+          daemon=$(docker top box -eo pid,args | awk '/nett daemon/ { print $1 }')
+          grep -E '^CapEff:\s+0+3400$' "/proc/$daemon/status"
           # A service beside box answers each connection with the address it came from
           ask box "perl -MIO::Socket::INET -e '\$s = IO::Socket::INET->new(LocalPort => 8080, Listen => 5, ReuseAddr => 1) or die; while (\$c = \$s->accept) { print \$c \"from \" . \$c->peerhost . \"\n\"; close \$c }'" &
           from=""

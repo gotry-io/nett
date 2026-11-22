@@ -122,8 +122,8 @@ pub fn serve(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report>
         format!("{result}; the service saw {:?}", seen()),
     );
 
-    // Recorded, not judged: the serving node's mesh process next to those that serve nothing
-    for (name, pid) in lab.measured() {
+    // Recorded, not judged: the serving node's daemon next to those that serve nothing
+    for (name, pid, _) in lab.measured() {
         if let Some(m) = super::memory_kib(pid) {
             report.record(
                 &name,

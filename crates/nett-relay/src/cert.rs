@@ -45,7 +45,7 @@ pub enum CertError {
     )]
     BadKey(String),
     #[error(
-        "{0} has no TLS certificate and key; nett-node creates them before it starts the relay"
+        "{0} has no TLS certificate and key; the nett service creates them before it starts the relay"
     )]
     Missing(String),
     #[error("the system random number generator failed")]
@@ -216,7 +216,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The transport adapter's client, which trusts only the fingerprint, completes a TLS handshake
+    /// The TLS transport's client, which trusts only the fingerprint, completes a TLS handshake
     /// with the relay's own certificate.
     #[test]
     fn the_transport_adapter_accepts_the_certificate_by_fingerprint() {

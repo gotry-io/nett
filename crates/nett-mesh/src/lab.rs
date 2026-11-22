@@ -1,10 +1,9 @@
-//! Lab build (`lab` feature): events are also written as JSON lines for `nett-lab` to collect, simulated
-//! clock error, and the transport adapter's config file (design/prototype.md section 7). Official builds
-//! do not include this module.
+//! Lab build (`lab` feature): events are also written as JSON lines for `nett-lab` to collect, and
+//! simulated clock error (design/prototype.md section 7). Official builds do not include this
+//! module.
 
 use std::fs::File;
 use std::io::Write as _;
-use std::path::PathBuf;
 
 use crate::clock::Clock;
 use crate::event::{Event, EventSink, log_event};
@@ -65,41 +64,5 @@ impl<C: Clock> Clock for LabClock<C> {
 
     fn trusted(&self) -> bool {
         self.trusted.unwrap_or_else(|| self.inner.trusted())
-    }
-}
-
-/// When the mesh process hands out the transport adapter's configuration ([`Event::TransportConfigChanged`],
-/// before the peers are configured), it is written to a local file (design/mesh.md section 5.3): in the
-/// prototype this stands in for the local interface between the mesh process and the transport adapter
-/// (ADR 0013).
-pub struct TransportConfigWriter<E> {
-    inner: E,
-    path: PathBuf,
-}
-
-impl<E> TransportConfigWriter<E> {
-    pub fn new(inner: E, path: PathBuf) -> Self {
-        Self { inner, path }
-    }
-}
-
-impl<E: EventSink> EventSink for TransportConfigWriter<E> {
-    fn emit(&mut self, event: Event) {
-        if let Event::TransportConfigChanged { config } = &event {
-            // Write a temporary file first, then rename: the transport adapter always reads a complete configuration
-            let tmp = self.path.with_extension("tmp");
-            let result = serde_json::to_vec_pretty(config)
-                .map_err(std::io::Error::other)
-                .and_then(|bytes| std::fs::write(&tmp, bytes))
-                .and_then(|()| std::fs::rename(&tmp, &self.path));
-            if let Err(error) = result {
-                tracing::warn!(
-                    %error,
-                    path = %self.path.display(),
-                    "writing the transport config failed"
-                );
-            }
-        }
-        self.inner.emit(event);
     }
 }

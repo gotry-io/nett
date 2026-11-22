@@ -1,5 +1,5 @@
 //! Lab build (`lab` feature): relay allocation is read from a local file (design/prototype.md
-//! section 3). In official builds the allocation is provided by the local mesh process
+//! section 3). In official builds the allocation is provided by the local mesh
 //! (design/mesh.md section 5.2).
 
 use std::net::SocketAddr;

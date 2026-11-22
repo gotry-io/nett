@@ -66,7 +66,7 @@ pub struct NodePolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<EdgeSources>,
     pub addresses: NodeAddresses,
-    /// Ports the mesh process forwards from the mesh addresses to the same port on `127.0.0.1`
+    /// Ports the mesh forwards from the mesh addresses to the same port on `127.0.0.1`
     /// (ADR 0028), in increasing order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub serve: Vec<ServedPort>,

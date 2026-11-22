@@ -1,4 +1,4 @@
-//! Runtime of the mesh process: one background thread owns the engine, advances path selection and
+//! Runtime of the mesh: one background thread owns the engine, advances path selection and
 //! performs switchovers; each socket has a receive thread that hands received probe messages to the
 //! background thread. The queue is bounded; when full, measurement messages are dropped (affecting only
 //! one measurement).
@@ -7,7 +7,7 @@
 //! their connections are forwarded on the async runtime handed to [`Runtime::spawn`].
 //!
 //! Sockets: the probe port on the mesh address (sends and receives only packets that pass through the
-//! mesh interface); probes to TLS relays are sent from the mesh process's own port to the transport's
+//! mesh interface); probes to TLS relays are sent from the mesh's own port to the transport's
 //! loopback ports; direct probes and probes of UDP relays are sent and received with the WireGuard port
 //! as the source port, provided by the data plane ([`DataPlane::wg_port_probes`]) and opened again
 //! when the WireGuard port changes.
@@ -70,7 +70,7 @@ enum Msg {
         Option<nett_core::transport::CertFingerprint>,
         SyncSender<Option<crate::helper::RelayAssignment>>,
     ),
-    /// The transport adapter fetches its configuration.
+    /// The TLS transport asks for its configuration.
     Transport(SyncSender<Option<nett_core::transport::TransportConfig>>),
     /// From nett-node over the coordination connection (design/status.md section 4.2).
     Coordination(Inbound),
@@ -490,7 +490,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 Ok(server) => {
                     self.dns = Some(server);
                     self.events.emit(Event::NamesReady);
-                    // macOS sends the suffix to this machine's own responder (the mesh process runs as
+                    // macOS sends the suffix to this machine's own responder (the mesh runs as
                     // root there); elsewhere the service setup does it
                     #[cfg(target_os = "macos")]
                     if let Some(IpAddr::V4(v4)) = addrs.iter().find(|a| a.is_ipv4()) {

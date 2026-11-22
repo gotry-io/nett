@@ -1,5 +1,5 @@
 //! `nett status`: the status of this machine's mesh (design/status.md section 7), and `nett reload`
-//! (section 4.1). Both go through the mesh process's local socket.
+//! (section 4.1). Both go through the mesh's local socket.
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -34,7 +34,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     }
     let raw = status::query_raw(&socket).map_err(|e| explain(e, &socket))?;
     let doc: StatusDoc = serde_json::from_value(raw.clone())
-        .context("the mesh service sent a status this version cannot read")?;
+        .context("the nett service sent a status this version cannot read")?;
     let now = Timestamp::now();
     match (peer, json) {
         (None, true) => outln!("{}", serde_json::to_string_pretty(&raw)?),
@@ -52,7 +52,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `nett reload`: asks the mesh process to re-read the desired state file and shows whether it was
+/// `nett reload`: asks the mesh to re-read the desired state file and shows whether it was
 /// accepted (design/status.md section 4.1).
 pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut socket = PathBuf::from(status::DEFAULT_SOCKET);
@@ -66,7 +66,7 @@ pub fn reload(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Asks the mesh process on `socket` to re-read the desired state file and returns the result to
+/// Asks the mesh on `socket` to re-read the desired state file and returns the result to
 /// show; an error when rejected. Shared by `nett reload` and macOS `nett install`.
 pub fn reload_at(socket: &std::path::Path) -> anyhow::Result<String> {
     let outcome = status::reload(socket).map_err(|e| explain(e, socket))?;
@@ -102,10 +102,10 @@ pub(crate) fn explain(e: QueryError, socket: &std::path::Path) -> anyhow::Error 
     match &e {
         QueryError::Connect { source, .. } => match source.kind() {
             ErrorKind::NotFound => {
-                anyhow::anyhow!("the mesh service is not running (no socket at {path})")
+                anyhow::anyhow!("the nett service is not running (no socket at {path})")
             }
             ErrorKind::ConnectionRefused => anyhow::anyhow!(
-                "the mesh service is not running ({path} does not accept connections)"
+                "the nett service is not running ({path} does not accept connections)"
             ),
             ErrorKind::PermissionDenied => {
                 anyhow::anyhow!("permission denied for {path}; run with sudo")

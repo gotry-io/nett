@@ -1,7 +1,7 @@
-//! The helper socket (design/status.md section 3.1): on Linux nett-relay and the transport adapter run
-//! as users systemd allocates and fetch their configuration from the mesh process here (ADR 0013).
-//! Each query is answered only for a process of the systemd unit it belongs to (and root), because
-//! the replies hold probe tokens.
+//! The helper socket (design/status.md section 3.1): on Linux nett-relay runs as a user systemd
+//! allocates and fetches its assignment from the nett daemon here (ADR 0013). It is answered only
+//! for a process of the relay's systemd unit (and root), because the replies hold probe tokens. The
+//! TLS transport in the daemon asks the same source directly.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::SocketAddr;
@@ -23,9 +23,8 @@ use crate::status::{
 pub const SOCKET_NAME: &str = "helpers.sock";
 /// How often the helpers ask again.
 pub const FETCH_INTERVAL: Duration = Duration::from_secs(5);
-/// The systemd units of nett-relay and the transport adapter: a caller is known by its unit.
+/// The systemd unit of nett-relay: a caller is known by its unit.
 pub const RELAY_UNIT: &str = "nett-relay.service";
-pub const TRANSPORT_UNIT: &str = "nett-transport.service";
 
 /// The helper socket next to the status socket at `status`.
 pub fn socket_path(status: &Path) -> PathBuf {
@@ -53,12 +52,12 @@ pub struct AssignedMember {
     pub token: ProbeToken,
 }
 
-/// The mesh process behind the helper socket.
+/// The mesh behind the helper socket and the TLS transport.
 pub trait HelperSource: Send + 'static {
     /// The current relay assignment (`None` inside when this machine is not a relay), recording the
     /// fingerprint nett-relay reported; `None` when the background thread is busy.
     fn relay(&self, fingerprint: Option<CertFingerprint>) -> Option<Option<RelayAssignment>>;
-    /// The transport adapter's configuration (`None` inside before the interface is ready); `None` when
+    /// The TLS transport's configuration (`None` inside before the interface is ready); `None` when
     /// the background thread is busy.
     fn transport(&self) -> Option<Option<TransportConfig>>;
 }
@@ -75,12 +74,6 @@ struct Request {
 struct RelayReply {
     v: u32,
     relay: Option<RelayAssignment>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct TransportReply {
-    v: u32,
-    transport: Option<TransportConfig>,
 }
 
 /// The thread that answers the helpers. Dropping it stops the thread and deletes the socket.
@@ -127,29 +120,19 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
             ),
         );
     }
-    let allowed = |unit: &str| uid == 0 || caller_unit(stream).as_deref() == Some(unit);
-    let busy = || reply_error(stream, "busy", "the mesh process is busy; try again");
+    let allowed = uid == 0 || caller_unit(stream).as_deref() == Some(RELAY_UNIT);
     let bytes = match request.query.as_str() {
-        "relay" if allowed(RELAY_UNIT) => {
+        "relay" if allowed => {
             let Some(relay) = source.relay(request.fingerprint) else {
-                return busy();
+                return reply_error(stream, "busy", "the nett daemon is busy; try again");
             };
             serde_json::to_vec(&RelayReply { v: VERSION, relay })
         }
-        "transport" if allowed(TRANSPORT_UNIT) => {
-            let Some(transport) = source.transport() else {
-                return busy();
-            };
-            serde_json::to_vec(&TransportReply {
-                v: VERSION,
-                transport,
-            })
-        }
-        "relay" | "transport" => {
+        "relay" => {
             return reply_error(
                 stream,
                 "permission_denied",
-                "this query is answered only for its own service",
+                "this query is answered only for the relay's service",
             );
         }
         other => {
@@ -180,7 +163,7 @@ fn caller_unit(stream: &UnixStream) -> Option<String> {
         .flatten()
 }
 
-/// Only Linux runs nett-relay and the transport adapter as services.
+/// Only Linux runs nett-relay as a service.
 #[cfg(not(target_os = "linux"))]
 fn caller_unit(_stream: &UnixStream) -> Option<String> {
     None
@@ -219,15 +202,6 @@ pub fn fetch_relay(
     let reply: RelayReply =
         serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
     Ok(reply.relay)
-}
-
-/// The transport adapter: fetches its configuration.
-pub fn fetch_transport(path: &Path) -> Result<Option<TransportConfig>, QueryError> {
-    let request = serde_json::json!({"v": VERSION, "query": "transport"});
-    let value = send(path, &request, QUERY_TIMEOUT)?;
-    let reply: TransportReply =
-        serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
-    Ok(reply.transport)
 }
 
 #[cfg(test)]
@@ -291,7 +265,6 @@ mod tests {
                 assert_eq!(me, 0);
                 assert_eq!(relay.expect("assigned").port, 41822);
                 assert_eq!(*fake.seen.lock().expect("lock"), [Some(fingerprint)]);
-                assert_eq!(fetch_transport(&path).expect("transport"), None);
             }
             Err(QueryError::Refused { code, .. }) => {
                 assert_ne!(me, 0);
@@ -312,10 +285,10 @@ mod tests {
             system_unit("0::/system.slice/nett-relay.service\n"),
             Some(RELAY_UNIT)
         );
-        let hybrid = "12:pids:/system.slice/nett-transport.service\n\
-                      1:name=systemd:/system.slice/nett-transport.service\n\
-                      0::/system.slice/nett-transport.service\n";
-        assert_eq!(system_unit(hybrid), Some(TRANSPORT_UNIT));
+        let hybrid = "12:pids:/system.slice/nett-relay.service\n\
+                      1:name=systemd:/system.slice/nett-relay.service\n\
+                      0::/system.slice/nett-relay.service\n";
+        assert_eq!(system_unit(hybrid), Some(RELAY_UNIT));
         for other in [
             "0::/user.slice/user-1000.slice/user@1000.service/app.slice/nett-relay.service\n",
             "0::/system.slice/nett-relay.service/extra\n",

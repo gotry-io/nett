@@ -95,7 +95,7 @@ pub struct MachineStatus {
     pub result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// The mesh process's local status (design/status.md section 6), and the time it was reported
+    /// The mesh's local status (design/status.md section 6), and the time it was reported
     /// (Unix seconds).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<serde_json::Value>,

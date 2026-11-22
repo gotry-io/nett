@@ -1,8 +1,9 @@
 //! Service installation on macOS (design/release.md sections 4 and 8, hub.md section 7): `sudo nett
 //! install` generates the keys in a root-only directory, places a copy of the program, writes the
-//! launchd configuration and starts the mesh service; without a Hub, it finds the desired state for
-//! this machine in the site directory of the user who ran sudo; with a Hub (a token, or an existing
-//! Hub configuration) it also starts nett-node, which receives the desired state from the Hub.
+//! launchd configuration and starts the service; without a Hub, it finds the desired state for this
+//! machine in the site directory of the user who ran sudo; with a Hub (a token, or an existing Hub
+//! configuration) the service also runs nett-node, which receives the desired state from the Hub
+//! (ADR 0013).
 //! `sudo nett uninstall` removes everything but the identity, and `sudo nett leave` the identity.
 //! The program `sudo nett install` runs from may lie where ordinary users can write, so the root
 //! service only runs this copy.
@@ -16,7 +17,7 @@ use crate::install::{
     InstallArgs, apply_token, copy_self, ensure_dir, replace_if_changed, require_root,
 };
 
-use nett_node::launchd::{self, DESIRED, MESH, NODE, Service, plist};
+use nett_node::launchd::{self, DAEMON, Service, plist};
 use nett_node::platform::macos::{COMMAND, DIR, PROGRAM as BINARY};
 
 fn loaded(service: &Service) -> anyhow::Result<bool> {
@@ -76,13 +77,9 @@ fn ensure_running(
 pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     require_root()?;
     ensure_dir(DIR, 0o700)?;
-    let keys = crate::mesh::node_keys(Path::new(DIR))?;
-    let token = apply_token(
-        DIR,
-        nett_mesh::store::DEFAULT_STATE_DIR,
-        args.token.as_deref(),
-        &keys.0,
-    )?;
+    let keys = crate::daemon::node_keys(Path::new(DIR))?;
+    let desired = Path::new(DIR).join(crate::daemon::DESIRED_FILE);
+    let token = apply_token(DIR, args.token.as_deref(), &keys.0)?;
     let hub_changed = token.hub_changed;
     let linked = HubConfig::load(Path::new(DIR))
         .map_err(anyhow::Error::msg)?
@@ -114,18 +111,16 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         (None, true) => None,
     };
     let desired_changed = match imported {
-        Some(bytes) => replace_if_changed(Path::new(DESIRED), &bytes, 0o600)?,
+        Some(bytes) => replace_if_changed(&desired, &bytes, 0o600)?,
         None => false,
     };
     let binary_changed = copy_self(BINARY)?;
-    let mesh_plist_changed =
-        replace_if_changed(Path::new(MESH.plist), plist(&MESH).as_bytes(), 0o644)?;
-    let node_plist_changed =
-        linked && replace_if_changed(Path::new(NODE.plist), plist(&NODE).as_bytes(), 0o644)?;
+    let plist_changed =
+        replace_if_changed(Path::new(DAEMON.plist), plist(&DAEMON).as_bytes(), 0o644)?;
 
     // The public key line is only needed when this machine has not been added to the site yet
-    if !Path::new(DESIRED).exists() {
-        crate::mesh::print_keys(Path::new(DIR), keys);
+    if !desired.exists() {
+        crate::daemon::print_keys(Path::new(DIR), keys);
         let site = site.map_or_else(|| "~/.config/nett".to_owned(), |s| s.display().to_string());
         outln!("Installed to {DIR}. Not started: {site} has no desired state for this machine.");
         outln!(
@@ -137,7 +132,9 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         return Ok(());
     }
     let mut messages = Vec::new();
-    match ensure_running(&MESH, mesh_plist_changed, binary_changed)? {
+    // With a new Hub configuration, the service starts nett-node afresh
+    let restart = binary_changed || (linked && hub_changed);
+    match ensure_running(&DAEMON, plist_changed, restart)? {
         Some(m) => messages.push(m),
         None if desired_changed => {
             // Only the desired state changed: re-read through the local interface, without restart
@@ -150,26 +147,13 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         }
         None => {}
     }
-    if linked
-        && let Some(m) = ensure_running(&NODE, node_plist_changed, binary_changed || hub_changed)?
-    {
-        messages.push(m);
-    }
-    // The mesh service carries the TLS transport, and the services log to the system log only
-    if launchd::remove_transport_service().map_err(anyhow::Error::msg)? {
-        messages.push(
-            "Removed the transport service of nett 0.3.11 and its account _nett-transport."
-                .to_owned(),
-        );
-    }
-    launchd::remove_old_logs().map_err(anyhow::Error::msg)?;
     if messages.is_empty() && !desired_changed {
-        messages.push("The services are running. Nothing changed.".to_owned());
+        messages.push("The service is running. Nothing changed.".to_owned());
     }
     for m in messages {
         outln!("{m}");
     }
-    if mesh_plist_changed || node_plist_changed || binary_changed {
+    if plist_changed || binary_changed {
         outln!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
         if linked {
             outln!("Run `sudo nett install` again after upgrading nett.");
@@ -249,13 +233,13 @@ pub fn uninstall() -> anyhow::Result<()> {
 }
 
 /// `sudo nett leave` (design/hub.md section 7): tells the Hub, removes the services and the
-/// identity. The utun interface belongs to the mesh process and disappears when it exits; the `nett`
+/// identity. The utun interface belongs to the mesh and disappears when it exits; the `nett`
 /// command stays.
 pub fn leave() -> anyhow::Result<()> {
     require_root()?;
     crate::install::tell_hub(DIR)?;
     remove_installation()?;
-    crate::install::forget(DIR, nett_mesh::store::DEFAULT_STATE_DIR)?;
+    crate::install::forget(DIR)?;
     crate::install::remove_if_empty(DIR)?;
     outln!(
         "Left the site: removed the services, deleted the keys, the desired state, the trust store \
@@ -264,18 +248,14 @@ pub fn leave() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Everything `sudo nett install` and the services placed, except the identity and the command:
-/// the services and their copy of the program, the files of the running mesh, the upgrade records,
-/// and what earlier releases placed.
+/// Everything `sudo nett install` and the service placed, except the identity and the command: the
+/// service and its copy of the program, the files of the running mesh and the upgrade records.
 fn remove_installation() -> anyhow::Result<()> {
-    launchd::remove_transport_service().map_err(anyhow::Error::msg)?;
-    stop(&NODE)?;
-    stop(&MESH)?;
+    stop(&DAEMON)?;
     let previous = Path::new(BINARY).with_file_name("nett.previous");
     let new = Path::new(BINARY).with_file_name("nett.new");
     for path in [
-        NODE.plist,
-        MESH.plist,
+        DAEMON.plist,
         BINARY,
         &previous.to_string_lossy(),
         &new.to_string_lossy(),
@@ -287,8 +267,7 @@ fn remove_installation() -> anyhow::Result<()> {
     if let Some(run) = Path::new(nett_mesh::status::DEFAULT_SOCKET).parent() {
         crate::install::remove_tree(&run.to_string_lossy())?;
     }
-    crate::install::forget_upgrades(DIR)?;
-    launchd::remove_old_logs().map_err(anyhow::Error::msg)
+    crate::install::forget_upgrades(DIR)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! TLS for connecting to the Hub (hard rule 11): when the Hub has a public certificate it is
 //! verified against the system root certificates; when the Hub is self-signed it is verified
-//! against the certificate fingerprint in the Hub configuration (reusing the transport adapter's
+//! against the certificate fingerprint in the Hub configuration (reusing the TLS transport's
 //! implementation).
 
 use std::sync::Arc;

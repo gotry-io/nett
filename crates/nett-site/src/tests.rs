@@ -88,7 +88,7 @@ fn signed(site: &SiteDir, state: &mut State) {
     .expect("signed");
 }
 
-/// A machine's desired state is accepted by the mesh process, and all its members can be verified.
+/// A machine's desired state is accepted by the mesh, and all its members can be verified.
 fn admitted(state: &State, n: &str) -> MemberSet {
     let doc = desired(state, &name(n)).expect("composed").expect("signed");
     let desired = DesiredMesh::from_doc(doc).expect("valid");
@@ -507,7 +507,7 @@ fn inconsistent_machines_are_refused() {
 }
 
 /// Advertising again after all advertised routes were removed: the version keeps increasing. The
-/// mesh process remembers the highest version it has seen and only accepts higher ones
+/// mesh remembers the highest version it has seen and only accepts higher ones
 /// (design/mesh.md section 4.2).
 #[test]
 fn advertised_routes_keep_counting_after_they_are_removed() {
@@ -1320,7 +1320,7 @@ fn device_site(dir: &Path) -> (SiteDir, State) {
     (site, state)
 }
 
-/// The devices a machine's desired state carries, as the mesh process verifies them.
+/// The devices a machine's desired state carries, as the mesh verifies them.
 fn devices_of(state: &State, n: &str) -> nett_mesh::devices::Devices {
     let doc = desired(state, &name(n)).expect("composed").expect("signed");
     let desired = DesiredMesh::from_doc(doc).expect("valid");

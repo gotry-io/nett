@@ -119,7 +119,7 @@ pub struct Error {
     pub related_id: u64,
 }
 /// One partition of the desired state. The content of the mesh partition is the desired state file
-/// of local signing (JSON, protocol.md section 6), which nett-node writes to the mesh process as is;
+/// of local signing (JSON, protocol.md section 6), which nett-node writes for the mesh as is;
 /// the hub_endpoints partition is a JSON array of strings
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct Partition {
@@ -166,7 +166,7 @@ pub struct Inventory {
     #[prost(string, repeated, tag = "3")]
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
-/// node → Hub: the mesh process's local status (JSON in design/status.md section 6), displayed by
+/// node → Hub: the mesh's local status (JSON in design/status.md section 6), displayed by
 /// nett site status
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LinkReport {
@@ -175,7 +175,7 @@ pub struct LinkReport {
 }
 /// Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
 /// down (design/mesh.md section 8.4). node → Hub: node_id is the peer it is for; Hub → node: the
-/// peer it came from. The message is authenticated end to end by the two mesh processes and opaque
+/// peer it came from. The message is authenticated end to end by the two meshes and opaque
 /// to nett-node and the Hub, which passes it on only between members the site connects
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct PathSwitch {

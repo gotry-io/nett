@@ -18,13 +18,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{DesiredMeshDoc, MAX_DESIRED_BYTES, read_bounded};
 
-/// Default location of the trust store (design/mesh.md section 4.2). On Linux it is created by the
-/// systemd unit's `StateDirectory`; on macOS it is in the root-only directory created by
-/// `sudo nett install`. Container images put it in a mounted directory with `--state`.
-#[cfg(target_os = "macos")]
-pub const DEFAULT_STATE_DIR: &str = "/Library/Application Support/nett/state";
-#[cfg(not(target_os = "macos"))]
-pub const DEFAULT_STATE_DIR: &str = "/var/lib/nett";
+/// The trust store's directory inside nett's directory (design/mesh.md section 4.2,
+/// design/release.md section 8).
+pub const STATE_DIR: &str = "state";
 
 pub const TRUST_FILE: &str = "trust.json";
 pub const ACCEPTED_FILE: &str = "accepted.json";
@@ -132,7 +128,7 @@ impl Backend for DirBackend {
             .mode(0o700)
             .create(&self.dir)?;
         let tmp = self.dir.join(format!(".{name}.tmp"));
-        // The temporary file name is fixed: only the mesh process writes this directory, and symlinks are not
+        // The temporary file name is fixed: only the mesh writes this directory, and symlinks are not
         // followed
         match std::fs::remove_file(&tmp) {
             Ok(()) => {}

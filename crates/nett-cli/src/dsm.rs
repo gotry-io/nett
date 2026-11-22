@@ -73,7 +73,7 @@ impl TunHost for Kernel {
     }
 }
 
-/// Makes sure the TUN device opens before the mesh service starts: loads the driver when it does not,
+/// Makes sure the TUN device opens before the nett service starts: loads the driver when it does not,
 /// and creates the device when loading the driver did not (the kernel normally does). Returns a
 /// sentence for the user when it loaded the driver.
 pub fn prepare_tun() -> anyhow::Result<Option<String>> {
@@ -92,7 +92,7 @@ fn prepare_tun_on(host: &impl TunHost) -> anyhow::Result<Option<String>> {
     }
     if !host.opens() {
         bail!(
-            "{TUN_DEVICE} does not open after loading {TUN_MODULE}; the mesh service needs it for \
+            "{TUN_DEVICE} does not open after loading {TUN_MODULE}; the nett service needs it for \
              its interface, so nothing was started"
         );
     }
@@ -230,7 +230,7 @@ mod tests {
         }
     }
 
-    /// At boot on DSM the TUN device came 32 seconds after the mesh service: the driver is loaded
+    /// At boot on DSM the TUN device came 32 seconds after the nett service: the driver is loaded
     /// before the services start, and nothing is done where TUN already works
     #[test]
     fn tun_is_prepared_before_the_services_start() {
