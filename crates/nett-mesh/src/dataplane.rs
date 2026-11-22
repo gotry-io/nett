@@ -2,7 +2,7 @@
 //! platform's backend (ADR 0018).
 //! The core logic operates on the data plane only through this interface; tests use a stand-in.
 
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::time::SystemTime;
 
 use nett_trust::keys::X25519PublicKey;
@@ -204,6 +204,10 @@ pub trait DataPlane: Send {
     /// A socket bound to this machine's mesh address that sends and receives only through the mesh interface
     /// (in-tunnel probes, design/mesh.md section 7).
     fn bind_tunnel(&self, addr: SocketAddr) -> std::io::Result<UdpSocket>;
+
+    /// A TCP listener on this machine's mesh address that accepts only connections arriving through
+    /// the mesh interface where the platform can tell (a port it serves, design/mesh.md section 12.1).
+    fn listen_tunnel(&self, addr: SocketAddr) -> std::io::Result<TcpListener>;
 
     /// A dual-stack socket toward the underlying network (probes to TLS relays through the transport's
     /// loopback ports). On macOS it binds the physical interface carrying the default route and does not go

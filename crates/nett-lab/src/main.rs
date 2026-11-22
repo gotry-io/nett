@@ -63,6 +63,7 @@ const USAGE: &str = "usage:
   nett-lab run dial-only-switch --topology <file.toml> --nett <path/to/nett> --out <dir> [--repeat N]
   nett-lab run dial-only-outage --topology <file.toml> --nett <path/to/nett> --out <dir> [--clock-skew MS] [--repeat N] [--with-tailscale]
   nett-lab run access --topology access.toml --nett <path/to/nett> --out <dir>
+  nett-lab run serve --topology serve.toml --nett <path/to/nett> --out <dir>
   nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir> [--soak SECONDS]
       (nett-hub next to nett; --soak then keeps changing and pinging, samples memory into
       soak.csv, rests 10 minutes and checks that memory stayed flat)
@@ -211,6 +212,7 @@ fn run() -> anyhow::Result<bool> {
                 }
                 "wgport" => scenario::wg_port(&topology, &nett()?, &out)?,
                 "access" => scenario::access(&topology, &nett()?, &out)?,
+                "serve" => scenario::serve(&topology, &nett()?, &out)?,
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
                 "devices" => scenario::devices(&topology, &nett()?, &out)?,

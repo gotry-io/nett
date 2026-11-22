@@ -369,6 +369,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             sink,
             clock,
             nett_mesh::dns::PORT,
+            runtime.handle().clone(),
         ),
         None => Runtime::spawn(
             Engine::new(node_id, key, UserspaceDataPlane::new(LinuxTun::open()?))
@@ -376,6 +377,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             sink,
             clock,
             nett_mesh::dns::PORT,
+            runtime.handle().clone(),
         ),
     };
     #[cfg(target_os = "macos")]
@@ -384,6 +386,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         sink,
         clock,
         nett_mesh::dns::PORT,
+        runtime.handle().clone(),
     );
     let worker = worker.context("starting the mesh worker thread")?;
     // The local interface is only for people and nett-node: if the socket cannot be created, record

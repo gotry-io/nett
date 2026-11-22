@@ -21,6 +21,8 @@ pub const MAX_RULE_PORTS: usize = 64;
 pub const MAX_EDGE_CONTAINERS: usize = 16;
 /// Upper limit on the number of prefixes a node advertises.
 pub const MAX_ADVERTISED_ROUTES: usize = 64;
+/// Upper limit on the number of ports a node serves (ADR 0028).
+pub const MAX_SERVED_PORTS: usize = 16;
 
 /// The document form of a signed payload. The console (and lab tools) generate it, and the verifier
 /// parses it.
@@ -64,7 +66,42 @@ pub struct NodePolicy {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<EdgeSources>,
     pub addresses: NodeAddresses,
+    /// Ports the mesh process forwards from the mesh addresses to the same port on `127.0.0.1`
+    /// (ADR 0028), in increasing order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve: Vec<ServedPort>,
     pub enrollment_public_key: Ed25519PublicKey,
+}
+
+/// A port a node serves to its services on loopback (ADR 0028).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServedPort {
+    pub protocol: ServedProtocol,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServedProtocol {
+    Tcp,
+}
+
+impl ServedPort {
+    pub fn tcp(port: u16) -> Self {
+        Self {
+            protocol: ServedProtocol::Tcp,
+            port,
+        }
+    }
+}
+
+impl std::fmt::Display for ServedPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.protocol {
+            ServedProtocol::Tcp => write!(f, "{}/tcp", self.port),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -192,6 +229,11 @@ pub enum PayloadError {
          addresses together, with unicast edge addresses that differ from the mesh addresses"
     )]
     Edge(NodeId),
+    #[error(
+        "payload: node policy for {0} must serve between 1 and 16 ports, each non-zero, once and \
+         in increasing order"
+    )]
+    Serve(NodeId),
     #[error("payload: access rule set: {0}")]
     AccessRules(&'static str),
     #[error("payload: carries more than one access rule set")]
@@ -370,6 +412,13 @@ impl NodePolicy {
         }
         if !self.addresses.mesh.is_unicast() {
             return Err(PayloadError::Address(self.node_id.clone()));
+        }
+        // An empty list is written as no field at all, which the round trip already enforces
+        let serve_ok = self.serve.len() <= MAX_SERVED_PORTS
+            && self.serve.iter().all(|p| p.port != 0)
+            && self.serve.windows(2).all(|w| w[0] < w[1]);
+        if !serve_ok {
+            return Err(PayloadError::Serve(self.node_id.clone()));
         }
         let edge_ok = match (self.has_role(Role::Edge), &self.edge, &self.addresses.edge) {
             (false, None, None) => true,
@@ -642,6 +691,60 @@ pub(crate) mod tests {
         ] {
             let err = Payload::parse(&bytes(&payload_value(vec![v.clone()]))).expect_err("edge");
             assert!(matches!(err, PayloadError::Edge(_)), "{v}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn parses_served_ports() {
+        let mut v = policy_value();
+        v["serve"] = json!([
+            { "protocol": "tcp", "port": 3000 },
+            { "protocol": "tcp", "port": 8080 },
+        ]);
+        let payload = payload_value(vec![v]);
+        let p = Payload::parse(&bytes(&payload)).expect("valid");
+        let node: NodeId = NODE_A.parse().expect("id");
+        let (_, policy) = p.node_policy(&node).expect("policy present");
+        assert_eq!(
+            policy.serve,
+            vec![ServedPort::tcp(3000), ServedPort::tcp(8080)]
+        );
+        assert_eq!(policy.serve[1].to_string(), "8080/tcp");
+        assert_eq!(p.doc().to_canonical().expect("canonical"), bytes(&payload));
+    }
+
+    #[test]
+    fn rejects_bad_served_ports() {
+        let with = |ports: Value| {
+            let mut v = policy_value();
+            v["serve"] = ports;
+            Payload::parse(&bytes(&payload_value(vec![v])))
+        };
+        let tcp = |port: u32| json!({ "protocol": "tcp", "port": port });
+        let many: Vec<Value> = (1..=17).map(tcp).collect();
+        for ports in [
+            json!([tcp(0)]),
+            json!([tcp(8080), tcp(8080)]),
+            json!([tcp(8080), tcp(3000)]),
+            json!(many),
+        ] {
+            let err = with(ports.clone()).expect_err("bad ports");
+            assert!(matches!(err, PayloadError::Serve(_)), "{ports}: {err:?}");
+        }
+        // No ports is written as no field, and only TCP is served
+        assert_eq!(
+            with(json!([])).err(),
+            Some(PayloadError::NonCanonicalFields)
+        );
+        for ports in [
+            json!([{ "protocol": "udp", "port": 53 }]),
+            json!([{ "protocol": "tcp", "port": 70000 }]),
+            json!([{ "protocol": "tcp", "port": 22, "to": "127.0.0.1" }]),
+        ] {
+            assert!(
+                matches!(with(ports.clone()), Err(PayloadError::Document(_))),
+                "{ports}"
+            );
         }
     }
 

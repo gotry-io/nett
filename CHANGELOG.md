@@ -4,6 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A machine can serve a service that listens only on `127.0.0.1` to the mesh, as `tailscale serve`
+  does for TCP: `nett site serve <machine> 8080/tcp` signs the port into the machine's node policy,
+  and its mesh service forwards connections that arrive on its mesh address to the same port on
+  `127.0.0.1`. Access rules decide who reaches the port, as for any other; the service sees every
+  such connection come from `127.0.0.1`, so serve only services that trust loopback no more than
+  the mesh. `nett status` shows the served ports. Every machine and the Hub need this release
+  before a port is served; with a Hub, `nett site serve` checks.
+
 ## [0.7.1] - 2026-11-21
 
 - `nett` and `nett-hub` end quietly when the reader of their output goes away, such as

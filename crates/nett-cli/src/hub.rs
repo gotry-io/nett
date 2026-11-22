@@ -33,6 +33,9 @@ pub const SITE_HUB_FILE: &str = "hub.json";
 /// The release that adds devices: the Hub and every machine run it before the first gateway role or
 /// device is signed, since older ones reject what they do not recognize (design/devices.md section 9).
 pub const DEVICES_SINCE: &str = "0.4.0";
+/// The release that adds served ports (ADR 0028): a member before it rejects a node policy that
+/// serves, and drops that machine.
+pub const SERVE_SINCE: &str = "0.8.0";
 /// The release that adds upgrade approvals: a Hub before it refuses a site that carries them
 /// (design/release.md section 7, ADR 0027).
 pub const UPGRADES_SINCE: &str = "0.6.0";
@@ -266,12 +269,13 @@ pub fn upgrade_plan(hub: &SiteHub) -> anyhow::Result<UpgradePlan> {
     })
 }
 
-/// Refuses while the Hub or a machine runs a release older than [`DEVICES_SINCE`], or than this
-/// signing tool when it is older still: a machine on the same release as the tool knows everything
-/// it signs. A machine that never connected joins with the current release.
-pub fn require_devices(hub: &SiteHub) -> anyhow::Result<()> {
+/// Refuses while the Hub or a machine runs a release older than `since` ([`DEVICES_SINCE`],
+/// [`SERVE_SINCE`]), or than this signing tool when it is older still: a machine on the same
+/// release as the tool knows everything it signs. A machine that never connected joins with the
+/// current release. `what` names the new content, as in "devices need".
+pub fn require_release(hub: &SiteHub, since: &str, what: &str) -> anyhow::Result<()> {
     use nett_trust::release::Version;
-    let since: Version = DEVICES_SINCE.parse().context("DEVICES_SINCE")?;
+    let since: Version = since.parse().context("the release that adds it")?;
     let own: Version = env!("CARGO_PKG_VERSION")
         .parse()
         .context("this tool's version")?;
@@ -292,7 +296,7 @@ pub fn require_devices(hub: &SiteHub) -> anyhow::Result<()> {
     }
     if !behind.is_empty() {
         bail!(
-            "devices need nett {since} or later on the Hub and every machine, which otherwise \
+            "{what} nett {since} or later on the Hub and every machine, which otherwise \
              reject the new signed content; still older: {}",
             behind.join(", ")
         );

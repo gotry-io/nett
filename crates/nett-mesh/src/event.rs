@@ -80,6 +80,19 @@ pub enum Event {
     NamesUnavailable {
         reason: String,
     },
+    /// A port this machine serves is forwarded to `127.0.0.1` (design/mesh.md section 12.1).
+    Serving {
+        port: u16,
+    },
+    /// A port this machine serves could not be bound; tried again like the DNS responder.
+    ServeUnavailable {
+        port: u16,
+        reason: String,
+    },
+    /// The node policy no longer serves the port: its listener and connections are closed.
+    ServeStopped {
+        port: u16,
+    },
     /// A data plane operation failed; what it left closed stays closed. When it failed while a desired
     /// state was applied, that desired state is applied again after a wait that doubles up to 30 seconds
     /// (design/mesh.md section 15).
@@ -214,6 +227,11 @@ pub fn log_event(event: &Event) {
         Event::NamesUnavailable { reason } => {
             tracing::warn!(%reason, "names under {} do not resolve", crate::dns::SUFFIX)
         }
+        Event::Serving { port } => tracing::info!(port, "serving the port to 127.0.0.1"),
+        Event::ServeUnavailable { port, reason } => {
+            tracing::warn!(port, %reason, "a served port is not forwarded")
+        }
+        Event::ServeStopped { port } => tracing::info!(port, "stopped serving the port"),
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
         Event::DataPlaneRecovered => tracing::info!("data plane update succeeded on retry"),
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),

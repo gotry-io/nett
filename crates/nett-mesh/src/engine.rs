@@ -306,6 +306,14 @@ impl<D: DataPlane> Engine<D> {
         self.interface.as_ref()
     }
 
+    /// The ports this machine serves to its services on loopback, from its own admitted node policy
+    /// (design/mesh.md section 12.1); none while it is not admitted.
+    pub fn served(&self) -> &[nett_trust::payload::ServedPort] {
+        self.members
+            .get(&self.node_id)
+            .map_or(&[], |m| m.serve.as_slice())
+    }
+
     /// Applies a desired state. When the whole is rejected (not meant for this machine, or the trust anchors
     /// differ from the ones pinned on this machine) returns the reason and keeps using the state already
     /// in effect; after the whole is accepted it is written to the trust store.
@@ -1059,6 +1067,7 @@ impl<D: DataPlane> Engine<D> {
             mesh: me.map(mesh_addrs).unwrap_or_default(),
             edge: me.map(edge_addrs).unwrap_or_default(),
             routes: self.routes.of(&self.node_id).to_vec(),
+            serve: self.served().iter().map(|p| p.port).collect(),
             reachability: self.reachability,
             dataplane: self.dataplane.kind(),
             listen_port: self.interface.as_ref().map(|i| i.listen_port),
@@ -1763,6 +1772,45 @@ mod tests {
             .expect("accepted");
         assert_eq!(e.dataplane.filter, None);
         assert_eq!(e.dataplane.peers, Some(vec![]));
+    }
+
+    #[test]
+    fn a_node_serves_the_ports_of_its_own_admitted_policy_only() {
+        use nett_trust::payload::ServedPort;
+        let mesh = Mesh::new(&[1, 2]);
+        let mut serving = mesh.policy(1, 1);
+        serving.serve = vec![ServedPort::tcp(8080)];
+        let members = vec![mesh.material_for(serving, mesh_key(1)), mesh.material(2, 1)];
+        let mut own = engine(1);
+        own.apply(
+            &validated(mesh.desired(1, members.clone())),
+            &mut VecSink::default(),
+        )
+        .expect("accepted");
+        assert_eq!(own.served(), [ServedPort::tcp(8080)]);
+        assert_eq!(
+            own.status(Instant::now(), SystemTime::now(), Timestamp::now())
+                .node
+                .serve,
+            [8080]
+        );
+        // Another member's served ports are its own business
+        let mut other = engine(2);
+        other
+            .apply(
+                &validated(mesh.desired(2, members)),
+                &mut VecSink::default(),
+            )
+            .expect("accepted");
+        assert!(other.served().is_empty());
+        // A new policy version without the port stops serving it
+        let members = vec![mesh.material(1, 2), mesh.material(2, 1)];
+        own.apply(
+            &validated(mesh.desired(1, members)),
+            &mut VecSink::default(),
+        )
+        .expect("accepted");
+        assert!(own.served().is_empty());
     }
 
     #[test]

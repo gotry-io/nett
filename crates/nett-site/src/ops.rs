@@ -10,7 +10,7 @@ use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_mesh::config::Reachability;
 use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
-use nett_trust::payload::{MeshAddresses, PortRange};
+use nett_trust::payload::{MeshAddresses, PortRange, ServedPort};
 
 use crate::SiteError;
 use crate::state::{
@@ -133,6 +133,18 @@ impl State {
 
     pub fn set_routes(&mut self, name: &NodeName, routes: Vec<IpPrefix>) -> Result<(), SiteError> {
         self.attempt(|s| s.set_routes_in(name, routes))
+    }
+
+    /// Sets the ports a machine serves to its services on `127.0.0.1` (ADR 0028); an empty list
+    /// removes them.
+    pub fn set_serve(&mut self, name: &NodeName, ports: Vec<ServedPort>) -> Result<(), SiteError> {
+        self.attempt(|s| {
+            let mut ports = ports;
+            ports.sort_unstable();
+            ports.dedup();
+            s.machine_mut(name)?.serve = ports;
+            s.check()
+        })
     }
 
     pub fn allow(
@@ -307,6 +319,7 @@ impl State {
                 relay: None,
                 edge: None,
                 routes: Vec::new(),
+                serve: Vec::new(),
                 policy: None,
                 routes_signed: None,
                 routes_version: 0,

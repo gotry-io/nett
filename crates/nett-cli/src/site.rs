@@ -28,7 +28,7 @@ use nett_site::state::{
 };
 use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
-use nett_trust::payload::{PortRange, Protocol};
+use nett_trust::payload::{PortRange, Protocol, ServedPort};
 use nett_trust::signing::EnrollmentKeyPair;
 
 use crate::hub::SiteHub;
@@ -58,6 +58,10 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        without: sign its node policy again, rewrite its desired state
   edge <name> <prefix>... | --none     the Edge containers on this machine
   routes <name> <prefix>... | --none   the routes this machine advertises
+  serve <name> <port>/tcp... | --none  forward these ports on its mesh address to the same port
+                                       on 127.0.0.1, for services that listen only there; access
+                                       rules decide who reaches them, and the service sees every
+                                       connection come from 127.0.0.1
   upgrade [<name>...] [--hub]          approve the release the Hub holds: for the Hub and every
                                        machine, for the machines named, or with --hub for the Hub;
                                        nothing upgrades before it is approved
@@ -290,6 +294,14 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
             let routes = list_or_none(prefixes, none, "routes")?.unwrap_or_default();
             Box::new(move |s| Ok(s.set_routes(&name, routes)?))
         }
+        ["serve", name, ports @ ..] => {
+            let name = machine(name)?;
+            let ports = served_ports(ports, none)?;
+            if !ports.is_empty() {
+                serve_ready(&dir)?;
+            }
+            Box::new(move |s| Ok(s.set_serve(&name, ports)?))
+        }
         ["allow", from, to, rest @ ..] if rest.len() <= 1 => {
             let split = |s: &str| s.split(',').map(str::to_owned).collect::<Vec<_>>();
             let (from, to) = (split(from), split(to));
@@ -381,17 +393,39 @@ fn devices_ready(dir: &Path) -> anyhow::Result<()> {
     if !state.devices.is_empty() {
         return Ok(());
     }
+    release_ready(dir, crate::hub::DEVICES_SINCE, "devices need")
+}
+
+/// Before the site's first served port: the Hub and every machine run a release that knows
+/// `serve`, since every member verifies the serving machine's node policy (design/site.md section
+/// 5.3).
+fn serve_ready(dir: &Path) -> anyhow::Result<()> {
+    let state = SiteDir::open(dir)?.load()?;
+    if state.machines.values().any(|m| !m.serve.is_empty()) {
+        return Ok(());
+    }
+    release_ready(dir, crate::hub::SERVE_SINCE, "served ports need")
+}
+
+fn release_ready(dir: &Path, since: &str, what: &str) -> anyhow::Result<()> {
     match SiteHub::load(dir)? {
-        Some(hub) => crate::hub::require_devices(&hub),
+        Some(hub) => crate::hub::require_release(&hub, since, what),
         None => {
             outln!(
-                "Every machine needs nett {} or later for devices; older ones reject the new \
-                 signed content.",
-                crate::hub::DEVICES_SINCE
+                "{} nett {since} or later on every machine; older ones reject the new signed \
+                 content.",
+                capitalized(what)
             );
             Ok(())
         }
     }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
 }
 
 /// `nett site device add` (design/devices.md section 3): the key pair is generated here, the
@@ -924,6 +958,25 @@ fn rules(dir: &Path, json: bool) -> anyhow::Result<()> {
 }
 
 /// `22/tcp`, `3425/tcp,3430/tcp`, `60000-61000/udp`.
+/// `nett site serve <machine> <port>/tcp... | --none` (design/site.md section 5.3).
+fn served_ports(items: &[&str], none: bool) -> anyhow::Result<Vec<ServedPort>> {
+    match (items.is_empty(), none) {
+        (true, true) => Ok(Vec::new()),
+        (false, false) => items
+            .iter()
+            .map(|item| {
+                let port = item.strip_suffix("/tcp").with_context(|| {
+                    format!("`{item}`: serve takes TCP ports, such as 8080/tcp")
+                })?;
+                let port: u16 = port.parse().with_context(|| format!("port `{item}`"))?;
+                ensure!(port != 0, "port `{item}`: need 1 or more");
+                Ok(ServedPort::tcp(port))
+            })
+            .collect(),
+        _ => bail!("nett site serve takes ports such as 8080/tcp, or --none to remove them"),
+    }
+}
+
 fn parse_ports(s: &str) -> anyhow::Result<Vec<PortRange>> {
     s.split(',').map(parse_port_range).collect()
 }
@@ -1323,6 +1376,26 @@ mod tests {
             check_desired_for(&bytes, &mac_key).expect("mine"),
             state.machines[&name("mac")].node_id
         );
+        // Serve TCP ports to loopback: written in order into the node policy, removed with --none
+        let policy = |s: &State| s.machines[&name("mac")].policy.as_ref().map(|p| p.version);
+        let unserved = policy(&state);
+        site(&dir, &["serve", "mac", "8080/tcp", "3000/tcp"]).expect("serve");
+        let state = SiteDir::open(&dir).expect("open").load().expect("load");
+        assert_eq!(
+            state.machines[&name("mac")].serve,
+            [ServedPort::tcp(3000), ServedPort::tcp(8080)]
+        );
+        assert_eq!(policy(&state), unserved.map(|v| v + 1));
+        for bad in [
+            &["serve", "mac", "53/udp"][..],
+            &["serve", "mac", "0/tcp"],
+            &["serve", "mac"],
+        ] {
+            assert!(site(&dir, bad).is_err(), "{bad:?}");
+        }
+        site(&dir, &["serve", "mac", "--none"]).expect("no ports");
+        let state = SiteDir::open(&dir).expect("open").load().expect("load");
+        assert!(state.machines[&name("mac")].serve.is_empty());
         // Remove a prefix: the rules that reference it are deleted with it
         site(&dir, &["routes", "mac", "--none"]).expect("no routes");
         let state = SiteDir::open(&dir).expect("open").load().expect("load");

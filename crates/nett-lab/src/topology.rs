@@ -59,6 +59,9 @@ pub struct Node {
     /// Lab A: builds a "service" namespace behind this node; `address` is the service's address and
     /// `ingress` is the node's address in the service network (the same `/24`).
     pub service: Option<Service>,
+    /// TCP ports the node serves to its services on `127.0.0.1` (ADR 0028).
+    #[serde(default)]
+    pub serve: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

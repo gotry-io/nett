@@ -1601,3 +1601,118 @@ fn upgrade_approvals_are_listed_and_change_nothing_signed() {
             .is_err()
     );
 }
+
+#[test]
+fn served_ports_are_signed_listed_with_who_reaches_them_and_bounded() {
+    use nett_trust::payload::ServedPort;
+    let (_dir_tmp, dir) = temp_dir("serve");
+    let (site, mut state) = site(&dir);
+    state
+        .set_edge(
+            &name("edge-vps"),
+            Some(vec!["172.17.0.2/32".parse().expect("prefix")]),
+        )
+        .expect("edge");
+    signed(&site, &mut state);
+    let before = state.machine(&name("mac")).expect("mac").policy.clone();
+    // A machine that serves nothing keeps its signature: no serve field goes into the inputs
+    signed(&site, &mut state);
+    assert_eq!(state.machine(&name("mac")).expect("mac").policy, before);
+
+    let old = state.clone();
+    state
+        .set_serve(
+            &name("mac"),
+            vec![ServedPort::tcp(8080), ServedPort::tcp(3000)],
+        )
+        .expect("serve");
+    signed(&site, &mut state);
+    let lines = describe(&old, &state);
+    assert_eq!(
+        lines,
+        [
+            "+ mac serves 3000/tcp, 8080/tcp to 127.0.0.1",
+            "    3000/tcp is reached by nothing yet: nett site allow <from> mac 3000/tcp; the service sees 127.0.0.1",
+            "    8080/tcp is reached by nothing yet: nett site allow <from> mac 8080/tcp; the service sees 127.0.0.1",
+        ]
+    );
+    let mac = state.machine(&name("mac")).expect("mac");
+    assert_eq!(
+        mac.policy.as_ref().map(|p| p.version),
+        before.as_ref().map(|p| p.version + 1)
+    );
+    // Every member admits the policy and sees the ports
+    let members = admitted(&state, "nas");
+    let member = members.get(&mac.node_id).expect("mac admitted");
+    assert_eq!(
+        member.serve,
+        vec![ServedPort::tcp(3000), ServedPort::tcp(8080)]
+    );
+
+    // Who reaches a newly served port: the rules to the machine that cover it, and the devices
+    state
+        .allow(
+            &["edge-vps.edge".into()],
+            &["mac".into()],
+            vec![tcp(8080)],
+            None,
+        )
+        .expect("rule");
+    state
+        .allow(&["nas".into()], &["mac".into()], vec![], None)
+        .expect("rule");
+    state
+        .allow(&["edge-vps".into()], &["mac".into()], vec![tcp(22)], None)
+        .expect("rule");
+    let mac = state.machine(&name("mac")).expect("mac").clone();
+    assert_eq!(
+        crate::changes::reached_by(&state, &mac, ServedPort::tcp(8080)),
+        "edge-vps.edge (r1) and nas (r2)"
+    );
+    signed(&site, &mut state);
+    let old = state.clone();
+    state
+        .set_serve(&name("mac"), vec![ServedPort::tcp(8080)])
+        .expect("narrowed");
+    signed(&site, &mut state);
+    assert_eq!(
+        describe(&old, &state),
+        ["~ mac serves 8080/tcp to 127.0.0.1"]
+    );
+    let old = state.clone();
+    state.set_serve(&name("mac"), vec![]).expect("removed");
+    signed(&site, &mut state);
+    assert_eq!(describe(&old, &state), ["- mac serves nothing on loopback"]);
+
+    // At most 16 ports, none zero, and not the relay's TLS port
+    let many: Vec<ServedPort> = (1..=17).map(ServedPort::tcp).collect();
+    assert!(state.set_serve(&name("mac"), many).is_err());
+    assert!(
+        state
+            .set_serve(&name("mac"), vec![ServedPort::tcp(0)])
+            .is_err()
+    );
+    state
+        .set_relay(
+            &name("edge-vps"),
+            Some(crate::state::RelayRole {
+                port: crate::state::DEFAULT_RELAY_PORT,
+                tls_port: Some(443),
+                fingerprint: None,
+            }),
+            crate::state::RelayKey([7; 32]),
+        )
+        .expect("relay");
+    assert!(
+        state
+            .set_serve(&name("edge-vps"), vec![ServedPort::tcp(443)])
+            .is_err()
+    );
+    assert!(
+        state
+            .machine(&name("edge-vps"))
+            .expect("edge-vps")
+            .serve
+            .is_empty()
+    );
+}

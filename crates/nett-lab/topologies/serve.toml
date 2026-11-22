@@ -1,0 +1,38 @@
+# Served ports (design/mesh.md section 12.1, ADR 0028): web serves 8080/tcp to a service on its
+# loopback. client is allowed to reach it; other reaches web only on 22/tcp, and also tries the port
+# from outside the mesh, addressing web's mesh address through the public network.
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "web"
+reachability = "public"
+serve = [8080]
+
+[[node]]
+name = "client"
+reachability = "public"
+
+[[node]]
+name = "other"
+reachability = "public"
+
+[[link]]
+peers = ["web", "client"]
+candidates = ["direct"]
+
+[[link]]
+peers = ["web", "other"]
+candidates = ["direct"]
+
+[[allow]]
+from = ["client"]
+to = ["web"]
+ports = ["8080/tcp"]
+
+[[allow]]
+from = ["other"]
+to = ["web"]
+ports = ["22/tcp"]

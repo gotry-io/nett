@@ -17,7 +17,7 @@ use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{
     AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, DeviceCredential, EdgeSources,
     MAX_RULE_PREFIXES, MeshAddresses, Module, NodeAddresses, NodePolicy, Payload, PayloadDoc, Role,
-    RuleAction,
+    RuleAction, ServedPort,
 };
 use nett_trust::signed::SignedPayload;
 use nett_trust::signing::{EnrollmentKeyPair, RecoveryKeyPair};
@@ -41,6 +41,10 @@ struct PolicyInput {
     edge_sources: Option<EdgeSources>,
     mesh: MeshAddresses,
     edge: Option<MeshAddresses>,
+    /// Left out when empty: a machine that serves nothing hashes the same inputs as a site signed
+    /// without the field, and keeps its signature
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    serve: Vec<ServedPort>,
 }
 
 /// Node policy inputs of a machine waiting to join through the Hub (design/hub.md section 6): the
@@ -53,6 +57,8 @@ struct PendingInput {
     edge_sources: Option<EdgeSources>,
     mesh: MeshAddresses,
     edge: Option<MeshAddresses>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    serve: Vec<ServedPort>,
 }
 
 /// Signs the artifacts in the site that changed. Machines in `force` get a new version of the node
@@ -100,6 +106,7 @@ pub fn sign(
                 }),
                 mesh: m.mesh,
                 edge: m.edge.as_ref().map(|e| e.addresses),
+                serve: m.serve.clone(),
             };
             let hash = hash_of(&input)?;
             let keep = e.policy.as_ref().is_some_and(|p| {
@@ -115,6 +122,7 @@ pub fn sign(
                         input.edge_sources,
                         input.mesh,
                         input.edge,
+                        input.serve,
                         input.enrollment_key,
                         expires_at,
                     )?)
@@ -189,6 +197,7 @@ fn policy_input(m: &Machine, gateway: bool) -> Option<PolicyInput> {
         }),
         mesh: m.mesh,
         edge: m.edge.as_ref().map(|e| e.addresses),
+        serve: m.serve.clone(),
     })
 }
 
@@ -247,6 +256,7 @@ pub(crate) fn enrolled_input(keys: NodeKeys, member: &Member) -> Result<Sha256Di
         }),
         mesh: member.addresses,
         edge: member.edge.as_ref().map(|e| e.addresses),
+        serve: member.serve.clone(),
     })
 }
 
@@ -259,6 +269,7 @@ fn node_policy_payload(
     edge_sources: Option<EdgeSources>,
     mesh: MeshAddresses,
     edge: Option<MeshAddresses>,
+    serve: Vec<ServedPort>,
     enrollment_public_key: Ed25519PublicKey,
     expires_at: Timestamp,
 ) -> Result<Vec<u8>, SiteError> {
@@ -271,6 +282,7 @@ fn node_policy_payload(
             roles,
             edge: edge_sources,
             addresses: NodeAddresses { mesh, edge },
+            serve,
             enrollment_public_key,
         })],
         expires_at,
@@ -296,6 +308,7 @@ fn sign_node(
         input.edge_sources,
         input.mesh,
         input.edge,
+        input.serve,
         enrollment.public_key(),
         expires_at,
     )?;

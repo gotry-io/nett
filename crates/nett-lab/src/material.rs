@@ -27,7 +27,7 @@ use nett_trust::encoding::Timestamp;
 use nett_trust::keys::X25519PublicKey;
 use nett_trust::payload::{
     AccessRule, AccessRuleSet, AdvertisedRoutes, Artifact, EdgeSources, MeshAddresses, Module,
-    NodeAddresses, NodePolicy, PayloadDoc, Role, RuleAction,
+    NodeAddresses, NodePolicy, PayloadDoc, Role, RuleAction, ServedPort,
 };
 use nett_trust::revocation::Revocation;
 use nett_trust::signed::SignedPayload;
@@ -304,15 +304,19 @@ impl Signer<'_> {
 }
 
 /// Node policy; `edge` is the Edge address and the prefix of the container Edge runs in, and when
-/// present the `edge` role is added.
+/// present the `edge` role is added; `serve` are the TCP ports it serves to loopback.
 fn policy(
     node_id: NodeId,
     version: u64,
     addresses: MeshAddresses,
     roles: &[String],
     edge: Option<(MeshAddresses, &[IpPrefix])>,
+    serve: &[u16],
     enrollment: &EnrollmentKeyPair,
 ) -> NodePolicy {
+    let mut serve: Vec<ServedPort> = serve.iter().copied().map(ServedPort::tcp).collect();
+    serve.sort_unstable();
+    serve.dedup();
     let mut roles: Vec<Role> = roles
         .iter()
         .filter_map(|r| match r.as_str() {
@@ -336,6 +340,7 @@ fn policy(
             mesh: addresses,
             edge: edge.map(|(a, _)| a),
         },
+        serve,
         enrollment_public_key: enrollment.public_key(),
     }
 }
@@ -399,6 +404,7 @@ pub fn generate(
             addresses,
             &roles,
             edge_policy,
+            &node.serve,
             &enrollment,
         );
         materials.insert(node.name.clone(), signer.material(&p, &enrollment, public)?);
@@ -409,6 +415,7 @@ pub fn generate(
                 addresses,
                 &roles,
                 edge_policy,
+                &node.serve,
                 &enrollment,
             );
             lower_version_of_second = Some(signer.material(&older, &enrollment, public)?);
@@ -629,6 +636,7 @@ fn negative_examples(
             mesh_addresses(topo, index)?,
             &[],
             None,
+            &[],
             &enrollment,
         );
         let mut material = signer.material(&p, &enrollment, mesh_key)?;

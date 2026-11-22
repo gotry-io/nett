@@ -68,6 +68,7 @@ impl Mesh {
                 },
                 edge: None,
             },
+            serve: Vec::new(),
             enrollment_public_key: self.enrollment[&n].public_key(),
         }
     }
@@ -487,6 +488,12 @@ impl DataPlane for FakeDataPlane {
     }
 
     fn bind_tunnel(&self, _addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+        Err(std::io::Error::other(
+            "no tunnel sockets in the fake data plane",
+        ))
+    }
+
+    fn listen_tunnel(&self, _addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
         Err(std::io::Error::other(
             "no tunnel sockets in the fake data plane",
         ))

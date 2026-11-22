@@ -11,7 +11,7 @@ use crate::anchors::TrustAnchors;
 use crate::canonical::{CanonicalError, parse_canonical, to_canonical};
 use crate::encoding::{Sha256Digest, Timestamp, b64, b64_fixed};
 use crate::keys::X25519PublicKey;
-use crate::payload::{MeshAddresses, Module, Role};
+use crate::payload::{MeshAddresses, Module, Role, ServedPort};
 use crate::revocation::Revocations;
 use crate::signed::{SignatureError, SignedPayload, Signer};
 
@@ -73,6 +73,8 @@ pub struct Member {
     pub roles: Vec<Role>,
     /// With the `edge` role, the Edge address and the origin of Edge traffic (ADR 0015).
     pub edge: Option<EdgeMember>,
+    /// Ports the member forwards to its services on loopback (ADR 0028).
+    pub serve: Vec<ServedPort>,
     pub signer: Signer,
     /// Hash of the node policy artifact.
     pub policy_hash: Sha256Digest,
@@ -182,6 +184,7 @@ pub fn admit(
                 addresses,
                 containers: sources.containers.clone(),
             }),
+        serve: policy.serve.clone(),
         signer: verified.signer,
         policy_hash: *policy_hash,
         proof_hash: Sha256Digest::of(&material.proof.payload),
@@ -358,6 +361,7 @@ mod tests {
                 },
                 edge: None,
             },
+            serve: Vec::new(),
             enrollment_public_key: enrollment.public_key(),
         }
     }

@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_mesh::config::Reachability;
-use nett_trust::payload::{PortRange, Protocol};
+use nett_trust::payload::{PortRange, Protocol, ServedPort};
 
 use crate::compose::{Pair, connections, relay_paths};
 use crate::state::{Machine, Part, Rule, Selector, State};
@@ -70,6 +70,9 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                         };
                         lines.push(format!("{sign} {name}.routes {}", list(&m.routes)));
                     }
+                }
+                if o.serve != m.serve {
+                    lines.extend(serve_lines(new, name, &o.serve, m));
                 }
                 if o.upgrade_to != m.upgrade_to
                     && let Some(v) = m.upgrade_to
@@ -216,6 +219,66 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
         }
     }
     lines
+}
+
+/// A machine's served ports changed (ADR 0028): what it serves now, and who reaches each port it
+/// newly serves, since every one of them gets the trust the service gives to `127.0.0.1`.
+fn serve_lines(state: &State, name: &NodeName, old: &[ServedPort], m: &Machine) -> Vec<String> {
+    if m.serve.is_empty() {
+        return vec![format!("- {name} serves nothing on loopback")];
+    }
+    let sign = if old.iter().all(|p| m.serve.contains(p)) {
+        '+'
+    } else {
+        '~'
+    };
+    let mut lines = vec![format!(
+        "{sign} {name} serves {} to 127.0.0.1",
+        list(&m.serve)
+    )];
+    for port in m.serve.iter().filter(|p| !old.contains(p)) {
+        lines.push(format!(
+            "    {port} is reached by {}; the service sees 127.0.0.1",
+            reached_by(state, m, *port)
+        ));
+    }
+    lines
+}
+
+/// Who reaches a port a machine serves: the rules that allow it, and the devices that reach every
+/// machine (design/devices.md section 5), for example `edge-vps.edge (r4) and the devices`.
+pub fn reached_by(state: &State, m: &Machine, port: ServedPort) -> String {
+    let covers = |ports: &[PortRange]| {
+        ports.is_empty()
+            || ports
+                .iter()
+                .any(|r| r.protocol == Protocol::Tcp && (r.first..=r.last).contains(&port.port))
+    };
+    let mut who: Vec<String> = state
+        .rules
+        .iter()
+        .filter(|(_, r)| {
+            covers(&r.ports)
+                && r.to.iter().any(|s| {
+                    matches!(s, Selector::Machine(t) if t.node == m.node_id && t.part == Part::Mesh)
+                })
+        })
+        .map(|(id, r)| {
+            let from: Vec<String> = r.from.iter().map(|s| state.selector_text(s)).collect();
+            format!("{} ({id})", from.join(", "))
+        })
+        .collect();
+    if state.devices.values().any(|d| !d.limited) {
+        who.push("the devices".to_owned());
+    }
+    let name = state
+        .name_of(&m.node_id)
+        .map_or_else(|| m.node_id.to_string(), ToString::to_string);
+    match who.as_slice() {
+        [] => format!("nothing yet: nett site allow <from> {name} {port}"),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
 }
 
 fn reach(state: &State, m: &Machine) -> String {

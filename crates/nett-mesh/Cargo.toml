@@ -20,7 +20,7 @@ ring.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "macros", "signal", "sync"] }
+tokio = { workspace = true, features = ["rt", "macros", "signal", "sync", "net", "io-util", "time"] }
 tracing.workspace = true
 x25519-dalek.workspace = true
 zeroize.workspace = true

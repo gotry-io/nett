@@ -95,6 +95,12 @@ impl Platform for LinuxTun {
         Ok(socket)
     }
 
+    fn listen_tunnel(&self, addr: SocketAddr) -> io::Result<std::net::TcpListener> {
+        let listener = std::net::TcpListener::bind(addr)?;
+        sys::bind_to_device(listener.as_fd(), &self.name)?;
+        Ok(listener)
+    }
+
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
         sync_routes(&mut self.route, self.ifindex, routes)
     }

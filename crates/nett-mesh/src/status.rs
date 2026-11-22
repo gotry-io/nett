@@ -135,6 +135,9 @@ pub struct NodeStatus {
     pub edge: Vec<IpAddr>,
     /// Prefixes advertised by this machine.
     pub routes: Vec<IpPrefix>,
+    /// Ports this machine serves to its services on `127.0.0.1` (design/mesh.md section 12.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve: Vec<u16>,
     pub reachability: Reachability,
     pub dataplane: DataPlaneKind,
     /// The port WireGuard actually listens on; empty while the interface is not ready yet.
@@ -316,6 +319,8 @@ pub enum ProblemKind {
     TrustStore,
     /// The DNS responder could not start (design/names-and-diagnostics.md section 2).
     Names,
+    /// A port this machine serves is not forwarded (design/mesh.md section 12.1).
+    Serve,
     #[serde(other)]
     Other,
 }
@@ -429,6 +434,9 @@ struct Problems {
     trust_store: Option<(Timestamp, String)>,
     /// The DNS responder could not start.
     names: Option<(Timestamp, String)>,
+    /// Served ports that could not be bound (at most `MAX_SERVED_PORTS`); they stay listed across
+    /// desired states until the port is forwarded or no longer served.
+    serve: BTreeMap<u16, (Timestamp, String)>,
 }
 
 impl<E: EventSink> Recorder<E> {
@@ -448,9 +456,11 @@ impl<E: EventSink> Recorder<E> {
     pub fn begin_apply(&mut self) {
         let data_plane = self.problems.data_plane.take();
         let trust_store = self.problems.trust_store.take();
+        let serve = std::mem::take(&mut self.problems.serve);
         self.problems = Problems {
             data_plane,
             trust_store,
+            serve,
             ..Problems::default()
         };
     }
@@ -535,6 +545,13 @@ impl<E: EventSink> Recorder<E> {
         if let Some(n) = &p.names {
             push(ProblemKind::Names, None, n);
         }
+        for (port, (at, reason)) in &p.serve {
+            push(
+                ProblemKind::Serve,
+                None,
+                &(*at, format!("port {port}/tcp: {reason}")),
+            );
+        }
         problems
     }
 
@@ -577,6 +594,15 @@ impl<E: EventSink> Recorder<E> {
             Event::TrustStoreSaved => self.problems.trust_store = None,
             Event::NamesUnavailable { reason } => self.problems.names = Some((now, reason.clone())),
             Event::NamesReady => self.problems.names = None,
+            Event::ServeUnavailable { port, reason }
+                if self.problems.serve.len() < nett_trust::payload::MAX_SERVED_PORTS
+                    || self.problems.serve.contains_key(port) =>
+            {
+                self.problems.serve.insert(*port, (now, reason.clone()));
+            }
+            Event::Serving { port } | Event::ServeStopped { port } => {
+                self.problems.serve.remove(port);
+            }
             Event::PathSwitched {
                 node_id, reason, ..
             } => {
@@ -1190,6 +1216,7 @@ mod tests {
                 mesh: vec!["100.88.0.1".parse().expect("addr")],
                 edge: vec![],
                 routes: vec![],
+                serve: vec![],
                 reachability: Reachability::Public,
                 dataplane: DataPlaneKind::Kernel,
                 listen_port: Some(41820),

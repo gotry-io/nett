@@ -3,12 +3,16 @@
 //! background thread. The queue is bounded; when full, measurement messages are dropped (affecting only
 //! one measurement).
 //!
+//! Served ports (design/mesh.md section 12.1) are listened on once the mesh interface is ready, and
+//! their connections are forwarded on the async runtime handed to [`Runtime::spawn`].
+//!
 //! Sockets: the probe port on the mesh address (sends and receives only packets that pass through the
 //! mesh interface); probes to TLS relays are sent from the mesh process's own port to the transport's
 //! loopback ports; direct probes and probes of UDP relays are sent and received with the WireGuard port
 //! as the source port, provided by the data plane ([`DataPlane::wg_port_probes`]) and opened again
 //! when the WireGuard port changes.
 
+use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,6 +21,8 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
 use nett_core::id::NodeId;
+use nett_core::prefix::IpPrefix;
+use nett_trust::payload::ServedPort;
 
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
@@ -93,12 +99,13 @@ impl Applier for Runtime {
 
 impl Runtime {
     /// Starts the background thread. `dns_port` is where the DNS responder answers on the mesh addresses
-    /// (`crate::dns::PORT`; 0 turns it off).
+    /// (`crate::dns::PORT`; 0 turns it off); connections to served ports are forwarded on `serve`.
     pub fn spawn<D: DataPlane + 'static, E: EventSink + Send + 'static, C: Clock + 'static>(
         engine: Engine<D>,
         events: E,
         clock: C,
         dns_port: u16,
+        serve: tokio::runtime::Handle,
     ) -> std::io::Result<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         let worker_tx = tx.clone();
@@ -120,6 +127,8 @@ impl Runtime {
                     dns: None,
                     dns_port,
                     names_sent: None,
+                    served: crate::serve::Served::new(serve),
+                    serve_failing: BTreeSet::new(),
                     sockets_retry: None,
                 };
                 let mut last_tick = Instant::now();
@@ -368,6 +377,9 @@ struct Worker<D, E> {
     dns_port: u16,
     /// The names last handed to the data plane.
     names_sent: Option<crate::dns::NameTable>,
+    /// The ports forwarded to `127.0.0.1` now, and those that failed to bind and wait for a retry.
+    served: crate::serve::Served,
+    serve_failing: BTreeSet<ServedPort>,
     /// After opening the probe sockets or the DNS responder failed: when to try again, and the wait
     /// that led there (doubling like the engine's retries).
     sockets_retry: Option<(Instant, Duration)>,
@@ -384,18 +396,52 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 .as_ref()
                 .is_none_or(|s| s.wg_port.port != interface.listen_port)
                 || (self.dns.is_none() && self.dns_port != 0)
+                || self.unserved().next().is_some()
         })
     }
 
+    /// Ports the node policy serves that are not forwarded yet.
+    fn unserved(&self) -> impl Iterator<Item = ServedPort> + '_ {
+        let running: BTreeSet<ServedPort> = self.served.ports().collect();
+        self.engine
+            .served()
+            .iter()
+            .copied()
+            .filter(move |p| !running.contains(p))
+    }
+
+    /// Closes the ports the node policy no longer serves, at once: narrowing does not wait for a
+    /// retry.
+    fn stop_unserved(&mut self) {
+        let gone: Vec<ServedPort> = self
+            .served
+            .ports()
+            .chain(self.serve_failing.iter().copied())
+            .filter(|p| !self.engine.served().contains(p))
+            .collect();
+        for port in gone {
+            self.served.stop(port);
+            self.serve_failing.remove(&port);
+            self.events.emit(Event::ServeStopped { port: port.port });
+        }
+    }
+
     fn ensure_sockets(&mut self) {
+        self.stop_unserved();
         let Some(interface) = self.engine.interface() else {
             return;
         };
         let addrs: Vec<IpAddr> = interface.spec.addresses.iter().map(|a| a.addr).collect();
+        let mesh: Vec<IpPrefix> = interface
+            .spec
+            .addresses
+            .iter()
+            .filter_map(|a| IpPrefix::containing(a.addr, a.prefix_len))
+            .collect();
         let listen_port = interface.listen_port;
         let now = Instant::now();
         if self.sockets_retry.is_none_or(|(due, _)| now >= due) {
-            let failed = self.open_sockets(&addrs, listen_port);
+            let failed = self.open_sockets(&addrs, listen_port) | self.open_served(&addrs, &mesh);
             self.sockets_retry = failed.then(|| {
                 let delay = self
                     .sockets_retry
@@ -458,6 +504,44 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                             "binding UDP port {} on the mesh addresses: {e}",
                             self.dns_port
                         ),
+                    });
+                }
+            }
+        }
+        failed
+    }
+
+    /// Listens on the ports the node policy serves and are not forwarded yet, on every mesh address;
+    /// returns whether any failed. A port that fails leaves the others and the mesh as they are.
+    fn open_served(&mut self, addrs: &[IpAddr], mesh: &[IpPrefix]) -> bool {
+        let mut failed = false;
+        for port in self.unserved().collect::<Vec<_>>() {
+            let dataplane = self.engine.dataplane_mut();
+            let listeners = addrs
+                .iter()
+                .map(|a| {
+                    let at = SocketAddr::new(*a, port.port);
+                    dataplane
+                        .listen_tunnel(at)
+                        .map_err(|e| format!("binding TCP {at}: {e}"))
+                })
+                .collect::<Result<Vec<_>, String>>();
+            let started = listeners.and_then(|l| {
+                self.served
+                    .start(port, l, mesh)
+                    .map_err(|e| format!("forwarding TCP {}: {e}", port.port))
+            });
+            match started {
+                Ok(()) => {
+                    self.serve_failing.remove(&port);
+                    self.events.emit(Event::Serving { port: port.port });
+                }
+                Err(reason) => {
+                    failed = true;
+                    self.serve_failing.insert(port);
+                    self.events.emit(Event::ServeUnavailable {
+                        port: port.port,
+                        reason,
                     });
                 }
             }

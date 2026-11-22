@@ -56,6 +56,8 @@ mod dataplane {
         /// A socket bound to this machine's mesh address that sends and receives only through the mesh
         /// interface.
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket>;
+        /// A TCP listener on the mesh address, bound to the mesh interface.
+        fn listen_tunnel(&self, addr: SocketAddr) -> io::Result<std::net::TcpListener>;
         /// Makes the routes on the mesh interface exactly `routes`.
         fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
     }
@@ -289,6 +291,10 @@ mod dataplane {
             self.platform.bind_tunnel(addr)
         }
 
+        fn listen_tunnel(&self, addr: SocketAddr) -> io::Result<std::net::TcpListener> {
+            self.platform.listen_tunnel(addr)
+        }
+
         fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket> {
             self.platform.bind_underlay(port)
         }
@@ -350,6 +356,9 @@ mod dataplane {
                 UdpSocket::bind("127.0.0.1:0")
             }
             fn bind_tunnel(&self, _addr: SocketAddr) -> io::Result<UdpSocket> {
+                Err(io::Error::other("not used"))
+            }
+            fn listen_tunnel(&self, _addr: SocketAddr) -> io::Result<std::net::TcpListener> {
                 Err(io::Error::other("not used"))
             }
             fn sync_routes(&mut self, _routes: &[IpPrefix]) -> Result<(), DataPlaneError> {

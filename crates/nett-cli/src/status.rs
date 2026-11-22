@@ -155,6 +155,10 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
     if !node.routes.is_empty() {
         head.push(("routes", join(&node.routes)));
     }
+    if !node.serve.is_empty() {
+        let ports: Vec<String> = node.serve.iter().map(|p| format!("{p}/tcp")).collect();
+        head.push(("serve", format!("{} to 127.0.0.1", ports.join(", "))));
+    }
     let mut network = vec![
         reachability(node.reachability).to_owned(),
         match node.dataplane {
@@ -477,6 +481,7 @@ pub(crate) fn problem_text(p: &Problem) -> String {
         }
         ProblemKind::AccessRulesRejected => format!("access rules rejected: {reason}"),
         ProblemKind::Names => format!("names under nett.internal do not resolve: {reason}"),
+        ProblemKind::Serve => format!("a served port is not forwarded: {reason}"),
         ProblemKind::RoutesRejected => match &p.node {
             Some(node) => format!("routes of {} rejected: {reason}", node_label(node)),
             None => format!("routes rejected: {reason}"),

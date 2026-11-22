@@ -351,6 +351,14 @@ impl Platform for MacTun {
         Ok(socket)
     }
 
+    fn listen_tunnel(&self, addr: SocketAddr) -> io::Result<std::net::TcpListener> {
+        let listener = std::net::TcpListener::bind(addr)?;
+        // Replies leave through utun; XNU does not filter arrivals by it, so the caller checks the
+        // peer's address as well
+        sys::bind_to_interface(listener.as_fd(), self.index, addr.is_ipv6())?;
+        Ok(listener)
+    }
+
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
         // Monitoring of the physical interface starts after the mesh is ready, only once
         if self.monitor.is_none() {
@@ -580,6 +588,43 @@ mod tests {
             .recv_from(&mut got)
             .expect("delivered to the own IPv6 mesh address");
         assert_eq!(&got[..n], b"self6");
+
+        // A served port's listener takes a connection that arrives through the utun, and its reply
+        // leaves through the utun (design/mesh.md section 12.1)
+        let served = mac
+            .listen_tunnel("100.88.255.1:0".parse().expect("addr"))
+            .expect("served listener");
+        let served_port = served.local_addr().expect("addr").port();
+        let mut syn = crate::userspace::packet::build::tcp(
+            "100.88.1.2".parse().expect("ip"),
+            40_000,
+            "100.88.255.1".parse().expect("ip"),
+            served_port,
+            0x02,
+        );
+        crate::userspace::packet::fill_checksum(&mut syn);
+        tun.send(&syn).expect("SYN into utun");
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match tun.recv(&mut buf) {
+                Ok(n)
+                    if n >= 40
+                        && buf[0] >> 4 == 4
+                        && buf[9] == crate::userspace::packet::PROTO_TCP =>
+                {
+                    let header = usize::from(buf[0] & 0x0f) * 4;
+                    assert_eq!(buf[16..20], [100, 88, 1, 2], "the reply goes to the peer");
+                    assert_eq!(buf[header + 13] & 0x12, 0x12, "a SYN-ACK");
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("no SYN-ACK from the served listener left {name}: {e}"),
+            }
+        }
+        drop(served);
 
         // The underlay socket is bound to the physical interface (when there is a default route)
         let underlay = mac.bind_underlay(0).expect("underlay");

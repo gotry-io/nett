@@ -455,6 +455,14 @@ impl DataPlane for KernelWireGuard {
         Ok(socket)
     }
 
+    fn listen_tunnel(&self, addr: SocketAddr) -> std::io::Result<std::net::TcpListener> {
+        let listener = std::net::TcpListener::bind(addr)?;
+        // Connections to the mesh address that arrive on other interfaces never reach the listener:
+        // Linux would otherwise accept them (weak host model)
+        sys::bind_to_device(listener.as_fd(), INTERFACE_NAME)?;
+        Ok(listener)
+    }
+
     fn bind_underlay(&self, port: u16) -> std::io::Result<UdpSocket> {
         crate::userspace::dual_stack_udp(port)
     }

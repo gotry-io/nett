@@ -17,7 +17,7 @@ use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
 use nett_trust::encoding::Sha256Digest;
 use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
-use nett_trust::payload::{MeshAddresses, PortRange};
+use nett_trust::payload::{MAX_SERVED_PORTS, MeshAddresses, PortRange, ServedPort};
 use nett_trust::release::Version;
 use nett_trust::signed::SignedPayload;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -170,6 +170,9 @@ pub struct Machine {
     /// Advertised routes.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes: Vec<IpPrefix>,
+    /// Ports forwarded to the machine's services on `127.0.0.1` (ADR 0028), in increasing order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub serve: Vec<ServedPort>,
     /// Signed node policy and admission proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<SignedPolicy>,
@@ -613,6 +616,21 @@ impl State {
                         "the site has a relay but no relay key".to_owned(),
                     ));
                 }
+            }
+            if m.serve.len() > MAX_SERVED_PORTS
+                || m.serve.iter().any(|p| p.port == 0)
+                || !m.serve.windows(2).all(|w| w[0] < w[1])
+            {
+                return Err(SiteError::invalid(format!(
+                    "machine `{name}` serves at most {MAX_SERVED_PORTS} ports, each non-zero and once"
+                )));
+            }
+            if let Some(tls) = m.relay.and_then(|r| r.tls_port)
+                && m.serve.contains(&ServedPort::tcp(tls))
+            {
+                return Err(SiteError::invalid(format!(
+                    "machine `{name}`: its relay takes TCP {tls} for TLS, so it cannot also serve it"
+                )));
             }
             if m.keys.is_some() && m.enrollment.is_some() {
                 return Err(SiteError::invalid(format!(
