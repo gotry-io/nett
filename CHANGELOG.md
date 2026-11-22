@@ -23,6 +23,8 @@ member. Upgrade the Hub first.
   Linux connections continue through the restart; on macOS they pause until the service is back.
 - A panic in the connection to the Hub ends only that part, on its own thread: the mesh keeps
   working, and the connection starts again after 5 seconds.
+- `nett site` no longer checks that the Hub and the machines run 0.4, 0.6 or 0.8 before devices,
+  upgrade approvals or served ports: every machine runs 0.9.
 
 ## [0.8.2] - 2026-11-22
 

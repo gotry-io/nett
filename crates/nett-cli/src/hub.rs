@@ -30,15 +30,6 @@ use serde::{Deserialize, Serialize};
 use crate::layout::{key_values, table};
 
 pub const SITE_HUB_FILE: &str = "hub.json";
-/// The release that adds devices: the Hub and every machine run it before the first gateway role or
-/// device is signed, since older ones reject what they do not recognize (design/devices.md section 9).
-pub const DEVICES_SINCE: &str = "0.4.0";
-/// The release that adds served ports (ADR 0028): a member before it rejects a node policy that
-/// serves, and drops that machine.
-pub const SERVE_SINCE: &str = "0.8.0";
-/// The release that adds upgrade approvals: a Hub before it refuses a site that carries them
-/// (design/release.md section 7, ADR 0027).
-pub const UPGRADES_SINCE: &str = "0.6.0";
 /// Script that installs `nett` on a new machine (design/release.md section 6): installs the program
 /// only, does not read the token.
 pub const INSTALL_SCRIPT: &str = "curl -fsSL https://nett.gotry.io/install.sh | sh";
@@ -228,25 +219,11 @@ impl UpgradePlan {
     }
 }
 
-/// The release the Hub holds and the versions it knows (design/release.md section 7); refuses a
-/// Hub older than [`UPGRADES_SINCE`] (or this tool, when it is older still), which would refuse
-/// the approval.
+/// The release the Hub holds and the versions it knows (design/release.md section 7).
 pub fn upgrade_plan(hub: &SiteHub) -> anyhow::Result<UpgradePlan> {
     use nett_trust::release::Version;
-    let since: Version = UPGRADES_SINCE.parse().context("UPGRADES_SINCE")?;
-    let own: Version = env!("CARGO_PKG_VERSION")
-        .parse()
-        .context("this tool's version")?;
-    let since = since.min(own);
     let status = fetch_status(hub).context("reading the release the Hub holds")?;
     let hub_version = status.hub_version.parse::<Version>().ok();
-    if hub_version.is_none_or(|v| v < since) {
-        bail!(
-            "the Hub runs nett-hub {}, which does not take upgrade approvals; it needs {since} or \
-             later, which it upgrades to once on its own",
-            status.hub_version
-        );
-    }
     let release: Version = status
         .release
         .as_deref()
@@ -267,41 +244,6 @@ pub fn upgrade_plan(hub: &SiteHub) -> anyhow::Result<UpgradePlan> {
             })
             .collect(),
     })
-}
-
-/// Refuses while the Hub or a machine runs a release older than `since` ([`DEVICES_SINCE`],
-/// [`SERVE_SINCE`]), or than this signing tool when it is older still: a machine on the same
-/// release as the tool knows everything it signs. A machine that never connected joins with the
-/// current release. `what` names the new content, as in "devices need".
-pub fn require_release(hub: &SiteHub, since: &str, what: &str) -> anyhow::Result<()> {
-    use nett_trust::release::Version;
-    let since: Version = since.parse().context("the release that adds it")?;
-    let own: Version = env!("CARGO_PKG_VERSION")
-        .parse()
-        .context("this tool's version")?;
-    let since = since.min(own);
-    let older = |v: &str| v.parse::<Version>().map_or(true, |v| v < since);
-    let status = fetch_status(hub).context("reading which release each machine runs")?;
-    let mut behind = Vec::new();
-    if older(&status.hub_version) {
-        behind.push(format!("the Hub ({})", status.hub_version));
-    }
-    for m in &status.machines {
-        match (&m.nett_version, m.last_seen) {
-            (Some(v), _) if !older(v) => {}
-            (Some(v), _) => behind.push(format!("{} ({v})", m.name)),
-            (None, Some(_)) => behind.push(format!("{} (no version reported)", m.name)),
-            (None, None) => {}
-        }
-    }
-    if !behind.is_empty() {
-        bail!(
-            "{what} nett {since} or later on the Hub and every machine, which otherwise \
-             reject the new signed content; still older: {}",
-            behind.join(", ")
-        );
-    }
-    Ok(())
 }
 
 /// One machine's confirmation of `generation`.

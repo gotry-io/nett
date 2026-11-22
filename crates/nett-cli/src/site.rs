@@ -297,9 +297,6 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         ["serve", name, ports @ ..] => {
             let name = machine(name)?;
             let ports = served_ports(ports, none)?;
-            if !ports.is_empty() {
-                serve_ready(&dir)?;
-            }
             Box::new(move |s| Ok(s.set_serve(&name, ports)?))
         }
         ["allow", from, to, rest @ ..] if rest.len() <= 1 => {
@@ -386,48 +383,6 @@ fn upgrade(dir: &Path, names: Vec<NodeName>, hub_only: bool, yes: bool) -> anyho
     Ok(())
 }
 
-/// Before the site's first device: the Hub and every machine run a release that knows devices
-/// (design/devices.md section 9). Without a Hub the site cannot tell, so it says what is needed.
-fn devices_ready(dir: &Path) -> anyhow::Result<()> {
-    let state = SiteDir::open(dir)?.load()?;
-    if !state.devices.is_empty() {
-        return Ok(());
-    }
-    release_ready(dir, crate::hub::DEVICES_SINCE, "devices need")
-}
-
-/// Before the site's first served port: the Hub and every machine run a release that knows
-/// `serve`, since every member verifies the serving machine's node policy (design/site.md section
-/// 5.3).
-fn serve_ready(dir: &Path) -> anyhow::Result<()> {
-    let state = SiteDir::open(dir)?.load()?;
-    if state.machines.values().any(|m| !m.serve.is_empty()) {
-        return Ok(());
-    }
-    release_ready(dir, crate::hub::SERVE_SINCE, "served ports need")
-}
-
-fn release_ready(dir: &Path, since: &str, what: &str) -> anyhow::Result<()> {
-    match SiteHub::load(dir)? {
-        Some(hub) => crate::hub::require_release(&hub, since, what),
-        None => {
-            outln!(
-                "{} nett {since} or later on every machine; older ones reject the new signed \
-                 content.",
-                capitalized(what)
-            );
-            Ok(())
-        }
-    }
-}
-
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
-}
-
 /// `nett site device add` (design/devices.md section 3): the key pair is generated here, the
 /// configuration is written once the signed change is saved, and the private key is kept nowhere
 /// else.
@@ -439,7 +394,6 @@ fn device_add(
     out: &Path,
     yes: bool,
 ) -> anyhow::Result<()> {
-    devices_ready(dir)?;
     {
         let state = SiteDir::open(dir)?.load()?;
         crate::device::gateway_for(&state, gateway.as_ref())?;
@@ -563,7 +517,7 @@ fn sync(dir: &Path, hub: &SiteHub, json: bool) -> anyhow::Result<()> {
 }
 
 /// The desired state of every machine; if composition fails (the generated desired state is not
-/// accepted by the mesh process), the whole command fails.
+/// accepted by the mesh), the whole command fails.
 fn outputs(state: &State) -> anyhow::Result<Vec<(NodeName, DesiredMeshDoc)>> {
     let mut outputs = Vec::new();
     for name in state.machines.keys() {
