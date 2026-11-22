@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-22
+
 - A machine can serve a service that listens only on `127.0.0.1` to the mesh, as `tailscale serve`
   does for TCP: `nett site serve <machine> 8080/tcp` signs the port into the machine's node policy,
   and its mesh service forwards connections that arrive on its mesh address to the same port on
