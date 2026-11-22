@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-11-22
+
 - Right after two dial-only machines moved together to another relay through the Hub, the follower
   could still act on the outage it had measured on the relay they left: it waited for another
   proposal, then rotated through relays on its own and split the pair for several seconds. A
