@@ -21,7 +21,7 @@ use crate::path::{
 use crate::probe::{
     self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, PUNCH_ACK, PUNCH_PROPOSAL,
     ProbeKey, PunchMessage, RELAY_PROBE, RelayReport, SWITCH_ACK, SWITCH_PROPOSAL, SwitchMessage,
-    SwitchTarget, TUNNEL_PROBE_PORT,
+    SwitchTarget, THROUGH_PROBE, THROUGH_REPLY, TUNNEL_PROBE_PORT, Through,
 };
 use crate::punch::{Observations, Punch, PunchEvent};
 
@@ -36,6 +36,9 @@ const MAX_OUTSTANDING: usize = 4096;
 /// Interval at which the follower measures relays: only to provide the decider with the "relay -> this
 /// machine" leg.
 pub(crate) const RELAY_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+/// A path through a relay is measured by through probes while one came back through that relay
+/// within this long; after that, from its segments again (ADR 0029).
+pub(crate) const THROUGH_LAPSE: Duration = Duration::from_secs(30);
 /// Window for judging whether there is traffic (design/mesh.md section 7).
 pub const ACTIVE_WINDOW: Duration = Duration::from_secs(30);
 /// Probing a peer's paths on request happens at most this often (design/status.md section 4.3).
@@ -157,6 +160,8 @@ struct Peer {
     /// (design/mesh.md section 6.1).
     punch: Option<Punch>,
     reports: HashMap<KeyId, (Duration, f64)>,
+    /// When a through reply from the peer last came back through each relay (ADR 0029).
+    through: HashMap<KeyId, Instant>,
     /// The send time of the latest direct probe received from the peer (design/mesh.md section 6).
     latest_probe_ms: u64,
     /// When the paths to it were last probed on request (design/status.md section 4.3).
@@ -211,6 +216,12 @@ enum Pending {
     Candidate {
         index: usize,
         local: u32,
+    },
+    /// The through probe sent with a candidate probe of a relay path (ADR 0029).
+    Through {
+        index: usize,
+        local: u32,
+        relay: KeyId,
     },
     /// A probe of a relay outside path selection: over UDP it measures the relay for the peer, over TLS it
     /// keeps the standby connection authenticated.
@@ -524,6 +535,10 @@ impl Prober {
                         .as_ref()
                         .map(|p| p.reports.clone())
                         .unwrap_or_default(),
+                    through: previous
+                        .as_ref()
+                        .map(|p| p.through.clone())
+                        .unwrap_or_default(),
                     latest_probe_ms: previous.as_ref().map_or(0, |p| p.latest_probe_ms),
                     probed_on_request: previous.as_ref().and_then(|p| p.probed_on_request),
                     last_activity: previous.as_ref().and_then(|p| p.last_activity),
@@ -742,7 +757,7 @@ impl Prober {
                                 }
                             }
                             (
-                                CandidateMeta::Relay { key, tls, .. },
+                                CandidateMeta::Relay { relay, key, tls },
                                 Route::Relay { endpoint, .. },
                             ) => {
                                 let probe = OuterProbe {
@@ -752,6 +767,36 @@ impl Prober {
                                     sent_ms: now_ms,
                                 };
                                 out.push(relay_probe(*tls, endpoint, probe.encode(key).to_vec()));
+                                // The same way, a probe the relay forwards to the peer: its reply
+                                // measures the whole path (ADR 0029)
+                                let (relay, key, tls) = (*relay, key.clone(), *tls);
+                                let receiver = KeyId::of(peer.public_key.as_bytes());
+                                let Some(direct) = peer.direct_key.clone() else {
+                                    continue;
+                                };
+                                let Some(wire) = self.remember(
+                                    &id,
+                                    Pending::Through {
+                                        index,
+                                        local: seq,
+                                        relay,
+                                    },
+                                    now,
+                                ) else {
+                                    continue;
+                                };
+                                let through = Through {
+                                    kind: THROUGH_PROBE,
+                                    sender: self.own_key_id,
+                                    seq: wire,
+                                    sent_ms: now_ms,
+                                    receiver,
+                                };
+                                out.push(relay_probe(
+                                    tls,
+                                    endpoint,
+                                    through.encode_probe(&direct, &key).to_vec(),
+                                ));
                             }
                             _ => {}
                         }
@@ -1188,6 +1233,11 @@ impl Prober {
                     data: reply.to_vec(),
                 }]
             }
+            (Incoming::WgPort, Some(THROUGH_PROBE)) => self.on_through_probe(from, data, now_ms),
+            (Incoming::WgPort, Some(THROUGH_REPLY)) => {
+                self.on_through_reply(data, at, now_ms);
+                vec![]
+            }
             (Incoming::WgPort, Some(probe::WG_COOKIE_REPLY))
                 if data.len() == probe::WG_COOKIE_LEN =>
             {
@@ -1493,7 +1543,7 @@ impl Prober {
                     _ => return,
                 }
             }
-            Pending::Tunnel { .. } | Pending::Punch => return,
+            Pending::Tunnel { .. } | Pending::Through { .. } | Pending::Punch => return,
         };
         if tls != over_tls || OuterReply::verify(data, key).is_none() {
             return;
@@ -1504,12 +1554,94 @@ impl Prober {
         if !tls {
             self.relay_stats.entry(relay).or_default().record_reply(rtt);
         }
+        // While through probes come back through this relay, they alone measure paths through it: the
+        // relay answering this end says nothing about its leg to the peer (ADR 0029)
         if let Pending::Candidate { index, local } = pending
             && let Some(peer) = self.peers.get_mut(&owner)
         {
+            match peer.through.get(&relay) {
+                Some(t) if at.saturating_duration_since(*t) < THROUGH_LAPSE => return,
+                // The relay answers but the path through it has not for a while: until the peer
+                // reports its leg to the relay working, that is a break beyond the relay, as when
+                // a path through it fails while it answers. A peer or relay gone back to an older
+                // release reports the leg working, and the relay is taken again
+                Some(_) => {
+                    peer.through.remove(&relay);
+                    if let Some(paths) = peer.paths.as_mut() {
+                        paths.hold_beyond(relay, at);
+                    }
+                }
+                None => {}
+            }
             let extra = peer.reports.get(&relay).copied();
             if let Some(paths) = peer.paths.as_mut() {
                 paths.on_candidate_reply(index, local, at, extra);
+            }
+        }
+    }
+
+    /// A peer's through probe, forwarded by a relay (ADR 0029): answered, once its member checksum
+    /// holds, to where it came from, as a direct probe is.
+    fn on_through_probe(&self, from: SocketAddr, data: &[u8], now_ms: u64) -> Vec<Outgoing> {
+        let Some(head) = Through::peek(data) else {
+            return vec![];
+        };
+        let Some(key) = self
+            .by_key_id
+            .get(&head.sender)
+            .and_then(|id| self.peers[id].direct_key.as_ref())
+        else {
+            return vec![];
+        };
+        match Through::verify_member(data, key, now_ms) {
+            Some(probe) if probe.kind == THROUGH_PROBE && probe.receiver == self.own_key_id => {
+                vec![Outgoing::WgPort {
+                    to: from,
+                    data: probe.encode_reply(key).to_vec(),
+                }]
+            }
+            _ => vec![],
+        }
+    }
+
+    /// The peer's reply to a through probe, back through the relay: the whole path through that relay
+    /// works, and from now on through probes measure it.
+    fn on_through_reply(&mut self, data: &[u8], at: Instant, now_ms: u64) {
+        let Some(head) = Through::peek(data) else {
+            return;
+        };
+        let Some(id) = self.by_key_id.get(&head.sender).cloned() else {
+            return;
+        };
+        let Some(reply) = self.peers[&id]
+            .direct_key
+            .as_ref()
+            .and_then(|k| Through::verify_member(data, k, now_ms))
+        else {
+            return;
+        };
+        if reply.kind != THROUGH_REPLY || reply.receiver != self.own_key_id {
+            return;
+        }
+        let Some((
+            owner,
+            Pending::Through {
+                index,
+                local,
+                relay,
+            },
+            _,
+        )) = self.outstanding.remove(&reply.seq)
+        else {
+            return;
+        };
+        if owner != id {
+            return;
+        }
+        if let Some(peer) = self.peers.get_mut(&owner) {
+            peer.through.insert(relay, at);
+            if let Some(paths) = peer.paths.as_mut() {
+                paths.on_candidate_reply(index, local, at, Some((Duration::ZERO, 0.0)));
             }
         }
     }
@@ -1619,6 +1751,9 @@ mod tests {
         /// Packets from B's WireGuard port reach R. `false` stands in for a network that drops what
         /// leaves B's WireGuard port toward R while B's other ports get through.
         b_wg_to_relay: bool,
+        /// R forwards through probes and their replies (ADR 0029); a relay on an older release
+        /// does not.
+        relay_forwards_through: bool,
         /// In-tunnel packets from B to A are additionally queued this long (B's uplink is filled, the queue is
         /// deep).
         tunnel_queue: Duration,
@@ -1723,6 +1858,7 @@ mod tests {
                 direct_up: true,
                 relay_up: true,
                 b_wg_to_relay: true,
+                relay_forwards_through: true,
                 tunnel_queue: Duration::ZERO,
                 queued: Vec::new(),
                 now: Instant::now(),
@@ -1767,6 +1903,22 @@ mod tests {
             };
             let now = self.now;
             match out {
+                // A through probe: R forwards it to the other end and that end's reply back, over
+                // R's legs to both (the checks on R are nett-relay's)
+                Outgoing::WgPort { to, data }
+                    if to == self.relay && data.first() == Some(&THROUGH_PROBE) =>
+                {
+                    if self.relay_up && self.relay_forwards_through && self.b_wg_to_relay {
+                        let relay = self.relay;
+                        for reply in dst.prober.on_packet(Incoming::WgPort, relay, &data, now, 0) {
+                            if let Outgoing::WgPort { to, data } = reply
+                                && to == relay
+                            {
+                                src.prober.on_packet(Incoming::WgPort, relay, &data, now, 0);
+                            }
+                        }
+                    }
+                }
                 Outgoing::Tunnel { data, .. } if up => {
                     for reply in dst
                         .prober
@@ -1881,6 +2033,89 @@ mod tests {
             .map(|(_, s)| s.reason)
             .collect();
         assert!(onto_relay.is_empty(), "{onto_relay:?}");
+    }
+
+    /// A whose current path fails, with R as the only other candidate.
+    fn onto_relay_after(net: &Net, since: Instant) -> Vec<SwitchReason> {
+        net.switches
+            .iter()
+            .filter(|(at, s)| *at >= since && s.to.endpoint() == net.relay)
+            .map(|(_, s)| s.reason)
+            .collect()
+    }
+
+    /// B's leg to R breaks while R keeps answering A, as when a firewall upstream of B starts dropping
+    /// its UDP, and then the direct path fails. B's reports of its leg to R are over a window of probes,
+    /// one every 5 seconds, so they still show the leg mostly working; R's through probes do not come
+    /// back, and A does not move onto the broken path (ADR 0029). A relay that does not forward through
+    /// probes leaves A only the reports, and A moves there.
+    #[test]
+    fn a_relay_whose_leg_to_the_peer_broke_is_not_taken_on_the_relays_answers() {
+        for forwards in [true, false] {
+            let mut net = Net::new();
+            net.relay_forwards_through = forwards;
+            net.run(Duration::from_secs(10));
+            net.b_wg_to_relay = false;
+            net.run(Duration::from_secs(4));
+            let broke = net.now;
+            net.direct_up = false;
+            net.run(Duration::from_secs(8));
+            let onto = onto_relay_after(&net, broke);
+            assert_eq!(
+                onto.is_empty(),
+                forwards,
+                "forwards through probes: {forwards}, {onto:?}"
+            );
+        }
+    }
+
+    /// Through probes that stop coming back while the relay path works, as when the peer or the relay
+    /// goes back to an older release: after 30 seconds the path through R is estimated from its
+    /// segments again, and A can fail over to it.
+    #[test]
+    fn a_relay_whose_through_probes_stop_is_measured_from_its_segments_again() {
+        let mut net = Net::new();
+        net.run(Duration::from_secs(10));
+        let relay = KeyId::of(node_id(9).as_str().as_bytes());
+        assert!(
+            net.a.prober.peers[&net.b.id].through.contains_key(&relay),
+            "through replies came back"
+        );
+        net.relay_forwards_through = false;
+        // The pair keeps carrying traffic all along
+        let b = net.b.id.clone();
+        for _ in 0..7 {
+            net.a.prober.mark_active(&b, net.now);
+            net.run(Duration::from_secs(5));
+        }
+        net.a.prober.mark_active(&b, net.now);
+        let broke = net.now;
+        net.direct_up = false;
+        net.run(Duration::from_secs(10));
+        // The test network signals no completed handshake, so the switch is followed by retries
+        assert_eq!(
+            onto_relay_after(&net, broke).first(),
+            Some(&SwitchReason::Unreachable),
+            "{:?}",
+            net.switches
+        );
+    }
+
+    /// With through probes coming back, a failover takes the relay path as usual.
+    #[test]
+    fn a_working_relay_path_is_taken_on_its_through_probes() {
+        let mut net = Net::new();
+        net.run(Duration::from_secs(10));
+        let broke = net.now;
+        net.direct_up = false;
+        net.run(Duration::from_secs(10));
+        // The test network signals no completed handshake, so the switch is followed by retries
+        assert_eq!(
+            onto_relay_after(&net, broke).first(),
+            Some(&SwitchReason::Unreachable),
+            "{:?}",
+            net.switches
+        );
     }
 
     #[test]

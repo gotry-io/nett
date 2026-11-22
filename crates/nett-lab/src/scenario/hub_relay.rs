@@ -152,7 +152,8 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
             edge_ipv4: None,
             dir: dir.clone(),
             tls: false,
-            userspace: false,
+            // `--userspace <node>` puts that node on the userspace data plane, as on macOS
+            userspace: topo.node(name).is_some_and(|n| n.userspace),
         };
         lab.spawn(&node, nett)?;
         let child = spawn_in(

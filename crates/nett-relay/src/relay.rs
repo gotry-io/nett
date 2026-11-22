@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use nett_mesh::probe::{self, KeyId, OuterProbe, ProbeKey, RELAY_PROBE};
+use nett_mesh::probe::{
+    self, KeyId, OuterProbe, ProbeKey, RELAY_PROBE, THROUGH_PROBE, THROUGH_REPLY, Through,
+};
 use nett_trust::keys::X25519PublicKey;
 
 use crate::wg::{self, Index, Mac1Key, Message};
@@ -33,6 +35,10 @@ const BIND_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// After a new binding, if no data arrives from the new address within this time, the old binding
 /// is restored.
 const BIND_CONFIRM: Duration = Duration::from_secs(10);
+/// Through probes forwarded and waiting for their reply (ADR 0029): at most this many, each for this
+/// long, as long as a member waits for the reply.
+const MAX_THROUGH: usize = 4096;
+const THROUGH_TTL: Duration = Duration::from_secs(2);
 
 /// A TLS connection (design/mesh.md section 5.3), numbered by the receive/send loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -112,6 +118,8 @@ pub enum Drop {
     BindRateLimited,
     UnknownIndex,
     BadProbe,
+    /// A through reply that answers no probe forwarded to its sender's bound address.
+    UnexpectedReply,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,6 +170,9 @@ pub struct Relay {
     connections: HashSet<(usize, usize)>,
     pending: HashMap<Index, Pending>,
     sessions: HashMap<Index, Session>,
+    /// Through probes forwarded, by (sender, receiver, sequence number): where the probe came from,
+    /// and when.
+    through: HashMap<(usize, usize, u32), (PeerAddr, Instant)>,
 }
 
 fn pair(a: usize, b: usize) -> (usize, usize) {
@@ -210,6 +221,7 @@ impl Relay {
             connections,
             pending: HashMap::new(),
             sessions: HashMap::new(),
+            through: HashMap::new(),
         })
     }
 
@@ -217,8 +229,11 @@ impl Relay {
     /// IPv4 by the caller; messages on a TLS connection are passed in only after the connection is
     /// authenticated ([`Relay::authenticate`]).
     pub fn handle(&mut self, from: PeerAddr, packet: &[u8], now: Instant, now_ms: u64) -> Outcome {
-        if packet.first() == Some(&RELAY_PROBE) {
-            return self.probe(from, packet, now_ms);
+        match packet.first() {
+            Some(&RELAY_PROBE) => return self.probe(from, packet, now_ms),
+            Some(&THROUGH_PROBE) => return self.through_probe(from, packet, now, now_ms),
+            Some(&THROUGH_REPLY) => return self.through_reply(from, packet),
+            _ => {}
         }
         let Some(message) = wg::parse(packet) else {
             return Outcome::Drop(Drop::NotWireGuard);
@@ -452,6 +467,60 @@ impl Relay {
         Some((index, reply.to_vec()))
     }
 
+    /// A through probe (design/mesh.md section 5.1, ADR 0029): from a member whose token checks, to the
+    /// other end of a link assigned here, forwarded as is to where that member's WireGuard traffic
+    /// goes. Where it came from is kept for the reply.
+    fn through_probe(
+        &mut self,
+        from: PeerAddr,
+        packet: &[u8],
+        now: Instant,
+        now_ms: u64,
+    ) -> Outcome {
+        let Some(head) = Through::peek(packet) else {
+            return Outcome::Drop(Drop::BadProbe);
+        };
+        let position = |id: KeyId| self.members.iter().position(|m| m.key_id == id);
+        let (Some(sender), Some(receiver)) = (position(head.sender), position(head.receiver))
+        else {
+            return Outcome::Drop(Drop::BadProbe);
+        };
+        if Through::verify_relay(packet, &self.members[sender].probe_key, now_ms).is_none() {
+            return Outcome::Drop(Drop::BadProbe);
+        }
+        if sender == receiver || !self.connections.contains(&pair(sender, receiver)) {
+            return Outcome::Drop(Drop::NotAssigned);
+        }
+        let Some(dest) = self.members[receiver].bound else {
+            return Outcome::Drop(Drop::ReceiverUnbound);
+        };
+        let key = (sender, receiver, head.seq);
+        if self.through.len() >= MAX_THROUGH && !self.through.contains_key(&key) {
+            return Outcome::Drop(Drop::TableFull);
+        }
+        self.through.insert(key, (from, now));
+        Outcome::Forward(dest)
+    }
+
+    /// A through reply: forwarded once to where the probe it answers came from, and only when it comes
+    /// from the address that probe was forwarded to.
+    fn through_reply(&mut self, from: PeerAddr, packet: &[u8]) -> Outcome {
+        let Some(head) = Through::peek(packet) else {
+            return Outcome::Drop(Drop::BadProbe);
+        };
+        let position = |id: KeyId| self.members.iter().position(|m| m.key_id == id);
+        let (Some(replier), Some(sender)) = (position(head.sender), position(head.receiver)) else {
+            return Outcome::Drop(Drop::UnexpectedReply);
+        };
+        if self.members[replier].bound != Some(from) {
+            return Outcome::Drop(Drop::UnexpectedReply);
+        }
+        match self.through.remove(&(sender, replier, head.seq)) {
+            Some((source, _)) => Outcome::Forward(source),
+            None => Outcome::Drop(Drop::UnexpectedReply),
+        }
+    }
+
     /// The first message on a TLS connection (design/mesh.md section 5.3): it must be an
     /// authenticated relay probe, from which the member is identified. On success returns the probe
     /// reply; when this member has no address yet, its address is this connection (the token
@@ -490,6 +559,8 @@ impl Relay {
             .retain(|_, p| now.saturating_duration_since(p.at) < PENDING_TTL);
         self.sessions
             .retain(|_, s| now.saturating_duration_since(s.at) < SESSION_IDLE);
+        self.through
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < THROUGH_TTL);
         for m in &mut self.members {
             if let Some((previous, at)) = m.unconfirmed
                 && now.saturating_duration_since(at) >= BIND_CONFIRM
@@ -1094,6 +1165,110 @@ mod tests {
         // Expired
         assert_eq!(
             r.probe(from, &probe.encode(&key), 100_000),
+            Outcome::Drop(Drop::BadProbe)
+        );
+    }
+
+    /// A through probe from B to A (ADR 0029): the member checksum is opaque to the relay.
+    fn through(seq: u32, sender: &[u8; 32], receiver: &[u8; 32], token: u8) -> Vec<u8> {
+        Through {
+            kind: THROUGH_PROBE,
+            sender: KeyId::of(sender),
+            seq,
+            sent_ms: 1_000,
+            receiver: KeyId::of(receiver),
+        }
+        .encode_probe(
+            &ProbeKey::from_token(&[9; 32]),
+            &ProbeKey::from_token(&[token; 32]),
+        )
+        .to_vec()
+    }
+
+    #[test]
+    fn through_probes_reach_the_peers_bound_address_and_one_reply_comes_back() {
+        let mut r = relay();
+        let now = Instant::now();
+        handshake(&mut r, "203.0.113.5:50000", now, 11, 22);
+        let a = addr("198.51.100.1:41820");
+        // B probes through the relay from its TLS connection: forwarded to A's WireGuard address
+        let tls = PeerAddr::Tls(ConnId(3));
+        assert_eq!(
+            r.handle(tls, &through(5, &B, &A, 2), now, 1_000),
+            Outcome::Forward(a)
+        );
+        let reply = Through::peek(&through(5, &B, &A, 2))
+            .expect("probe")
+            .encode_reply(&ProbeKey::from_token(&[9; 32]))
+            .to_vec();
+        // Only from where the probe went, and only once, back to where it came from
+        assert_eq!(
+            r.handle(addr("198.51.100.9:41820"), &reply, now, 1_000),
+            Outcome::Drop(Drop::UnexpectedReply)
+        );
+        assert_eq!(r.handle(a, &reply, now, 1_000), Outcome::Forward(tls));
+        assert_eq!(
+            r.handle(a, &reply, now, 1_000),
+            Outcome::Drop(Drop::UnexpectedReply)
+        );
+        // A reply to a probe never forwarded goes nowhere
+        let unasked = Through::peek(&through(6, &B, &A, 2))
+            .expect("probe")
+            .encode_reply(&ProbeKey::from_token(&[9; 32]));
+        assert_eq!(
+            r.handle(a, &unasked, now, 1_000),
+            Outcome::Drop(Drop::UnexpectedReply)
+        );
+        // A forwarded probe waits for its reply for 2 seconds only
+        assert_eq!(
+            r.handle(tls, &through(7, &B, &A, 2), now, 1_000),
+            Outcome::Forward(a)
+        );
+        r.expire(now + THROUGH_TTL);
+        let late = Through::peek(&through(7, &B, &A, 2))
+            .expect("probe")
+            .encode_reply(&ProbeKey::from_token(&[9; 32]));
+        assert_eq!(
+            r.handle(a, &late, now, 1_000),
+            Outcome::Drop(Drop::UnexpectedReply)
+        );
+    }
+
+    #[test]
+    fn through_probes_need_the_senders_token_an_assigned_link_and_a_bound_receiver() {
+        let mut r = relay();
+        let now = Instant::now();
+        let from = addr("203.0.113.5:40000");
+        // B to A before B is bound: A's address comes with the assignment, so it is forwarded
+        assert_eq!(
+            r.handle(from, &through(1, &B, &A, 2), now, 1_000),
+            Outcome::Forward(addr("198.51.100.1:41820"))
+        );
+        // A to B: B has no address yet
+        assert_eq!(
+            r.handle(
+                addr("198.51.100.1:41820"),
+                &through(2, &A, &B, 1),
+                now,
+                1_000
+            ),
+            Outcome::Drop(Drop::ReceiverUnbound)
+        );
+        // Another member's token, a stale send time, a pair not assigned, an unknown receiver
+        assert_eq!(
+            r.handle(from, &through(3, &B, &A, 3), now, 1_000),
+            Outcome::Drop(Drop::BadProbe)
+        );
+        assert_eq!(
+            r.handle(from, &through(3, &B, &A, 2), now, 100_000),
+            Outcome::Drop(Drop::BadProbe)
+        );
+        assert_eq!(
+            r.handle(from, &through(4, &C, &A, 3), now, 1_000),
+            Outcome::Drop(Drop::NotAssigned)
+        );
+        assert_eq!(
+            r.handle(from, &through(5, &B, &D, 2), now, 1_000),
             Outcome::Drop(Drop::BadProbe)
         );
     }

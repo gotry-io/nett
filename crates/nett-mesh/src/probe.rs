@@ -26,10 +26,21 @@ pub const SWITCH_ACK: u8 = 0x85;
 pub const PUNCH_PROPOSAL: u8 = 0x86;
 pub const PUNCH_ACK: u8 = 0x87;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
+/// A probe a relay forwards to the peer, and the peer's reply it forwards back (ADR 0029).
+pub const THROUGH_PROBE: u8 = 0x92;
+pub const THROUGH_REPLY: u8 = 0x93;
 
-/// Probe messages that arrive on the WireGuard port (design/mesh.md section 7.1): a peer's direct probe
-/// and the replies to this machine's direct and UDP relay probes, each [`OUTER_LEN`] bytes long.
-pub const WG_PORT_MESSAGES: [u8; 3] = [DIRECT_PROBE, DIRECT_REPLY, RELAY_REPLY];
+/// Probe messages that arrive on the WireGuard port (design/mesh.md section 7.1): a peer's direct probe,
+/// the replies to this machine's direct and UDP relay probes, and through probes and replies, which a
+/// relay forwards there over UDP or the transport adapter hands there from TLS; each [`OUTER_LEN`]
+/// bytes long.
+pub const WG_PORT_MESSAGES: [u8; 5] = [
+    DIRECT_PROBE,
+    DIRECT_REPLY,
+    RELAY_REPLY,
+    THROUGH_PROBE,
+    THROUGH_REPLY,
+];
 
 /// WireGuard's cookie reply: type and length (WireGuard protocol). The mesh process gets a copy of it from
 /// the WireGuard port, and from it learns that the peer is under load and WireGuard will retry with the
@@ -484,6 +495,103 @@ pub fn decode_tunnel_reply(b: &[u8]) -> Option<(u32, Vec<RelayReport>)> {
     Some((seq, reports))
 }
 
+/// A through probe (`0x92`) or reply (`0x93`) (design/mesh.md section 7.2, ADR 0029):
+/// `type | 0 | 0 | 0 | sender | sequence number | send time | receiver | member checksum | relay
+/// checksum`. The sender and receiver are the numbers of their mesh public keys. The member checksum is
+/// with the pair's direct probe key over everything before it, so only the two members can make it;
+/// the relay checksum, on a probe only, is with the sender's relay token over everything before it,
+/// for the relay to check before forwarding. A reply carries the replier as sender and the probe's
+/// sender as receiver, with the sequence number and send time echoed, and no relay checksum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Through {
+    pub kind: u8,
+    pub sender: KeyId,
+    pub seq: u32,
+    pub sent_ms: u64,
+    pub receiver: KeyId,
+}
+
+const THROUGH_MEMBER_MAC_AT: usize = 32;
+const THROUGH_RELAY_MAC_AT: usize = THROUGH_MEMBER_MAC_AT + MAC_LEN;
+
+impl Through {
+    fn header(&self) -> [u8; OUTER_LEN] {
+        let mut b = [0u8; OUTER_LEN];
+        b[0] = self.kind;
+        b[4..12].copy_from_slice(&self.sender.0);
+        b[12..16].copy_from_slice(&self.seq.to_be_bytes());
+        b[16..24].copy_from_slice(&self.sent_ms.to_be_bytes());
+        b[24..32].copy_from_slice(&self.receiver.0);
+        b
+    }
+
+    /// A probe, with the member checksum and the relay checksum.
+    pub fn encode_probe(&self, member: &ProbeKey, relay: &ProbeKey) -> [u8; OUTER_LEN] {
+        let mut b = self.header();
+        b[0] = THROUGH_PROBE;
+        let mac = member.mac(&b[..THROUGH_MEMBER_MAC_AT]);
+        b[THROUGH_MEMBER_MAC_AT..THROUGH_RELAY_MAC_AT].copy_from_slice(&mac);
+        let mac = relay.mac(&b[..THROUGH_RELAY_MAC_AT]);
+        b[THROUGH_RELAY_MAC_AT..].copy_from_slice(&mac);
+        b
+    }
+
+    /// The reply to this probe from its receiver, with the member checksum only.
+    pub fn encode_reply(&self, member: &ProbeKey) -> [u8; OUTER_LEN] {
+        let mut b = Self {
+            kind: THROUGH_REPLY,
+            sender: self.receiver,
+            receiver: self.sender,
+            ..*self
+        }
+        .header();
+        let mac = member.mac(&b[..THROUGH_MEMBER_MAC_AT]);
+        b[THROUGH_MEMBER_MAC_AT..THROUGH_RELAY_MAC_AT].copy_from_slice(&mac);
+        b
+    }
+
+    /// Reads the unauthenticated header of a probe or reply, so the receiver can choose its keys.
+    pub fn peek(b: &[u8]) -> Option<Self> {
+        let kind = *b.first()?;
+        if b.len() != OUTER_LEN
+            || !matches!(kind, THROUGH_PROBE | THROUGH_REPLY)
+            || b[1..4] != [0; 3]
+        {
+            return None;
+        }
+        Some(Self {
+            kind,
+            sender: KeyId(b[4..12].try_into().ok()?),
+            seq: u32::from_be_bytes(b[12..16].try_into().ok()?),
+            sent_ms: u64::from_be_bytes(b[16..24].try_into().ok()?),
+            receiver: KeyId(b[24..32].try_into().ok()?),
+        })
+    }
+
+    /// The relay's check of a probe: the sender's relay token and the send time.
+    pub fn verify_relay(b: &[u8], relay: &ProbeKey, now_ms: u64) -> Option<Self> {
+        let probe = Self::peek(b)?;
+        (probe.kind == THROUGH_PROBE
+            && now_ms.abs_diff(probe.sent_ms) <= MAX_CLOCK_SKEW_MS
+            && relay.verify(&b[..THROUGH_RELAY_MAC_AT], &b[THROUGH_RELAY_MAC_AT..]))
+        .then_some(probe)
+    }
+
+    /// A member's check of a probe or reply: the pair's direct key, the send time, and for a reply an
+    /// empty relay checksum.
+    pub fn verify_member(b: &[u8], member: &ProbeKey, now_ms: u64) -> Option<Self> {
+        let message = Self::peek(b)?;
+        let empty = message.kind == THROUGH_PROBE || b[THROUGH_RELAY_MAC_AT..] == [0; MAC_LEN];
+        (empty
+            && now_ms.abs_diff(message.sent_ms) <= MAX_CLOCK_SKEW_MS
+            && member.verify(
+                &b[..THROUGH_MEMBER_MAC_AT],
+                &b[THROUGH_MEMBER_MAC_AT..THROUGH_RELAY_MAC_AT],
+            ))
+        .then_some(message)
+    }
+}
+
 /// Unspecified address: used when `observed` cannot be known.
 pub const UNSPECIFIED: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
 
@@ -597,6 +705,63 @@ mod tests {
             bad[30] ^= 1;
             assert!(OuterReply::verify(&bad, &key).is_none());
         }
+    }
+
+    #[test]
+    fn through_probes_carry_a_checksum_for_the_relay_and_one_for_the_peer() {
+        let (a, b) = (
+            PrivateKey::generate().expect("a"),
+            PrivateKey::generate().expect("b"),
+        );
+        let pair_a = ProbeKey::direct(&a, &b.public_key()).expect("a's key");
+        let pair_b = ProbeKey::direct(&b, &a.public_key()).expect("b's key");
+        let token = ProbeKey::from_token(&[7; 32]);
+        let probe = Through {
+            kind: THROUGH_PROBE,
+            sender: KeyId([1; 8]),
+            seq: 9,
+            sent_ms: 1_000_000,
+            receiver: KeyId([2; 8]),
+        };
+        let wire = probe.encode_probe(&pair_a, &token);
+        assert_eq!(wire.len(), OUTER_LEN);
+        assert_eq!(Through::verify_relay(&wire, &token, 1_000_500), Some(probe));
+        assert_eq!(
+            Through::verify_member(&wire, &pair_b, 1_000_500),
+            Some(probe)
+        );
+        // The relay cannot pass for a member, nor a member for another sender's relay token
+        assert!(Through::verify_member(&wire, &token, 1_000_500).is_none());
+        assert!(Through::verify_relay(&wire, &ProbeKey::from_token(&[8; 32]), 1_000_500).is_none());
+        // Too old to forward or answer
+        assert!(Through::verify_relay(&wire, &token, 1_000_000 + MAX_CLOCK_SKEW_MS + 1).is_none());
+        let mut forged = wire;
+        forged[24] ^= 1;
+        assert!(Through::verify_relay(&forged, &token, 1_000_500).is_none());
+        assert!(Through::verify_member(&forged, &pair_b, 1_000_500).is_none());
+
+        // The reply names the replier and the original sender, and echoes the rest
+        let reply = probe.encode_reply(&pair_b);
+        assert_eq!(reply.len(), wire.len());
+        let read = Through::verify_member(&reply, &pair_a, 1_000_700).expect("reply");
+        assert_eq!(
+            (
+                read.kind,
+                read.sender,
+                read.receiver,
+                read.seq,
+                read.sent_ms
+            ),
+            (THROUGH_REPLY, KeyId([2; 8]), KeyId([1; 8]), 9, 1_000_000)
+        );
+        assert!(Through::verify_relay(&reply, &token, 1_000_700).is_none());
+        let mut padded = reply;
+        padded[63] = 1;
+        assert!(Through::verify_member(&padded, &pair_a, 1_000_700).is_none());
+        assert!(Through::peek(&wire[..63]).is_none());
+        assert!(
+            WG_PORT_MESSAGES.contains(&THROUGH_PROBE) && WG_PORT_MESSAGES.contains(&THROUGH_REPLY)
+        );
     }
 
     #[test]

@@ -230,6 +230,19 @@ impl<S: Sessions> Plane<S> {
         now: Instant,
         out: &mut Vec<Action>,
     ) {
+        // Probe messages are not WireGuard's: they reach the mesh process from an idle TLS loopback
+        // port too, as the kernel's copy rule takes them before its guard (design/mesh.md section 7.1)
+        if let Some(kind) = datagram.first()
+            && WG_PORT_MESSAGES.contains(kind)
+        {
+            if datagram.len() == OUTER_LEN {
+                out.push(Action::Probe {
+                    from,
+                    data: datagram.to_vec(),
+                });
+            }
+            return;
+        }
         if from.ip().is_loopback() && self.guarded.contains(&from.port()) {
             return;
         }
@@ -240,15 +253,6 @@ impl<S: Sessions> Plane<S> {
                 }
             }
             Some(3 | 4) => {}
-            Some(kind) if WG_PORT_MESSAGES.contains(kind) => {
-                if datagram.len() == OUTER_LEN {
-                    out.push(Action::Probe {
-                        from,
-                        data: datagram.to_vec(),
-                    });
-                }
-                return;
-            }
             _ => return,
         }
         if datagram[0] == WG_COOKIE_REPLY && datagram.len() == WG_COOKIE_LEN {
@@ -704,6 +708,18 @@ mod tests {
         b.plane
             .from_udp(sa("127.0.0.1:50001"), &datagram, Instant::now(), &mut at_b);
         assert!(!at_b.is_empty(), "other loopback ports are used by TLS");
+        // A probe message from an idle TLS port still reaches the mesh process: a through reply comes
+        // back over the TLS connection of a candidate not in use (ADR 0029), as the kernel's copy rule
+        // takes it before its guard
+        let mut at_b = Vec::new();
+        let mut reply = [0u8; OUTER_LEN];
+        reply[0] = crate::probe::THROUGH_REPLY;
+        b.plane
+            .from_udp(sa("127.0.0.1:50000"), &reply, Instant::now(), &mut at_b);
+        assert!(
+            matches!(at_b.as_slice(), [Action::Probe { from, .. }] if *from == sa("127.0.0.1:50000")),
+            "{at_b:?}"
+        );
     }
 
     #[test]

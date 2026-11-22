@@ -983,6 +983,17 @@ impl PeerPaths {
         }
     }
 
+    /// The paths through `relay` may be broken beyond it (section 8.2): its through probes stopped
+    /// coming back while it answers this end (ADR 0029). Held off until the peer reports its leg to the
+    /// relay working, as after a path through it broke while it answered.
+    pub fn hold_beyond(&mut self, relay: KeyId, now: Instant) {
+        for c in &mut self.candidates {
+            if matches!(c.route, Route::Relay { relay: r, .. } if r == relay) {
+                c.beyond = Some(now);
+            }
+        }
+    }
+
     /// Result of a candidate probe; `extra` is the round-trip time and loss rate of the other leg of a relay
     /// path (carried by the peer in the in-tunnel reply).
     pub fn on_candidate_reply(

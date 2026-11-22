@@ -4,6 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A path through a relay is measured end to end: with each probe of the relay, a member sends a
+  through probe the relay forwards to the peer, and the peer's answer comes back through the relay
+  (ADR 0029). Before, a member judged the path from the relay's answer and the peer's report of its
+  own leg, which is over its last 10 probes, one every 5 seconds: when the peer's leg broke, for
+  example when the peer's UDP was blocked, the member could move onto the broken path within
+  seconds and lose every packet for about 4 seconds before moving back. A relay or peer on an older
+  release does not answer through probes, and paths through it are judged as before.
+
 ## [0.8.1] - 2026-11-22
 
 - `nett site status` kept listing a problem a machine reported when it applied a change after the
