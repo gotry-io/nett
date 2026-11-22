@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-11-22
+
 - `nett site status` kept listing a problem a machine reported when it applied a change after the
   problem had healed, such as a served port another program held until it was stopped. A machine's
   problems now come from the status it reports every 15 seconds.
