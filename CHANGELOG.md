@@ -7,6 +7,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - `nett site status` kept listing a problem a machine reported when it applied a change after the
   problem had healed, such as a served port another program held until it was stopped. A machine's
   problems now come from the status it reports every 15 seconds.
+- After a machine restarted while its peer reached it through the relay on that machine, the pair
+  could stay disconnected for ten minutes, switching between the transports of another relay that
+  only answered for its own leg. A path through a relay now has a round trip only once the peer has
+  reported its leg: it is no better path to move to before that, and a failover tries the paths
+  whose whole round trip is known first.
 
 ## [0.8.0] - 2026-11-22
 

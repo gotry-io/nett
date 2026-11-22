@@ -525,6 +525,9 @@ pub struct PeerPaths {
     /// Probe every candidate this end probes at the next tick, outside the schedule (design/status.md
     /// section 4.3).
     probe_now: bool,
+    /// The relay on the peer's own machine: its leg to the peer is the peer's loopback, so this end's
+    /// probes of it cover the whole path (design/mesh.md section 7.2).
+    peer_relay: Option<KeyId>,
     seq: u32,
 }
 
@@ -563,6 +566,7 @@ impl PeerPaths {
             punched: None,
             learned: None,
             probe_now: false,
+            peer_relay: None,
             seq: 0,
         })
         .map(|mut paths| {
@@ -672,6 +676,21 @@ impl PeerPaths {
                 _ => i != self.current || self.candidates[i].kind <= PathKind::Direct,
             })
             .count()
+    }
+
+    /// The relay that runs on the peer's own machine, when it runs one.
+    pub fn set_peer_relay(&mut self, relay: KeyId) {
+        self.peer_relay = Some(relay);
+    }
+
+    /// The candidate's measurement covers its whole path (design/mesh.md section 7.2): a direct path's
+    /// probes do; a path through a relay does once its replies carry the peer's leg, or when the relay
+    /// runs on the peer's own machine. Until then this end's probes show only that the relay answers.
+    fn whole(&self, c: &Candidate) -> bool {
+        match c.route {
+            Route::Direct(_) => true,
+            Route::Relay { relay, .. } => c.far_leg || self.peer_relay == Some(relay),
+        }
     }
 
     /// The LAN direct candidate the follower takes when both ends move to a LAN path together (design/mesh.md
@@ -1360,9 +1379,10 @@ impl PeerPaths {
                 .enumerate()
                 .filter(|(i, c)| *i != current && c.last_reply.is_some_and(|t| t >= fresh_since))
                 .filter(|(_, c)| !others || !c.broken_beyond(now))
-                .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, s)))
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(i, _)| i)
+                // A path measured end to end before one measured only to its relay (section 7.2)
+                .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, !self.whole(c), s)))
+                .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)))
+                .map(|(i, _, _)| i)
         };
         let target = best(true).or_else(|| best(false))?;
         self.record_failure(now);
@@ -1425,6 +1445,7 @@ impl PeerPaths {
         let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
             *i != self.current
                 && c.kind < current_kind
+                && self.whole(c)
                 && !c.broken_beyond(now)
                 && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
                 && c.healthy_since
@@ -1447,6 +1468,7 @@ impl PeerPaths {
             .filter(|(i, c)| {
                 *i != self.current
                     && c.kind == current_kind
+                    && self.whole(c)
                     && !c.broken_beyond(now)
                     && c.last_reply
                         .is_some_and(|t| now.saturating_duration_since(t) <= 2 * CANDIDATE_INTERVAL)
@@ -1631,6 +1653,9 @@ mod tests {
         now: Instant,
         up: Vec<bool>,
         rtt: Vec<Duration>,
+        /// The round trip through the whole path, where it is longer than what a candidate probe
+        /// measures: a relay's probe covers only this end's leg to the relay.
+        path_rtt: Vec<Option<Duration>>,
         /// In-tunnel packets are additionally queued for this long (the peer's uplink is filled by its own
         /// traffic, so the queue is deep); candidate probes outside the tunnel are not affected.
         queue: Vec<Duration>,
@@ -1684,11 +1709,18 @@ mod tests {
 
         fn with_role(routes: Vec<(Route, PathKind)>, role: Role) -> Self {
             let n = routes.len();
+            // With the tunnel up the peer reports its leg to each relay; a test of the time before
+            // that clears it
+            let far_leg = routes
+                .iter()
+                .map(|(r, _)| matches!(r, Route::Relay { .. }).then_some(Duration::ZERO))
+                .collect();
             Self {
                 paths: PeerPaths::new(routes, role).expect("routes"),
                 now: Instant::now(),
                 up: vec![true; n],
                 rtt: vec![2 * MS; n],
+                path_rtt: vec![None; n],
                 queue: vec![Duration::ZERO; n],
                 one_way: vec![false; n],
                 drop_every: vec![0; n],
@@ -1708,7 +1740,7 @@ mod tests {
                 lost: Vec::new(),
                 proposals: Vec::new(),
                 candidate_probes: 0,
-                far_leg: vec![None; n],
+                far_leg,
                 peer_reports: Vec::new(),
                 heard: std::collections::HashMap::new(),
                 busy: false,
@@ -1775,7 +1807,7 @@ mod tests {
                             if !self.tunnel_broken[i] && !self.one_way[i] && self.delivers(i, true)
                             {
                                 self.inflight.push((
-                                    now + self.rtt[i] + self.queue[i],
+                                    now + self.whole(i) + self.queue[i],
                                     true,
                                     i,
                                     seq,
@@ -1817,8 +1849,11 @@ mod tests {
                                 if self.fix_on_rehandshake {
                                     self.tunnel_broken[i] = false;
                                 }
+                                // Removing and adding the peer again voids a handshake still in
+                                // flight: its response finds no initiation waiting for it
+                                self.handshakes.clear();
                                 if self.up[i] && !self.tunnel_broken[i] {
-                                    self.handshakes.push(now + self.rtt[i]);
+                                    self.handshakes.push(now + self.whole(i));
                                 }
                             }
                             // After a switch, probes still in flight on the old path are voided
@@ -1835,10 +1870,16 @@ mod tests {
     }
 
     impl Sim {
+        /// The round trip through the whole of path `i`.
+        fn whole(&self, i: usize) -> Duration {
+            self.path_rtt[i].unwrap_or(self.rtt[i])
+        }
+
         /// Room for a candidate added while running (a learned LAN address), working by default.
         fn grow(&mut self) {
             self.up.push(true);
             self.rtt.push(2 * MS);
+            self.path_rtt.push(None);
             self.queue.push(Duration::ZERO);
             self.one_way.push(false);
             self.drop_every.push(0);
@@ -1962,6 +2003,9 @@ mod tests {
             (direct(), PathKind::Direct),
             (relay(1), PathKind::Relay),
         ]);
+        // Only this end's leg of the relay is known, which keeps the rule for a much faster relay out
+        // of it (a_path_left_for_a_faster_relay_while_lossy_is_held_too covers that rule with loss)
+        sim.far_leg[1] = None;
         sim.run(Duration::from_secs(10));
         sim.loss[0] = 0.15;
         sim.run(Duration::from_secs(20 * 60));
@@ -2008,6 +2052,9 @@ mod tests {
             (direct(), PathKind::Direct),
             (relay(1), PathKind::Relay),
         ]);
+        // Only this end's leg of the relay is known, which keeps the rule for a much faster relay out
+        // of it (a_path_left_for_a_faster_relay_while_lossy_is_held_too covers that rule with loss)
+        sim.far_leg[1] = None;
         sim.drop_every[0] = 10;
         sim.run(Duration::from_secs(120));
         assert!(sim.switches.is_empty(), "{:?}", sim.switches);
@@ -2901,5 +2948,59 @@ mod tests {
             sim.sent[i] > lapsed,
             "probed again once the peer's probes come from it"
         );
+    }
+
+    /// Both ends started at once: there is no tunnel yet, and the peer has reported none of its legs,
+    /// so a relay's probes cover only this end's leg to it (4 ms) while the round trip through it is
+    /// 330 ms. The direct path is down; the peer's own relay over TLS is measured end to end. The pair
+    /// connects and stays connected (design/mesh.md section 8.4).
+    #[test]
+    fn a_relay_measured_only_to_itself_connects_over_its_whole_round_trip() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay_tls(1), PathKind::RelayTls),
+            (relay(2), PathKind::Relay),
+            (relay_tls(2), PathKind::RelayTls),
+        ]);
+        sim.up[0] = false;
+        sim.rtt = vec![2 * MS, 185 * MS, 4 * MS, 6 * MS];
+        sim.path_rtt = vec![None, None, Some(330 * MS), Some(332 * MS)];
+        sim.far_leg = vec![None; 4];
+        sim.paths.set_peer_relay(KeyId([1; 8]));
+        sim.run(Duration::from_secs(30));
+        assert!(sim.paths.tunnel_established(), "{:?}", sim.switches);
+        let settled = sim.switches.len();
+        sim.run(Duration::from_secs(30));
+        assert_eq!(sim.switches.len(), settled, "{:?}", sim.switches);
+    }
+
+    /// The peer restarts while the pair is on the peer's own relay over TLS: that path fails for a
+    /// moment, and the other relay answers this end while the path through it does not work. The
+    /// pair is back on the peer's own relay as soon as it works again, not once the failure is old
+    /// enough to be forgotten.
+    #[test]
+    fn a_relay_that_failed_while_its_peer_restarted_is_taken_back_once_it_works() {
+        let mut sim = Sim::new(vec![
+            (relay_tls(1), PathKind::RelayTls),
+            (direct(), PathKind::Direct),
+            (relay(2), PathKind::Relay),
+            (relay_tls(2), PathKind::RelayTls),
+        ]);
+        sim.rtt = vec![185 * MS, 2 * MS, 4 * MS, 6 * MS];
+        // No tunnel yet, so no leg reported: only the peer's own relay is known end to end
+        sim.far_leg = vec![None; 4];
+        sim.paths.set_peer_relay(KeyId([1; 8]));
+        sim.up[1] = false;
+        sim.tunnel_broken[2] = true;
+        sim.tunnel_broken[3] = true;
+        sim.fix_on_rehandshake = false;
+        sim.run(Duration::from_secs(5));
+        // The peer restarts: its relay answers again before its mesh process does
+        sim.tunnel_broken[0] = true;
+        sim.run(Duration::from_secs(5));
+        sim.tunnel_broken[0] = false;
+        sim.run(Duration::from_secs(60));
+        assert_eq!(sim.paths.current, 0, "{:?}", sim.switches);
+        assert!(sim.paths.tunnel_established());
     }
 }

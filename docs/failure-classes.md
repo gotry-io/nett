@@ -19,6 +19,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - Probes of direct candidates and of UDP relays leave from the WireGuard port, and replies come back to it; probes of TLS relays travel inside the connection the tunnel uses (mesh.md section 7.1);
 - A path through a relay that failed while the relay still answered is broken beyond the relay; the relay counts as recovered only when the peer reports its leg without loss in a report covering the time since, and a relay the peer never reached is reported lost (mesh.md section 8.2);
 - The current candidate shows the tunnel's measurement (status.md section 6);
+- A path through a relay has a round trip only with the peer's leg: until the peer reports it, this end's probes show only that the relay answers, so the path is no better path to move to, and a failover takes it after the paths whose whole round trip is known, the relay on the peer's own machine among them (mesh.md section 7.2);
 - Whether a LAN path works is found by probing it: every LAN address a peer reports is a candidate whatever the Hub sees of the two, an authenticated probe is answered from any address, the address the peer's probes come from is learned when another NAT sits inside the LAN, and both `dial-only` ends probe their LAN paths (mesh.md sections 6 and 7).
 
 **Guards**
@@ -28,6 +29,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:an_authenticated_probe_is_answered_from_any_address`
 - `nett-mesh:a_lan_address_the_peers_probes_come_from_becomes_a_candidate`
 - `nett-mesh:the_follower_takes_the_lan_path_that_answers`
+- `nett-mesh:a_relay_that_failed_while_its_peer_restarted_is_taken_back_once_it_works`
 - `nett-mesh:a_relay_the_followers_wireguard_port_cannot_reach_is_not_used`
 - `nett-mesh:a_break_beyond_a_relay_moves_to_another_relay`
 - `nett-mesh:a_relay_that_never_answered_is_reported_lost`

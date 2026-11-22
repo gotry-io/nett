@@ -485,6 +485,10 @@ impl Prober {
                 ),
                 (None, None) => (None, None),
             };
+            let mut paths = paths;
+            if let Some(p) = paths.as_mut() {
+                p.set_peer_relay(KeyId::of(id.as_str().as_bytes()));
+            }
             let follows_together = role == Some(Role::FollowTogether);
             for (m, (route, _)) in meta.iter().zip(&routes) {
                 let (CandidateMeta::Relay { relay, key, tls }, Route::Relay { endpoint, .. }) =
