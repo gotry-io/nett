@@ -48,7 +48,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - After an upgrade settles, and after `sudo nett install` brings a new program, the relay and the transport adapter restart on it; a changed launchd configuration is unloaded and loaded again (release.md sections 4 and 7);
 - A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
-- The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2).
+- The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
+- `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4).
 
 **Guards**
 
@@ -65,6 +66,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-node:a_transfer_from_the_hub_that_breaks_off_is_fetched_from_the_hub_again`
 - `nett-hub:only_verified_programs_are_served`
 - `nett-site:advertised_routes_keep_counting_after_they_are_removed`
+- `nett-cli:problems_after_applying_follow_the_reported_status`
 - `lab:port-change`, `lab:relay-restart`
 
 **Not yet guarded**: the restart of the helpers by `sudo nett install` with a new program, and the unload and load of a changed launchd configuration. Each needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, both are watched when each release is installed on real machines.

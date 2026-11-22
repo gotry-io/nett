@@ -104,6 +104,7 @@ mac       nas      unreachable  relay edge-vps (tls)  -
 ```
 
 - `HUB` is this machine's connection to the Hub: `online`, `offline`, and `never` when it has never connected; `CONFIG` is its acknowledgment of the latest push: `current` (applied), `pending` (written, but the mesh process has not yet given a result), `rejected`, `behind` (not yet received or not yet acknowledged);
+- `PROBLEMS` of a machine that applied the latest push comes from the status it reports every 15 seconds (status.md section 6): a problem left after applying, which the push already listed, stays until it heals, such as a port that is bound on a retry. For a push it rejected or left pending, it is the reason the machine gave;
 - `release` names the release the Hub holds when the Hub or a machine runs an older one, and how to approve it (release.md section 7); without one, the line is left out;
 - `nett site status <machine>` shows the details of one machine, the same content as running `nett status` (status.md) on that machine, plus the time it last connected to the Hub;
 - When the Hub is down, `nett site status` says it cannot connect, and still lists the machines in the site;

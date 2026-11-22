@@ -715,9 +715,19 @@ fn public_text(state: &State, name: &NodeName) -> Option<String> {
     })
 }
 
+/// What needs attention on a machine (design/hub.md section 3.4). Problems left after applying a
+/// push are taken from the status the machine reports every 15 seconds, which shows whether they
+/// have healed since; the reason it gave when it applied describes that moment only. A push it
+/// rejected or left pending keeps its reason.
 fn problems_text(m: &MachineStatus, now: Timestamp) -> String {
     let mut out = Vec::new();
-    if let Some(reason) = &m.reason {
+    let status = m
+        .status
+        .clone()
+        .and_then(|s| serde_json::from_value::<StatusDoc>(s).ok());
+    let applied = m.result.as_deref() == Some("applied");
+    let reason = m.reason.as_ref().filter(|_| !applied || status.is_none());
+    if let Some(reason) = reason {
         out.push(reason.clone());
     }
     if let Some(upgrade) = upgrade_text(m)
@@ -725,10 +735,13 @@ fn problems_text(m: &MachineStatus, now: Timestamp) -> String {
     {
         out.push(upgrade);
     }
-    if let Some(Ok(doc)) = m.status.clone().map(serde_json::from_value::<StatusDoc>) {
-        let n = doc.problems.len();
-        if n > 0 && m.reason.is_none() {
-            out.push(format!("{n} problem{}", if n == 1 { "" } else { "s" }));
+    if let Some(doc) = &status
+        && reason.is_none()
+    {
+        match doc.problems.as_slice() {
+            [] => {}
+            [one] => out.push(crate::status::problem_text(one)),
+            many => out.push(format!("{} problems", many.len())),
         }
     }
     if !m.online
@@ -771,6 +784,58 @@ mod tests {
             upgrade_result: None,
             upgrade_reason: None,
         }
+    }
+
+    /// A machine's reported status with these problems.
+    fn reporting(mut m: MachineStatus, problems: serde_json::Value) -> MachineStatus {
+        m.status = Some(serde_json::json!({
+            "v": 1, "version": "0.8.0",
+            "node": {
+                "id": m.node_id, "name": m.name, "admitted": true,
+                "mesh": ["100.88.0.6", "fd00:88::6"], "edge": [], "routes": [],
+                "reachability": "dial-only", "dataplane": "userspace", "listen_port": 53557,
+                "nat": null, "clock_trusted": true, "started_at": "2026-11-22T07:00:00Z"
+            },
+            "config": {"applied_at": "2026-11-22T07:48:00Z", "access_rules_version": 18},
+            "peers": [], "problems": problems, "events": []
+        }));
+        m
+    }
+
+    #[test]
+    fn problems_after_applying_follow_the_reported_status() {
+        let now = Timestamp::from_unix_seconds(1_795_300_000);
+        let bind = "port 8080/tcp: binding TCP 100.88.0.6:8080: Address already in use";
+        let applied = machine(true, Some(1), Some((3, "applied", Some(bind))));
+        // The port was bound on a retry: the status reported since lists nothing
+        assert_eq!(
+            problems_text(&reporting(applied.clone(), serde_json::json!([])), now),
+            "-"
+        );
+        // Still failing: the status lists it
+        let still = serde_json::json!([
+            {"kind": "serve", "node": null, "at": "2026-11-22T07:48:08Z", "reason": bind}
+        ]);
+        assert_eq!(
+            problems_text(&reporting(applied.clone(), still.clone()), now),
+            format!("a served port is not forwarded: {bind}")
+        );
+        let two = serde_json::json!([
+            {"kind": "serve", "node": null, "at": "2026-11-22T07:48:08Z", "reason": bind},
+            {"kind": "names", "node": null, "at": "2026-11-22T07:48:08Z", "reason": "port 53"}
+        ]);
+        assert_eq!(
+            problems_text(&reporting(applied.clone(), two), now),
+            "2 problems"
+        );
+        // Before any status arrives, the reason given when applying is all there is
+        assert_eq!(problems_text(&applied, now), bind);
+        // A rejected push keeps its reason, whatever the status lists
+        let rejected = machine(true, Some(1), Some((3, "rejected", Some("older"))));
+        assert_eq!(
+            problems_text(&reporting(rejected, serde_json::json!([])), now),
+            "older"
+        );
     }
 
     #[test]
