@@ -33,6 +33,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0025](0025-upgrades-through-the-hub.md) | Upgrades fetch the program through the Hub | Accepted |
 | [0026](0026-upgrades-from-the-state-directory.md) | Programs that cannot replace themselves upgrade from their state directory | Accepted |
 | [0027](0027-upgrades-by-approval.md) | Upgrades start when the user approves them | Accepted |
+| [0028](0028-serve-loopback-services.md) | Serve: mesh ports forwarded to services on loopback | Accepted |
 
 Template:
 

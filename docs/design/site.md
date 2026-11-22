@@ -34,6 +34,7 @@ All site content is stored by the tool in the site directory (section 8), and th
 | `nett site invite <machine>` | Prepare what an added machine needs to enroll: with a Hub, prints the enrollment command (hub.md sections 3.3 and 3.5); without one, re-signs and rewrites its desired state file |
 | `nett site edge <machine>` | Set this machine's Edge sources (section 5.2) |
 | `nett site routes <machine>` | Set the routes this machine advertises (section 5.2) |
+| `nett site serve <machine>` | Set the ports this machine serves to its services on `127.0.0.1` (section 5.3) |
 | `nett site device add <name>` | Add a device, which joins through the `public` machine `--gateway` names, and export its configuration; `nett site device remove <name>` revokes it (devices.md section 3) |
 | `nett site devices` | List devices |
 | `nett site allow` | Add an access rule (section 5.1) |
@@ -43,7 +44,7 @@ All site content is stored by the tool in the site directory (section 8), and th
 | `nett site link` | Link with the Hub (hub.md section 3.1) |
 
 - Run only on the computer that holds the site, as an ordinary user, without `sudo`; the site directory defaults to `$XDG_CONFIG_HOME/nett` (`~/.config/nett` when unset), and `--dir` can place it elsewhere;
-- Modifying commands (`add`, `set`, `relay`, `remove`, `edge`, `routes`, `device add`, `device remove`, `allow`, `rules remove`, `upgrade`) list the changes, confirm, sign and deliver according to section 7; when not on a terminal, `--yes` is required;
+- Modifying commands (`add`, `set`, `relay`, `remove`, `edge`, `routes`, `serve`, `device add`, `device remove`, `allow`, `rules remove`, `upgrade`) list the changes, confirm, sign and deliver according to section 7; when not on a terminal, `--yes` is required;
 - Viewing commands (`rules`, `status`, `devices`) output the full content with `--json`.
 
 ## 4. Machines
@@ -125,6 +126,21 @@ $ nett site routes mac-app 172.30.0.10/32
 - **Edge**: give the address of the container where the Edge runs (ADR 0015, local-signing.md section 6). This machine's node policy gets the `edge` role, and a pair of Edge addresses is assigned;
 - **Advertised routes**: this machine's node policy gets the `subnet_router` role, and the routes are signed separately as a versioned artifact (auth.md section 10.5). Routes cannot overlap the mesh prefixes or the routes advertised by other machines;
 - Each time, the machine's complete list is written; `--none` removes it. The node policy and the advertised routes are then signed with a new version (section 7), and when removed, the rules that reference it are cleaned up according to section 5.1.
+
+### 5.3 Served ports
+
+```
+$ nett site serve mac 8080/tcp
++ mac serves 8080/tcp to 127.0.0.1
+    8080/tcp is reached by edge-vps.edge (r4) and the devices; the service sees 127.0.0.1
+Sign? [y/N] y
+```
+
+- **What it is for**: a service on the machine that listens only on `127.0.0.1`. The machine's mesh process listens on the port on its mesh address and forwards each connection to `127.0.0.1` on the same port (ADR 0028, mesh.md section 12.1). A service that listens on all addresses needs no serving;
+- **Who reaches it** is decided by the access rules, as for any other port of the machine (section 5.1), for example `nett site allow edge-vps.edge mac 8080/tcp`; the listing names the rules that reach each port and whether the devices do, or says that nothing does yet;
+- **The service sees `127.0.0.1`** for every connection: a service that skips authentication or grants more to local connections is not to be served, because everything that reaches the port gets that trust;
+- **Ports**: `<port>/tcp`, several separated by spaces, at most 16. Each time, the machine's complete list is written; `--none` removes it. The node policy is then signed with a new version (section 7);
+- **Releases**: every member verifies the node policy, and a release that does not know `serve` rejects it and drops the machine (auth.md section 10.5). With a Hub, the command refuses while the Hub or any machine runs an older release than the one that adds serving, naming them, as `device add` does (devices.md section 9); without one, it prints which release every machine needs.
 
 ## 6. Connections
 

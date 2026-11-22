@@ -53,7 +53,7 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 **Three principles**
 
 1. **Management and traffic are separate**: when the Hub and the nodes are both stopped, websites and the mesh keep working; changes are temporarily impossible.
-2. **Privileged components are not exposed; exposed components are not privileged**: nett-node and the mesh process listen on no public address (the mesh process provides DNS and probe responses only on the mesh address); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the mesh process, answers only authenticated probes, and does not respond at all to unauthenticated packets.
+2. **Privileged components are not exposed; exposed components are not privileged**: nett-node and the mesh process listen on no public address (the mesh process provides DNS, probe responses and the ports its signed node policy serves only on the mesh address, ADR 0028); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the mesh process, answers only authenticated probes, and does not respond at all to unauthenticated packets.
 3. **Decision and execution are separate; raising privileges requires a signature**: a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the content to be signed is computed and displayed locally by the signing tool, not through the Hub (ADR 0024, design/auth.md section 2). Mesh members, advertised routes and access rules are likewise composed of signed artifacts (ADR 0014).
 
 ## 3. nett-node
@@ -249,10 +249,11 @@ The Edge is a reverse proxy the user runs on the ingress node, and any implement
 | On a mesh member (Linux, container or native process) | Edge → mesh → member's mesh address:port. On Linux, Docker port mapping applies destination NAT to external traffic and preserves the source | The ingress node's Edge address |
 | In a service sharing the network of nett's container (Linux or macOS) | Edge → mesh → the container's mesh address:port (ADR 0016) | The ingress node's Edge address |
 | LAN host behind a smart gateway | Edge → mesh → smart gateway (translation by source class) → LAN host | The smart gateway's ingress address (used only to translate traffic from Edge addresses) |
+| On a mesh member, listening only on `127.0.0.1` | Edge → mesh → member's mesh address:port, a port the member serves → the mesh process → `127.0.0.1`:port (ADR 0028) | `127.0.0.1`: the service cannot tell the Edge from local programs |
 
 **Services that trust by source**:
 
-- The translated address must never be a loopback address; when forwarding to a service on the host, use the host's LAN address and never `host.docker.internal` (fact 2 in section 17);
+- The translated address must never be a loopback address; when forwarding to a service on the host, use the host's LAN address and never `host.docker.internal` (fact 2 in section 17). The one way mesh traffic reaches a service from loopback is a port the member serves (ADR 0028), which is for services that give loopback no extra trust;
 - Advertised LAN prefixes are open only to the user's devices by default;
 - An Edge address cannot reach any target by default; which hosts and ports it can reach is written by the user in the access rules. These rules belong to the signed access rule set: adding or changing an origin target amounts to exposing an internal port to the public network, so widening requires a signature (design/mesh.md section 12);
 - Origin traffic from the Edge to a service on the same host does not go through the mesh and is not subject to these rules.

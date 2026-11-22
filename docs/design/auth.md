@@ -308,6 +308,12 @@ The byte-level format of signed payloads, admission proofs, and trust anchor lis
   }
   ```
 
+  A machine that serves ports to its services on `127.0.0.1` (mesh.md section 12.1, ADR 0028) has `serve`: the TCP ports in increasing order, each once, between 1 and 16 of them; without served ports the item does not appear.
+
+  ```json
+  { "serve": [{ "protocol": "tcp", "port": 8080 }] }
+  ```
+
 - **Access rule set artifact**: the whole rule set, with rules matched in array order (earlier rules take precedence), written as the prefixes and ports after selector expansion (mesh.md section 12). An empty `ports` means all protocols and ports:
 
   ```json

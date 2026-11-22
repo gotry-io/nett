@@ -344,6 +344,17 @@ Candidate paths, relay assignments, admission material and keys are all kept loc
 - **Deny first, then open**: at startup the filter rules are installed first, and peers are added afterwards; when a rule update fails, deny is kept and an event is reported;
 - WireGuard's `AllowedIPs` guarantees that source addresses cannot be forged.
 
+### 12.1 Served ports
+
+A service that listens only on `127.0.0.1` is reached from the mesh through a port its machine serves (ADR 0028), set with `nett site serve` (site.md section 5.3) and signed in the node policy (`serve`, auth.md section 10.5):
+
+- **Listening**: once the mesh interface has its addresses, the mesh process listens on each served TCP port on this machine's mesh addresses, IPv4 and IPv6, bound to the mesh interface (`SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` on macOS). Ports are added and removed with the node policy; removing one closes its connections;
+- **Accepting**: a connection whose peer address is outside the mesh prefixes is closed at once. A host on the LAN can address a packet to the mesh address through another interface, which Linux accepts by default and macOS accepts while IP forwarding is on; a forged mesh source does not complete the handshake, because the reply is routed into the mesh interface;
+- **Forwarding**: each connection is copied unchanged to `127.0.0.1` on the same port, over plain TCP; the service sees `127.0.0.1` as its peer. A service that refuses the connection or does not answer within 10 seconds gets the mesh connection closed;
+- **Who connects** is decided by the access rules, as for any port on the machine: the filter runs before the listener, between members by rule, and the user's devices by default;
+- **Bounds**: 16 served ports per machine; 256 forwarded connections, beyond which a new one is closed at once; 8 KiB of buffer per direction; TCP keepalive on both sides (60 seconds idle, then 10-second probes, 3 lost) closes a connection whose peer has gone, while an idle connection whose peers remain stays open;
+- **Failure**: a port that cannot be bound, for example because another program holds it on all addresses, is listed as a problem in `nett status` and retried like the DNS responder (section 15); the other ports and the mesh are unaffected.
+
 ## 13. Phones and the mobile gateway
 
 - The mobile gateway is a `public` node with the `gateway` role (the role is granted by the signed node policy): it accepts devices as peers on `nett0` and carries device traffic into the mesh through the path layer;
@@ -400,7 +411,7 @@ The concrete userspace WireGuard implementation is evaluated and selected after 
 |---|---|
 | Candidate paths per pair of members | 6 |
 | Probe traffic | About 1 KiB/s per pair of active links; about 2.5 KB/s for 15 seconds after switching away because of a failure (section 7) |
-| Mesh process | Idle private memory <= 5 MB (hard rule 14); mesh state (including admission material and revocations) no more than 1 MiB at 50 members; forwarding buffers have limits |
+| Mesh process | Idle private memory <= 5 MB (hard rule 14); mesh state (including admission material and revocations) no more than 1 MiB at 50 members; forwarding buffers have limits; served ports: 16, with 256 connections of 16 KiB of buffers each (section 12.1) |
 | Desired state file and trust store | 4 MiB each; 256 members; 4096 revocations; candidate paths per member as above |
 | Transport adapter | Idle private memory <= 5 MB; forwarding buffers have limits |
 | nett-relay per link through the relay | About 1 KiB; the total number of connections, the index table size and the number of `mac1` trials per second all have limits |

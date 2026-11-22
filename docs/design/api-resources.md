@@ -240,6 +240,7 @@ A node's module permissions are not changed in `spec` but through `node-policies
 | `spec.modules` | Modules allowed to be enabled |
 | `spec.roles` | Roles: `relay`, `gateway` (mobile gateway), `subnet_router` (smart gateway), `edge` (runs Edge on this machine and declares how to recognize traffic sent by Edge: the address of the container Edge runs in, or the system user when running natively); signed by `node.set_roles` |
 | `spec.addresses` | Mesh address; with the `edge` role, also the Edge address |
+| `spec.serve` | TCP ports the mesh process forwards from the mesh address to the same port on `127.0.0.1` (ADR 0028) |
 | `spec.advertised_routes` | Advertised LAN prefixes (signed by `node.advertise_routes`) |
 | `spec.enrollment_public_key` | Enrollment public key, used to verify admission proofs |
 | `spec.policy_version` | Only increases |
