@@ -3,10 +3,6 @@
 //! than 7 days from expiry is re-signed with a new version. Narrowing is also signed with a higher
 //! version: nodes reject older versions because versions only increase (design/mesh.md section
 //! 4.2), so replaying an old signed artifact cannot restore a narrowed permission.
-//!
-//! The hash of the inputs equals that of the sites this tool took over (the fields and order of the
-//! node policy inputs and the way access rules are expanded are unchanged), so an existing site
-//! does not need to be re-signed after switching over.
 
 use nett_core::id::NodeId;
 use nett_core::prefix::IpPrefix;
@@ -199,31 +195,6 @@ fn policy_input(m: &Machine, gateway: bool) -> Option<PolicyInput> {
         edge: m.edge.as_ref().map(|e| e.addresses),
         serve: m.serve.clone(),
     })
-}
-
-/// Artifacts whose signing would change the version: node policies whose inputs changed, advertised
-/// routes and the access rule set. After migrating an existing site, this confirms no re-signing is
-/// needed.
-pub fn outdated(state: &State) -> Result<Vec<String>, SiteError> {
-    let mut out = Vec::new();
-    for (name, m) in &state.machines {
-        if let (Some(input), Some(p)) = (policy_input(m, state.is_gateway(&m.node_id)), &m.policy)
-            && hash_of(&input)? != p.input
-        {
-            out.push(format!("{name}: node policy"));
-        }
-        if !m.routes.is_empty()
-            && m.routes_signed.as_ref().map(|r| r.input) != Some(hash_of(&m.routes.as_slice())?)
-        {
-            out.push(format!("{name}: advertised routes"));
-        }
-    }
-    if state.access_rules.as_ref().map(|r| r.input) != Some(hash_of(&expand_rules(state)?)?)
-        && !(state.rules.is_empty() && state.access_rules.is_none())
-    {
-        out.push("access rules".to_owned());
-    }
-    Ok(out)
 }
 
 /// Roles in the node policy: `edge` when there is an Edge, `subnet_router` when there are
