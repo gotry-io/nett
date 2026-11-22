@@ -5,10 +5,10 @@
 
 ## Context
 
-Nodes install only packages that pass verification against the project's release signature, and automatically accept packages with a higher version (ADR 0012). nett-node runs as root, so the release private key is the most impactful key in the whole system:
+Nodes install only packages that pass verification against the project's release signature, and accept packages with a higher version once the user approves that version (ADR 0012, ADR 0027). nett-node runs as root, so the release private key is the most impactful key in the whole system:
 
-- If it is stolen, an attacker can sign a "new version" that every node with automatic upgrade enabled will install;
-- If it is lost, the project can never again issue upgrades that nodes accept automatically, and machines must be reinstalled one by one;
+- If it is stolen, an attacker can sign a "new version" that every node installs once the user approves that version;
+- If it is lost, the project can never again issue upgrades that nodes accept, and machines must be reinstalled one by one;
 - With only one public key embedded in `nett`, there is no remedy for either leakage or loss.
 
 nett is an open-source project: anyone can compile it themselves, and those who do not trust the project's keys need to be able to substitute their own.
@@ -18,7 +18,7 @@ nett is an open-source project: anyone can compile it themselves, and those who 
 - **The private keys are held by the project maintainers**: official release packages are signed by the project's release private key. All installations carry only public keys and can verify but not sign.
 - **Public keys are build parameters**: official builds embed the project's public keys; people who compile it themselves replace them with their own public keys at build time, sign with their own private keys, and distribute through their own Hub. Development builds embed development public keys, and official builds do not accept packages signed with development keys.
 - **Two keys, primary and backup**: every build embeds two public keys. The primary key is used for everyday signing; the backup key is kept only offline and is not used normally. Nodes accept packages signed by either key. When the primary key is leaked or lost, the backup key signs a new version that embeds a new pair of primary and backup public keys; once a node has installed it, it no longer accepts signatures from the old primary key.
-- **Upgrades are automatic by default**: nodes automatically accept packages signed by the project with a higher version, pushed by the Hub through the `release` partition (low risk); a rollback can only go back to the version this machine last installed; other downgrades require a user signature (`release_override`, design/auth.md section 11.3).
+- **Upgrades need the project's signature and the user's approval**: nodes accept packages signed by the project with a higher version, which the Hub relays through the `release` partition once the user approves that version (low risk, ADR 0027); a rollback can only go back to the version this machine last installed; other downgrades require a user signature (`release_override`, design/auth.md section 11.3).
 - **Signature format**: Ed25519, in the minisign format. Nodes need only a very small verification-only library; the signature carries a key ID, from which the node selects the public key; users can also check release packages manually with the `minisign` command.
 - **CI signs automatically, with no human involved in releases**:
   - The primary private key is stored in CI's `release` environment, which only `v*` version tags may use; version tags are protected by a ruleset, and only repository administrators can create, modify and delete them;
@@ -50,7 +50,7 @@ nett is an open-source project: anyone can compile it themselves, and those who 
 
 ## Consequences
 
-- **Residual risk**: if a maintainer's code hosting account is stolen, or someone can push protected version tags or change the release workflow, they can use the primary key to sign a version that all nodes with automatic upgrade enabled will install, until a new version signed by the backup key replaces the primary key. An optional "upgrades need user approval" mode can be added later;
+- **Residual risk**: if a maintainer's code hosting account is stolen, or someone can push protected version tags or change the release workflow, they can use the primary key to sign a version that the nodes install once the user approves it (ADR 0027), until a new version signed by the backup key replaces the primary key;
 - **Residual risk of the first installation**: if the project website, its DNS or its hosting account is compromised, machines newly installed in that period are taken over; machines already installed are unaffected. These accounts also have two-step verification enabled;
 - The Developer ID signature of the macOS programs carries the maintainer's name. People who build nett themselves sign it with their own identity, or keep the ad-hoc signature and grant the macOS firewall permission again after each upgrade;
 - The build script accepts the release public keys as parameters; the release handbook documents the configuration of the release workflow and the steps for replacing keys with the backup key;

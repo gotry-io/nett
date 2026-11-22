@@ -6,7 +6,8 @@
 #   nett site add app-box          prints the token for NETT_TOKEN below
 #   nett site allow <from> app-box 8080/tcp
 # Then: docker compose up -d
-# The container upgrades itself with each release; the image tag is the version it starts from.
+# The container upgrades itself to each release you approve with `nett site upgrade`; the image
+# tag is the version it starts from.
 services:
   nett:
     image: ghcr.io/gotry-io/nett:latest

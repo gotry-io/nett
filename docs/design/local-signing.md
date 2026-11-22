@@ -13,7 +13,7 @@ Signing, verification and mesh behavior are the same as after joining the Hub: t
 
 | Included | Not included |
 |---|---|
-| The signing tool `nett site`, running on the user's own computer: generates the recovery key and the trust anchor list, assigns addresses, signs node policy, advertised routes and access rule sets, generates a desired state file for each node; maintains the site with commands (site.md) | Hub, nett-node, console, passkey, automatic upgrade |
+| The signing tool `nett site`, running on the user's own computer: generates the recovery key and the trust anchor list, assigns addresses, signs node policy, advertised routes and access rule sets, generates a desired state file for each node; maintains the site with commands (site.md) | Hub, nett-node, console, passkey, upgrades through the Hub |
 | `nett mesh --config` in the official build: reads the local desired state file and reloads on `SIGHUP` | Device credentials, mobile gateway, hostnames and DNS, CONNECT |
 | `nett keys`, which generates keys on the node (on macOS done by `sudo nett install`) | Native macOS member, DSM, Home Assistant OS |
 | Access control (mesh.md section 12), the Edge address (ADR 0015), a member forwarding Edge traffic to the routes it advertises (mesh.md section 10) | |

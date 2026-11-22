@@ -379,7 +379,7 @@ The trust anchors for release packages are independent of the user's trust ancho
 - When the primary key is leaked or lost, the backup key signs a version embedding new primary and backup public keys; once a node has installed it, the node no longer accepts signatures from the old primary key;
 - At first installation, the install script checks the program against the hash written in the script, and the first installation trusts the project website (release.md section 6, ADR 0020). The user can also check the release signature by hand (`keys/`);
 - A node automatically accepts only release packages with a higher version number; rollback is possible only to the version last installed on this machine; installing any other lower version requires a `release_override` artifact (signed by the user);
-- Upgrades have a single path: the `release` partition of the desired state (protocol.md section 6). An upgrade that satisfies the rules above is low risk and is pushed automatically by the Hub; the node fetches the program from the Hub's copy or from the URL in the manifest, and the signature, not the Hub or the download location, decides whether it is installed (release.md section 7, ADR 0025).
+- Upgrades have a single path: the `release` partition of the desired state (protocol.md section 6). An upgrade that satisfies the rules above is low risk, and the Hub relays it once the user approves that version with `nett site upgrade` (ADR 0027); the node fetches the program from the Hub's copy or from the URL in the manifest, and the signature, not the Hub or the download location, decides whether it is installed (release.md section 7, ADR 0025).
 
 ## 12. Safeguards
 

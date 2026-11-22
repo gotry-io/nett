@@ -8,7 +8,8 @@
 #   docker compose up -d
 # Then, within an hour, run the printed `nett site link nett_lnk_…` on the computer that holds the site.
 # To unlink the site: docker compose exec hub nett-hub reset --data /data
-# The Hub upgrades itself with each release; the image tag is the version it starts from.
+# The Hub upgrades itself to each release you approve with `nett site upgrade`; the image tag is
+# the version it starts from.
 services:
   hub:
     image: ghcr.io/gotry-io/nett-hub:latest

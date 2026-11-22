@@ -68,12 +68,12 @@ Linux only, static configuration instead of the Hub. Scenarios, pass criteria an
 
 - [x] H1 Distribution and status: `nett-hub`, nett-node (`nett node`), `nett site link`, `status`, `invite` for existing machines, `sudo nett install` on both platforms
 - [x] H2 Enrollment and leaving: the same one-line enrollment command on all platforms, the install script on the project website, public addresses learned by the Hub, `sudo nett leave`
-- [x] H3 Upgrade: machines upgrade themselves from signed releases the Hub announces, with downgrade protection and rollback (design/release.md section 7)
+- [x] H3 Upgrade: machines upgrade themselves to signed releases the user approves, with downgrade protection and rollback (design/release.md section 7, ADR 0027)
 - [x] H4 Runtime coordination: relays (`nett site relay`) with UDP and TLS paths for every connection, LAN direct paths from the addresses machines report, `dial-only` pairs switching together through the Hub
 - [x] H5, first half: the encrypted Hub backup every machine keeps, `nett-hub restore` and the rebuild procedure (design/hub.md section 8.2); the second half is stage 9
 - [x] Site: machines, Edge, advertised routes (denied by default) and access rules maintained with `nett site` commands; connections derived from access rules
 - [x] Authentication: recovery key and backup key, the site's API token, node keys and admission proofs, trust anchors; signing on the user's own computer (ADR 0024)
-- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, the Hub's image and Compose example in `packaging/`, automatic upgrade and rollback
+- [x] Installation: release workflow (built in CI, a separate signing job), release packages of `nett` and `nett-hub`, the install script, the Hub's image and Compose example in `packaging/`, upgrades and rollback
 - [x] Availability: nett-node and the mesh process apply the locally saved configuration at start-up
 - [x] OpenAPI document of the Hub API (`docs/api/openapi.json`)
 

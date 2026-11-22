@@ -12,6 +12,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   only answered for its own leg. A path through a relay now has a round trip only once the peer has
   reported its leg: it is no better path to move to before that, and a failover tries the paths
   whose whole round trip is known first.
+- The README, the Compose examples and the design say that upgrades start once you approve them
+  with `nett site upgrade`.
 
 ## [0.8.0] - 2026-11-22
 
