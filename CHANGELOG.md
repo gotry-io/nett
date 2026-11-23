@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-23
+
 - `nett site` lists what the Hub learned about a machine, such as the WireGuard port a `dial-only`
   machine was given when its service started, instead of an empty "From the Hub:".
 - `sudo nett install` on a Mac linked to a Hub ends without telling to run it again after
