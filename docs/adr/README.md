@@ -35,6 +35,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0027](0027-upgrades-by-approval.md) | Upgrades start when the user approves them | Accepted |
 | [0028](0028-serve-loopback-services.md) | Serve: mesh ports forwarded to services on loopback | Accepted |
 | [0029](0029-relay-paths-measured-end-to-end.md) | Relay paths are measured end to end | Accepted |
+| [0030](0030-obfuscated-udp-transport.md) | Obfuscated UDP transport: WireGuard wrapped in a public format with site keys | Accepted |
 
 Template:
 
