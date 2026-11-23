@@ -13,6 +13,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub const RELAY_PROBE: u8 = 0x90;
 pub const RELAY_REPLY: u8 = 0x91;
 
+/// The largest padding a site may choose for the obfuscated transport's sealed messages
+/// (design/obfuscation.md section 4: a minimum up to 64 bytes and a maximum up to 256 above it).
+pub const MAX_OBFS_PADDING: u16 = 320;
+
 /// The maximum number of TLS relays in one configuration.
 pub const MAX_TARGETS: usize = 16;
 

@@ -44,11 +44,13 @@ const THROUGH_TTL: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ConnId(pub u64);
 
-/// A member's address: a UDP source or an authenticated TLS connection.
+/// A member's address: a UDP source on the relay port, an authenticated TLS connection, or a UDP
+/// source on the obfuscated port, whose packets are wrapped (design/obfuscation.md section 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PeerAddr {
     Udp(SocketAddr),
     Tls(ConnId),
+    Obfs(SocketAddr),
 }
 
 /// Format version of the saved state.
@@ -447,7 +449,8 @@ impl Relay {
     /// the WireGuard address bound for this member, which is its mapped address (design/mesh.md
     /// section 6.1): the probe itself is sent from the mesh's own port, so its source is
     /// not the WireGuard mapping. When no UDP address is bound yet, the probe's source is echoed;
-    /// over TLS there is no mapped address.
+    /// over TLS and the obfuscated port there is no mapped address: the transport's socket is not
+    /// WireGuard's.
     fn verify_probe(&self, from: PeerAddr, packet: &[u8], now_ms: u64) -> Option<(usize, Vec<u8>)> {
         let head = OuterProbe::peek(packet)?;
         let index = self.members.iter().position(|m| m.key_id == head.key_id)?;
@@ -459,7 +462,7 @@ impl Relay {
         let observed = match (member.bound, from) {
             (Some(PeerAddr::Udp(bound)), _) => bound,
             (_, PeerAddr::Udp(addr)) => addr,
-            (_, PeerAddr::Tls(_)) => probe::UNSPECIFIED,
+            (_, PeerAddr::Tls(_) | PeerAddr::Obfs(_)) => probe::UNSPECIFIED,
         };
         let reply = probe
             .reply(member.key_id, observed)

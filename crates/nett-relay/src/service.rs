@@ -14,7 +14,8 @@ use tokio::sync::mpsc;
 use crate::cert::{CertError, RelayCert};
 use crate::relay::{AssignedMember, AssignmentError, Relay};
 use crate::server::{
-    ASSIGNMENT_QUEUE, Assignment, TlsIngress, TlsSetupError, cert_acceptor, serve, tls_listener,
+    ASSIGNMENT_QUEUE, Assignment, ObfsIngress, TlsIngress, TlsSetupError, cert_acceptor, serve,
+    tls_listener,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -25,6 +26,8 @@ pub enum ServiceError {
     Tls(#[from] TlsSetupError),
     #[error("the relay assignment from the nett service is not valid: {0}")]
     Assignment(#[from] AssignmentError),
+    #[error("the relay assignment's obfuscation padding is not valid: {0}")]
+    Obfs(#[from] nett_transport::obfs::ObfsError),
     #[error("binding {what} port {port}: {source}")]
     Bind {
         what: &'static str,
@@ -89,9 +92,32 @@ pub async fn run(
         }),
         None => None,
     };
+    let obfs = match &assignment.obfs {
+        Some(doc) => {
+            let socket = tokio::net::UdpSocket::bind(SocketAddr::new(
+                Ipv6Addr::UNSPECIFIED.into(),
+                doc.port,
+            ))
+            .await
+            .map_err(|source| ServiceError::Bind {
+                what: "the obfuscated",
+                port: doc.port,
+                source,
+            })?;
+            let padding = nett_transport::obfs::Padding::new(doc.padding.min, doc.padding.max)?;
+            let key = nett_transport::obfs::ObfsKey::from_bytes(doc.key.0);
+            Some(ObfsIngress {
+                socket,
+                obfuscator: nett_transport::obfs::Obfuscator::new(&key, padding),
+                rng: ring::rand::SystemRandom::new(),
+            })
+        }
+        None => None,
+    };
     tracing::info!(
         udp = ports.0,
         tls = ?ports.1,
+        obfs = ?assignment.obfs.as_ref().map(|o| o.port),
         members = first.members.len(),
         links = first.connections.len(),
         "relay started"
@@ -112,7 +138,7 @@ pub async fn run(
             Some(()) = ports_changed.recv() => ended = Ended::PortsChanged,
         }
     };
-    let served = serve(udp, tls, relay, Some(state), Some(rx), stop).await;
+    let served = serve(udp, tls, obfs, relay, Some(state), Some(rx), stop).await;
     fetcher.abort();
     served?;
     Ok(ended)
@@ -137,8 +163,11 @@ async fn follow(
         if next == current {
             continue;
         }
-        if (next.port, next.tls_port) != (current.port, current.tls_port) {
-            tracing::info!(udp = next.port, tls = ?next.tls_port, "relay ports changed; restarting");
+        // A new obfuscation key or padding range is rebound with the port: they change rarely
+        if (next.port, next.tls_port) != (current.port, current.tls_port)
+            || next.obfs != current.obfs
+        {
+            tracing::info!(udp = next.port, tls = ?next.tls_port, obfs = ?next.obfs.as_ref().map(|o| o.port), "relay ports changed; restarting");
             let _ = ports_changed.try_send(());
             return;
         }

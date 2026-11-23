@@ -41,6 +41,8 @@ pub struct RelayAssignment {
     pub tls_port: Option<u16>,
     pub members: Vec<AssignedMember>,
     pub links: Vec<[X25519PublicKey; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<crate::config::RelayObfsDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -226,6 +228,7 @@ mod tests {
                     token: ProbeToken([2; 32]),
                 }],
                 links: vec![],
+                obfs: None,
             }))
         }
 

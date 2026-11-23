@@ -723,6 +723,7 @@ impl<D: DataPlane> Engine<D> {
                     .iter()
                     .filter_map(|[a, b]| Some([key(a)?, key(b)?]))
                     .collect(),
+                obfs: doc.obfs.clone(),
             }
         });
         if assignment != self.relay {
@@ -1598,6 +1599,7 @@ mod tests {
                 })
                 .into(),
             links: vec![[node_id(1), node_id(2)]],
+            obfs: None,
         });
         let mut events = VecSink::default();
         e.apply(&validated(doc), &mut events).expect("accepted");
@@ -2379,6 +2381,7 @@ mod tests {
                 })
                 .into(),
             links: vec![[node_id(1), node_id(2)]],
+            obfs: None,
         });
         e.apply(&validated(doc), &mut events).expect("accepted");
         let relay: SocketAddr = "127.0.0.1:41822".parse().expect("addr");

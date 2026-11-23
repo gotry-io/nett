@@ -120,7 +120,7 @@ async fn lab(
             }
         }
     });
-    let served = serve(udp, tls, relay, state, Some(received), shutdown).await;
+    let served = serve(udp, tls, None, relay, state, Some(received), shutdown).await;
     reload.abort();
     served.context("relay socket")
 }

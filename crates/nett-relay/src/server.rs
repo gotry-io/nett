@@ -19,12 +19,17 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::relay::{AssignedMember, ConnId, Outcome, PeerAddr, Relay, RelayState};
+use nett_transport::obfs::{Obfuscator, Salts};
 use nett_transport::queue;
 use nett_trust::keys::X25519PublicKey;
+use ring::rand::SystemRandom;
 
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(1);
 /// Outer packets are at most about 1360 bytes (design/mesh.md section 4); leave some margin.
 const MAX_DATAGRAM: usize = 2048;
+/// A datagram on the obfuscated port: a message of up to [`MAX_DATAGRAM`] with the salt, the sealed
+/// form's header and tag, and the largest padding.
+const MAX_OBFS_DATAGRAM: usize = MAX_DATAGRAM + 512;
 /// Interval for saving state (design/mesh.md section 5.2).
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Upper limit on TLS connections, and on those among them that are waiting for authentication.
@@ -48,6 +53,14 @@ pub fn tls_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
     socket.set_reuseaddr(true)?;
     socket.bind(addr)?;
     socket.listen(1024)
+}
+
+/// The obfuscated port (design/obfuscation.md section 2): what arrives is unwrapped before it is
+/// routed, and what goes to a member bound here is wrapped.
+pub struct ObfsIngress {
+    pub socket: UdpSocket,
+    pub obfuscator: Obfuscator,
+    pub rng: SystemRandom,
 }
 
 /// The TLS entry point on the relay port.
@@ -78,13 +91,15 @@ pub struct Assignment {
 /// Bound on assignments waiting to be applied: the fetcher sends one only when it changed.
 pub const ASSIGNMENT_QUEUE: usize = 4;
 
-/// Runs until `shutdown` completes. `udp` is the dual-stack relay port. `state` is the file holding
+/// Runs until `shutdown` completes. `udp` is the dual-stack relay port, `obfs` the obfuscated port when
+/// the relay offers it. `state` is the file holding
 /// the index table: restored at startup, and written once per second and again before exit, so
 /// connections through the relay survive a restart. Assignments arriving on `updates` are applied in
 /// place.
 pub async fn serve(
     udp: UdpSocket,
     tls: Option<TlsIngress>,
+    obfs: Option<ObfsIngress>,
     mut relay: Relay,
     state: Option<PathBuf>,
     mut updates: Option<mpsc::Receiver<Assignment>>,
@@ -92,6 +107,10 @@ pub async fn serve(
 ) -> std::io::Result<()> {
     let granted = nett_mesh::sockbuf::enlarge_receive_buffer(&udp);
     tracing::debug!(bytes = ?granted, "relay receive buffer");
+    if let Some(o) = &obfs {
+        let granted = nett_mesh::sockbuf::enlarge_receive_buffer(&o.socket);
+        tracing::debug!(bytes = ?granted, "obfuscated port receive buffer");
+    }
     if let Some(path) = &state {
         match load(path) {
             Ok(Some(saved)) => {
@@ -109,6 +128,11 @@ pub async fn serve(
     let mut conns: HashMap<ConnId, Conn> = HashMap::new();
     let mut next_conn = 0u64;
     let mut buf = vec![0u8; MAX_DATAGRAM];
+    // The obfuscated port's datagram, what it unwraps to, and what is wrapped for a member bound there
+    let mut obuf = vec![0u8; MAX_OBFS_DATAGRAM];
+    let mut plain = Vec::with_capacity(MAX_DATAGRAM);
+    let mut wire = Vec::with_capacity(MAX_OBFS_DATAGRAM);
+    let mut salts = Salts::default();
     let mut tick = tokio::time::interval(EXPIRE_INTERVAL);
     let mut last_save = Instant::now();
     // Writing to disk can stall for a few hundred milliseconds when the disk is busy (for example
@@ -126,7 +150,19 @@ pub async fn serve(
                 let from = PeerAddr::Udp(unmap(from));
                 let packet = &buf[..len];
                 let outcome = relay.handle(from, packet, Instant::now(), now_ms());
-                dispatch(&udp, &conns, from, packet, outcome, &mut dropped);
+                dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, packet, outcome, &mut dropped);
+            }
+            received = recv_obfs(obfs.as_ref(), &mut obuf) => {
+                let (len, from) = received?;
+                let Some(o) = obfs.as_ref() else { continue };
+                // What does not unwrap is dropped and gets no answer (hard rule 2)
+                if o.obfuscator.unwrap(now_ms(), &mut salts, &obuf[..len], &mut plain).is_err() {
+                    dropped += 1;
+                    continue;
+                }
+                let from = PeerAddr::Obfs(unmap(from));
+                let outcome = relay.handle(from, &plain, Instant::now(), now_ms());
+                dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, &plain, outcome, &mut dropped);
             }
             Some(update) = next_update(&mut updates) => {
                 match relay.reassign(&update.members, &update.connections) {
@@ -159,7 +195,7 @@ pub async fn serve(
                     if conn.authenticated {
                         let from = PeerAddr::Tls(id);
                         let outcome = relay.handle(from, &packet, Instant::now(), now_ms());
-                        dispatch(&udp, &conns, from, &packet, outcome, &mut dropped);
+                        dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, &packet, outcome, &mut dropped);
                     } else if let Some(reply) = relay.authenticate(id, &packet, now_ms()) {
                         conn.authenticated = true;
                         tracing::info!(conn = id.0, "TLS connection authenticated");
@@ -216,6 +252,16 @@ async fn next_update(updates: &mut Option<mpsc::Receiver<Assignment>>) -> Option
     }
 }
 
+async fn recv_obfs(
+    obfs: Option<&ObfsIngress>,
+    buf: &mut [u8],
+) -> std::io::Result<(usize, SocketAddr)> {
+    match obfs {
+        Some(o) => o.socket.recv_from(buf).await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketAddr)> {
     let Some(ingress) = tls else {
         return std::future::pending().await;
@@ -230,19 +276,29 @@ async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketA
 
 /// The result of running [`Relay::handle`]. A send failure (for example the peer has no route yet
 /// or the connection's queue is full) drops only that one packet.
+#[allow(clippy::too_many_arguments)]
 fn dispatch(
     udp: &UdpSocket,
+    obfs: Option<&ObfsIngress>,
+    wire: &mut Vec<u8>,
     conns: &HashMap<ConnId, Conn>,
     from: PeerAddr,
     packet: &[u8],
     outcome: Outcome,
     dropped: &mut u64,
 ) {
-    let send = |to: PeerAddr, data: &[u8]| match to {
+    let mut send = |to: PeerAddr, data: &[u8]| match to {
         PeerAddr::Udp(addr) => drop(udp.try_send_to(data, map_v6(addr))),
         PeerAddr::Tls(id) => {
             if let Some(conn) = conns.get(&id) {
                 conn.tx.push(data.to_vec());
+            }
+        }
+        PeerAddr::Obfs(addr) => {
+            if let Some(o) = obfs
+                && o.obfuscator.wrap(&o.rng, now_ms(), data, wire).is_ok()
+            {
+                drop(o.socket.try_send_to(wire, map_v6(addr)));
             }
         }
     };
@@ -473,6 +529,137 @@ mod tests {
         });
     }
 
+    /// The obfuscated port unwraps what it receives, routes it as the relay port does, and wraps only
+    /// what goes to the member bound there (design/obfuscation.md section 2): garbage gets no answer,
+    /// a probe gets a wrapped reply, and a handshake and data cross between a member on the relay
+    /// port and a member on the obfuscated port.
+    #[test]
+    fn the_obfuscated_port_routes_between_plain_and_obfuscated_members() {
+        use crate::wg::tests::{data, initiation, response};
+        use nett_transport::obfs::{ObfsKey, Obfuscator, Padding, Salts};
+
+        let (a, b) = ([1; 32], [2; 32]);
+        let plain_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("a's socket");
+        plain_a
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let member = |k: [u8; 32], address| AssignedMember {
+            public_key: X25519PublicKey::from_bytes(k),
+            address,
+            token: [k[0]; 32],
+        };
+        let relay = Relay::new(
+            &[
+                member(a, Some(plain_a.local_addr().expect("addr"))),
+                member(b, None),
+            ],
+            &[(
+                X25519PublicKey::from_bytes(a),
+                X25519PublicKey::from_bytes(b),
+            )],
+        )
+        .expect("assignment");
+        let key = ObfsKey::from_bytes([7; 32]);
+        let padding = Padding::new(8, 64).expect("padding");
+        let udp = std::net::UdpSocket::bind("[::]:0").expect("relay socket");
+        let obfs = std::net::UdpSocket::bind("[::]:0").expect("obfuscated socket");
+        for s in [&udp, &obfs] {
+            s.set_nonblocking(true).expect("nonblocking");
+        }
+        let at = |s: &std::net::UdpSocket| {
+            SocketAddr::from(([127, 0, 0, 1], s.local_addr().expect("addr").port()))
+        };
+        let (relay_addr, obfs_addr) = (at(&udp), at(&obfs));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server_key = key.clone();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let ingress = ObfsIngress {
+                    socket: UdpSocket::from_std(obfs).expect("tokio socket"),
+                    obfuscator: Obfuscator::new(&server_key, padding),
+                    rng: SystemRandom::new(),
+                };
+                let udp = UdpSocket::from_std(udp).expect("tokio socket");
+                serve(udp, None, Some(ingress), relay, None, None, async {
+                    drop(stopped.await);
+                })
+                .await
+            })
+        });
+
+        // b reaches the relay only through the obfuscated port
+        let obfs_b = std::net::UdpSocket::bind("127.0.0.1:0").expect("b's socket");
+        obfs_b.connect(obfs_addr).expect("connect");
+        obfs_b
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        let wrapper = Obfuscator::new(&key, padding);
+        let rng = SystemRandom::new();
+        let mut salts = Salts::default();
+        let send = |message: &[u8]| {
+            let mut wire = Vec::new();
+            wrapper
+                .wrap(&rng, now_ms(), message, &mut wire)
+                .expect("wrap");
+            obfs_b.send(&wire).expect("send");
+        };
+        let mut buf = [0u8; MAX_OBFS_DATAGRAM];
+        let mut receive = |salts: &mut Salts| -> Option<Vec<u8>> {
+            let len = obfs_b.recv(&mut buf).ok()?;
+            let mut message = Vec::new();
+            wrapper
+                .unwrap(now_ms(), salts, &buf[..len], &mut message)
+                .ok()?;
+            Some(message)
+        };
+
+        obfs_b.send(&[0u8; 60]).expect("send garbage");
+        assert_eq!(receive(&mut salts), None, "garbage gets no answer");
+
+        let probe_key = ProbeKey::from_token(&[2; 32]);
+        let probe = OuterProbe {
+            kind: RELAY_PROBE,
+            key_id: KeyId::of(&b),
+            seq: 1,
+            sent_ms: now_ms(),
+        };
+        send(&probe.encode(&probe_key));
+        let reply = receive(&mut salts).expect("a wrapped reply to the probe");
+        assert!(OuterReply::verify(&reply, &probe_key).is_some());
+
+        let mut plain = [0u8; MAX_DATAGRAM];
+        let init = initiation(11, &a);
+        send(&init);
+        let (len, _) = plain_a
+            .recv_from(&mut plain)
+            .expect("a gets the initiation");
+        assert_eq!(plain[..len], init[..], "a gets it as WireGuard sent it");
+        let resp = response(22, 11, &b);
+        plain_a.send_to(&resp, relay_addr).expect("a answers");
+        assert_eq!(
+            receive(&mut salts),
+            Some(resp),
+            "b gets the response wrapped"
+        );
+
+        send(&data(22));
+        let (len, _) = plain_a.recv_from(&mut plain).expect("a gets b's data");
+        assert_eq!(plain[..len], data(22)[..]);
+        plain_a.send_to(&data(11), relay_addr).expect("a's data");
+        assert_eq!(
+            receive(&mut salts),
+            Some(data(11)),
+            "b gets a's data wrapped"
+        );
+
+        stop.send(()).expect("relay still running");
+        server.join().expect("server thread").expect("serve");
+    }
+
     /// When the state write stalls (a named pipe with no reader stands in for a busy disk here),
     /// the relay keeps answering and forwarding.
     #[test]
@@ -526,7 +713,7 @@ mod tests {
                 .expect("runtime");
             runtime.block_on(async move {
                 let udp = UdpSocket::from_std(socket).expect("tokio socket");
-                serve(udp, None, relay, Some(server_state), None, async {
+                serve(udp, None, None, relay, Some(server_state), None, async {
                     drop(stopped.await);
                 })
                 .await

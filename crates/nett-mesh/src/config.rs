@@ -83,6 +83,9 @@ pub struct RelayDoc {
     pub members: Vec<RelayMemberDoc>,
     /// Pairs of members the relay forwards between.
     pub links: Vec<[NodeId; 2]>,
+    /// The obfuscated UDP transport, when the relay offers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<RelayObfsDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +213,48 @@ impl std::fmt::Debug for ProbeToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ProbeToken(<redacted>)")
     }
+}
+
+/// A relay's obfuscation key (design/obfuscation.md section 4). `Debug` does not print it, and it is
+/// zeroized when dropped (hard rule 10).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObfsSecret(#[serde(with = "nett_trust::encoding::b64_fixed")] pub [u8; 32]);
+
+impl std::fmt::Debug for ObfsSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ObfsSecret(<redacted>)")
+    }
+}
+
+impl Drop for ObfsSecret {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+/// The site's padding range for the obfuscated transport's sealed messages, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfsPadding {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl ObfsPadding {
+    pub fn is_valid(&self) -> bool {
+        self.min <= self.max && self.max <= nett_core::transport::MAX_OBFS_PADDING
+    }
+}
+
+/// A relay's obfuscated UDP transport (design/obfuscation.md section 2): its port, its key and the
+/// site's padding range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelayObfsDoc {
+    pub port: u16,
+    pub key: ObfsSecret,
+    pub padding: ObfsPadding,
 }
 
 /// Path configuration of one peer.
@@ -409,6 +454,21 @@ impl DesiredMesh {
 fn check_relay(relay: &RelayDoc) -> Result<(), ConfigError> {
     if relay.port == 0 || relay.tls_port == Some(0) {
         return Err(ConfigError::Relay("ports must not be 0".into()));
+    }
+    if let Some(obfs) = &relay.obfs {
+        if obfs.port == 0 || obfs.port == relay.port {
+            return Err(ConfigError::Relay(
+                "the obfuscated port must be set and differ from the relay port".into(),
+            ));
+        }
+        if !obfs.padding.is_valid() {
+            return Err(ConfigError::Relay(format!(
+                "obfuscation padding {}-{} is not within 0-{} with the minimum first",
+                obfs.padding.min,
+                obfs.padding.max,
+                nett_core::transport::MAX_OBFS_PADDING
+            )));
+        }
     }
     if relay.members.len() > MAX_MEMBERS {
         return Err(ConfigError::TooMany {

@@ -29,8 +29,7 @@ const KEEPALIVE_LEN: usize = 32;
 /// Version, time in milliseconds and the message's length, in front of the message in the sealed form.
 const SEALED_HEADER: usize = 1 + 8 + 2;
 const TAG_LEN: usize = 16;
-/// The largest padding a site may choose (section 4: a minimum up to 64 and a maximum up to 256 above).
-pub const MAX_PADDING: u16 = 320;
+pub use nett_core::transport::MAX_OBFS_PADDING as MAX_PADDING;
 /// The largest message the transport carries; outer WireGuard packets are about 1360 bytes.
 pub const MAX_MESSAGE: usize = 2048;
 /// A sealed message whose time differs from the receiver's clock by more than this is dropped.

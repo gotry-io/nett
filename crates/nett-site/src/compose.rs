@@ -250,6 +250,7 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
         tls_port: role.tls_port,
         members,
         links,
+        obfs: None,
     })
 }
 
