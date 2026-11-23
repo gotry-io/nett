@@ -217,17 +217,19 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: configuration and files are validated at the boundary, against what the machine itself uses, before anything acts on them.
 
-**Breaks when** a value is valid on its own but collides with something nett uses (a port), or a file is checked and then opened, so what is opened is not what was checked.
+**Breaks when** a value is valid on its own but collides with something nett uses (a port); a release starts reserving a port a site already gives a machine, and the machine then rejects the desired state it saved and starts without its mesh; or a file is checked and then opened, so what is opened is not what was checked.
 
 **Where it holds**
 
-- A WireGuard port that nett uses itself on the machine (the probe port, the TLS loopback ports) is rejected when the desired state is built and when it is applied (site.md section 4);
+- The probe port, the one port nett binds that a WireGuard or relay port may not be, is rejected when the desired state is built and when it is applied; the transports' loopback ports go around the machine's own WireGuard and relay ports instead of forbidding them, and a WireGuard port the system assigns avoids them (site.md section 4, mesh.md sections 5.3 and 5.5);
 - `sudo nett install`, running as root, opens the desired state from the user's directory without following links or blocking, and checks the file it opened;
 - The target names of a release manifest are checked before the Hub names files after them, and the version and target a node asks for are only compared with what the Hub holds, never used as a path (release.md section 7).
 
 **Guards**
 
 - `nett-mesh:listen_port_avoids_the_ports_nett_uses_itself`
+- `nett-mesh:loopback_ports_go_around_the_machines_own_ports`
+- `nett-mesh:automatic_port_skips_the_ports_nett_uses_itself`
 - `nett-cli:reads_only_regular_files_without_following_links_or_blocking`
 - `nett-trust:manifests_and_versions_from_the_network_are_checked`
 - `nett-hub:nodes_fetch_the_program_of_a_release_from_the_hub`

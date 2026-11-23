@@ -17,8 +17,8 @@ pub const MESH_MTU: u32 = 1280;
 /// Name of the mesh interface.
 pub const INTERFACE_NAME: &str = "nett0";
 
-/// When a system-assigned port is a reserved port ([`crate::config::is_reserved_port`]), the maximum
-/// number of reassignments.
+/// When a system-assigned port is one nett uses itself ([`crate::config::is_reserved_port`],
+/// [`crate::config::is_loopback_port`]), the maximum number of reassignments.
 const PORT_ATTEMPTS: usize = 8;
 
 /// When the desired state carries no port, the system assigns the WireGuard port (design/mesh.md section
@@ -32,7 +32,7 @@ pub(crate) fn automatic_port<T>(
     let mut reserved = Vec::new();
     for _ in 0..=PORT_ATTEMPTS {
         let (handle, port) = assign()?;
-        if !crate::config::is_reserved_port(port) {
+        if !crate::config::is_reserved_port(port) && !crate::config::is_loopback_port(port) {
             return Ok((handle, port));
         }
         reserved.push((handle, port));
@@ -231,19 +231,25 @@ pub trait DataPlane: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::TLS_LOOPBACK_BASE;
+    use crate::config::{OBFS_LOOPBACK_BASE, TLS_LOOPBACK_BASE};
     use crate::probe::TUNNEL_PROBE_PORT;
 
     #[test]
     fn automatic_port_skips_the_ports_nett_uses_itself() {
-        let mut ports = vec![TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, 50_000].into_iter();
+        let mut ports = vec![
+            TUNNEL_PROBE_PORT,
+            TLS_LOOPBACK_BASE,
+            OBFS_LOOPBACK_BASE,
+            50_000,
+        ]
+        .into_iter();
         let mut calls = 0;
         let got = automatic_port(|| {
             calls += 1;
             Ok(((), ports.next().expect("port")))
         });
         assert_eq!(got.expect("picked").1, 50_000);
-        assert_eq!(calls, 3);
+        assert_eq!(calls, 4);
 
         let mut calls = 0;
         let stuck = automatic_port(|| {

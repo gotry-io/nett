@@ -63,7 +63,7 @@ Relay probes and through probes of an obfuscated candidate are sent from the mes
 
 - `nett site relay <machine> --obfs [--obfs-port <port>]` gives a relay the obfuscated transport, and `--no-obfs` removes it (site.md section 4.1);
 - The relay's obfuscated port is opened in the cloud security group once, like the relay port (mesh.md section 5.5);
-- The member's loopback ports are allocated like the TLS transport's, from `41850`-`41865`, a range the machine's WireGuard port may not use (site.md section 4);
+- The member's loopback ports are allocated like the TLS transport's (mesh.md section 5.3), from `41850`;
 - Placed on a machine: the record of blocked endpoints in the mesh's state directory, listed in release.md section 8. No new process, service, account or setting.
 
 ## 8. Security and the hard rules

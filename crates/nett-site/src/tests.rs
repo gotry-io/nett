@@ -1091,6 +1091,48 @@ fn obfuscated_udp_comes_between_udp_and_tls() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A relay whose WireGuard and relay ports fall among the transports' loopback ports, as a site
+/// moved them to step around a block before a release took ports from 41850, keeps a valid site,
+/// and each machine accepts the desired state composed for it (design/site.md section 4).
+#[test]
+fn ports_among_the_loopback_ports_stay_valid() {
+    let (_dir_tmp, dir) = temp_dir("loopback-ports");
+    let (site, mut state) = relay_site(&dir);
+    state
+        .set(
+            &name("r1"),
+            crate::ops::MachineChange {
+                port: Some(Some(41850)),
+                ..crate::ops::MachineChange::default()
+            },
+        )
+        .expect("WireGuard on 41850");
+    let role = crate::state::RelayRole {
+        port: 41852,
+        tls_port: None,
+        fingerprint: None,
+        obfs_port: Some(41851),
+    };
+    state
+        .set_relay(
+            &name("r1"),
+            Some(role),
+            crate::state::RelayKey([0; 32]),
+            PADDING,
+        )
+        .expect("relay on 41852, obfuscated UDP on 41851");
+    offer_obfs(&mut state, "r2", 41853);
+    signed(&site, &mut state);
+    for machine in ["r1", "r2", "mac", "nas"] {
+        let doc = desired(&state, &name(machine))
+            .expect("ok")
+            .expect("signed");
+        let mesh = nett_mesh::config::DesiredMesh::from_doc(doc);
+        assert!(mesh.is_ok(), "{machine}: {:?}", mesh.err());
+    }
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// When UDP and obfuscated paths fill a connection's candidates, a TLS path still stays among them:
 /// TLS is what passes where all UDP is dropped.
 #[test]

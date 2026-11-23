@@ -168,13 +168,18 @@ pub enum Candidate {
     Punch,
 }
 
-/// The TLS transport's loopback ports start here and are allocated in order of the relays' node IDs
-/// (ADR 0013: allocated by the mesh).
+/// The TLS transport's loopback ports start here and are allocated in order of the relays' node IDs,
+/// going around the machine's own UDP ports (ADR 0013: allocated by the mesh; design/mesh.md
+/// section 5.3).
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
-const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 /// The obfuscated transport's loopback ports, allocated the same way (design/obfuscation.md section 7).
 pub const OBFS_LOOPBACK_BASE: u16 = 41850;
-const OBFS_LOOPBACK_LAST: u16 = OBFS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
+/// The machine's own UDP ports a transport's loopback ports may have to go around: its WireGuard
+/// port, its relay port and its relay's obfuscated port. Each binds every local address, loopback
+/// included.
+const OWN_UDP_PORTS: u16 = 3;
+const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 + OWN_UDP_PORTS - 1;
+const OBFS_LOOPBACK_LAST: u16 = OBFS_LOOPBACK_BASE + MAX_TARGETS as u16 + OWN_UDP_PORTS - 1;
 
 /// Size limit of each file in the desired state file and the trust store (design/mesh.md section 17).
 pub const MAX_DESIRED_BYTES: u64 = 4 << 20;
@@ -212,13 +217,22 @@ pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-/// Ports the mesh and the TLS transport use locally: the probe port on the mesh address and
-/// the loopback ports of TLS relays. The WireGuard socket binds all local addresses; when it uses one of
-/// them, the party that binds later fails (design/site.md section 4).
+/// The probe port on the mesh address, which neither the WireGuard port nor a relay's ports may be:
+/// they bind all local addresses, and the party that binds later fails (design/site.md section 4).
 pub fn is_reserved_port(port: u16) -> bool {
     port == TUNNEL_PROBE_PORT
-        || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
+}
+
+/// The ports the transports may take on loopback. A WireGuard port the system assigns avoids them
+/// (design/mesh.md section 5.5); the transports go around a port the site gives the machine.
+pub fn is_loopback_port(port: u16) -> bool {
+    (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
         || (OBFS_LOOPBACK_BASE..=OBFS_LOOPBACK_LAST).contains(&port)
+}
+
+/// Loopback ports from `base`, going around the machine's own UDP ports.
+fn loopback_ports(base: u16, own: &[u16]) -> impl Iterator<Item = u16> + '_ {
+    (base..).filter(move |port| !own.contains(port))
 }
 
 /// Probe token between a member and a relay. `Debug` does not print the contents (hard rule 10).
@@ -280,11 +294,7 @@ pub enum ConfigError {
     #[error("a public node needs a listen port: other members dial it")]
     PublicWithoutPort,
     #[error(
-        "listen port {0} is one nett itself uses on this host: {TUNNEL_PROBE_PORT} for probes on mesh \
-         addresses, {TLS_LOOPBACK_BASE}-{last} for TLS relays and {OBFS_LOOPBACK_BASE}-{obfs_last} for \
-         obfuscated relays on loopback; pick another WireGuard port",
-        last = TLS_LOOPBACK_LAST,
-        obfs_last = OBFS_LOOPBACK_LAST
+        "listen port {0} is the port nett's probes use on mesh addresses; pick another WireGuard port"
     )]
     ListenPortInUse(u16),
     #[error("mesh prefix {0} is not a private-use range of a sensible size")]
@@ -434,9 +444,20 @@ impl DesiredMesh {
         if tls.len() > MAX_TARGETS {
             return Err(ConfigError::TooManyTlsRelays);
         }
+        let own: Vec<u16> = doc
+            .listen_port
+            .into_iter()
+            .chain(
+                doc.relay
+                    .iter()
+                    .flat_map(|r| std::iter::once(r.port).chain(r.obfs.as_ref().map(|o| o.port))),
+            )
+            .collect();
         let mut tls_endpoints = BTreeMap::new();
         let mut targets = Vec::new();
-        for (port, (relay, (connect, fingerprint))) in (TLS_LOOPBACK_BASE..).zip(tls) {
+        for (port, (relay, (connect, fingerprint))) in
+            loopback_ports(TLS_LOOPBACK_BASE, &own).zip(tls)
+        {
             let listen = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
             tls_endpoints.insert(relay, listen);
             targets.push(TlsTarget {
@@ -471,7 +492,9 @@ impl DesiredMesh {
         }
         let mut obfs_endpoints = BTreeMap::new();
         let mut obfs_targets = Vec::new();
-        for (port, (relay, (connect, key, padding))) in (OBFS_LOOPBACK_BASE..).zip(obfs) {
+        for (port, (relay, (connect, key, padding))) in
+            loopback_ports(OBFS_LOOPBACK_BASE, &own).zip(obfs)
+        {
             let listen = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
             obfs_endpoints.insert(relay, listen);
             obfs_targets.push(ObfsTarget {
@@ -678,13 +701,12 @@ mod tests {
                 with_port(reachability, Some(0)).err(),
                 Some(ConfigError::ListenPort)
             );
-            for port in [TUNNEL_PROBE_PORT, TLS_LOOPBACK_BASE, TLS_LOOPBACK_LAST] {
-                assert_eq!(
-                    with_port(reachability, Some(port)).err(),
-                    Some(ConfigError::ListenPortInUse(port))
-                );
-            }
-            for port in [41820, 41822, TLS_LOOPBACK_BASE - 1, TLS_LOOPBACK_LAST + 1] {
+            assert_eq!(
+                with_port(reachability, Some(TUNNEL_PROBE_PORT)).err(),
+                Some(ConfigError::ListenPortInUse(TUNNEL_PROBE_PORT))
+            );
+            // The transports' loopback ports go around a port the site gives
+            for port in [41820, 41822, TLS_LOOPBACK_BASE, OBFS_LOOPBACK_BASE] {
                 assert_eq!(with_port(reachability, Some(port)), Ok(Some(port)));
             }
         }
@@ -694,6 +716,65 @@ mod tests {
             with_port(Reachability::Public, None).err(),
             Some(ConfigError::PublicWithoutPort)
         );
+    }
+
+    /// A public machine whose own ports fall among the transports' loopback ports, as a site whose
+    /// WireGuard port and relay port were moved to 41850 and 41852 before obfuscated UDP took ports
+    /// from 41850: the desired state stays valid, and the loopback ports go around the machine's own.
+    #[test]
+    fn loopback_ports_go_around_the_machines_own_ports() {
+        use crate::testutil::{Mesh, node_id};
+        let obfs = |relay: u8| Candidate::RelayObfs {
+            relay: node_id(relay),
+            address: format!("198.51.100.{relay}:30000").parse().expect("addr"),
+            key: ObfsSecret([relay; 32]),
+            padding: ObfsPadding { min: 0, max: 64 },
+            token: ProbeToken([relay; 32]),
+        };
+        let tls = |relay: u8| Candidate::RelayTls {
+            relay: node_id(relay),
+            address: format!("198.51.100.{relay}:443").parse().expect("addr"),
+            fingerprint: CertFingerprint([relay; 32]),
+            token: ProbeToken([relay; 32]),
+        };
+        let mesh = Mesh::new(&[1]);
+        let mut doc = mesh.desired(1, vec![]);
+        doc.reachability = Reachability::Public;
+        doc.listen_port = Some(OBFS_LOOPBACK_BASE);
+        doc.relay = Some(RelayDoc {
+            port: OBFS_LOOPBACK_BASE + 2,
+            tls_port: Some(443),
+            members: vec![],
+            links: vec![],
+            obfs: Some(RelayObfsDoc {
+                port: TLS_LOOPBACK_BASE,
+                key: ObfsSecret([1; 32]),
+                padding: ObfsPadding { min: 0, max: 64 },
+            }),
+        });
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::Public,
+            candidates: vec![obfs(7), obfs(8), obfs(9), tls(7), tls(8)],
+        }];
+        let desired = DesiredMesh::from_doc(doc).expect("valid");
+        let ports = |endpoints: &BTreeMap<NodeId, SocketAddr>| -> Vec<u16> {
+            endpoints.values().map(SocketAddr::port).collect()
+        };
+        assert_eq!(
+            ports(desired.obfs_endpoints()),
+            [
+                OBFS_LOOPBACK_BASE + 1,
+                OBFS_LOOPBACK_BASE + 3,
+                OBFS_LOOPBACK_BASE + 4
+            ]
+        );
+        assert_eq!(
+            ports(desired.tls_endpoints()),
+            [TLS_LOOPBACK_BASE + 1, TLS_LOOPBACK_BASE + 2]
+        );
+        let transport = desired.transport(OBFS_LOOPBACK_BASE);
+        assert_eq!(transport.validate(), Ok(()));
     }
 
     #[test]
