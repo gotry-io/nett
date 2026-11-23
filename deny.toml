@@ -3,6 +3,14 @@
 
 [graph]
 all-features = true
+# The platforms nett is released for (.github/workflows/release.yml); dependencies only other
+# platforms use never enter a release
+targets = [
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-musl",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
 
 [advisories]
 ignore = [

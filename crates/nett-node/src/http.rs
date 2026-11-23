@@ -69,8 +69,8 @@ pub async fn call(
         .map_err(|_| HttpError::Connect(format!("{}: no answer within {TIMEOUT:?}", target.url)))?
 }
 
-/// GETs an `https://` URL, verifying the certificate against the system root certificates: at
-/// most `limit` bytes, within `timeout`. Redirects are not followed.
+/// GETs an `https://` URL, the certificate verified by the operating system: at most `limit`
+/// bytes, within `timeout`. Redirects are not followed.
 pub async fn get(url: &str, limit: usize, timeout: Duration) -> Result<Vec<u8>, HttpError> {
     let (target, path) = split_https(url)?;
     let (status, bytes) =

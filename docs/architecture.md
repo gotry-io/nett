@@ -267,7 +267,7 @@ nett contains no AI logic. AI, like any other external program, uses nett only t
 | Part | Choice |
 |---|---|
 | Hub | Rust: axum, SQLite + sqlx, utoipa, rustls; webauthn-rs and rust-embed are added with the web console (ADR 0024) |
-| node | Rust: tokio (single-threaded), tokio-tungstenite, prost, hyper; WireGuard is managed through netlink against the kernel implementation (only the few message types used are encoded; no netlink library) |
+| node | Rust: tokio (single-threaded), tokio-tungstenite, prost, hyper; rustls-platform-verifier (the operating system verifies a Hub's public certificate and the website's, design/hub.md section 4); WireGuard is managed through netlink against the kernel implementation (only the few message types used are encoded; no netlink library) |
 | Shared by all components | serde, serde_json; ring (signature verification, hashing, HMAC, HKDF, also the crypto backend of rustls); x25519-dalek (derives the keys for direct probing between members from the mesh private key; ring cannot import an existing private key); rustix (system calls for netlink and raw sockets; nftables rules are also installed through netlink, without calling the `nft` command); lexopt (command-line parsing) |
 | nett-relay | Rust: tokio, rustls (via tokio-rustls), tokio-tungstenite (WebSocket for the TLS transport entry), hyper (HTTP/2 CONNECT); blake2 (computes `mac1` per the WireGuard protocol); quinn later (QUIC) |
 | TLS transport (in the nett daemon) | Rust: rustls (via tokio-rustls, verifying certificates by fingerprint), tokio-tungstenite, on the daemon's tokio runtime |

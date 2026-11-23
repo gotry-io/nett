@@ -8,6 +8,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   machine was given when its service started, instead of an empty "From the Hub:".
 - `sudo nett install` on a Mac linked to a Hub ends without telling to run it again after
   upgrades: they arrive through the Hub once approved.
+- The operating system verifies the certificate of a Hub with a public certificate and of the
+  website, as for any website. On macOS nett no longer reads every root certificate from the
+  Keychain at each connection, which left several megabytes in the nett service each time.
 
 ## [0.9.0] - 2026-11-23
 
