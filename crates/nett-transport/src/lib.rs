@@ -9,4 +9,5 @@
 
 pub mod client;
 pub mod forward;
+pub mod obfs;
 pub mod queue;

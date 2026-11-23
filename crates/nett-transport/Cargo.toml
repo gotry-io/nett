@@ -15,7 +15,10 @@ nett-core.workspace = true
 # The mesh process's helper socket, or on macOS the mesh process itself (design/status.md section 3.1)
 nett-mesh.workspace = true
 futures-util.workspace = true
+# The obfuscated transport's mask (BLAKE2s, already used by nett-relay) and key zeroizing
+blake2.workspace = true
 ring.workspace = true
+zeroize.workspace = true
 rustls.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
