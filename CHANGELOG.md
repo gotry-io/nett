@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.9.5] - 2026-11-23
+
 - The machine that decides the path to a relay's machine also reaches it through that relay over
   UDP, not only over TLS. Where a network drops UDP from the machine's WireGuard port but passes
   its relay port, as a censor does with a port it identified as WireGuard, the pair keeps a UDP
