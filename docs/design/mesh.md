@@ -257,7 +257,7 @@ score = round-trip time + loss penalty + jitter penalty + path type preference +
 ```
 
 - Path type preference: LAN < public direct (including hole-punched direct) < via relay < multi-hop;
-- Transport penalty: TLS is higher than UDP (20 milliseconds added on top of the via-relay preference);
+- Transport penalty: obfuscated UDP is higher than UDP and TLS higher still (10 and 20 milliseconds added on top of the via-relay preference, design/obfuscation.md section 5);
 - Relay load: rises when the relay approaches the traffic limit the user set for it. The limit is only a capacity mechanism; nett does not care how machines are billed or how upper-layer services use bandwidth;
 - Policy overrides are supported (`spec.policy` of `links`): prefer direct, pin to a given relay, pin the transport.
 
@@ -271,7 +271,7 @@ score = round-trip time + loss penalty + jitter penalty + path type preference +
 | Better path of the same type | Switch only to a candidate whose whole round trip is known (section 7.2), when its score is better than the current by at least 15% and at least 10 milliseconds, and this lasts 30 seconds (hysteresis); when 2 or more of the current path's last 10 in-tunnel probes were lost and this candidate responded to 2 consecutive probes, switch after 5 seconds. The hold is on the improvement: candidates of the same quality take turns at being the best by a fraction of a millisecond, and the switch goes to the best one when the hold ends |
 | Relay much faster than direct | When the current path is public or hole-punched direct, is not queuing (no late in-tunnel reply within 10 seconds: a full uplink slows every path alike), and the pair carries less than 2 Mbit/s: a UDP relay candidate whose round-trip time includes both legs (the peer's leg arrives with its in-tunnel replies, section 7) scores at most 70% of the current path and at least 20 milliseconds lower, for 30 seconds (some such relay all along, not necessarily the same one), then switch to the one that scores lowest. Back to direct when the direct candidate's score comes within 85% of the relay's, when the pair carries more than 2 Mbit/s (measured over 10 seconds), or when the relay fails as usual. Long direct paths, for example across a congested border, are often much slower than a path through a well-placed relay; a relay's uplink is often far narrower than a direct path, so bulk transfers stay direct, and per-relay traffic limits come in M2 (section 18). Pairs that are both `dial-only` switch together by proposal (section 8.4) and keep the order of path types |
 
-Path types from best to worst: LAN direct, public direct (including hole-punched direct), via relay, multi-hop; on the same path UDP is better than TLS. A relay much faster than direct, as in the table, comes before direct. The parameters are based on alignment with Tailscale (ADR 0021) and are adjusted according to measurements at the prototype gate.
+Path types from best to worst: LAN direct, public direct (including hole-punched direct), via relay, multi-hop; on the same path UDP is better than obfuscated UDP, which is better than TLS (design/obfuscation.md section 5). A relay much faster than direct, as in the table, comes before direct. The parameters are based on alignment with Tailscale (ADR 0021) and are adjusted according to measurements at the prototype gate.
 
 ### 8.3 Who decides
 

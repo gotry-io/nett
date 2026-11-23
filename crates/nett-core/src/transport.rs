@@ -32,6 +32,54 @@ pub struct TransportConfig {
     /// userspace.md section 6.2). Absent where the routing table decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interface: Option<u32>,
+    /// Relays reached over the obfuscated UDP transport (design/obfuscation.md section 2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub obfs: Vec<ObfsTarget>,
+}
+
+/// One relay reached over the obfuscated UDP transport.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfsTarget {
+    /// Port on this machine's loopback address: WireGuard and the mesh send packets destined for
+    /// this relay here.
+    pub listen: SocketAddr,
+    /// The relay's obfuscated port.
+    pub connect: SocketAddr,
+    pub key: ObfsKeyBytes,
+    pub padding: ObfsPadding,
+}
+
+/// A relay's obfuscation key as the transport is handed it. `Debug` does not print it, and it is
+/// zeroized when dropped (hard rule 10).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ObfsKeyBytes(pub [u8; 32]);
+
+impl fmt::Debug for ObfsKeyBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ObfsKeyBytes(<redacted>)")
+    }
+}
+
+impl Drop for ObfsKeyBytes {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+/// The site's padding range for the obfuscated transport's sealed messages, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ObfsPadding {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl ObfsPadding {
+    pub fn is_valid(&self) -> bool {
+        self.min <= self.max && self.max <= MAX_OBFS_PADDING
+    }
 }
 
 /// One TLS relay.
@@ -57,6 +105,8 @@ pub enum TransportConfigError {
     DuplicateListen(SocketAddr),
     #[error("wireguard port must not be 0")]
     WireguardPort,
+    #[error("obfuscated target {0} has a padding range outside 0-{MAX_OBFS_PADDING}")]
+    ObfsPadding(SocketAddr),
 }
 
 impl TransportConfig {
@@ -66,16 +116,27 @@ impl TransportConfig {
         if self.wireguard_port == 0 {
             return Err(TransportConfigError::WireguardPort);
         }
-        if self.targets.len() > MAX_TARGETS {
-            return Err(TransportConfigError::TooManyTargets(self.targets.len()));
+        if self.targets.len() > MAX_TARGETS || self.obfs.len() > MAX_TARGETS {
+            return Err(TransportConfigError::TooManyTargets(
+                self.targets.len().max(self.obfs.len()),
+            ));
         }
-        for (i, t) in self.targets.iter().enumerate() {
-            if !t.listen.ip().is_loopback() {
-                return Err(TransportConfigError::NotLoopback(t.listen));
+        let listens: Vec<SocketAddr> = self
+            .targets
+            .iter()
+            .map(|t| t.listen)
+            .chain(self.obfs.iter().map(|t| t.listen))
+            .collect();
+        for (i, listen) in listens.iter().enumerate() {
+            if !listen.ip().is_loopback() {
+                return Err(TransportConfigError::NotLoopback(*listen));
             }
-            if self.targets[..i].iter().any(|o| o.listen == t.listen) {
-                return Err(TransportConfigError::DuplicateListen(t.listen));
+            if listens[..i].contains(listen) {
+                return Err(TransportConfigError::DuplicateListen(*listen));
             }
+        }
+        if let Some(t) = self.obfs.iter().find(|t| !t.padding.is_valid()) {
+            return Err(TransportConfigError::ObfsPadding(t.connect));
         }
         Ok(())
     }
@@ -172,6 +233,7 @@ mod tests {
             wireguard_port: 41820,
             targets: vec![target("127.0.0.1:41830"), target("127.0.0.1:41831")],
             interface: None,
+            obfs: vec![],
         };
         assert_eq!(ok.validate(), Ok(()));
         let public = TransportConfig {
@@ -200,6 +262,7 @@ mod tests {
             wireguard_port: 41820,
             targets: vec![],
             interface: None,
+            obfs: vec![],
         };
         let json = serde_json::to_string(&config).expect("json");
         assert_eq!(json, r#"{"wireguard_port":41820,"targets":[]}"#);

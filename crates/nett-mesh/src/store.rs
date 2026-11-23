@@ -24,6 +24,9 @@ pub const STATE_DIR: &str = "state";
 
 pub const TRUST_FILE: &str = "trust.json";
 pub const ACCEPTED_FILE: &str = "accepted.json";
+/// The endpoints whose plain UDP is recorded as blocked (design/obfuscation.md section 5), kept beside
+/// the trust store so a restart does not try them again.
+pub const BLOCKED_FILE: &str = "blocked.json";
 const FORMAT_V1: u32 = 1;
 
 /// The saved content.
@@ -272,6 +275,29 @@ impl TrustStore {
         self.problem.take()
     }
 
+    /// The endpoints recorded as blocked; none when the file does not exist. An unreadable file is
+    /// moved aside: forgetting a block only lets plain UDP be tried once more.
+    pub fn blocked(&mut self) -> std::collections::BTreeSet<std::net::SocketAddr> {
+        match self.backend.read(BLOCKED_FILE) {
+            Ok(Some(bytes)) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                drop(self.backend.quarantine(BLOCKED_FILE));
+                std::collections::BTreeSet::new()
+            }),
+            _ => std::collections::BTreeSet::new(),
+        }
+    }
+
+    /// Records the endpoints recorded as blocked.
+    pub fn save_blocked(
+        &mut self,
+        blocked: &std::collections::BTreeSet<std::net::SocketAddr>,
+    ) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(blocked).map_err(|e| e.to_string())?;
+        self.backend
+            .write(BLOCKED_FILE, &bytes)
+            .map_err(|e| format!("writing {BLOCKED_FILE}: {e}"))
+    }
+
     /// The desired state most recently accepted as a whole.
     pub fn accepted(&mut self) -> Result<Option<DesiredMeshDoc>, String> {
         let Some(bytes) = self
@@ -359,6 +385,25 @@ mod tests {
             r.admits(3, &Sha256Digest::of(b"other")),
             Err(FloorError::Conflict(3))
         );
+    }
+
+    /// The endpoints recorded as blocked are read back after a restart, and an unreadable record
+    /// is moved aside instead of stopping the mesh (design/obfuscation.md section 5).
+    #[test]
+    fn blocked_endpoints_survive_reopening() {
+        let backend = MemoryBackend::default();
+        let mut store = TrustStore::open(Box::new(backend.clone()));
+        assert!(store.blocked().is_empty());
+        let blocked: BTreeSet<std::net::SocketAddr> =
+            ["203.0.113.5:41822".parse().expect("addr")].into();
+        store.save_blocked(&blocked).expect("saved");
+        let mut reopened = TrustStore::open(Box::new(backend.clone()));
+        assert_eq!(reopened.blocked(), blocked);
+
+        let mut broken = backend.clone();
+        broken.write(BLOCKED_FILE, b"not json").expect("write");
+        let mut reopened = TrustStore::open(Box::new(backend));
+        assert!(reopened.blocked().is_empty());
     }
 
     #[test]

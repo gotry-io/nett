@@ -451,6 +451,7 @@ impl<D: DataPlane> Engine<D> {
             .tls_targets()
             .iter()
             .map(|t| (t.listen, t.connect))
+            .chain(desired.obfs_targets().iter().map(|t| (t.listen, t.connect)))
             .collect();
         let own = OwnPolicy {
             node_id: &self.node_id,
@@ -523,10 +524,12 @@ impl<D: DataPlane> Engine<D> {
 
         self.reachability = desired.reachability;
         let (trusted, hub) = (self.clock_trusted, self.hub);
+        let trust = &mut self.trust;
         let prober = self.prober.get_or_insert_with(|| {
             let mut prober = Prober::new(&own_key);
             prober.set_clock_trusted(trusted);
             prober.set_hub(hub);
+            prober.set_blocked(trust.blocked());
             prober
         });
         prober.update(
@@ -536,8 +539,15 @@ impl<D: DataPlane> Engine<D> {
             self.members.members(),
             &desired.paths,
             desired.tls_endpoints(),
+            desired.obfs_endpoints(),
         );
-        self.tls_endpoints = desired.tls_endpoints().values().copied().collect();
+        // A transport's loopback port nobody uses is guarded, TLS and obfuscated UDP alike
+        self.tls_endpoints = desired
+            .tls_endpoints()
+            .values()
+            .chain(desired.obfs_endpoints().values())
+            .copied()
+            .collect();
         let mut peers: Vec<PeerSpec> = self
             .members
             .members()
@@ -900,6 +910,11 @@ impl<D: DataPlane> Engine<D> {
         for event in prober.take_events() {
             events.emit(event);
         }
+        if let Some(blocked) = prober.take_blocked_change()
+            && let Err(reason) = self.trust.save_blocked(blocked)
+        {
+            events.emit(Event::TrustStoreFailed { reason });
+        }
         self.guard_idle_tls(events);
         for switch in switches {
             let result = if switch.rehandshake {
@@ -1252,12 +1267,14 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// The address shown in local status: a TLS relay shows its TLS address, not the TLS transport's
-    /// loopback port.
+    /// The address shown in local status: a relay reached through a transport shows its TLS or
+    /// obfuscated address, not the transport's loopback port.
     fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
         let endpoint = route.endpoint();
         match kind {
-            PathKind::RelayTls => self.tls_relays.get(&endpoint).copied().unwrap_or(endpoint),
+            PathKind::RelayTls | PathKind::RelayObfs => {
+                self.tls_relays.get(&endpoint).copied().unwrap_or(endpoint)
+            }
             _ => endpoint,
         }
     }
@@ -1283,6 +1300,7 @@ fn kind_doc(kind: PathKind) -> PathKindDoc {
         PathKind::Lan => PathKindDoc::Lan,
         PathKind::Direct => PathKindDoc::Direct,
         PathKind::Relay => PathKindDoc::Relay,
+        PathKind::RelayObfs => PathKindDoc::RelayObfs,
         PathKind::RelayTls => PathKindDoc::RelayTls,
     }
 }

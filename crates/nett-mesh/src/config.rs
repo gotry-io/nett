@@ -13,7 +13,9 @@ use std::path::Path;
 
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
-use nett_core::transport::{CertFingerprint, MAX_TARGETS, TlsTarget, TransportConfig};
+use nett_core::transport::{
+    CertFingerprint, MAX_TARGETS, ObfsKeyBytes, ObfsTarget, TlsTarget, TransportConfig,
+};
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::{AnchorsError, TrustAnchors, TrustAnchorsDoc};
 use nett_trust::revocation::Revocation;
@@ -148,6 +150,16 @@ pub enum Candidate {
         fingerprint: CertFingerprint,
         token: ProbeToken,
     },
+    /// Obfuscated UDP transport via a relay (design/obfuscation.md section 5): the relay's obfuscated
+    /// port, its obfuscation key and the site's padding range; the token is the same as for the UDP
+    /// relay. The endpoint in WireGuard is the transport's loopback port for this relay.
+    RelayObfs {
+        relay: NodeId,
+        address: SocketAddr,
+        key: ObfsSecret,
+        padding: ObfsPadding,
+        token: ProbeToken,
+    },
     /// LAN direct path (design/mesh.md section 6): the peer's LAN address and WireGuard port, composed by
     /// the Hub when both are on the same LAN.
     Lan { endpoint: SocketAddr },
@@ -160,6 +172,9 @@ pub enum Candidate {
 /// (ADR 0013: allocated by the mesh).
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
+/// The obfuscated transport's loopback ports, allocated the same way (design/obfuscation.md section 7).
+pub const OBFS_LOOPBACK_BASE: u16 = 41850;
+const OBFS_LOOPBACK_LAST: u16 = OBFS_LOOPBACK_BASE + MAX_TARGETS as u16 - 1;
 
 /// Size limit of each file in the desired state file and the trust store (design/mesh.md section 17).
 pub const MAX_DESIRED_BYTES: u64 = 4 << 20;
@@ -201,7 +216,9 @@ pub fn read_bounded(path: &Path, max: u64) -> std::io::Result<Option<Vec<u8>>> {
 /// the loopback ports of TLS relays. The WireGuard socket binds all local addresses; when it uses one of
 /// them, the party that binds later fails (design/site.md section 4).
 pub fn is_reserved_port(port: u16) -> bool {
-    port == TUNNEL_PROBE_PORT || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
+    port == TUNNEL_PROBE_PORT
+        || (TLS_LOOPBACK_BASE..=TLS_LOOPBACK_LAST).contains(&port)
+        || (OBFS_LOOPBACK_BASE..=OBFS_LOOPBACK_LAST).contains(&port)
 }
 
 /// Probe token between a member and a relay. `Debug` does not print the contents (hard rule 10).
@@ -233,19 +250,7 @@ impl Drop for ObfsSecret {
     }
 }
 
-/// The site's padding range for the obfuscated transport's sealed messages, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ObfsPadding {
-    pub min: u16,
-    pub max: u16,
-}
-
-impl ObfsPadding {
-    pub fn is_valid(&self) -> bool {
-        self.min <= self.max && self.max <= nett_core::transport::MAX_OBFS_PADDING
-    }
-}
+pub use nett_core::transport::ObfsPadding;
 
 /// A relay's obfuscated UDP transport (design/obfuscation.md section 2): its port, its key and the
 /// site's padding range.
@@ -276,8 +281,10 @@ pub enum ConfigError {
     PublicWithoutPort,
     #[error(
         "listen port {0} is one nett itself uses on this host: {TUNNEL_PROBE_PORT} for probes on mesh \
-         addresses and {TLS_LOOPBACK_BASE}-{last} for TLS relays on loopback; pick another WireGuard port",
-        last = TLS_LOOPBACK_LAST
+         addresses, {TLS_LOOPBACK_BASE}-{last} for TLS relays and {OBFS_LOOPBACK_BASE}-{obfs_last} for \
+         obfuscated relays on loopback; pick another WireGuard port",
+        last = TLS_LOOPBACK_LAST,
+        obfs_last = OBFS_LOOPBACK_LAST
     )]
     ListenPortInUse(u16),
     #[error("mesh prefix {0} is not a private-use range of a sensible size")]
@@ -288,6 +295,15 @@ pub enum ConfigError {
     TlsTargetConflict(NodeId),
     #[error("paths list more than {MAX_TARGETS} TLS relays")]
     TooManyTlsRelays,
+    #[error("obfuscated relay {0} is listed with different addresses, keys or padding")]
+    ObfsTargetConflict(NodeId),
+    #[error("paths list more than {MAX_TARGETS} obfuscated relays")]
+    TooManyObfsRelays,
+    #[error(
+        "obfuscated relay {0} has a padding range outside 0-{max}",
+        max = nett_core::transport::MAX_OBFS_PADDING
+    )]
+    ObfsPadding(NodeId),
     #[error("desired state lists more than {max} {what}")]
     TooMany { what: &'static str, max: usize },
     #[error("relay: {0}")]
@@ -316,6 +332,9 @@ pub struct DesiredMesh {
     /// TLS targets of the TLS transport, coming from the same place as [`DesiredMesh::tls_endpoints`].
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
+    /// The obfuscated transport's targets and loopback ports, allocated like the TLS ones.
+    obfs_targets: Vec<ObfsTarget>,
+    obfs_endpoints: BTreeMap<NodeId, SocketAddr>,
     /// The document before validation: saved into the trust store after the whole is accepted, and used when
     /// the desired state file is rejected at startup.
     doc: DesiredMeshDoc,
@@ -336,6 +355,16 @@ impl DesiredMesh {
         &self.tls_targets
     }
 
+    /// The endpoint in WireGuard of each obfuscated relay: the loopback port the transport opens for it.
+    pub fn obfs_endpoints(&self) -> &BTreeMap<NodeId, SocketAddr> {
+        &self.obfs_endpoints
+    }
+
+    /// Targets of the obfuscated transport: loopback port and the relay's obfuscated port.
+    pub fn obfs_targets(&self) -> &[ObfsTarget] {
+        &self.obfs_targets
+    }
+
     /// Configuration handed to the TLS transport: the WireGuard port is the port the interface actually
     /// listens on (possibly assigned by the system); the data plane fills in the interface when it hands
     /// the configuration out.
@@ -344,6 +373,7 @@ impl DesiredMesh {
             wireguard_port,
             targets: self.tls_targets.clone(),
             interface: None,
+            obfs: self.obfs_targets.clone(),
         }
     }
 
@@ -415,6 +445,42 @@ impl DesiredMesh {
                 fingerprint,
             });
         }
+        let mut obfs: BTreeMap<NodeId, (SocketAddr, &ObfsSecret, ObfsPadding)> = BTreeMap::new();
+        for c in doc.paths.iter().flat_map(|p| &p.candidates) {
+            if let Candidate::RelayObfs {
+                relay,
+                address,
+                key,
+                padding,
+                ..
+            } = c
+            {
+                if !padding.is_valid() {
+                    return Err(ConfigError::ObfsPadding(relay.clone()));
+                }
+                if obfs
+                    .insert(relay.clone(), (*address, key, *padding))
+                    .is_some_and(|prev| prev != (*address, key, *padding))
+                {
+                    return Err(ConfigError::ObfsTargetConflict(relay.clone()));
+                }
+            }
+        }
+        if obfs.len() > MAX_TARGETS {
+            return Err(ConfigError::TooManyObfsRelays);
+        }
+        let mut obfs_endpoints = BTreeMap::new();
+        let mut obfs_targets = Vec::new();
+        for (port, (relay, (connect, key, padding))) in (OBFS_LOOPBACK_BASE..).zip(obfs) {
+            let listen = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+            obfs_endpoints.insert(relay, listen);
+            obfs_targets.push(ObfsTarget {
+                listen,
+                connect,
+                key: ObfsKeyBytes(key.0),
+                padding,
+            });
+        }
         if let Some(relay) = &doc.relay {
             check_relay(relay)?;
         }
@@ -445,6 +511,8 @@ impl DesiredMesh {
             relay: doc.relay,
             tls_targets: targets,
             tls_endpoints,
+            obfs_targets,
+            obfs_endpoints,
             doc: source,
         })
     }

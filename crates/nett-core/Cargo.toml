@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 serde.workspace = true
 thiserror.workspace = true
+# Obfuscation keys are zeroized when dropped (hard rule 10)
+zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

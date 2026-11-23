@@ -5,7 +5,7 @@
 //! Pure logic: the caller passes in the time, and sending probes and switching the endpoint are handed to
 //! the caller as [`Action`]s, so tests can simulate time precisely.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
@@ -120,6 +120,8 @@ const LOSS_PENALTY_MS: f64 = 500.0;
 /// Path type preference and transport penalty (milliseconds), smaller is better (section 8.1): TLS adds
 /// another 20 ms on top of the relay preference.
 const RELAY_PENALTY_MS: f64 = 10.0;
+/// Obfuscated UDP sits between UDP and TLS (design/obfuscation.md section 5).
+const OBFS_PENALTY_MS: f64 = 10.0;
 const TLS_PENALTY_MS: f64 = 20.0;
 
 /// Path types, from best to worst (section 8.2): on the same path UDP is better than TLS.
@@ -129,13 +131,18 @@ pub enum PathKind {
     Lan,
     Direct,
     Relay,
+    /// Obfuscated UDP via a relay (design/obfuscation.md section 5): after UDP, before TLS.
+    RelayObfs,
     /// TLS transport via a relay (design/mesh.md section 5.3).
     RelayTls,
 }
 
 impl PathKind {
     pub fn via_relay(self) -> bool {
-        matches!(self, PathKind::Relay | PathKind::RelayTls)
+        matches!(
+            self,
+            PathKind::Relay | PathKind::RelayObfs | PathKind::RelayTls
+        )
     }
 }
 
@@ -236,6 +243,7 @@ impl PathStats {
         let type_penalty = match kind {
             PathKind::Lan | PathKind::Direct => 0.0,
             PathKind::Relay => RELAY_PENALTY_MS,
+            PathKind::RelayObfs => RELAY_PENALTY_MS + OBFS_PENALTY_MS,
             PathKind::RelayTls => RELAY_PENALTY_MS + TLS_PENALTY_MS,
         };
         self.rtt_ms
@@ -283,6 +291,9 @@ struct Candidate {
     /// Left while losing packets: the results of its probes since. A lossy path still answers most
     /// probes, so a run of replies says nothing about its loss rate (section 8.2).
     left_for_loss: Option<LossRecord>,
+    /// Plain UDP to an endpoint recorded as blocked (design/obfuscation.md section 5): not probed, and
+    /// its replies are not counted, so no rule takes it back.
+    blocked: bool,
 }
 
 /// Results of a candidate's probes, the latest in the lowest bit (set: lost).
@@ -322,6 +333,7 @@ impl Candidate {
             far_leg: false,
             beyond: None,
             left_for_loss: None,
+            blocked: false,
         }
     }
 
@@ -529,6 +541,9 @@ pub struct PeerPaths {
     /// The relay on the peer's own machine: its leg to the peer is the peer's loopback, so this end's
     /// probes of it cover the whole path (design/mesh.md section 7.2).
     peer_relay: Option<KeyId>,
+    /// The endpoint of a plain UDP path that failed while obfuscated UDP took over, for the caller to
+    /// record as blocked.
+    newly_blocked: Option<SocketAddr>,
     seq: u32,
 }
 
@@ -568,6 +583,7 @@ impl PeerPaths {
             learned: None,
             probe_now: false,
             peer_relay: None,
+            newly_blocked: None,
             seq: 0,
         })
         .map(|mut paths| {
@@ -736,6 +752,20 @@ impl PeerPaths {
                 _ => i != self.current || self.candidates[i].kind <= PathKind::Direct,
             })
             .count()
+    }
+
+    /// Plain UDP candidates to these endpoints are blocked (design/obfuscation.md section 5); LAN
+    /// paths never are.
+    pub fn set_blocked(&mut self, blocked: &BTreeSet<SocketAddr>) {
+        for c in &mut self.candidates {
+            c.blocked = matches!(c.kind, PathKind::Direct | PathKind::Relay)
+                && blocked.contains(&c.route.endpoint());
+        }
+    }
+
+    /// The endpoint a switch has just taken as blocked, once.
+    pub fn take_newly_blocked(&mut self) -> Option<SocketAddr> {
+        self.newly_blocked.take()
     }
 
     /// The relay that runs on the peer's own machine, when it runs one.
@@ -1058,6 +1088,9 @@ impl PeerPaths {
         let Some(c) = self.candidates.get_mut(index) else {
             return;
         };
+        if c.blocked {
+            return;
+        }
         let Some(pos) = c.outstanding.iter().position(|(s, _)| *s == seq) else {
             return;
         };
@@ -1246,7 +1279,7 @@ impl PeerPaths {
     }
 
     fn candidate_due(&self, index: usize, now: Instant, active: bool) -> bool {
-        if self.learned_lapsed(index, now) {
+        if self.learned_lapsed(index, now) || self.candidates[index].blocked {
             return false;
         }
         let c = &self.candidates[index];
@@ -1654,6 +1687,21 @@ impl PeerPaths {
         self.faster_since = None;
         let from = self.candidates[self.current].route;
         let to = self.candidates[target].route;
+        // Plain UDP failed and obfuscated UDP took over: the endpoint lost is taken as blocked, and stays
+        // avoided, since probing it again only renews a block (design/obfuscation.md section 5)
+        let failed = matches!(
+            reason,
+            SwitchReason::Unreachable | SwitchReason::HandshakeIncomplete
+        );
+        if failed
+            && matches!(
+                self.candidates[self.current].kind,
+                PathKind::Direct | PathKind::Relay
+            )
+            && self.candidates[target].kind == PathKind::RelayObfs
+        {
+            self.newly_blocked = Some(from.endpoint());
+        }
         let old_rtt_ms = self.tunnel.rtt_ms();
         // Left because of its loss, whichever rule chose the new path: a better score held on a path
         // losing probes includes their penalty
@@ -3064,6 +3112,67 @@ mod tests {
             vec![(relay_tls(1), SwitchReason::Unreachable)],
             "{after:?}"
         );
+    }
+
+    fn relay_obfs(n: u8) -> Route {
+        Route::Relay {
+            relay: KeyId([n; 8]),
+            endpoint: format!("127.0.0.1:{}", 41850 + u16::from(n))
+                .parse()
+                .expect("addr"),
+        }
+    }
+
+    /// Plain UDP through a relay is lost while obfuscated UDP answers: the pair moves to obfuscated
+    /// UDP, the plain endpoint is reported as blocked, and once recorded it is neither probed nor taken
+    /// back when it answers again (design/obfuscation.md section 5).
+    #[test]
+    fn a_plain_endpoint_lost_to_obfuscated_udp_stays_avoided() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay_obfs(1), PathKind::RelayObfs),
+            (relay_tls(1), PathKind::RelayTls),
+        ]);
+        sim.run(Duration::from_secs(40));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::Unreachable)]);
+        let blocked = sim.paths.take_newly_blocked().expect("the plain endpoint");
+        assert_eq!(blocked, relay(1).endpoint());
+        assert_eq!(sim.paths.take_newly_blocked(), None, "reported once");
+
+        sim.paths.set_blocked(&[blocked].into());
+        let probes = sim.sent[0];
+        sim.up[0] = true;
+        sim.run(Duration::from_secs(120));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+        assert_eq!(sim.sent[0], probes, "the blocked endpoint is not probed");
+    }
+
+    /// Leaving plain UDP for TLS, or obfuscated UDP for anything, records no block.
+    #[test]
+    fn only_plain_udp_given_up_for_obfuscated_udp_counts_as_blocked() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay_tls(1), PathKind::RelayTls),
+        ]);
+        sim.run(Duration::from_secs(40));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+        assert_eq!(sim.paths.take_newly_blocked(), None);
+
+        let mut sim = Sim::new(vec![
+            (relay_obfs(1), PathKind::RelayObfs),
+            (relay_tls(1), PathKind::RelayTls),
+        ]);
+        sim.run(Duration::from_secs(40));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+        assert_eq!(sim.paths.take_newly_blocked(), None);
     }
 
     /// A better path that has never answered is probed every second in its first minute, then on

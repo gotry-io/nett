@@ -4,7 +4,7 @@
 //! 8.4). It does not touch sockets or the data plane; [`crate::engine`] performs those, and tests can
 //! drive it directly.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -30,6 +30,9 @@ use crate::punch::{Observations, Punch, PunchEvent};
 /// replies that queued for a few seconds must also be handed to the path selection state machine
 /// (design/mesh.md section 7).
 pub(crate) const OUTSTANDING_TTL: Duration = Duration::from_secs(2);
+/// Endpoints recorded as blocked at most; a machine has a few relays and public peers.
+pub const MAX_BLOCKED: usize = 64;
+
 /// Upper limit of the lookup table: fewer than 20 in-tunnel probes within 10 seconds for each peer with
 /// traffic, plus probes of candidates and relays.
 const MAX_OUTSTANDING: usize = 4096;
@@ -131,13 +134,30 @@ pub struct Switch {
 
 enum CandidateMeta {
     Direct,
-    /// `tls`: TLS transport via the TLS transport; the measurement is not counted as this machine's UDP
-    /// measurement to this relay.
+    /// `via`: how the relay is reached; only a measurement over its UDP relay port counts as this
+    /// machine's UDP measurement to the relay.
     Relay {
         relay: KeyId,
         key: ProbeKey,
-        tls: bool,
+        via: Via,
     },
+}
+
+/// How a relay candidate is reached: its UDP relay port from the WireGuard port, or through a
+/// transport's loopback port, obfuscated UDP (design/obfuscation.md section 2) or TLS (design/mesh.md
+/// section 5.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Via {
+    Udp,
+    Obfs,
+    Tls,
+}
+
+impl Via {
+    /// Probes and the tunnel go to the transport's loopback port, and replies come back through it.
+    fn loopback(self) -> bool {
+        self != Via::Udp
+    }
 }
 
 struct Peer {
@@ -227,7 +247,7 @@ enum Pending {
     /// keeps the standby connection authenticated.
     Monitor {
         relay: KeyId,
-        tls: bool,
+        via: Via,
     },
     /// Hole punching probe.
     Punch,
@@ -248,7 +268,12 @@ pub struct Prober {
     /// the follower measures each relay, for the peer to estimate the other leg of the relay path; over TLS
     /// the follower of a pair of `dial-only` members keeps its standby connection authenticated, since it
     /// may have to move there together with the decider (design/mesh.md sections 5.3 and 8.4).
-    monitored: HashMap<(KeyId, bool), (SocketAddr, ProbeKey, Option<Instant>)>,
+    monitored: HashMap<(KeyId, Via), (SocketAddr, ProbeKey, Option<Instant>)>,
+    /// Endpoints whose plain UDP was lost while obfuscated UDP took over (design/obfuscation.md section
+    /// 5): every peer's plain candidates to them stay unused. Kept in the state directory by the caller.
+    blocked: BTreeSet<SocketAddr>,
+    /// The blocked endpoints changed since the caller last took them.
+    blocked_changed: bool,
     /// The round of the most recent switch proposal.
     round: u32,
     /// The switch to perform after a confirmation is received, handed out at the next [`Prober::tick`].
@@ -267,9 +292,9 @@ pub struct Prober {
 /// A probe of a relay. Over UDP it leaves from the WireGuard port, so it measures the addresses the
 /// tunnel through that relay uses: a network that treats WireGuard's port differently from other
 /// ports (a NAT mapping, a firewall or a block keyed on the port) shows in the measurement (design/mesh.md
-/// section 7.1). Over TLS it goes through the transport's loopback port, as the tunnel does.
-fn relay_probe(tls: bool, to: SocketAddr, data: Vec<u8>) -> Outgoing {
-    if tls {
+/// section 7.1). Over a transport it goes through the transport's loopback port, as the tunnel does.
+fn relay_probe(via: Via, to: SocketAddr, data: Vec<u8>) -> Outgoing {
+    if via.loopback() {
         Outgoing::Transport { to, data }
     } else {
         Outgoing::WgPort { to, data }
@@ -309,11 +334,12 @@ pub fn is_decider(
 }
 
 /// A candidate's endpoint in WireGuard and the information used for measurement. The endpoint of a TLS
-/// candidate is the TLS transport's loopback port, given by `tls`; a TLS candidate that was not
-/// assigned a port is not used.
+/// or obfuscated candidate is its transport's loopback port, given by `tls` or `obfs`; such a
+/// candidate that was not assigned a port is not used.
 fn routes(
     candidates: &[Candidate],
     tls: &BTreeMap<NodeId, SocketAddr>,
+    obfs: &BTreeMap<NodeId, SocketAddr>,
 ) -> (Vec<(Route, PathKind)>, Vec<CandidateMeta>) {
     candidates
         .iter()
@@ -330,9 +356,12 @@ fn routes(
                 relay,
                 endpoint,
                 token,
-            } => Some(relay_route(relay, *endpoint, token, false)),
+            } => Some(relay_route(relay, *endpoint, token, Via::Udp)),
+            Candidate::RelayObfs { relay, token, .. } => {
+                Some(relay_route(relay, *obfs.get(relay)?, token, Via::Obfs))
+            }
             Candidate::RelayTls { relay, token, .. } => {
-                Some(relay_route(relay, *tls.get(relay)?, token, true))
+                Some(relay_route(relay, *tls.get(relay)?, token, Via::Tls))
             }
             // The address for hole punching is exchanged during hole punching, and becomes a candidate only after
             // the punch succeeds
@@ -345,13 +374,13 @@ fn relay_route(
     relay: &NodeId,
     endpoint: SocketAddr,
     token: &ProbeToken,
-    tls: bool,
+    via: Via,
 ) -> ((Route, PathKind), CandidateMeta) {
     let id = KeyId::of(relay.as_str().as_bytes());
-    let kind = if tls {
-        PathKind::RelayTls
-    } else {
-        PathKind::Relay
+    let kind = match via {
+        Via::Udp => PathKind::Relay,
+        Via::Obfs => PathKind::RelayObfs,
+        Via::Tls => PathKind::RelayTls,
     };
     (
         (
@@ -364,12 +393,37 @@ fn relay_route(
         CandidateMeta::Relay {
             relay: id,
             key: ProbeKey::from_token(&token.0),
-            tls,
+            via,
         },
     )
 }
 
 impl Prober {
+    /// The endpoints recorded as blocked, as saved in the state directory (design/obfuscation.md
+    /// section 5); applied to every peer.
+    pub fn set_blocked(&mut self, blocked: BTreeSet<SocketAddr>) {
+        self.blocked = blocked;
+        for paths in self.peers.values_mut().filter_map(|p| p.paths.as_mut()) {
+            paths.set_blocked(&self.blocked);
+        }
+    }
+
+    /// The blocked endpoints, once after each change, for the caller to save.
+    pub fn take_blocked_change(&mut self) -> Option<&BTreeSet<SocketAddr>> {
+        std::mem::take(&mut self.blocked_changed).then_some(&self.blocked)
+    }
+
+    fn block(&mut self, endpoint: SocketAddr) {
+        if self.blocked.len() >= MAX_BLOCKED || !self.blocked.insert(endpoint) {
+            return;
+        }
+        self.blocked_changed = true;
+        tracing::warn!(%endpoint, "plain UDP to this endpoint is blocked; obfuscated UDP stays in use");
+        for paths in self.peers.values_mut().filter_map(|p| p.paths.as_mut()) {
+            paths.set_blocked(&self.blocked);
+        }
+    }
+
     pub fn new(own_public_key: &X25519PublicKey) -> Self {
         Self {
             own_key_id: KeyId::of(own_public_key.as_bytes()),
@@ -380,6 +434,8 @@ impl Prober {
             wire_seq: 0,
             relay_stats: HashMap::new(),
             monitored: HashMap::new(),
+            blocked: BTreeSet::new(),
+            blocked_changed: false,
             round: 0,
             ready: Vec::new(),
             clock_trusted: false,
@@ -454,13 +510,14 @@ impl Prober {
         members: &BTreeMap<NodeId, Member>,
         paths: &BTreeMap<NodeId, PeerPathConfig>,
         tls: &BTreeMap<NodeId, SocketAddr>,
+        obfs: &BTreeMap<NodeId, SocketAddr>,
     ) {
         let mut next = BTreeMap::new();
         self.monitored.clear();
         for (id, member) in members.iter().filter(|(id, _)| *id != own_id) {
             let config = paths.get(id);
             let candidates = config.map(|c| c.candidates.as_slice()).unwrap_or_default();
-            let (mut routes, mut meta) = routes(candidates, tls);
+            let (mut routes, mut meta) = routes(candidates, tls, obfs);
             let configured = routes.len();
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
             let punch_wanted =
@@ -509,19 +566,24 @@ impl Prober {
             let mut paths = paths;
             if let Some(p) = paths.as_mut() {
                 p.set_peer_relay(KeyId::of(id.as_str().as_bytes()));
+                p.set_blocked(&self.blocked);
             }
             let follows_together = role == Some(Role::FollowTogether);
             for (m, (route, _)) in meta.iter().zip(&routes) {
-                let (CandidateMeta::Relay { relay, key, tls }, Route::Relay { endpoint, .. }) =
+                let (CandidateMeta::Relay { relay, key, via }, Route::Relay { endpoint, .. }) =
                     (m, route)
                 else {
                     continue;
                 };
-                if *tls && !follows_together {
-                    continue;
+                // Over UDP the relay is measured for the peer; over TLS a follower keeps its standby
+                // connection; obfuscated UDP has no connection to keep
+                match via {
+                    Via::Udp => {}
+                    Via::Tls if follows_together => {}
+                    Via::Tls | Via::Obfs => continue,
                 }
                 self.monitored
-                    .entry((*relay, *tls))
+                    .entry((*relay, *via))
                     .or_insert_with(|| (*endpoint, key.clone(), None));
             }
             next.insert(
@@ -708,8 +770,14 @@ impl Prober {
             .map(|(seq, _)| *seq)
             .collect();
         for seq in expired {
-            if let Some((_, Pending::Monitor { relay, tls: false }, _)) =
-                self.outstanding.remove(&seq)
+            if let Some((
+                _,
+                Pending::Monitor {
+                    relay,
+                    via: Via::Udp,
+                },
+                _,
+            )) = self.outstanding.remove(&seq)
             {
                 self.relay_stats.entry(relay).or_default().record_loss();
             }
@@ -770,7 +838,7 @@ impl Prober {
                                 }
                             }
                             (
-                                CandidateMeta::Relay { relay, key, tls },
+                                CandidateMeta::Relay { relay, key, via },
                                 Route::Relay { endpoint, .. },
                             ) => {
                                 let probe = OuterProbe {
@@ -779,10 +847,10 @@ impl Prober {
                                     seq: wire,
                                     sent_ms: now_ms,
                                 };
-                                out.push(relay_probe(*tls, endpoint, probe.encode(key).to_vec()));
+                                out.push(relay_probe(*via, endpoint, probe.encode(key).to_vec()));
                                 // The same way, a probe the relay forwards to the peer: its reply
                                 // measures the whole path (ADR 0029)
-                                let (relay, key, tls) = (*relay, key.clone(), *tls);
+                                let (relay, key, via) = (*relay, key.clone(), *via);
                                 let receiver = KeyId::of(peer.public_key.as_bytes());
                                 let Some(direct) = peer.direct_key.clone() else {
                                     continue;
@@ -806,7 +874,7 @@ impl Prober {
                                     receiver,
                                 };
                                 out.push(relay_probe(
-                                    tls,
+                                    via,
                                     endpoint,
                                     through.encode_probe(&direct, &key).to_vec(),
                                 ));
@@ -834,6 +902,14 @@ impl Prober {
                     Action::Lost { since } => self.lost(&id, since, now, now_ms),
                 }
             }
+            if let Some(endpoint) = self
+                .peers
+                .get_mut(&id)
+                .and_then(|p| p.paths.as_mut())
+                .and_then(PeerPaths::take_newly_blocked)
+            {
+                self.block(endpoint);
+            }
             // A new proposal is sent immediately; those already waiting are resent at intervals
             out.extend(self.send_proposal(&id, now, now_ms));
             out.extend(self.punch_tick(&id, now, now_ms));
@@ -841,7 +917,7 @@ impl Prober {
 
         // The follower also measures relays, for the peer to estimate the other leg of the relay path, and
         // keeps its TLS standby connections authenticated
-        let due: Vec<(KeyId, bool)> = self
+        let due: Vec<(KeyId, Via)> = self
             .monitored
             .iter()
             .filter(|(_, (_, _, last))| {
@@ -850,12 +926,12 @@ impl Prober {
             .map(|(id, _)| *id)
             .collect();
         let any_peer = self.peers.keys().next().cloned();
-        for (relay, tls) in due {
+        for (relay, via) in due {
             let Some(owner) = any_peer.clone() else { break };
-            let Some(wire) = self.remember(&owner, Pending::Monitor { relay, tls }, now) else {
+            let Some(wire) = self.remember(&owner, Pending::Monitor { relay, via }, now) else {
                 break;
             };
-            if let Some((endpoint, key, last)) = self.monitored.get_mut(&(relay, tls)) {
+            if let Some((endpoint, key, last)) = self.monitored.get_mut(&(relay, via)) {
                 *last = Some(now);
                 let probe = OuterProbe {
                     kind: RELAY_PROBE,
@@ -863,7 +939,7 @@ impl Prober {
                     seq: wire,
                     sent_ms: now_ms,
                 };
-                out.push(relay_probe(tls, *endpoint, probe.encode(key).to_vec()));
+                out.push(relay_probe(via, *endpoint, probe.encode(key).to_vec()));
             }
         }
         (out, switches)
@@ -1531,9 +1607,9 @@ impl Prober {
         out
     }
 
-    /// A relay's reply, which comes back the way its probe went: through the TLS transport
-    /// (`over_tls`) or to the WireGuard port.
-    fn on_relay_reply(&mut self, data: &[u8], at: Instant, over_tls: bool) {
+    /// A relay's reply, which comes back the way its probe went: through a transport's loopback port
+    /// (`over_transport`) or to the WireGuard port.
+    fn on_relay_reply(&mut self, data: &[u8], at: Instant, over_transport: bool) {
         // The number in the reply is this machine's; look up which probe it was by sequence number, then
         // authenticate with that relay's token
         let Some(head) = OuterReply::peek(data) else {
@@ -1546,26 +1622,26 @@ impl Prober {
         let Some((owner, pending, sent)) = self.outstanding.get(&seq).cloned() else {
             return;
         };
-        let (relay, key, tls) = match pending {
-            Pending::Monitor { relay, tls } => match self.monitored.get(&(relay, tls)) {
-                Some((_, key, _)) => (relay, key, tls),
+        let (relay, key, via) = match pending {
+            Pending::Monitor { relay, via } => match self.monitored.get(&(relay, via)) {
+                Some((_, key, _)) => (relay, key, via),
                 None => return,
             },
             Pending::Candidate { index, .. } => {
                 match self.peers.get(&owner).and_then(|p| p.meta.get(index)) {
-                    Some(CandidateMeta::Relay { relay, key, tls }) => (*relay, key, *tls),
+                    Some(CandidateMeta::Relay { relay, key, via }) => (*relay, key, *via),
                     _ => return,
                 }
             }
             Pending::Tunnel { .. } | Pending::Through { .. } | Pending::Punch => return,
         };
-        if tls != over_tls || OuterReply::verify(data, key).is_none() {
+        if via.loopback() != over_transport || OuterReply::verify(data, key).is_none() {
             return;
         }
         self.outstanding.remove(&seq);
         let rtt = at.saturating_duration_since(sent);
         // What is carried to the peer with the in-tunnel reply is this machine's UDP measurement to the relay
-        if !tls {
+        if via == Via::Udp {
             self.relay_stats.entry(relay).or_default().record_reply(rtt);
         }
         // While through probes come back through this relay, they alone measure paths through it: the
@@ -1848,6 +1924,7 @@ mod tests {
                 &members,
                 &paths(2, Reachability::Public, TOKEN_A, "198.51.100.2:41820"),
                 &BTreeMap::new(),
+                &BTreeMap::new(),
             );
             b.prober.update(
                 &b.id,
@@ -1855,6 +1932,7 @@ mod tests {
                 &b_priv,
                 &members,
                 &paths(1, Reachability::DialOnly, TOKEN_B, "203.0.113.1:41820"),
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             );
             for node in [&mut a, &mut b] {
@@ -2351,6 +2429,7 @@ mod tests {
                     c
                 }),
                 &BTreeMap::new(),
+                &BTreeMap::new(),
             );
             b.prober.update(
                 &b.id,
@@ -2362,6 +2441,7 @@ mod tests {
                     c.extend(punch.then_some(Candidate::Punch));
                     c
                 }),
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             );
             let now = Instant::now();
@@ -2409,6 +2489,7 @@ mod tests {
                 &b_priv,
                 &self.members,
                 &paths,
+                &BTreeMap::new(),
                 &BTreeMap::new(),
             );
         }
@@ -2671,6 +2752,7 @@ mod tests {
                 )]
                 .into(),
                 &tls,
+                &BTreeMap::new(),
             );
             let (out, _) = prober.tick(Instant::now(), 1_700_000_000_000);
             out.into_iter()
@@ -2727,6 +2809,7 @@ mod tests {
                 },
             )]
             .into(),
+            &BTreeMap::new(),
             &BTreeMap::new(),
         );
         let key = ProbeKey::direct(&b_priv, &a_pub).expect("key");

@@ -406,11 +406,14 @@ fn check_peer(peer: &PeerStatus) -> Option<Finding> {
                 .iter()
                 .all(|c| c.state == CandidateStateDoc::Failing)
     };
-    let advice = if failing(&[PathKindDoc::Relay, PathKindDoc::RelayTls])
-        && failing(&[PathKindDoc::Direct, PathKindDoc::Lan])
+    let advice = if failing(&[
+        PathKindDoc::Relay,
+        PathKindDoc::RelayObfs,
+        PathKindDoc::RelayTls,
+    ]) && failing(&[PathKindDoc::Direct, PathKindDoc::Lan])
     {
         "every path fails: check that this machine can send UDP at all, and that the relays' ports \
-         (UDP 41822, TCP 443 or the one set with nett site relay) are open"
+         (UDP 41822, the obfuscated UDP port, TCP 443 or the ones set with nett site relay) are open"
             .to_owned()
     } else if failing(&[PathKindDoc::Direct]) {
         format!(

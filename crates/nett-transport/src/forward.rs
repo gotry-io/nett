@@ -30,8 +30,8 @@ pub const KEEPALIVE: Duration = Duration::from_secs(25);
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// After a relay's loopback port failed, for example while another process still holds it, it is
 /// opened again after a delay that starts here and doubles up to [`REOPEN_MAX`].
-const REOPEN_DELAY: Duration = Duration::from_secs(1);
-const REOPEN_MAX: Duration = Duration::from_secs(60);
+pub(crate) const REOPEN_DELAY: Duration = Duration::from_secs(1);
+pub(crate) const REOPEN_MAX: Duration = Duration::from_secs(60);
 /// Number of packets held before the connection is authenticated: they go to the connection's send
 /// queue, which keeps as many.
 const MAX_HELD: usize = SEND_QUEUE;
@@ -82,12 +82,23 @@ pub async fn run(
                     }
                 }
                 let wireguard = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), config.wireguard_port);
-                tracing::info!(targets = config.targets.len(), "transport config applied");
+                tracing::info!(
+                    targets = config.targets.len(),
+                    obfuscated = config.obfs.len(),
+                    "transport config applied"
+                );
                 let tasks = config
                     .targets
                     .iter()
                     .cloned()
                     .map(|t| tokio::spawn(target_or_log(t, wireguard, config.interface)))
+                    .chain(config.obfs.iter().cloned().map(|t| {
+                        tokio::spawn(crate::obfuscated::target_or_log(
+                            t,
+                            wireguard,
+                            config.interface,
+                        ))
+                    }))
                     .collect();
                 current = Some((config, tasks));
             }
@@ -325,6 +336,7 @@ mod tests {
                 fingerprint: CertFingerprint([0; 32]),
             }],
             interface: None,
+            obfs: vec![],
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {
@@ -369,6 +381,7 @@ mod tests {
                 fingerprint: CertFingerprint([0; 32]),
             }],
             interface: None,
+            obfs: vec![],
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {

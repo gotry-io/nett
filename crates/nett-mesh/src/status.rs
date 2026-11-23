@@ -259,6 +259,7 @@ pub enum PathKindDoc {
     Lan,
     Direct,
     Relay,
+    RelayObfs,
     RelayTls,
     #[serde(other)]
     Other,

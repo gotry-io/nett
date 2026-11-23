@@ -905,6 +905,9 @@ fn connections_go_through_every_relay_udp_first() {
                 Candidate::RelayTls { relay, address, .. } => {
                     format!("tls {} {address}", state.name_of(relay).expect("name"))
                 }
+                Candidate::RelayObfs { relay, address, .. } => {
+                    format!("obfs {} {address}", state.name_of(relay).expect("name"))
+                }
             })
             .collect()
     };
