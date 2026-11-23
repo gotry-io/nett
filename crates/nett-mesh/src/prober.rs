@@ -619,6 +619,15 @@ impl Prober {
             );
         }
         self.peers = next;
+        // A record ends once no candidate leads to its endpoint: that endpoint changed
+        let recorded = self.blocked.len();
+        self.blocked.retain(|endpoint| {
+            self.peers
+                .values()
+                .filter_map(|p| p.paths.as_ref())
+                .any(|p| p.leads_to_plain(endpoint))
+        });
+        self.blocked_changed |= self.blocked.len() != recorded;
         self.by_mesh_addr = self
             .peers
             .iter()
@@ -3032,6 +3041,42 @@ mod tests {
             .filter(|(_, _, s)| s.reason == SwitchReason::Rotation)
             .collect();
         assert!(rotations.is_empty(), "{rotations:?}");
+    }
+
+    /// A blocked endpoint's record lasts while a plain UDP candidate leads to it and ends once none
+    /// does (design/obfuscation.md section 5); the candidate shows as blocked meanwhile.
+    #[test]
+    fn a_blocked_record_ends_when_its_endpoint_changes() {
+        let mut pair = Pair::new();
+        let blocked = pair.relays[0];
+        pair.b.prober.set_blocked([blocked].into());
+        pair.reconfigure_b(vec![pair.b_relay(0), pair.b_relay(1)]);
+        assert!(
+            pair.b.prober.take_blocked_change().is_none(),
+            "still in use"
+        );
+        let states: Vec<_> = pair
+            .b
+            .prober
+            .peers
+            .get(&pair.a.id)
+            .and_then(|p| p.paths.as_ref())
+            .expect("paths")
+            .candidate_views(pair.now)
+            .into_iter()
+            .map(|v| (v.route.endpoint(), v.state))
+            .collect();
+        assert!(
+            states.contains(&(blocked, crate::path::CandidateState::Blocked)),
+            "{states:?}"
+        );
+
+        pair.reconfigure_b(vec![pair.b_relay(1)]);
+        assert_eq!(
+            pair.b.prober.take_blocked_change(),
+            Some(&BTreeSet::new()),
+            "the record ends with the endpoint"
+        );
     }
 
     #[test]

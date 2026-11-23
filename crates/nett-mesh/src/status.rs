@@ -289,6 +289,7 @@ pub enum CandidateStateDoc {
     Ok,
     Failing,
     Untested,
+    Blocked,
     #[serde(other)]
     Other,
 }

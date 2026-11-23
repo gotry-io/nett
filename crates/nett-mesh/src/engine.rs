@@ -1213,6 +1213,7 @@ impl<D: DataPlane> Engine<D> {
                                 CandidateState::Ok => CandidateStateDoc::Ok,
                                 CandidateState::Failing => CandidateStateDoc::Failing,
                                 CandidateState::Untested => CandidateStateDoc::Untested,
+                                CandidateState::Blocked => CandidateStateDoc::Blocked,
                             },
                         })
                         .collect(),

@@ -350,6 +350,7 @@ fn peer_detail(doc: &StatusDoc, p: &PeerStatus, now: Timestamp) -> String {
                     CandidateStateDoc::Ok => "ok",
                     CandidateStateDoc::Failing => "failing",
                     CandidateStateDoc::Untested => "untested",
+                    CandidateStateDoc::Blocked => "blocked",
                     CandidateStateDoc::Other => "-",
                 }
                 .to_owned(),

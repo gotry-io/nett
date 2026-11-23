@@ -414,6 +414,9 @@ pub enum CandidateState {
     Failing,
     /// No probe result yet.
     Untested,
+    /// Plain UDP to its endpoint is recorded as blocked, and it is not probed (design/obfuscation.md
+    /// section 5).
+    Blocked,
 }
 
 /// The role of this side in this pair of members (sections 8.3 and 8.4).
@@ -763,6 +766,13 @@ impl PeerPaths {
         }
     }
 
+    /// A plain UDP candidate leads to `endpoint`.
+    pub fn leads_to_plain(&self, endpoint: &SocketAddr) -> bool {
+        self.candidates.iter().any(|c| {
+            matches!(c.kind, PathKind::Direct | PathKind::Relay) && c.route.endpoint() == *endpoint
+        })
+    }
+
     /// The endpoint a switch has just taken as blocked, once.
     pub fn take_newly_blocked(&mut self) -> Option<SocketAddr> {
         self.newly_blocked.take()
@@ -816,6 +826,8 @@ impl PeerPaths {
                 };
                 let state = if i == self.current {
                     CandidateState::Current
+                } else if c.blocked {
+                    CandidateState::Blocked
                 } else if c.first_probe.is_none() {
                     CandidateState::Untested
                 } else if c.stats.consecutive_losses > 0 || !backoff(&c.failures, now).is_zero() {

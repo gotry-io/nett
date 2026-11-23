@@ -402,9 +402,12 @@ fn check_peer(peer: &PeerStatus) -> Option<Finding> {
             .filter(|c| kinds.contains(&c.kind))
             .collect();
         !of_kind.is_empty()
-            && of_kind
-                .iter()
-                .all(|c| c.state == CandidateStateDoc::Failing)
+            && of_kind.iter().all(|c| {
+                matches!(
+                    c.state,
+                    CandidateStateDoc::Failing | CandidateStateDoc::Blocked
+                )
+            })
     };
     let advice = if failing(&[
         PathKindDoc::Relay,
