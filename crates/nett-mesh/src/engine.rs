@@ -692,8 +692,8 @@ impl<D: DataPlane> Engine<D> {
     /// public keys from the verified admission material; members that are not admitted are left out with
     /// their links, so the relay forwards only between admitted members (hard rule 4).
     fn update_relay(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
-        // This machine's WireGuard is reached on loopback: a peer that reaches the relay over TLS
-        // then needs no UDP path to this machine (section 5.1)
+        // This machine's WireGuard is reached on loopback: a peer that reaches the relay, over UDP
+        // or TLS, then needs no path to this machine's WireGuard port (section 5.1)
         let own = self
             .interface
             .as_ref()

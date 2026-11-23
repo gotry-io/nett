@@ -116,10 +116,10 @@ pub struct RelayPath<'a> {
 }
 
 /// The paths of the connection between `a` and `b` through relays (design/site.md section 6):
-/// the relay on one end over TLS when the other end decides the path, then every relay other than
-/// the two ends that has joined and has a public address, in the order of their node IDs, first
-/// over UDP and then over TLS, while the connection has room for candidates. The result is the
-/// same for both ends.
+/// the relay on one end when the other end decides the path, over UDP and then over TLS, then
+/// every relay other than the two ends that has joined and has a public address, in the order of
+/// their node IDs, first over UDP and then over TLS, while the connection has room for candidates.
+/// The result is the same for both ends.
 pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayPath<'a>> {
     if a.policy.is_none() || b.policy.is_none() {
         return Vec::new();
@@ -142,27 +142,40 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
         .collect();
     relays.sort_by(|x, y| x.0.node_id.cmp(&y.0.node_id));
     // The relay hands the packets to WireGuard on its own machine, so the two stay connected when
-    // only TCP passes between them (design/mesh.md section 5.1); only the deciding end can use it
-    let own = [(a, b), (b, a)].into_iter().filter_map(|(host, other)| {
-        if !is_decider(
+    // only the relay's port or only TCP passes between them (design/mesh.md section 5.1); only the
+    // deciding end can use it
+    let own = [(a, b), (b, a)].into_iter().flat_map(|(host, other)| {
+        let decides = is_decider(
             &other.node_id,
             other.reachability,
             &host.node_id,
             host.reachability,
-        ) {
-            return None;
-        }
-        let r = state.by_id(&host.node_id)?;
-        let ip = r
-            .public_ipv4()
-            .map(IpAddr::V4)
-            .or_else(|| r.public_ipv6().map(IpAddr::V6))?;
-        Some(RelayPath {
+        );
+        let relay = state
+            .by_id(&host.node_id)
+            .filter(|_| decides)
+            .and_then(|r| {
+                let ip = r
+                    .public_ipv4()
+                    .map(IpAddr::V4)
+                    .or_else(|| r.public_ipv6().map(IpAddr::V6))?;
+                Some((r, ip, r.relay?))
+            });
+        let udp = relay.map(|(r, ip, role)| RelayPath {
             relay: r,
             ip,
-            port: r.relay?.tls_port?,
-            tls: Some(r.relay_fingerprint()?),
-        })
+            port: role.port,
+            tls: None,
+        });
+        let tls = relay.and_then(|(r, ip, role)| {
+            Some(RelayPath {
+                relay: r,
+                ip,
+                port: role.tls_port?,
+                tls: Some(r.relay_fingerprint()?),
+            })
+        });
+        udp.into_iter().chain(tls)
     });
     let udp = relays.iter().map(|(r, ip, role)| RelayPath {
         relay: r,

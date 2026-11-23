@@ -16,7 +16,7 @@ Add an independent process, **nett-relay**, running with low privileges on `publ
 | Function | Description |
 |---|---|
 | Packet relay | Forwards WireGuard-encrypted packets without seeing their contents. **Each relay uses only one UDP port** and determines the destination from the WireGuard messages themselves (see below) |
-| Transport entry point | Accepts TCP/TLS 443 transport (QUIC later) and hands packets to the local WireGuard |
+| Transport entry point | Accepts TCP/TLS 443 transport (QUIC later) and hands packets to the local WireGuard; the UDP relay port does the same for a member that reaches this machine through its relay |
 | Probe responses | Answers path-layer measurement probes; does not respond to unauthenticated probes |
 | **HTTPS CONNECT proxy** | HTTP/2 over TLS; forwards per connection; multiple relays can be chained; credentials are a kind of device credentials (see auth.md) |
 
@@ -44,7 +44,8 @@ Therefore, when handing over through Caddy only HTTP/2 CONNECT is offered; for o
 - It preserves "what has privileges is not exposed, what is exposed has no privileges": even if nett-relay is compromised, the attacker cannot obtain the mesh private key and cannot manage nodes;
 - A single port means each relay needs only one UDP port opened in the security group, so a node with only one port mapped (such as the smart gateway at home) can also act as a relay;
 - HTTPS CONNECT is a universal standard, so any client that supports an HTTPS proxy can use it directly, without a dedicated client;
-- Packet relay and CONNECT share the TLS, authentication, and path selection infrastructure, and implementing them in one process costs the least.
+- Packet relay and CONNECT share the TLS, authentication, and path selection infrastructure, and implementing them in one process costs the least;
+- A member reaches the machine a relay runs on through that relay over UDP as well as TLS. A censor that identifies WireGuard drops UDP sent from the identified port into its network while the other ports of the same address pass: net4people/bbs#117 reports it at the Chinese border (2022), and a measurement found the same random payload arriving from every other source port of an address and none from its WireGuard port. The relay's own port keeps a UDP path there, without TCP over TCP. Tailscale lets a device be its own peer relay (v1.104.7 `wgengine/magicsock/magicsock.go`, `updateRelayServersSet` takes the peers and the device itself).
 
 ## Alternatives considered
 
@@ -53,6 +54,8 @@ Therefore, when handing over through Caddy only HTTP/2 CONNECT is offered; for o
 - **A separate port for CONNECT**: not limited by the capabilities of the reverse proxy, but restricted networks often allow only 443. Measurement shows HTTP/2 CONNECT can share 443 with websites, so a separate port is not needed.
 - **Packet relay only**: clients that support only an HTTPS proxy cannot use it directly.
 - **CONNECT only**: supports TCP only and cannot carry mesh traffic of arbitrary protocols.
+- **Excluding the relay on the peer's own machine**, as Nebula does (v1.12.0 `relay_manager.go`): there the relay shares the node's one port, so going through the target gains nothing; nett-relay has a port of its own, and that port is what passes when the WireGuard port is blocked.
+- **Moving the WireGuard port when it is blocked**: it leaves the current entry of the block list but not the detection that filled it, and moving ports repeatedly has been reported to end with the whole address blocked (net4people/bbs#425, 2024); measurement chooses among the paths that pass instead, and an obfuscated transport (roadmap M2) is what addresses the detection.
 
 ## Consequences
 

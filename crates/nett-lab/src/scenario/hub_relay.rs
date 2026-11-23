@@ -11,6 +11,9 @@
 //! - c, on a's LAN behind the same NAT, gets a LAN direct candidate from the addresses both report, and
 //!   the pair moves onto the LAN;
 //! - With all of a's UDP blocked upstream, the pair moves to TLS and stays reachable;
+//! - With UDP from r1's WireGuard port dropped toward a's network and r2 while r1's other ports pass
+//!   (as a censor drops a port it identified as WireGuard, with the other relay behind it too), a
+//!   reaches r1 through r1's own relay over UDP;
 //! - With all of r1's UDP blocked upstream while TCP passes (as across a border), a reaches r1 through
 //!   r1's own relay over TLS, which hands the packets to WireGuard on r1, and r1 shows its relay as the
 //!   path;
@@ -461,31 +464,70 @@ pub fn hub_relay(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Rep
     );
     crate::fault::unblock_udp_upstream(&lab.underlay, "a")?;
 
-    // All of r1's UDP blocked upstream while TCP passes, as across a border: no relay reaches r1 over
-    // UDP, so a reaches it through r1's own relay over TLS, which hands the packets to WireGuard on r1
-    // (design/mesh.md section 5.1)
     let r1 = relay_node("r1")?;
-    crate::fault::block_udp_upstream(&lab.underlay, "r1")?;
     let through_r1 = |from: &LabNode, to: &LabNode, wanted: &str| {
         kind(from, to) == wanted && via(from, to).as_deref() == Some("r1")
     };
+    // No rule allows a to reach r1, so the probes through the tunnel show that it carries packets
+    let ping_r1 = || {
+        run_in(
+            &ns("a")?,
+            &nett.display().to_string(),
+            [
+                "ping".as_ref(),
+                "r1".as_ref(),
+                "-c".as_ref(),
+                "3".as_ref(),
+                "--socket".as_ref(),
+                socket_a.as_os_str(),
+            ],
+        )
+    };
+
+    // UDP from r1's WireGuard port dropped toward a's network and toward r2 while r1's other ports
+    // pass, as a censor drops a port it identified as WireGuard with the other relay behind it too:
+    // the only UDP path left is r1's own relay, and a takes it rather than TLS (design/mesh.md
+    // section 5.1)
+    let a_network = lab
+        .underlay
+        .egress_ipv4("a")
+        .context("a's egress address")?;
+    let r2_address = lab.underlay.public_ipv4("r2").context("r2's address")?;
+    crate::fault::block_udp_port_toward(
+        "r1",
+        nett_site::state::DEFAULT_LISTEN_PORT,
+        &[a_network.into(), r2_address.into()],
+    )?;
+    let deadline = Instant::now() + FALLBACK;
+    while !through_r1(a, r1, "Relay") && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    let probed = ping_r1();
+    report.check(
+        "udp:own-relay",
+        through_r1(a, r1, "Relay")
+            && through_r1(r1, a, "Relay")
+            && probed.as_ref().is_ok_and(|o| o.contains("3 received")),
+        format!(
+            "a -> r1: {} via {:?}; r1 -> a: {} via {:?}; {}",
+            kind(a, r1),
+            via(a, r1),
+            kind(r1, a),
+            via(r1, a),
+            probed.unwrap_or_else(|e| format!("{e:#}"))
+        ),
+    );
+    crate::fault::unblock_udp("r1")?;
+
+    // All of r1's UDP blocked upstream while TCP passes, as across a border: no relay reaches r1 over
+    // UDP, so a reaches it through r1's own relay over TLS, which hands the packets to WireGuard on r1
+    // (design/mesh.md section 5.1)
+    crate::fault::block_udp_upstream(&lab.underlay, "r1")?;
     let deadline = Instant::now() + FALLBACK;
     while !through_r1(a, r1, "RelayTls") && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(500));
     }
-    // No rule allows a to reach r1, so the probes through the tunnel show that it carries packets
-    let probed = run_in(
-        &ns("a")?,
-        &nett.display().to_string(),
-        [
-            "ping".as_ref(),
-            "r1".as_ref(),
-            "-c".as_ref(),
-            "3".as_ref(),
-            "--socket".as_ref(),
-            socket_a.as_os_str(),
-        ],
-    );
+    let probed = ping_r1();
     report.check(
         "tls:own-relay",
         through_r1(a, r1, "RelayTls")

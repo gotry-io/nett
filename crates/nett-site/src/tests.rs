@@ -920,11 +920,13 @@ fn connections_go_through_every_relay_udp_first() {
         expected,
         "both ends get the same relays"
     );
-    // A relay is never a path to itself; a connection to a relay goes through the other one
+    // mac decides the connection to r1, so it also reaches r1 through r1's own relay port, before
+    // the other relay
     assert_eq!(
         kinds(path(&mac, &state, "r1")),
         [
             "direct 198.51.100.1:41820",
+            "udp r1 198.51.100.1:41822",
             "udp r2 198.51.100.2:41822",
             "tls r2 198.51.100.2:443"
         ]
@@ -937,7 +939,8 @@ fn connections_go_through_every_relay_udp_first() {
     let mut pair = [id("mac"), id("nas")];
     pair.sort();
     assert!(relay.links.contains(&pair));
-    // Links to r2 itself are those whose other end reaches it over TLS: the dial-only machines
+    // Links to r2 itself are those whose other end reaches it through its relay: the dial-only
+    // machines, which decide
     let mut own: Vec<nett_core::id::NodeId> = relay
         .links
         .iter()
@@ -995,11 +998,11 @@ fn connections_go_through_every_relay_udp_first() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A machine that decides the path to a relay's machine also reaches it through that relay over
-/// TLS, which hands the packets to WireGuard there: the two stay connected when only TCP passes
-/// between them (design/mesh.md section 5.1).
+/// A machine that decides the path to a relay's machine also reaches it through that relay, over
+/// UDP and then TLS, and the relay hands the packets to WireGuard there: the two stay connected
+/// when only the relay's port or only TCP passes between them (design/mesh.md section 5.1).
 #[test]
-fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay_over_tls() {
+fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay() {
     let (_dir_tmp, dir) = temp_dir("relay-own");
     let (_site, state) = relay_site(&dir);
     let id = |n: &str| state.machine(&name(n)).expect("machine").node_id.clone();
@@ -1016,11 +1019,12 @@ fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay_over_tls() {
             })
             .collect()
     };
-    // mac is dial-only and decides: r2's own relay over TLS comes before the other relays
+    // mac is dial-only and decides: r2's own relay, over UDP and then TLS, comes before the other
+    // relays
     let r = |n: &str, tls| (n.to_owned(), tls);
     assert_eq!(
         through(path(&mac, &state, "r2")),
-        [r("r2", true), r("r1", false)]
+        [r("r2", false), r("r2", true), r("r1", false)]
     );
     let own = path(&mac, &state, "r2")
         .iter()
@@ -1042,10 +1046,10 @@ fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay_over_tls() {
         .find(|m| m.node == id("mac"))
         .expect("mac is a member of r2's relay");
     assert_eq!(mac_on_r2.token, own);
-    // r1 serves no TLS: mac reaches it only through r2
+    // r1 serves no TLS: mac reaches it through r1's relay over UDP only, then through r2
     assert_eq!(
         through(path(&mac, &state, "r1")),
-        [r("r2", false), r("r2", true)]
+        [r("r1", false), r("r2", false), r("r2", true)]
     );
     // Between two public machines the one with the smaller node ID decides: once both serve TLS and
     // a rule connects them, r1 reaches r2 through r2's relay, and r2 does not use r1's
@@ -1081,7 +1085,10 @@ fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay_over_tls() {
             })
             .collect()
     };
-    assert_eq!(through(path(&r1, &state, "r2")), [r("r2", true)]);
+    assert_eq!(
+        through(path(&r1, &state, "r2")),
+        [r("r2", false), r("r2", true)]
+    );
     assert!(through(path(&r2, &state, "r1")).is_empty());
     std::fs::remove_dir_all(&dir).ok();
 }

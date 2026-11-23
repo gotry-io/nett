@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- The machine that decides the path to a relay's machine also reaches it through that relay over
+  UDP, not only over TLS. Where a network drops UDP from the machine's WireGuard port but passes
+  its relay port, as a censor does with a port it identified as WireGuard, the pair keeps a UDP
+  path instead of carrying WireGuard over TCP.
 - Each end of a TLS relay connection keeps the newest 32 packets waiting to be sent and drops the
   oldest, so a connection that falls behind sends fresh packets rather than stale ones.
 

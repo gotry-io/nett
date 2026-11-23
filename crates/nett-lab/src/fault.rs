@@ -204,14 +204,21 @@ pub fn block_udp_with(name: &str, peers: &[std::net::IpAddr]) -> anyhow::Result<
     Ok(())
 }
 
-/// Drops UDP that leaves the node from source port `port` toward `to`, while the node's other ports
-/// still reach `to`: stands in for a network that blocks one port, for example the WireGuard port.
-pub fn block_udp_port_toward(name: &str, port: u16, to: std::net::IpAddr) -> anyhow::Result<()> {
+/// Drops UDP that leaves the node from source port `port` toward each address in `to`, while the
+/// node's other ports still reach them: stands in for a network that blocks one port, for example
+/// the WireGuard port.
+pub fn block_udp_port_toward(name: &str, port: u16, to: &[std::net::IpAddr]) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
-    let family = if to.is_ipv4() { "ip" } else { "ip6" };
+    let drops: String = to
+        .iter()
+        .map(|to| {
+            let family = if to.is_ipv4() { "ip" } else { "ip6" };
+            format!(" {family} daddr {to} udp sport {port} drop;")
+        })
+        .collect();
     let rules = format!(
         "table inet {FAULT_TABLE} {{\n\
-         chain out {{ type filter hook output priority 0; {family} daddr {to} udp sport {port} drop; }}\n\
+         chain out {{ type filter hook output priority 0;{drops} }}\n\
          }}\n"
     );
     run_with_input(
@@ -223,7 +230,7 @@ pub fn block_udp_port_toward(name: &str, port: u16, to: std::net::IpAddr) -> any
     Ok(())
 }
 
-/// Lifts [`block_udp`] or [`block_udp_with`].
+/// Lifts [`block_udp`], [`block_udp_with`] or [`block_udp_port_toward`].
 pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     run(

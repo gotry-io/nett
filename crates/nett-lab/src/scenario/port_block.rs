@@ -40,7 +40,7 @@ pub fn relay_port_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Res
     };
     let (a, b) = (node("a")?, node("b")?);
     let r1 = lab.underlay.public_ipv4("r1").context("r1's address")?;
-    crate::fault::block_udp_port_toward("b", material::LISTEN_PORT, r1.into())?;
+    crate::fault::block_udp_port_toward("b", material::LISTEN_PORT, &[r1.into()])?;
 
     let relays = ["r1", "r2"];
     let links = relays
