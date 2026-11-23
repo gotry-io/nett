@@ -4,6 +4,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Each end of a TLS relay connection keeps the newest 32 packets waiting to be sent and drops the
+  oldest, so a connection that falls behind sends fresh packets rather than stale ones.
+
 ## [0.9.4] - 2026-11-23
 
 - Requests through a TLS relay take one round trip of the path instead of about two: nett-relay

@@ -22,6 +22,7 @@ use tokio_rustls::TlsConnector;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::client::{self, MAX_MESSAGE};
+use crate::queue::{self, SEND_QUEUE};
 
 /// WebSocket keepalive interval (design/mesh.md section 5.3).
 pub const KEEPALIVE: Duration = Duration::from_secs(25);
@@ -31,11 +32,10 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 /// opened again after a delay that starts here and doubles up to [`REOPEN_MAX`].
 const REOPEN_DELAY: Duration = Duration::from_secs(1);
 const REOPEN_MAX: Duration = Duration::from_secs(60);
-/// Number of packets held before the connection is authenticated.
-const MAX_HELD: usize = 64;
-/// Send queue of each connection, and the queue of messages a connection hands to the forwarding
-/// task.
-const CONN_QUEUE: usize = 256;
+/// Number of packets held before the connection is authenticated: they go to the connection's send
+/// queue, which keeps as many.
+const MAX_HELD: usize = SEND_QUEUE;
+/// The queue of messages a connection hands to the forwarding task.
 const EVENT_QUEUE: usize = 256;
 /// Interval for asking the mesh whether it has a new configuration: each question is a message to
 /// its worker thread.
@@ -126,13 +126,13 @@ enum Out {
 }
 
 enum Event {
-    Connected(mpsc::Sender<Out>),
+    Connected(queue::Sender<Out>),
     Message(Vec<u8>),
     Closed,
 }
 
 struct Link {
-    tx: mpsc::Sender<Out>,
+    tx: queue::Sender<Out>,
     /// A relay probe has already been sent on this connection.
     authenticated: bool,
 }
@@ -167,9 +167,11 @@ async fn target_loop(
                     probe_source = Some(from);
                 }
                 match link.as_mut() {
-                    Some(l) if l.authenticated => drop(l.tx.try_send(Out::Data(data))),
+                    Some(l) if l.authenticated => {
+                        l.tx.push(Out::Data(data));
+                    }
                     Some(l) if probe => {
-                        drop(l.tx.try_send(Out::Data(data)));
+                        l.tx.first(Out::Data(data));
                         l.authenticated = true;
                         flush(l, &mut held);
                     }
@@ -195,7 +197,7 @@ async fn target_loop(
                     if let Some(i) = held.iter().position(|d| d.first() == Some(&RELAY_PROBE))
                         && let Some(first) = held.remove(i)
                     {
-                        drop(l.tx.try_send(Out::Data(first)));
+                        l.tx.first(Out::Data(first));
                         l.authenticated = true;
                         flush(&l, &mut held);
                     }
@@ -215,7 +217,7 @@ async fn target_loop(
             },
             _ = keepalive.tick() => {
                 if let Some(l) = &link {
-                    drop(l.tx.try_send(Out::Ping));
+                    l.tx.push(Out::Ping);
                 }
             }
         }
@@ -231,7 +233,7 @@ fn hold(held: &mut VecDeque<Vec<u8>>, data: Vec<u8>) {
 
 fn flush(link: &Link, held: &mut VecDeque<Vec<u8>>) {
     for data in held.drain(..) {
-        drop(link.tx.try_send(Out::Data(data)));
+        link.tx.push(Out::Data(data));
     }
 }
 
@@ -252,7 +254,7 @@ async fn connection(
         }
     };
     tracing::info!(relay = %addr, "TLS relay connected");
-    let (tx, mut rx) = mpsc::channel(CONN_QUEUE);
+    let (tx, mut rx) = queue::queue();
     if events.send(Event::Connected(tx)).await.is_err() {
         return;
     }

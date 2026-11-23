@@ -19,6 +19,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::relay::{AssignedMember, ConnId, Outcome, PeerAddr, Relay, RelayState};
+use nett_transport::queue;
 use nett_trust::keys::X25519PublicKey;
 
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(1);
@@ -33,9 +34,8 @@ const MAX_UNAUTHENTICATED: usize = 64;
 /// authenticated probe must arrive (design/mesh.md section 5.3).
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// Send queue of each TLS connection, and the queue of messages each connection hands to the main
-/// loop.
-const CONN_QUEUE: usize = 256;
+/// The queue of messages the TLS connections hand to the main loop; each connection's send queue is
+/// [`nett_transport::queue`].
 const EVENT_QUEUE: usize = 4096;
 
 /// Listens for the TLS entry point on `addr`.
@@ -57,13 +57,13 @@ pub struct TlsIngress {
 }
 
 enum Event {
-    Opened(ConnId, mpsc::Sender<Vec<u8>>),
+    Opened(ConnId, queue::Sender<Vec<u8>>),
     Packet(ConnId, Vec<u8>),
     Closed(ConnId),
 }
 
 struct Conn {
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: queue::Sender<Vec<u8>>,
     opened: Instant,
     authenticated: bool,
 }
@@ -163,7 +163,7 @@ pub async fn serve(
                     } else if let Some(reply) = relay.authenticate(id, &packet, now_ms()) {
                         conn.authenticated = true;
                         tracing::info!(conn = id.0, "TLS connection authenticated");
-                        drop(conn.tx.try_send(reply));
+                        conn.tx.push(reply);
                     } else {
                         // The first message is not an authenticated probe: close the connection and
                         // send no reply
@@ -242,7 +242,7 @@ fn dispatch(
         PeerAddr::Udp(addr) => drop(udp.try_send_to(data, map_v6(addr))),
         PeerAddr::Tls(id) => {
             if let Some(conn) = conns.get(&id) {
-                drop(conn.tx.try_send(data.to_vec()));
+                conn.tx.push(data.to_vec());
             }
         }
     };
@@ -281,7 +281,7 @@ async fn connection(
     let Ok(Some(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await else {
         return;
     };
-    let (tx, mut rx) = mpsc::channel(CONN_QUEUE);
+    let (tx, mut rx) = queue::queue();
     if events.send(Event::Opened(id, tx)).await.is_err() {
         return;
     }

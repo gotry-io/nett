@@ -275,10 +275,13 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 **Where it holds**
 
 - Both ends of a TLS relay connection turn Nagle's algorithm off: the TLS transport when it connects, nett-relay when it accepts (mesh.md section 5.3);
-- A served port's forwarder turns it off on both of its connections (mesh.md section 12.1).
+- A served port's forwarder turns it off on both of its connections (mesh.md section 12.1);
+- A TLS relay connection that falls behind sends its newest packets: each end's send queue keeps 32 and drops the oldest, and the probe that opens the connection goes first and is never dropped (mesh.md section 5.3).
 
 **Guards**
 
 - `nett-relay:both_ends_of_a_tls_relay_connection_send_each_packet_at_once`
+- `nett-transport:a_full_send_queue_drops_its_oldest_packet`
+- `nett-transport:the_opening_message_goes_first_and_is_never_dropped`
 
 **Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place.
