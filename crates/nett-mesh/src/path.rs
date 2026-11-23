@@ -120,19 +120,24 @@ const LOSS_PENALTY_MS: f64 = 500.0;
 /// Path type preference and transport penalty (milliseconds), smaller is better (section 8.1): TLS adds
 /// another 20 ms on top of the relay preference.
 const RELAY_PENALTY_MS: f64 = 10.0;
-/// Obfuscated UDP sits between UDP and TLS (design/obfuscation.md section 5).
-const OBFS_PENALTY_MS: f64 = 10.0;
+/// Obfuscated UDP through a relay comes before plain UDP through it (design/obfuscation.md
+/// section 5).
+const OBFS_PREFERENCE_MS: f64 = 5.0;
 const TLS_PENALTY_MS: f64 = 20.0;
 
-/// Path types, from best to worst (section 8.2): on the same path UDP is better than TLS.
+/// Path types, from best to worst (section 8.2): through a relay, obfuscated UDP is better than UDP,
+/// which is better than TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Lan,
+    /// Obfuscated UDP through the relay on the peer's own machine: it reaches the peer itself, so it
+    /// ranks with the direct paths, before the plain one (design/obfuscation.md section 5).
+    PeerRelayObfs,
     Direct,
-    Relay,
-    /// Obfuscated UDP via a relay (design/obfuscation.md section 5): after UDP, before TLS.
+    /// Obfuscated UDP via a relay (design/obfuscation.md section 5).
     RelayObfs,
+    Relay,
     /// TLS transport via a relay (design/mesh.md section 5.3).
     RelayTls,
 }
@@ -141,8 +146,13 @@ impl PathKind {
     pub fn via_relay(self) -> bool {
         matches!(
             self,
-            PathKind::Relay | PathKind::RelayObfs | PathKind::RelayTls
+            PathKind::PeerRelayObfs | PathKind::Relay | PathKind::RelayObfs | PathKind::RelayTls
         )
+    }
+
+    /// Obfuscated UDP, through the peer's own relay or another.
+    pub fn obfuscated(self) -> bool {
+        matches!(self, PathKind::PeerRelayObfs | PathKind::RelayObfs)
     }
 }
 
@@ -241,9 +251,9 @@ impl PathStats {
     /// preference (section 8.1).
     pub fn score(&self, kind: PathKind) -> Option<f64> {
         let type_penalty = match kind {
-            PathKind::Lan | PathKind::Direct => 0.0,
+            PathKind::Lan | PathKind::PeerRelayObfs | PathKind::Direct => 0.0,
+            PathKind::RelayObfs => RELAY_PENALTY_MS - OBFS_PREFERENCE_MS,
             PathKind::Relay => RELAY_PENALTY_MS,
-            PathKind::RelayObfs => RELAY_PENALTY_MS + OBFS_PENALTY_MS,
             PathKind::RelayTls => RELAY_PENALTY_MS + TLS_PENALTY_MS,
         };
         self.rtt_ms
@@ -752,7 +762,7 @@ impl PeerPaths {
         (0..self.candidates.len())
             .filter(|&i| match self.role {
                 Role::FollowTogether => self.candidates[i].kind == PathKind::Lan,
-                _ => i != self.current || self.candidates[i].kind <= PathKind::Direct,
+                _ => i != self.current || !self.candidates[i].kind.via_relay(),
             })
             .count()
     }
@@ -1592,18 +1602,25 @@ impl PeerPaths {
                     .is_some_and(|(direct, relay)| direct * DIRECT_RETURN_RATIO <= relay)
         };
         // Better type: 2 consecutive replies, the backoff after failure is satisfied, and a path left
-        // while losing packets has measured low loss since
-        let better_type = self.candidates.iter().enumerate().find(|(i, c)| {
-            *i != self.current
-                && c.kind < current_kind
-                && self.whole(c)
-                && !c.broken_beyond(now)
-                && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
-                && c.healthy_since
-                    .is_some_and(|t| now.saturating_duration_since(t) >= backoff(&c.failures, now))
-                && c.loss_recovered()
-                && returns(c)
-        });
+        // while losing packets has measured low loss since; the best type of those, the first listed
+        // among equals
+        let better_type = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| {
+                *i != self.current
+                    && c.kind < current_kind
+                    && self.whole(c)
+                    && !c.broken_beyond(now)
+                    && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
+                    && c.healthy_since.is_some_and(|t| {
+                        now.saturating_duration_since(t) >= backoff(&c.failures, now)
+                    })
+                    && c.loss_recovered()
+                    && returns(c)
+            })
+            .min_by_key(|(_, c)| c.kind);
         if let Some((i, _)) = better_type {
             return Some(self.decide(i, SwitchReason::BetterType, now));
         }
@@ -1675,7 +1692,7 @@ impl PeerPaths {
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    c.kind == PathKind::Relay
+                    matches!(c.kind, PathKind::Relay | PathKind::RelayObfs)
                         && c.far_leg
                         && !c.broken_beyond(now)
                         && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
@@ -1721,7 +1738,7 @@ impl PeerPaths {
                 self.candidates[self.current].kind,
                 PathKind::Direct | PathKind::Relay
             )
-            && self.candidates[target].kind == PathKind::RelayObfs
+            && self.candidates[target].kind.obfuscated()
         {
             self.newly_blocked = Some(from.endpoint());
         }
@@ -3152,7 +3169,7 @@ mod tests {
     #[test]
     fn a_plain_endpoint_lost_to_obfuscated_udp_stays_avoided() {
         let mut sim = Sim::new(vec![
-            (relay(1), PathKind::Relay),
+            (direct(), PathKind::Direct),
             (relay_obfs(1), PathKind::RelayObfs),
             (relay_tls(1), PathKind::RelayTls),
         ]);
@@ -3163,7 +3180,7 @@ mod tests {
         let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
         assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::Unreachable)]);
         let blocked = sim.paths.take_newly_blocked().expect("the plain endpoint");
-        assert_eq!(blocked, relay(1).endpoint());
+        assert_eq!(blocked, direct().endpoint());
         assert_eq!(sim.paths.take_newly_blocked(), None, "reported once");
 
         sim.paths.set_blocked(&[blocked].into());
@@ -3172,6 +3189,45 @@ mod tests {
         sim.run(Duration::from_secs(120));
         assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
         assert_eq!(sim.sent[0], probes, "the blocked endpoint is not probed");
+    }
+
+    /// Through a relay, obfuscated UDP is taken over plain UDP; through the relay on the peer's own
+    /// machine, over the plain direct path too (design/obfuscation.md section 5).
+    #[test]
+    fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
+        let mut sim = Sim::new(vec![
+            (relay(1), PathKind::Relay),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.run(Duration::from_secs(40));
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::BetterType)]);
+
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::PeerRelayObfs),
+        ]);
+        sim.paths.set_peer_relay(KeyId([1; 8]));
+        sim.run(Duration::from_secs(40));
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::BetterType)]);
+        sim.run(Duration::from_secs(120));
+        assert_eq!(sim.switches.len(), 1, "stays: {:?}", sim.switches);
+    }
+
+    /// When several paths of better types answer, the switch goes to the best of them at once rather
+    /// than to the first listed and then again.
+    #[test]
+    fn a_recovery_goes_to_the_best_type_that_answers() {
+        let mut sim = Sim::new(vec![
+            (relay_tls(1), PathKind::RelayTls),
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::PeerRelayObfs),
+        ]);
+        sim.paths.set_peer_relay(KeyId([1; 8]));
+        sim.run(Duration::from_secs(40));
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::BetterType)]);
     }
 
     /// Leaving plain UDP for TLS, or obfuscated UDP for anything, records no block.

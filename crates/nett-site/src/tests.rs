@@ -1041,11 +1041,12 @@ fn offer_obfs(state: &mut State, relay: &str, port: u16) {
         .expect("obfuscated");
 }
 
-/// A relay that offers obfuscated UDP is reached over it between UDP and TLS (design/obfuscation.md
-/// section 5); its relay section carries the port, its key and the site's padding range, and the key
-/// in a member's candidate is the same one.
+/// A relay that offers obfuscated UDP is reached over it before UDP and TLS, and the obfuscated path
+/// to a relay's own machine comes before the direct one (design/obfuscation.md section 5); its relay
+/// section carries the port, its key and the site's padding range, and the key in a member's
+/// candidate is the same one.
 #[test]
-fn obfuscated_udp_comes_between_udp_and_tls() {
+fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
     let (_dir_tmp, dir) = temp_dir("relay-obfs");
     let (site, mut state) = relay_site(&dir);
     let id = |s: &State, n: &str| s.machine(&name(n)).expect("machine").node_id.clone();
@@ -1055,21 +1056,27 @@ fn obfuscated_udp_comes_between_udp_and_tls() {
     assert_eq!(
         through(&state, path(&mac, &state, "nas")),
         [
+            "obfs r2 198.51.100.2:30000",
             "udp r1 198.51.100.1:41822",
             "udp r2 198.51.100.2:41822",
-            "obfs r2 198.51.100.2:30000",
             "tls r2 198.51.100.2:443"
         ]
     );
-    // mac decides the connection to r2: r2's own relay over each of its transports first
+    // mac decides the connection to r2: r2's own relay over each of its transports first, the
+    // obfuscated one before even the direct path
     assert_eq!(
         through(&state, path(&mac, &state, "r2")),
         [
-            "udp r2 198.51.100.2:41822",
             "obfs r2 198.51.100.2:30000",
+            "udp r2 198.51.100.2:41822",
             "tls r2 198.51.100.2:443",
             "udp r1 198.51.100.1:41822"
         ]
+    );
+    assert!(
+        matches!(path(&mac, &state, "r2")[0], Candidate::RelayObfs { .. }),
+        "{:?}",
+        path(&mac, &state, "r2")
     );
     let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
     let obfs = r2
@@ -1091,9 +1098,9 @@ fn obfuscated_udp_comes_between_udp_and_tls() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
-/// A relay whose WireGuard and relay ports fall among the transports' loopback ports, as a site
-/// moved them to step around a block before a release took ports from 41850, keeps a valid site,
-/// and each machine accepts the desired state composed for it (design/site.md section 4).
+/// A relay whose WireGuard and relay ports fall among the transports' loopback ports, as a site may
+/// have chosen them before a release took those ports, keeps a valid site, and each machine accepts
+/// the desired state composed for it (design/site.md section 4).
 #[test]
 fn ports_among_the_loopback_ports_stay_valid() {
     let (_dir_tmp, dir) = temp_dir("loopback-ports");
@@ -1176,7 +1183,7 @@ fn the_candidate_limit_keeps_a_tls_path() {
         "a TLS path stays: {paths:?}"
     );
     assert_eq!(
-        paths.iter().filter(|p| p.starts_with("udp ")).count(),
+        paths.iter().filter(|p| p.starts_with("obfs ")).count(),
         3,
         "{paths:?}"
     );
@@ -1367,7 +1374,7 @@ fn relay_changes_are_listed_with_the_paths_they_change() {
         "{lines:?}"
     );
     assert!(
-        lines.contains(&"  ~ mac - nas  punch, relay edge-vps (udp, obfs, tls)".to_owned()),
+        lines.contains(&"  ~ mac - nas  punch, relay edge-vps (obfs, udp, tls)".to_owned()),
         "{lines:?}"
     );
     let mut off = new.clone();

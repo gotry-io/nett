@@ -23,7 +23,7 @@ nett adds an obfuscated UDP transport (design/obfuscation.md):
 - **Shape of the TLS transport**: on the member, a loopback port per relay as the WireGuard endpoint and a socket connected to the relay's obfuscated port; on nett-relay, an obfuscated port of its own that unwraps, routes by `mac1` and session index as today, and wraps each leg that needs it. WireGuard is unchanged;
 - **Format version 1**: a 12-byte random salt on every datagram; data messages have their first 16 bytes masked with a keyed BLAKE2s of the salt; handshakes and probes are sealed with ChaCha20-Poly1305 with a time and random padding, and replays and unauthenticated packets get no answer;
 - **Public format, site keys**: the format is open source; each relay's obfuscation key is derived from the site's relay key, and each site draws its own padding range;
-- **Order**: obfuscated UDP comes between UDP and TLS. An endpoint lost to a block stays avoided until it changes. Obfuscated UDP comes before plain UDP on the paths that leave a LAN only if a measurement shows it costs at most 5% of throughput, 0.2 ms of round trip and 10% of CPU, within the memory budget (design/obfuscation.md section 9).
+- **Order**: a measurement showed obfuscated UDP costs less than 5% of throughput, 0.2 ms of round trip and 10% of CPU on paths of 1 Gbit/s and below, within the memory budget (design/obfuscation.md section 9), so it comes first wherever it adds no hop: through a relay before plain UDP, and through the relay on the peer's own machine before the plain direct path. A direct path between machines that run no relay stays plain until plain UDP stops working, since obfuscating it would route it through a relay. An endpoint lost to a block stays avoided until it changes.
 
 ## Rationale
 

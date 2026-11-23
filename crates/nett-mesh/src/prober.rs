@@ -518,6 +518,15 @@ impl Prober {
             let config = paths.get(id);
             let candidates = config.map(|c| c.candidates.as_slice()).unwrap_or_default();
             let (mut routes, mut meta) = routes(candidates, tls, obfs);
+            // Obfuscated UDP through the relay on the peer's own machine reaches the peer itself
+            let peer_relay = KeyId::of(id.as_str().as_bytes());
+            for (route, kind) in &mut routes {
+                if *kind == PathKind::RelayObfs
+                    && matches!(route, Route::Relay { relay, .. } if *relay == peer_relay)
+                {
+                    *kind = PathKind::PeerRelayObfs;
+                }
+            }
             let configured = routes.len();
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
             let punch_wanted =

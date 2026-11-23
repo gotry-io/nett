@@ -75,10 +75,14 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
     pairs
 }
 
-/// Candidate paths from this machine to a peer (design/site.md section 6): the direct ones first,
-/// then the paths through relays other than this machine's own.
+/// Candidate paths from this machine to a peer (design/site.md section 6): the LAN paths, then
+/// obfuscated UDP through the relay on the peer's own machine, which reaches the peer with the
+/// first handshake already obfuscated (design/obfuscation.md section 5), then the public direct
+/// ones, then the other paths through relays other than this machine's own.
 pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
-    let mut out = direct(state, me, peer);
+    let mut out = lan(state, me, peer);
+    let lan = out.len();
+    out.extend(public(state, me, peer));
     let Some(key) = &state.relay_key else {
         return out;
     };
@@ -89,7 +93,8 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
         let token = token(key, &path.relay.node_id, &me.node_id);
         let relay = path.relay.node_id.clone();
         let address = SocketAddr::new(path.ip, path.port);
-        out.push(match path.via {
+        let to_peer = path.relay.node_id == peer.node_id;
+        let candidate = match path.via {
             RelayVia::Udp => Candidate::Relay {
                 relay,
                 endpoint: address,
@@ -108,7 +113,12 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
                 fingerprint,
                 token,
             },
-        });
+        };
+        if to_peer && matches!(candidate, Candidate::RelayObfs { .. }) {
+            out.insert(lan, candidate);
+        } else {
+            out.push(candidate);
+        }
     }
     out
 }
@@ -143,8 +153,8 @@ impl RelayVia {
 
 /// The paths of the connection between `a` and `b` through relays (design/site.md section 6,
 /// design/obfuscation.md section 5): the relay on one end when the other end decides the path, over
-/// UDP, obfuscated UDP and then TLS, then every relay other than the two ends that has joined and
-/// has a public address, in the order of their node IDs, first over UDP, then obfuscated UDP, then
+/// obfuscated UDP, UDP and then TLS, then every relay other than the two ends that has joined and
+/// has a public address, in the order of their node IDs, first over obfuscated UDP, then UDP, then
 /// TLS, while the connection has room for candidates; a TLS path stays among them when any relay
 /// serves TLS. The result is the same for both ends.
 pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayPath<'a>> {
@@ -192,8 +202,8 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
             .into_iter()
             .flat_map(|(r, ip, role)| {
                 [
-                    udp_path(r, ip, role),
                     obfs_path(state, r, ip, role),
+                    udp_path(r, ip, role),
                     tls_path(r, ip, role),
                 ]
             })
@@ -210,7 +220,7 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
     let tls = relays
         .iter()
         .filter_map(|(r, ip, role)| tls_path(r, *ip, *role));
-    let all: Vec<RelayPath> = own.chain(udp).chain(obfs).chain(tls).collect();
+    let all: Vec<RelayPath> = own.chain(obfs).chain(udp).chain(tls).collect();
     let is_tls = |p: &RelayPath| matches!(p.via, RelayVia::Tls(_));
     let mut chosen: Vec<RelayPath> = all.iter().take(room).copied().collect();
     // TLS is what still passes where all UDP is dropped, so the limit does not cut every TLS path
@@ -370,12 +380,6 @@ fn lan(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
 /// the one the Hub learned; one each for IPv4 and IPv6 when both exist); when both ends are
 /// `dial-only`, hole punching; when this machine is `public` and the peer is `dial-only`, nothing
 /// more, and the peer connects in (WireGuard roaming).
-fn direct(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
-    let mut out = lan(state, me, peer);
-    out.extend(public(state, me, peer));
-    out
-}
-
 fn public(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     match (me.reachability, peer.reachability) {
         (_, Reachability::Public) => {

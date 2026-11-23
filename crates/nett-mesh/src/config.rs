@@ -718,9 +718,9 @@ mod tests {
         );
     }
 
-    /// A public machine whose own ports fall among the transports' loopback ports, as a site whose
-    /// WireGuard port and relay port were moved to 41850 and 41852 before obfuscated UDP took ports
-    /// from 41850: the desired state stays valid, and the loopback ports go around the machine's own.
+    /// A public machine whose own ports fall among the transports' loopback ports, as a site may
+    /// have chosen them before a release took those ports: the desired state stays valid, and the
+    /// loopback ports go around the machine's own.
     #[test]
     fn loopback_ports_go_around_the_machines_own_ports() {
         use crate::testutil::{Mesh, node_id};

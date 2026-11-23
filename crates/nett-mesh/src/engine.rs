@@ -1273,7 +1273,7 @@ impl<D: DataPlane> Engine<D> {
     fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
         let endpoint = route.endpoint();
         match kind {
-            PathKind::RelayTls | PathKind::RelayObfs => {
+            PathKind::RelayTls | PathKind::RelayObfs | PathKind::PeerRelayObfs => {
                 self.tls_relays.get(&endpoint).copied().unwrap_or(endpoint)
             }
             _ => endpoint,
@@ -1301,7 +1301,7 @@ fn kind_doc(kind: PathKind) -> PathKindDoc {
         PathKind::Lan => PathKindDoc::Lan,
         PathKind::Direct => PathKindDoc::Direct,
         PathKind::Relay => PathKindDoc::Relay,
-        PathKind::RelayObfs => PathKindDoc::RelayObfs,
+        PathKind::PeerRelayObfs | PathKind::RelayObfs => PathKindDoc::RelayObfs,
         PathKind::RelayTls => PathKindDoc::RelayTls,
     }
 }
