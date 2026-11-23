@@ -146,7 +146,7 @@ Checked items are met; the others name the stage that verifies them.
 ## M2: Mesh enhancements
 
 - Multi-hop relaying and automatic path finding; relay choice from a line quality matrix, traffic limits per relay
-- QUIC transport, obfuscation wrapping, UDP support for CONNECT
+- An obfuscated UDP transport first: a censor that identifies WireGuard drops UDP sent from the identified address and port into its network (ADR 0011), so the transport scrambles the WireGuard header on the way, as Mullvad's LWO does, and nett-relay unwraps it to read `mac1` and session indexes; then QUIC transport and UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 
 **Acceptance** (direction): when a single-hop relay is deliberately degraded, switching automatically to multi-hop when a two-segment relay is clearly better, with the connection uninterrupted; automatically switching to QUIC on networks that allow only UDP 443; the obfuscated transport still connects in environments that drop packets by WireGuard signature; hole punching succeeds when both sides are behind symmetric NAT; resident processes still meet the resource budget.
