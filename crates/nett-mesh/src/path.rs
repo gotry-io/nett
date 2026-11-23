@@ -123,6 +123,11 @@ const RELAY_PENALTY_MS: f64 = 10.0;
 /// Obfuscated UDP through a relay comes before plain UDP through it (design/obfuscation.md
 /// section 5).
 const OBFS_PREFERENCE_MS: f64 = 5.0;
+/// A plain endpoint left for obfuscated UDP is recorded as blocked once it has answered no probe for
+/// this long while obfuscated UDP carries the connection (design/obfuscation.md section 5).
+const BLOCK_SILENCE: Duration = Duration::from_secs(5 * 60);
+/// ...or once it fails again this soon after it was left; past this the suspicion lapses.
+const BLOCK_WINDOW: Duration = Duration::from_secs(60 * 60);
 const TLS_PENALTY_MS: f64 = 20.0;
 
 /// Path types, from best to worst (section 8.2): through a relay, obfuscated UDP is better than UDP,
@@ -304,6 +309,9 @@ struct Candidate {
     /// Plain UDP to an endpoint recorded as blocked (design/obfuscation.md section 5): not probed, and
     /// its replies are not counted, so no rule takes it back.
     blocked: bool,
+    /// When this plain path stopped working and was left for obfuscated UDP: a block is suspected until
+    /// the failure is shown to last, or the suspicion lapses.
+    suspected: Option<Instant>,
 }
 
 /// Results of a candidate's probes, the latest in the lowest bit (set: lost).
@@ -344,6 +352,7 @@ impl Candidate {
             beyond: None,
             left_for_loss: None,
             blocked: false,
+            suspected: None,
         }
     }
 
@@ -794,7 +803,25 @@ impl PeerPaths {
         })
     }
 
-    /// The endpoint a switch has just taken as blocked, once.
+    /// A suspected endpoint that has answered no probe since it was left, for [`BLOCK_SILENCE`] while
+    /// obfuscated UDP carries the connection, is recorded as blocked; a suspicion lapses after
+    /// [`BLOCK_WINDOW`].
+    fn confirm_blocks(&mut self, now: Instant) {
+        let obfuscated = self.current_kind().obfuscated();
+        for c in &mut self.candidates {
+            let Some(since) = c.suspected else { continue };
+            let elapsed = now.saturating_duration_since(since);
+            let silent = c.last_reply.is_none_or(|t| t < since);
+            if obfuscated && silent && elapsed >= BLOCK_SILENCE && self.newly_blocked.is_none() {
+                c.suspected = None;
+                self.newly_blocked = Some(c.route.endpoint());
+            } else if elapsed >= BLOCK_WINDOW {
+                c.suspected = None;
+            }
+        }
+    }
+
+    /// The endpoint just recorded as blocked, once.
     pub fn take_newly_blocked(&mut self) -> Option<SocketAddr> {
         self.newly_blocked.take()
     }
@@ -1150,6 +1177,7 @@ impl PeerPaths {
         let mut actions = Vec::new();
         self.expire(now);
         self.reset_lapsed(now);
+        self.confirm_blocks(now);
 
         if let Some(action) = self.check_handshake(now, active) {
             actions.push(action);
@@ -1727,8 +1755,8 @@ impl PeerPaths {
         self.faster_since = None;
         let from = self.candidates[self.current].route;
         let to = self.candidates[target].route;
-        // Plain UDP failed and obfuscated UDP took over: the endpoint lost is taken as blocked, and stays
-        // avoided, since probing it again only renews a block (design/obfuscation.md section 5)
+        // Plain UDP failed and obfuscated UDP took over: a block of the endpoint lost is suspected, and
+        // recorded when it fails so again while suspected (design/obfuscation.md section 5)
         let failed = matches!(
             reason,
             SwitchReason::Unreachable | SwitchReason::HandshakeIncomplete
@@ -1740,7 +1768,16 @@ impl PeerPaths {
             )
             && self.candidates[target].kind.obfuscated()
         {
-            self.newly_blocked = Some(from.endpoint());
+            let left = &mut self.candidates[self.current];
+            if left
+                .suspected
+                .is_some_and(|t| now.saturating_duration_since(t) < BLOCK_WINDOW)
+            {
+                left.suspected = None;
+                self.newly_blocked = Some(from.endpoint());
+            } else {
+                left.suspected = Some(now);
+            }
         }
         let old_rtt_ms = self.tunnel.rtt_ms();
         // Left because of its loss, whichever rule chose the new path: a better score held on a path
@@ -3179,6 +3216,13 @@ mod tests {
         sim.run(Duration::from_secs(10));
         let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
         assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::Unreachable)]);
+        assert_eq!(
+            sim.paths.take_newly_blocked(),
+            None,
+            "one failure is a suspicion"
+        );
+        // Silent for the whole time obfuscated UDP carries the connection
+        sim.run(BLOCK_SILENCE);
         let blocked = sim.paths.take_newly_blocked().expect("the plain endpoint");
         assert_eq!(blocked, direct().endpoint());
         assert_eq!(sim.paths.take_newly_blocked(), None, "reported once");
@@ -3189,6 +3233,50 @@ mod tests {
         sim.run(Duration::from_secs(120));
         assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
         assert_eq!(sim.sent[0], probes, "the blocked endpoint is not probed");
+    }
+
+    /// A plain path that fails once and answers again, as a handshake lost at start-up or a short
+    /// outage, is taken back and never recorded as blocked.
+    #[test]
+    fn one_failure_that_recovers_records_no_block() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.run(Duration::from_secs(40));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        sim.up[0] = true;
+        sim.run(BLOCK_WINDOW + BLOCK_SILENCE);
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(
+            moves,
+            vec![
+                (relay_obfs(1), SwitchReason::Unreachable),
+                (direct(), SwitchReason::BetterType)
+            ]
+        );
+        assert_eq!(sim.paths.take_newly_blocked(), None);
+    }
+
+    /// A plain path taken back after a failure that fails again within the hour is recorded: probes
+    /// pass and WireGuard does not.
+    #[test]
+    fn a_second_failure_within_the_hour_records_the_block() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.run(Duration::from_secs(40));
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        sim.up[0] = true;
+        sim.run(Duration::from_secs(60));
+        assert_eq!(sim.paths.take_newly_blocked(), None);
+        assert_eq!(sim.switches.len(), 2, "taken back: {:?}", sim.switches);
+        sim.up[0] = false;
+        sim.run(Duration::from_secs(10));
+        assert_eq!(sim.paths.take_newly_blocked(), Some(direct().endpoint()));
     }
 
     /// Through a relay, obfuscated UDP is taken over plain UDP; through the relay on the peer's own

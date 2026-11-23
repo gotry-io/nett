@@ -1,7 +1,8 @@
 //! WireGuard identified and blocked (design/prototype.md scenario 32, design/obfuscation.md
 //! section 5): a censor upstream of a drops everything a sends to an address and port once it sees
-//! a WireGuard message go there. The pair moves to obfuscated UDP through r1 and stays there, a
-//! records the endpoint it lost, and after a restart it starts off that endpoint.
+//! a WireGuard message go there. The pair leaves direct for obfuscated UDP through r1, which ranks
+//! before plain UDP through it, and stays there; a records the endpoint it lost, and after a
+//! restart it starts off that endpoint.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,16 +14,18 @@ use super::{
     Report, count, diagnose, events, nett_status, start, start_workload, switches_since, wait_for,
     write_report,
 };
-use crate::material::{self, LabNode, RELAY_PORT};
+use crate::material::{self, LISTEN_PORT, LabNode, RELAY_PORT};
 use crate::measure::{now_ms, probe_stats, tcp_stats};
 use crate::net::Underlay;
 use crate::topology::Topology;
 
-/// How long a has to settle on obfuscated UDP once the censor acts: it loses direct, may try r1
-/// over plain UDP, which the censor then flags too, and moves on.
+/// How long a has to settle on obfuscated UDP once the censor acts.
 const SETTLE: Duration = Duration::from_secs(90);
 /// How long the pair is watched once it has settled.
 const WATCH: Duration = Duration::from_secs(60);
+/// How long after the switch a records direct as blocked: direct answers nothing for 5 minutes
+/// while obfuscated UDP carries the pair (design/obfuscation.md section 5), with a margin.
+const RECORD_WITHIN: Duration = Duration::from_secs(6 * 60);
 
 pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
@@ -43,7 +46,11 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
     };
     let (a, b) = (node("a")?, node("b")?);
     let r1 = lab.underlay.public_ipv4("r1").context("r1's address")?;
-    let r1_udp = format!("relay {r1}:{RELAY_PORT}");
+    let b_ip = lab.underlay.public_ipv4("b").context("b's address")?;
+    let plain = [
+        format!("relay {r1}:{RELAY_PORT}"),
+        format!("direct {b_ip}:{LISTEN_PORT}"),
+    ];
     let (probe_file, tcp_file) = start_workload(&mut lab, "a", "b", b.mesh_ipv4.into(), out)?;
     let before = wait_path(nett, a, b, Duration::from_secs(30), |k| {
         k == PathKindDoc::Direct
@@ -54,6 +61,25 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
         before.err().map(|e| format!("{e:#}")).unwrap_or_default(),
     );
 
+    // Long enough for every candidate to have been measured while the pair is on direct; a failure
+    // at start-up, such as a first handshake the peer drops, is no block
+    std::thread::sleep(Duration::from_secs(20));
+    let ready = wait_path(nett, a, b, Duration::from_secs(30), |k| {
+        k == PathKindDoc::Direct
+    });
+    let direct = ready
+        .as_ref()
+        .ok()
+        .and_then(|s| candidate_state(s, b, PathKindDoc::Direct));
+    report.check(
+        "no-record-without-a-block",
+        ready.is_ok() && direct != Some(CandidateStateDoc::Blocked),
+        format!(
+            "{}; switches {:?}",
+            ready.as_ref().map(|s| candidates(s, b)).unwrap_or_default(),
+            switches_since(a, 0)
+        ),
+    );
     let fault_at = now_ms();
     crate::fault::block_wireguard_upstream(&lab.underlay, "a")?;
     let settled = wait_path(nett, a, b, SETTLE, |k| k == PathKindDoc::RelayObfs);
@@ -67,17 +93,17 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
             switches_since(a, fault_at)
         ),
     );
+    let onto_plain: Vec<_> = switches_since(a, fault_at)
+        .into_iter()
+        .filter(|(to, _)| plain.contains(to))
+        .collect();
+    report.check(
+        "never-onto-plain-udp",
+        onto_plain.is_empty(),
+        format!("switches onto plain UDP {onto_plain:?}"),
+    );
     if let Ok(status) = &settled {
-        let r1_plain = candidate_state(status, b, PathKindDoc::Relay);
-        report.check(
-            "plain-relay-recorded-blocked",
-            r1_plain == Some(CandidateStateDoc::Blocked),
-            format!("r1 over UDP: {r1_plain:?}"),
-        );
-        report.record(
-            "direct",
-            format!("{:?}", candidate_state(status, b, PathKindDoc::Direct)),
-        );
+        report.record("candidates after", candidates(status, b));
     }
     let outage = probe_stats(&probe_file, fault_at, settled_at)?;
     report.record("outage", format!("longest gap {} ms", outage.max_gap_ms));
@@ -104,7 +130,21 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
         format!("{tcp:?}"),
     );
 
-    // The record survives a restart: a does not go back to r1 over plain UDP
+    // Direct answers nothing while obfuscated UDP carries the pair: a records it as blocked
+    let recorded = wait_state(nett, a, b, PathKindDoc::Direct, RECORD_WITHIN, |s| {
+        s == CandidateStateDoc::Blocked
+    });
+    report.check(
+        "direct-recorded-blocked",
+        recorded.is_ok(),
+        format!(
+            "{} s after the switch; {}",
+            (now_ms() - settled_at) / 1000,
+            recorded.err().map(|e| format!("{e:#}")).unwrap_or_default()
+        ),
+    );
+
+    // The record survives a restart: a does not go back to direct
     let applied = count(&events(a), "peers_applied");
     lab.stop("a")?;
     let restarted_at = now_ms();
@@ -125,16 +165,16 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
     );
     let onto_plain: Vec<_> = switches_since(a, restarted_at)
         .into_iter()
-        .filter(|(to, _)| *to == r1_udp)
+        .filter(|(to, _)| plain.contains(to))
         .collect();
-    let r1_plain = back
+    let direct = back
         .as_ref()
         .ok()
-        .and_then(|s| candidate_state(s, b, PathKindDoc::Relay));
+        .and_then(|s| candidate_state(s, b, PathKindDoc::Direct));
     report.check(
-        "restart:plain-relay-still-avoided",
-        onto_plain.is_empty() && r1_plain == Some(CandidateStateDoc::Blocked),
-        format!("switches onto r1 over UDP {onto_plain:?}; r1 over UDP: {r1_plain:?}"),
+        "restart:direct-still-avoided",
+        onto_plain.is_empty() && direct == Some(CandidateStateDoc::Blocked),
+        format!("switches onto plain UDP {onto_plain:?}; direct: {direct:?}"),
     );
     let after = probe_stats(&probe_file, restarted_at, back_at)?;
     report.record(
@@ -177,6 +217,52 @@ fn wait_path(
         );
         std::thread::sleep(Duration::from_millis(500));
     }
+}
+
+/// Waits until a's candidate of `kind` toward b is in a state `want` accepts.
+fn wait_state(
+    nett: &Path,
+    a: &LabNode,
+    b: &LabNode,
+    kind: PathKindDoc,
+    within: Duration,
+    want: impl Fn(CandidateStateDoc) -> bool,
+) -> anyhow::Result<()> {
+    let deadline = Instant::now() + within;
+    loop {
+        let state = nett_status(nett, a)
+            .ok()
+            .and_then(|s| candidate_state(&s, b, kind));
+        if state.is_some_and(&want) {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "a's {kind:?} candidate is {state:?} after {within:?}"
+        );
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
+/// a's candidates toward b with what was measured of each.
+fn candidates(status: &StatusDoc, b: &LabNode) -> String {
+    status
+        .peers
+        .iter()
+        .find(|p| p.id == b.node_id)
+        .map(|p| {
+            p.candidates
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{:?} {} {:?} rtt {:?} loss {:?}",
+                        c.kind, c.endpoint, c.state, c.rtt_ms, c.loss
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default()
 }
 
 /// The state of a's candidate of `kind` toward b.

@@ -1,6 +1,6 @@
 # Scenario 32: a is behind a cone NAT (dial-only), b is on the "public network"; the candidates are
-# direct and r1 over UDP, obfuscated UDP and TLS. A censor upstream of a blocks each address and
-# port a sends WireGuard to
+# direct and r1 over obfuscated UDP, UDP and TLS, in the order the site composes them. A censor
+# upstream of a blocks each address and port a sends WireGuard to
 
 [mesh]
 ipv4 = "100.88.0.0/16"
@@ -26,7 +26,7 @@ nat = "cone"
 
 [[link]]
 peers = ["a", "b"]
-candidates = ["direct", "relay:r1", "relay-obfs:r1", "relay-tls:r1"]
+candidates = ["direct", "relay-obfs:r1", "relay:r1", "relay-tls:r1"]
 
 # Scenarios send and receive between these members (access is denied by default, ADR 0023)
 [[allow]]
