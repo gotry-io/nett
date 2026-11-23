@@ -18,6 +18,9 @@ pub struct RelayConfig {
     /// TLS (WebSocket) entry point (design/mesh.md section 5.3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls: Option<TlsDoc>,
+    /// The obfuscated port, its key and padding (design/obfuscation.md section 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<nett_mesh::config::RelayObfsDoc>,
     pub members: Vec<MemberDoc>,
     pub connections: Vec<[X25519PublicKey; 2]>,
 }

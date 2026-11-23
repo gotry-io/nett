@@ -8,6 +8,7 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use nett_core::transport::CertFingerprint;
+use nett_mesh::config::RelayObfsDoc;
 use nett_mesh::helper::{FETCH_INTERVAL, RelayAssignment, fetch_relay};
 use tokio::sync::mpsc;
 
@@ -37,6 +38,25 @@ pub enum ServiceError {
     },
     #[error("relay socket: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// The obfuscated port of an assignment, on every address (design/obfuscation.md section 2).
+pub async fn obfs_ingress(doc: &RelayObfsDoc) -> Result<ObfsIngress, ServiceError> {
+    let socket =
+        tokio::net::UdpSocket::bind(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), doc.port))
+            .await
+            .map_err(|source| ServiceError::Bind {
+                what: "the obfuscated",
+                port: doc.port,
+                source,
+            })?;
+    let padding = nett_transport::obfs::Padding::new(doc.padding.min, doc.padding.max)?;
+    let key = nett_transport::obfs::ObfsKey::from_bytes(doc.key.0);
+    Ok(ObfsIngress {
+        socket,
+        obfuscator: nett_transport::obfs::Obfuscator::new(&key, padding),
+        rng: ring::rand::SystemRandom::new(),
+    })
 }
 
 /// How the service ended.
@@ -93,25 +113,7 @@ pub async fn run(
         None => None,
     };
     let obfs = match &assignment.obfs {
-        Some(doc) => {
-            let socket = tokio::net::UdpSocket::bind(SocketAddr::new(
-                Ipv6Addr::UNSPECIFIED.into(),
-                doc.port,
-            ))
-            .await
-            .map_err(|source| ServiceError::Bind {
-                what: "the obfuscated",
-                port: doc.port,
-                source,
-            })?;
-            let padding = nett_transport::obfs::Padding::new(doc.padding.min, doc.padding.max)?;
-            let key = nett_transport::obfs::ObfsKey::from_bytes(doc.key.0);
-            Some(ObfsIngress {
-                socket,
-                obfuscator: nett_transport::obfs::Obfuscator::new(&key, padding),
-                rng: ring::rand::SystemRandom::new(),
-            })
-        }
+        Some(doc) => Some(obfs_ingress(doc).await?),
         None => None,
     };
     tracing::info!(

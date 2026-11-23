@@ -23,6 +23,7 @@ mod port_block;
 mod port_change;
 mod serve;
 mod throughput;
+mod wireguard_block;
 pub use devices::devices;
 pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
@@ -32,6 +33,7 @@ pub use port_block::relay_port_block;
 pub use port_change::port_change;
 pub use serve::serve;
 pub use throughput::throughput;
+pub use wireguard_block::wireguard_block;
 
 /// Maximum wait for connectivity checks.
 const CONNECT_DEADLINE: Duration = Duration::from_secs(12);

@@ -16,7 +16,8 @@ use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
-    Candidate, DesiredMeshDoc, MeshPrefixes, PathDoc, ProbeToken, Reachability,
+    Candidate, DesiredMeshDoc, MeshPrefixes, ObfsPadding, ObfsSecret, PathDoc, ProbeToken,
+    Reachability, RelayObfsDoc,
 };
 use nett_relay::lab::{MemberDoc, RelayConfig, TlsDoc};
 use nett_trust::admission::{
@@ -78,13 +79,29 @@ pub const RELAY_PORT: u16 = 41900;
 /// TLS entry of nett-relay (design/mesh.md section 5.3).
 pub const RELAY_TLS_PORT: u16 = 443;
 
-/// Candidates `relay:<relay>` and `relay-tls:<relay>`: the relay's name, and whether it goes
-/// through TLS.
-pub fn relay_of(candidate: &str) -> Option<(&str, bool)> {
-    candidate
-        .strip_prefix("relay:")
-        .map(|r| (r, false))
-        .or_else(|| candidate.strip_prefix("relay-tls:").map(|r| (r, true)))
+/// Obfuscated port of nett-relay in lab runs (design/obfuscation.md section 2).
+pub const RELAY_OBFS_PORT: u16 = 41910;
+/// The lab site's padding range for obfuscated UDP (design/obfuscation.md section 4).
+const OBFS_PADDING: ObfsPadding = ObfsPadding { min: 16, max: 200 };
+
+/// How a candidate through a relay reaches it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Over {
+    Udp,
+    Obfs,
+    Tls,
+}
+
+/// Candidates `relay:<relay>`, `relay-obfs:<relay>` and `relay-tls:<relay>`: the relay's name, and
+/// how the candidate reaches it.
+pub fn relay_of(candidate: &str) -> Option<(&str, Over)> {
+    [
+        ("relay:", Over::Udp),
+        ("relay-obfs:", Over::Obfs),
+        ("relay-tls:", Over::Tls),
+    ]
+    .into_iter()
+    .find_map(|(prefix, over)| candidate.strip_prefix(prefix).map(|r| (r, over)))
 }
 
 /// Node information recorded in the lab material, for scenario checks.
@@ -426,7 +443,7 @@ pub fn generate(
                 l.peers.contains(&node.name)
                     && l.candidates
                         .iter()
-                        .any(|c| relay_of(c).is_some_and(|(_, t)| t))
+                        .any(|c| relay_of(c).is_some_and(|(_, over)| over == Over::Tls))
             });
         nodes.push(LabNode {
             name: node.name.clone(),
@@ -477,7 +494,7 @@ pub fn generate(
         .iter()
         .flat_map(|l| &l.candidates)
         .filter_map(|c| relay_of(c))
-        .filter(|(_, tls)| *tls)
+        .filter(|(_, over)| *over == Over::Tls)
     {
         if fingerprints.contains_key(relay) {
             continue;
@@ -491,7 +508,17 @@ pub fn generate(
         let ip = addresses.public_ipv4(relay).context("relay address")?;
         fingerprints.insert(relay.to_owned(), self_signed(ip, &dir)?);
     }
-    write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints)?;
+    // Relays with an obfuscated port: one key each, shared by its members (design/obfuscation.md
+    // section 4)
+    let obfs_keys: BTreeMap<String, [u8; 32]> = topo
+        .links
+        .iter()
+        .flat_map(|l| &l.candidates)
+        .filter_map(|c| relay_of(c))
+        .filter(|(_, over)| *over == Over::Obfs)
+        .map(|(relay, _)| (relay.to_owned(), random_token()))
+        .collect();
+    write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints, &obfs_keys)?;
 
     let access_rules = signer.access_rules(topo, &nodes, &edges)?;
     let names: BTreeMap<NodeId, NodeName> = nodes
@@ -523,7 +550,7 @@ pub fn generate(
                     .iter()
                     .filter_map(|c| match relay_of(c) {
                         // Via relay: the relay port is on the relay node's public address
-                        Some((relay, false)) => Some(Candidate::Relay {
+                        Some((relay, Over::Udp)) => Some(Candidate::Relay {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             endpoint: SocketAddr::new(
                                 addresses.public_ipv4(relay)?.into(),
@@ -533,7 +560,18 @@ pub fn generate(
                         }),
                         // TLS transport via relay: TLS entry and certificate fingerprint; the token
                         // is the same as for the UDP relay
-                        Some((relay, true)) => Some(Candidate::RelayTls {
+                        // Obfuscated UDP via relay: its port, key and the site's padding
+                        Some((relay, Over::Obfs)) => Some(Candidate::RelayObfs {
+                            relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
+                            address: SocketAddr::new(
+                                addresses.public_ipv4(relay)?.into(),
+                                RELAY_OBFS_PORT,
+                            ),
+                            key: ObfsSecret(*obfs_keys.get(relay)?),
+                            padding: OBFS_PADDING,
+                            token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
+                        }),
+                        Some((relay, Over::Tls)) => Some(Candidate::RelayTls {
                             relay: nodes.iter().find(|n| n.name == relay)?.node_id.clone(),
                             address: SocketAddr::new(
                                 addresses.public_ipv4(relay)?.into(),
@@ -697,6 +735,7 @@ fn write_relay_configs(
     nodes: &[LabNode],
     tokens: &BTreeMap<(String, String), [u8; 32]>,
     fingerprints: &BTreeMap<String, CertFingerprint>,
+    obfs_keys: &BTreeMap<String, [u8; 32]>,
 ) -> anyhow::Result<()> {
     let key_of = |name: &str| {
         nodes
@@ -750,6 +789,11 @@ fn write_relay_configs(
         let config = RelayConfig {
             listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
             tls,
+            obfs: obfs_keys.get(&relay.name).map(|key| RelayObfsDoc {
+                port: RELAY_OBFS_PORT,
+                key: ObfsSecret(*key),
+                padding: OBFS_PADDING,
+            }),
             members,
             connections,
         };
@@ -850,7 +894,7 @@ pub fn generate_remote(topo: &Topology, out: &Path) -> anyhow::Result<Generated>
         topo.links
             .iter()
             .flat_map(|l| &l.candidates)
-            .all(|c| !relay_of(c).is_some_and(|(_, tls)| tls)),
+            .all(|c| !relay_of(c).is_some_and(|(_, over)| over == Over::Tls)),
         "real-machine topologies do not support `relay-tls:` candidates yet"
     );
     generate(topo, topo, out, false)

@@ -97,9 +97,18 @@ async fn lab(
         }
         None => None,
     };
+    let obfs = match &config.obfs {
+        Some(doc) => Some(
+            nett_relay::service::obfs_ingress(doc)
+                .await
+                .context("obfuscated ingress")?,
+        ),
+        None => None,
+    };
     tracing::info!(
         listen = %config.listen,
         tls = ?config.tls.as_ref().map(|t| t.listen),
+        obfs = ?config.obfs.as_ref().map(|o| o.port),
         members = config.members.len(),
         "relay started ({LAB_USAGE})"
     );
@@ -120,7 +129,7 @@ async fn lab(
             }
         }
     });
-    let served = serve(udp, tls, None, relay, state, Some(received), shutdown).await;
+    let served = serve(udp, tls, obfs, relay, state, Some(received), shutdown).await;
     reload.abort();
     served.context("relay socket")
 }

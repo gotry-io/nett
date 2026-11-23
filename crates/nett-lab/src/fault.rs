@@ -147,6 +147,39 @@ pub fn block_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()>
     Ok(())
 }
 
+/// A censor upstream of a node behind a NAT router that identifies WireGuard (design/prototype.md
+/// scenario 32): once the node sends a UDP packet that starts like a WireGuard message (type 1-4 and
+/// three zero bytes), everything the node sends to that address and port is dropped for an hour, as
+/// the blocks a border firewall places on an identified port. Only what the node sends is dropped.
+pub fn block_wireguard_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
+    let (ns, _) = underlay
+        .switch_port(name)
+        .with_context(|| format!("no link for `{name}`"))?;
+    anyhow::ensure!(
+        ns != crate::net::INET_NETNS,
+        "`{name}` needs to be behind a NAT router for this fault"
+    );
+    let ip = underlay.node(name).context("planned node")?.ipv4;
+    let rules = format!(
+        "table inet {FAULT_TABLE} {{\n\
+         set flagged {{ type ipv4_addr . inet_service; flags dynamic, timeout; timeout 1h; }}\n\
+         chain censor {{\n\
+         type filter hook forward priority 0;\n\
+         ip saddr {ip} ip daddr . udp dport @flagged drop\n\
+         ip saddr {ip} meta l4proto udp @th,64,8 1-4 @th,72,24 0 \
+         update @flagged {{ ip daddr . udp dport }} drop\n\
+         }}\n\
+         }}\n"
+    );
+    run_with_input(
+        "ip",
+        ["netns", "exec", &ns, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        COMMAND_TIMEOUT,
+    )?;
+    Ok(())
+}
+
 /// Lifts [`block_udp_upstream`].
 pub fn unblock_udp_upstream(underlay: &Underlay, name: &str) -> anyhow::Result<()> {
     let (ns, _) = underlay

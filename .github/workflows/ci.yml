@@ -761,9 +761,10 @@ jobs:
               Scenario 16: both sides are dial-only, and after a proposal through the tunnel both ends switch together | dial-only-switch --topology crates/nett-lab/topologies/dial-pair.toml
               Scenario 17: both sides are dial-only, the current relay fails, and they meet by time slice | dial-only-outage --clock-skew 1500 --topology crates/nett-lab/topologies/dial-pair.toml
           - group: relay-choice
-            title: A blocked relay port and a faster relay
+            title: Blocked ports and a faster relay
             scenarios: |
               Scenario 27: the network drops the peer's WireGuard port toward a relay, and the pair stays off that relay | relay-port-block --topology crates/nett-lab/topologies/far-leg.toml
+              Scenario 32: a censor blocks each port WireGuard is sent to, and the pair moves to obfuscated UDP and stays there, also after a restart | wireguard-block --topology crates/nett-lab/topologies/obfs.toml
               Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
           - group: nat
             title: NAT, hole punching, MTU and access control
