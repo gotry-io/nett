@@ -155,9 +155,8 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
     }
     if plist_changed || binary_changed {
         outln!("Logs: log show --last 1h --predicate 'process == \"nett\"'");
-        if linked {
-            outln!("Run `sudo nett install` again after upgrading nett.");
-        } else {
+        // With a Hub, the desired state and approved upgrades arrive through it
+        if !linked {
             outln!("Run `sudo nett install` again after the site changes or nett is upgraded.");
         }
     }
