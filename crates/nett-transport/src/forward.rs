@@ -154,6 +154,7 @@ async fn target_loop(
     interface: Option<u32>,
 ) -> std::io::Result<()> {
     let udp = UdpSocket::bind(target.listen).await?;
+    nett_mesh::sockbuf::enlarge_receive_buffer(&udp);
     let connector = client::connector(target.fingerprint).map_err(std::io::Error::other)?;
     let (events_tx, mut events) = mpsc::channel(EVENT_QUEUE);
     let mut link: Option<Link> = None;

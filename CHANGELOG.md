@@ -11,6 +11,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   are not.
 - A machine that loses a plain UDP endpoint to a block keeps avoiding it, also after a restart,
   until the endpoint changes; `nett status` lists such a path as `blocked`.
+- The TLS transport's loopback port asks for the same 1 MiB receive buffer as WireGuard's socket,
+  so a burst WireGuard sends faster than the relay connection takes it is held rather than
+  dropped.
 
 ## [0.9.5] - 2026-11-23
 

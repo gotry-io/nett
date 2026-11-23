@@ -49,6 +49,9 @@ async fn target_loop(
 ) -> std::io::Result<()> {
     let local = UdpSocket::bind(target.listen).await?;
     let relay = connected(target.connect, interface).await?;
+    for socket in [&local, &relay] {
+        nett_mesh::sockbuf::enlarge_receive_buffer(socket);
+    }
     let padding =
         Padding::new(target.padding.min, target.padding.max).map_err(std::io::Error::other)?;
     let obfuscator = Obfuscator::new(&ObfsKey::from_bytes(target.key.0), padding);
