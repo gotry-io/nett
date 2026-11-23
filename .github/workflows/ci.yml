@@ -184,6 +184,10 @@ jobs:
           pid=$(sudo launchctl print system/io.gotry.nett \
             | sed -n 's/^[[:space:]]*pid = \([0-9]*\)$/\1/p')
           sudo lsof -nP -a -p "$pid" -iUDP@127.0.0.1 | grep -F 'UDP 127.0.0.1:'
+          # Small allocations stay out of the nano zone (architecture.md section 13.1)
+          sudo vmmap --summary "$pid" > vmmap.txt
+          grep -F MALLOC_TINY vmmap.txt
+          if grep -F MALLOC_NANO vmmap.txt; then exit 1; fi
           [ "$(sudo stat -f %Lp /var/run/nett)" = 711 ]
           # Uninstalling removes nett and keeps the identity (design/release.md section 8)
           sudo "$nett" uninstall | tee uninstall.log

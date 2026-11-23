@@ -171,6 +171,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - On Synology DSM, which loads the TUN driver only for packages that need it, `nett install` loads it before it starts the services (dsm.md section 6.2);
 - A kernel without the WireGuard family gets the userspace data plane, and tearing down there leaves nftables alone: only the kernel data plane makes nett's tables, and a kernel without nftables may not answer at all (dsm.md section 5).
 - On macOS a public certificate is verified by the system, and no root certificates are read into the nett service: reading them through the Security framework leaves several megabytes in the allocator at each connection, which Linux returns (hub.md section 4).
+- On macOS the nett service runs without the allocator's nano zone, which keeps a page per size and CPU it has used and held megabytes for kilobytes of live objects; the running service is checked for it, since only the system shows which zones a process uses (architecture.md section 13.1).
 
 **Guards**
 
@@ -184,6 +185,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:teardown_leaves_nftables_alone_without_kernel_wireguard`
 - `nett-cli:tun_is_prepared_before_the_services_start`
 - `nett-node:a_connector_for_a_public_certificate_loads_no_root_store`
+- `nett-node:the_plist_is_valid_and_runs_the_copy`
 - `ci:utun, addresses and routes (needs root)`
 - `ci:Full flow of sudo nett install (needs root)`
 

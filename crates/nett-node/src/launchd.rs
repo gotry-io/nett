@@ -64,6 +64,13 @@ pub fn plist(service: &Service) -> String {
   <!-- 077: files the service creates are readable by root only -->
   <key>Umask</key>
   <integer>63</integer>
+  <!-- Small allocations share the tiny zone: the nano zone keeps a page per size and CPU it has
+       used, megabytes for a service whose small objects take kilobytes -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MallocNanoZone</key>
+    <string>0</string>
+  </dict>
 </dict>
 </plist>
 "#,
@@ -166,6 +173,10 @@ mod tests {
         assert!(text.contains("<string>daemon</string>"));
         assert!(text.contains(&format!("<string>{DIR}</string>")));
         assert!(!text.contains("UserName"), "the service starts as root");
+        assert!(
+            text.contains("<key>MallocNanoZone</key>\n    <string>0</string>"),
+            "small allocations stay out of the nano zone"
+        );
         let path = dir.path().join("io.gotry.nett.plist");
         std::fs::write(&path, &text).expect("write");
         let lint = std::process::Command::new("/usr/bin/plutil")

@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- On macOS the nett service starts without the system allocator's nano zone, which kept about two
+  megabytes of pages for a few kilobytes of small objects. launchd reads the new setting when it
+  next loads the service: at the next start of the Mac, or after `sudo nett install`.
+
 ## [0.9.1] - 2026-11-23
 
 - `nett site` lists what the Hub learned about a machine, such as the WireGuard port a `dial-only`
