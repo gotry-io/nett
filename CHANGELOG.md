@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-23
+
 - On macOS the nett service starts without the system allocator's nano zone, which kept about two
   megabytes of pages for a few kilobytes of small objects. launchd reads the new setting when it
   next loads the service: at the next start of the Mac, or after `sudo nett install`.
