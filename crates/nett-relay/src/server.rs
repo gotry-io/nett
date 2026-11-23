@@ -217,10 +217,15 @@ async fn next_update(updates: &mut Option<mpsc::Receiver<Assignment>>) -> Option
 }
 
 async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketAddr)> {
-    match tls {
-        Some(ingress) => ingress.listener.accept().await,
-        None => std::future::pending().await,
-    }
+    let Some(ingress) = tls else {
+        return std::future::pending().await;
+    };
+    let (stream, peer) = ingress.listener.accept().await?;
+    // Each message is one tunnel packet and goes out at once, as over UDP: Nagle's algorithm would
+    // hold it until the previous one is acknowledged, and probes and keepalives share the
+    // connection, so most requests through the relay would wait a round trip more
+    drop(stream.set_nodelay(true));
+    Ok((stream, peer))
 }
 
 /// The result of running [`Relay::handle`]. A send failure (for example the peer has no route yet
@@ -424,6 +429,49 @@ mod tests {
     use crate::relay::AssignedMember;
     use nett_mesh::probe::{KeyId, OuterProbe, OuterReply, ProbeKey, RELAY_PROBE};
     use nett_trust::keys::X25519PublicKey;
+
+    /// Each message on a TLS relay connection is one tunnel packet, so both ends send it at once
+    /// instead of holding it until the one before is acknowledged (Nagle's algorithm): with probes
+    /// and keepalives sharing the connection, that held most requests through the relay a round
+    /// trip longer.
+    #[test]
+    fn both_ends_of_a_tls_relay_connection_send_each_packet_at_once() {
+        let dir_tmp = tempfile::Builder::new()
+            .prefix("nett-relay-nodelay-")
+            .tempdir()
+            .expect("temp dir");
+        let cert =
+            crate::cert::RelayCert::load_or_create(&dir_tmp.path().join("cert")).expect("cert");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let ingress = TlsIngress {
+                listener: tls_listener("127.0.0.1:0".parse().expect("addr")).expect("listener"),
+                acceptor: cert_acceptor(&cert).expect("acceptor"),
+            };
+            let addr = ingress.listener.local_addr().expect("addr");
+            let connector =
+                nett_transport::client::connector(cert.fingerprint()).expect("connector");
+            let member = tokio::spawn(async move {
+                nett_transport::client::connect(addr, None, &connector).await
+            });
+            let (stream, _) = accept(Some(&ingress)).await.expect("accepted");
+            let relay_end = stream.nodelay().expect("relay end");
+            let (events, _opened) = mpsc::channel(EVENT_QUEUE);
+            tokio::spawn(connection(
+                ConnId(1),
+                stream,
+                ingress.acceptor.clone(),
+                events,
+            ));
+            let ws = member.await.expect("task").expect("connected");
+            let member_end = ws.get_ref().get_ref().0.nodelay().expect("member end");
+            assert!(relay_end, "the relay holds small packets back");
+            assert!(member_end, "the member holds small packets back");
+        });
+    }
 
     /// When the state write stalls (a named pipe with no reader stands in for a busy disk here),
     /// the relay keeps answering and forwarding.

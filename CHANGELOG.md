@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- A path through a TLS relay answers in one round trip again. nett-relay held each packet it sent
+  to a member until the one before was acknowledged, which made most requests through it take
+  about twice the round trip.
+
 ## [0.9.3] - 2026-11-23
 
 - `sudo nett install` on a Mac loads the nett service again when launchd still runs it with an

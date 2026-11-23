@@ -265,3 +265,20 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `ci:Full flow of sudo nett install (needs root)`
 
 **Not yet guarded**: JSON output of `nett site status --json` while a command records what happened on the Hub, which needs a Hub that serves those updates to the command line in a test; the error for a download over the size limit, since the client fetches only `https://` URLs verified by the operating system, which a test cannot serve (the limit itself is guarded by `nett-node:a_program_larger_than_any_release_is_refused`, and the error is one message naming the URL and the limit).
+
+## 9. What a tunnel carries goes out as it arrives
+
+**Holds**: every TCP connection that carries a tunnel's packets or a forwarded stream sends each write at once: as the UDP path would for a tunnel, and as the two ends would see it without a forwarder in between.
+
+**Breaks when** a socket keeps Nagle's algorithm: a small packet waits until the one before it is acknowledged, and with probes and keepalives sharing the connection most requests through it wait a round trip and the peer's delayed acknowledgement more.
+
+**Where it holds**
+
+- Both ends of a TLS relay connection turn Nagle's algorithm off: the TLS transport when it connects, nett-relay when it accepts (mesh.md section 5.3);
+- A served port's forwarder turns it off on both of its connections (mesh.md section 12.1).
+
+**Guards**
+
+- `nett-relay:both_ends_of_a_tls_relay_connection_send_each_packet_at_once`
+
+**Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place.
