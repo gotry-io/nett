@@ -69,7 +69,8 @@ const USAGE: &str = "usage:
   nett-lab run hub --topology direct.toml --nett <path/to/nett> --out <dir> [--soak SECONDS]
       (nett-hub next to nett; --soak then keeps changing and pinging, samples memory into
       soak.csv, rests 10 minutes and checks that memory stayed flat)
-  nett-lab run throughput --topology <direct.toml|relay-only.toml> --nett <path/to/release/nett> --out <dir> [--duration SECONDS]
+  nett-lab run throughput --topology <direct.toml|relay-only.toml|relay-obfs-only.toml> --nett <path/to/release/nett> --out <dir> [--duration SECONDS] [--rate MBIT/S]
+      (--rate limits the first node's link both ways)
       (iperf3 over the underlying network and the mesh; add --userspace a --userspace b to compare)
   nett-lab run faster-relay --topology failover.toml --nett <path/to/nett> --out <dir>
       (150 ms on the direct path only: a quiet pair moves to a relay, a bulk transfer moves it back)
@@ -114,6 +115,7 @@ fn run() -> anyhow::Result<bool> {
     let (mut to, mut listen) = (None, None);
     let (mut repeat, mut with_tailscale) = (1usize, false);
     let (mut level, mut duration_s) = (None::<u64>, 300u64);
+    let mut rate_mbit = None::<u32>;
     let mut clock_skew_ms = 0i64;
     let mut bytes = None::<u64>;
     let mut key = None::<String>;
@@ -133,6 +135,7 @@ fn run() -> anyhow::Result<bool> {
             Long("with-tailscale") => with_tailscale = true,
             Long("level") => level = Some(parser.value()?.string()?.parse()?),
             Long("duration") => duration_s = parser.value()?.string()?.parse()?,
+            Long("rate") => rate_mbit = Some(parser.value()?.string()?.parse()?),
             Long("clock-skew") => clock_skew_ms = parser.value()?.string()?.parse()?,
             Long("bytes") => bytes = Some(parser.value()?.string()?.parse()?),
             Long("key") => key = Some(parser.value()?.string()?),
@@ -218,7 +221,9 @@ fn run() -> anyhow::Result<bool> {
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
                 "devices" => scenario::devices(&topology, &nett()?, &out)?,
-                "throughput" => scenario::throughput(&topology, &nett()?, &out, duration_s)?,
+                "throughput" => {
+                    scenario::throughput(&topology, &nett()?, &out, duration_s, rate_mbit)?
+                }
                 "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
                 "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
                 "wireguard-block" => scenario::wireguard_block(&topology, &nett()?, &out)?,

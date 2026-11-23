@@ -89,6 +89,18 @@ Before obfuscated candidates can come first, obfuscated UDP is measured against 
 
 All four met: obfuscated candidates come first on every path that leaves a LAN, and a plain UDP candidate that crosses the public network (public direct, hole-punched direct, a UDP relay) is used only while no obfuscated candidate of the connection works; LAN paths stay plain. Otherwise plain UDP stays first, obfuscated UDP is taken where plain UDP stops working, and section 5's record keeps it there. If kernel WireGuard is what misses, a tc-eBPF program that masks in the kernel is the next thing to measure.
 
+**In the lab** (lab A: Linux 7.2, arm64 virtual machine, release build; the throughput scenario on `relay-only.toml` against `relay-obfs-only.toml`, two rounds each, and scenario 21 on `obfs.toml`), with obfuscated UDP against plain UDP through the same relay:
+
+| Measure | Kernel WireGuard | Userspace WireGuard |
+|---|---|---|
+| Throughput on a 1 Gbit/s link | 895-899 against 903-907 Mbit/s (99%) | 844-894 against 863-903 Mbit/s (98-99%) |
+| Throughput without a rate limit, where the CPU decides | 1.8-2.0 against 2.2-2.4 Gbit/s; with the whole lab on one CPU (both ends, the relay and the kernel) 1.26-1.40 against 1.6-1.97 Gbit/s | 2.0-2.2 against 2.4-2.6 Gbit/s |
+| Round trip, median | 0.50-0.59 against 0.43-0.51 ms | 0.27-0.32 against 0.21-0.26 ms |
+| Whole-machine CPU at 200 Mbit/s | 1.38-1.48 against 1.43-1.61 cores | 0.94-1.04 against 0.89-0.95 cores |
+| Idle memory after load | the nett daemon 1.0-1.4 MB of anonymous pages, nett-relay 0.7 MB, as without the obfuscated transport | |
+
+The virtual machine runs other workloads, so CPU differences of about 10% are within the noise. All four measures are met on paths of 1 Gbit/s and below; the measurement across a real border follows the release. The first round, before the transports' sockets had the receive buffer of tunnel sockets (userspace.md section 4), reached 1.4 Gbit/s with several times the retransmissions of plain UDP: packets were dropped at the loopback port.
+
 ## 10. Verification
 
 | Level | Content |
