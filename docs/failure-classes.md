@@ -16,7 +16,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Where it holds**
 
-- Probes of direct candidates and of UDP relays leave from the WireGuard port, and replies come back to it; probes of TLS relays travel inside the connection the tunnel uses (mesh.md section 7.1);
+- Probes of direct candidates and of UDP relays leave from the WireGuard port, and replies come back to it; probes of TLS relays travel inside the connection the tunnel uses (mesh.md section 7.1), and probes of obfuscated relays travel wrapped on the socket the tunnel uses, the relay's reply coming back to the port that sent the probe (obfuscation.md section 6);
 - A path through a relay that failed while the relay still answered is broken beyond the relay; the relay counts as recovered only when the peer reports its leg without loss in a report covering the time since, and a relay the peer never reached is reported lost (mesh.md section 8.2);
 - The current candidate shows the tunnel's measurement (status.md section 6);
 - A path through a relay is measured end to end once a through probe has come back through that relay: the relay forwards it to the peer's WireGuard address and the peer answers, so neither the relay answering for its own leg nor a report of the peer's leg made before it broke makes the path look good; 30 seconds without a through reply while the relay answers, the path is judged from its segments again and held off as broken beyond the relay until the peer reports its leg working (mesh.md section 7.2, ADR 0029);
@@ -25,6 +25,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Guards**
 
+- `nett-transport:packets_cross_wrapped_and_only_the_relay_is_heard`
+- `nett-relay:the_obfuscated_port_routes_between_plain_and_obfuscated_members`
 - `nett-site:machines_the_hub_sees_on_their_own_lan_connect_over_it`
 - `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
 - `nett-mesh:an_authenticated_probe_is_answered_from_any_address`
@@ -54,7 +56,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - On Linux, the probes on the WireGuard port move with the port when it changes (mesh.md section 5.5);
 - A desired state whose application hit a data plane failure is applied again, after 1 second and then twice as long each time up to 30 seconds, until it succeeds; the probe sockets and the DNS responder follow an interface that comes up later, and are retried the same way, as is a failure the mobile gateway's periodic check of its forwarding finds (mesh.md section 15, devices.md section 6);
 - After an upgrade settles, and after `sudo nett install` brings a new program, the relay restarts on it; after an upgrade the nett service rewrites a unit or launchd configuration that differs from its program's, starts again with its own changed unit on Linux, and launchd reads the rewritten configuration when it next loads the service (release.md sections 4 and 7);
-- A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change (mesh.md section 5.3);
+- A transport's loopback port that failed to open is opened again with backoff, without waiting for a configuration change, on the TLS and the obfuscated transport alike (mesh.md section 5.3);
+- A record of a blocked endpoint ends once no candidate leads to that endpoint, so a peer that moved to another address or port is tried there (obfuscation.md section 5);
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
 - A new desired state that changes a pair's candidates keeps the pair on the path it uses, with what was measured and reported of it, instead of starting the pair over: one end of a two-ended pair starting from the first relay while the other stays split the pair until it met again (mesh.md section 8.4);
@@ -79,6 +82,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:problems_after_applying_follow_the_reported_status`
 - `nett-mesh:dial_only_pair_stays_together_when_one_ends_candidates_change`
 - `nett-mesh:a_new_candidate_list_keeps_the_path_in_use`
+- `nett-mesh:a_blocked_record_ends_when_its_endpoint_changes`
 - `ci:sudo nett install <token> (join the Hub, needs root)` (the service rewrites a launchd configuration that differs)
 - `nett-node:the_loaded_service_shows_the_fingerprint_of_its_configuration`
 - `ci:Full flow of sudo nett install (needs root)` (an older configuration loaded with the file current is loaded again)
@@ -100,7 +104,9 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - After a re-handshake, completion is confirmed and the handshake repeated once on the same relay; a peer under load gets the time WireGuard's cookie retry needs (mesh.md section 8.4);
 - A failover, and the relay a `dial-only` decider proposes through the Hub, take only a path that answered since the failure was suspected, and the earlier replies of the paths that did not answer no longer make them a better path (mesh.md sections 8.2 and 8.4);
 - A `dial-only` decider whose pair has traffic proposes a better path through the tunnel only once the tunnel has answered since the pair moved onto the current path (mesh.md section 8.4);
-- A `dial-only` end carries out a switch both ends agreed on before it measures in the same step, so what it measures is about the path the pair is on (mesh.md section 8.4).
+- A `dial-only` end carries out a switch both ends agreed on before it measures in the same step, so what it measures is about the path the pair is on (mesh.md section 8.4);
+- When several better types answer, the switch goes to the best of them, not through each in turn (mesh.md section 8.2);
+- A plain endpoint is recorded as blocked, and avoided from then on, only once its failure lasts: 5 minutes without an answer while obfuscated UDP carries the pair, or a second failure within the hour; one failure it recovers from, such as a first handshake lost at start-up, records nothing (obfuscation.md section 5).
 
 **Guards**
 
@@ -123,7 +129,11 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_lost_pair_does_not_return_to_a_path_that_went_down_with_it`
 - `nett-mesh:a_pair_proposes_through_the_tunnel_only_once_it_answers`
 - `nett-mesh:a_proposal_carried_out_with_an_outage_of_the_path_left_is_not_undone`
-- `lab:congestion`, `lab:lossy-direct`, `lab:faster-relay`, `lab:wg-cookie`, `lab:wg-rehandshake`
+- `nett-mesh:a_recovery_goes_to_the_best_type_that_answers`
+- `nett-mesh:one_failure_that_recovers_records_no_block`
+- `nett-mesh:a_second_failure_within_the_hour_records_the_block`
+- `nett-mesh:only_plain_udp_given_up_for_obfuscated_udp_counts_as_blocked`
+- `lab:congestion`, `lab:lossy-direct`, `lab:faster-relay`, `lab:wg-cookie`, `lab:wg-rehandshake`, `lab:wireguard-block`
 
 ## 4. Waits are bounded and nothing slow holds up a loop that must keep going
 
@@ -140,7 +150,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - nett-node runs on a thread of its own in the nett daemon: a panic there ends that run only, the mesh keeps working, and nett-node starts again after 5 seconds; stopping the service ends it and the wait before its next run (ADR 0013);
 - A program download is abandoned after 60 seconds without data, from the Hub or the website, and runs in its own task beside the session (release.md section 7);
 - `sudo nett uninstall` waits until launchd no longer has the service;
-- The Hub says goodbye to each session and waits for it to record its end before exiting (hub.md section 8).
+- The Hub says goodbye to each session and waits for it to record its end before exiting (hub.md section 8);
+- A `nett site` command waits at most 2 seconds for the site directory's lock, then says another command holds it.
 
 **Guards**
 
@@ -156,8 +167,6 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-lab:a_sender_connects_once_its_receiver_appears`
 - `nett-site:a_command_waits_for_the_site_lock_for_a_bounded_time`
 - `ci:Full flow of sudo nett install (needs root)`
-
-- A `nett site` command waits at most 2 seconds for the site directory's lock, then says another command holds it.
 
 ## 5. Platform behavior is tested on the platform
 
@@ -250,6 +259,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file;
 - The change listing says that two `dial-only` machines without a relay connect only over a LAN, and gives the command that adds one (site.md section 6);
 - The change listing names what the Hub learned about a machine that its reachability line does not show (its WireGuard port, LAN addresses, relay certificate), so that a change fetched from the Hub is never an empty report (site.md section 7);
+- The change listing names a relay's obfuscated port, which the user opens in the machine's firewall, and `nett site relay --obfs` names the Hub and the machines on a release too old for it (site.md section 4.1, obfuscation.md section 5);
 - A command whose reader has gone ends quietly with success, a message that cannot be written leaves the exit status alone, and any other failure to write the output says why: the programs write through `nett_core::output`, and the workspace lints deny `println!` and its kin, which panic instead (architecture.md section 14.3).
 
 **Guards**
@@ -260,6 +270,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-hub:logs_carry_no_terminal_color_codes`
 - `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
 - `nett-site:what_the_hub_learns_about_a_machine_is_listed`
+- `nett-site:relay_changes_are_listed_with_the_paths_they_change`
+- `nett-cli:the_hub_and_machines_on_an_older_release_are_named`
 - `nett-cli:a_closed_output_ends_the_command_quietly`
 - `nett-cli:a_closed_error_output_keeps_the_failure`
 - `nett-cli:a_full_output_says_why_and_fails`
@@ -270,23 +282,25 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 ## 9. What a tunnel carries goes out as it arrives
 
-**Holds**: every TCP connection that carries a tunnel's packets or a forwarded stream sends each write at once: as the UDP path would for a tunnel, and as the two ends would see it without a forwarder in between.
+**Holds**: every TCP connection that carries a tunnel's packets or a forwarded stream sends each write at once: as the UDP path would for a tunnel, and as the two ends would see it without a forwarder in between. Every UDP socket that carries a tunnel's packets holds a burst, so a short delay in reading it drops nothing.
 
-**Breaks when** a socket keeps Nagle's algorithm: a small packet waits until the one before it is acknowledged, and with probes and keepalives sharing the connection most requests through it wait a round trip and the peer's delayed acknowledgement more.
+**Breaks when** a socket keeps Nagle's algorithm: a small packet waits until the one before it is acknowledged, and with probes and keepalives sharing the connection most requests through it wait a round trip and the peer's delayed acknowledgement more; or a UDP socket keeps the system's default receive buffer, which holds less than 2 ms at gigabit rates, and TCP inside the tunnel reads the drops as congestion.
 
 **Where it holds**
 
 - Both ends of a TLS relay connection turn Nagle's algorithm off: the TLS transport when it connects, nett-relay when it accepts (mesh.md section 5.3);
 - A served port's forwarder turns it off on both of its connections (mesh.md section 12.1);
-- A TLS relay connection that falls behind sends its newest packets: each end's send queue keeps 32 and drops the oldest, and the probe that opens the connection goes first and is never dropped (mesh.md section 5.3).
+- A TLS relay connection that falls behind sends its newest packets: each end's send queue keeps 32 and drops the oldest, and the probe that opens the connection goes first and is never dropped (mesh.md section 5.3);
+- Every socket that carries tunnel traffic asks for a 1 MiB receive buffer: the WireGuard port socket, the relay's sockets, and the transports' loopback ports and the obfuscated transport's socket to its relay (userspace.md section 4).
 
 **Guards**
 
 - `nett-relay:both_ends_of_a_tls_relay_connection_send_each_packet_at_once`
 - `nett-transport:a_full_send_queue_drops_its_oldest_packet`
 - `nett-transport:the_opening_message_goes_first_and_is_never_dropped`
+- `nett-mesh:the_buffer_never_shrinks`
 
-**Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place.
+**Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place. The same holds for each transport's request for a larger receive buffer, one call beside the socket it opens; the throughput scenario (design/obfuscation.md section 9) shows a missing one as retransmissions, and runs before releases that change a transport rather than in CI, since its numbers need a quiet machine.
 
 ## 10. A secret is readable only where it is meant to go
 
