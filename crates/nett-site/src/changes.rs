@@ -11,7 +11,7 @@ use nett_mesh::config::Reachability;
 use nett_trust::payload::{PortRange, Protocol, ServedPort};
 
 use crate::compose::{Pair, connections, relay_paths};
-use crate::state::{Machine, Part, Rule, Selector, State};
+use crate::state::{Learned, Machine, Part, Rule, Selector, State};
 
 /// The changes between two site states, one line per item; empty when nothing changed.
 pub fn describe(old: &State, new: &State) -> Vec<String> {
@@ -32,8 +32,12 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                 ));
             }
             Some(o) => {
-                if reach(old, o) != reach(new, m) {
+                let reach_changed = reach(old, o) != reach(new, m);
+                if reach_changed {
                     lines.push(format!("~ {name}: {}", reach(new, m)));
+                }
+                if let Some(text) = learned_text(&o.learned, &m.learned, reach_changed) {
+                    lines.push(format!("~ {name}: learned {text}"));
                 }
                 if o.relay != m.relay {
                     lines.push(match m.relay {
@@ -305,6 +309,53 @@ fn reach(state: &State, m: &Machine) -> String {
             }
         }
     }
+}
+
+/// What changed in what the Hub learned about a machine, the public addresses only when its
+/// reachability line does not already show them; `None` when nothing else changed.
+fn learned_text(old: &Learned, new: &Learned, reach_shown: bool) -> Option<String> {
+    let mut parts = Vec::new();
+    if !reach_shown {
+        for (was, is, family) in [
+            (
+                old.ipv4.as_ref().map(|a| a.ip.to_string()),
+                new.ipv4.as_ref().map(|a| a.ip.to_string()),
+                "IPv4",
+            ),
+            (
+                old.ipv6.as_ref().map(|a| a.ip.to_string()),
+                new.ipv6.as_ref().map(|a| a.ip.to_string()),
+                "IPv6",
+            ),
+        ] {
+            if was != is {
+                parts.push(is.map_or_else(
+                    || format!("no public {family} address"),
+                    |ip| format!("public address {ip}"),
+                ));
+            }
+        }
+    }
+    if old.listen_port != new.listen_port {
+        parts.push(new.listen_port.map_or_else(
+            || "no WireGuard port".to_owned(),
+            |p| format!("WireGuard port {p}"),
+        ));
+    }
+    if old.lan != new.lan {
+        parts.push(if new.lan.is_empty() {
+            "no LAN addresses".to_owned()
+        } else {
+            format!("LAN {}", list(&new.lan))
+        });
+    }
+    if old.relay_fingerprint != new.relay_fingerprint {
+        parts.push(new.relay_fingerprint.as_ref().map_or_else(
+            || "no relay certificate".to_owned(),
+            |f| format!("relay certificate {f}"),
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 fn list(items: &[impl ToString]) -> String {

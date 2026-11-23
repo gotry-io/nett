@@ -762,6 +762,60 @@ fn learned_addresses_fill_in_for_public_machines_without_one() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// A dial-only machine whose system assigns a new WireGuard port at every start: what the Hub
+/// learns is listed, so that a change fetched from the Hub is never an empty report
+#[test]
+fn what_the_hub_learns_about_a_machine_is_listed() {
+    let (_dir_tmp, dir) = temp_dir("learned-listed");
+    let (_site, before) = site(&dir);
+    let mut state = before.clone();
+    let mac = state.machine(&name("mac")).expect("mac").clone();
+    let learned = crate::state::Learned {
+        listen_port: Some(60796),
+        lan: vec!["192.168.1.6/24".parse().expect("lan")],
+        ..crate::state::Learned::default()
+    };
+    let applied = crate::updates::Updates {
+        learned: vec![crate::updates::LearnedFor {
+            node_id: mac.node_id.clone(),
+            learned,
+        }],
+        ..Default::default()
+    }
+    .apply(&mut state)
+    .expect("applied");
+    assert_eq!(applied.learned, vec![name("mac")]);
+    assert_eq!(
+        describe(&before, &state),
+        vec!["~ mac: learned WireGuard port 60796, LAN 192.168.1.6/24".to_owned()]
+    );
+    // A public machine's learned address is in its reachability line, and listed once
+    let mut public = state.clone();
+    let vps = public.machine(&name("edge-vps")).expect("vps").clone();
+    crate::updates::Updates {
+        learned: vec![crate::updates::LearnedFor {
+            node_id: vps.node_id.clone(),
+            learned: crate::state::Learned {
+                ipv6: Some(crate::state::LearnedIp {
+                    ip: "2001:db8::10".parse().expect("ip"),
+                    from: crate::state::AddressSource::Hub,
+                }),
+                ..crate::state::Learned::default()
+            },
+        }],
+        ..Default::default()
+    }
+    .apply(&mut public)
+    .expect("applied");
+    let lines = describe(&state, &public);
+    assert_eq!(
+        lines.iter().filter(|l| l.starts_with("~ edge-vps")).count(),
+        1,
+        "{lines:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// The site of [`site`] with two more public relays, r2 and r1 (r1 gets the smaller node ID), and a
 /// rule that connects mac and nas.
 fn relay_site(dir: &Path) -> (SiteDir, State) {

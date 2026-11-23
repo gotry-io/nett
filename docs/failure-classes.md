@@ -240,6 +240,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A data plane failure stays listed while its retries fail, also after the 5 minutes a single failure is listed, and goes once a retry succeeds (status.md section 6);
 - Logs are plain text: the log formatter is built without color support, so no program writes terminal color codes into the journal or a log file;
 - The change listing says that two `dial-only` machines without a relay connect only over a LAN, and gives the command that adds one (site.md section 6);
+- The change listing names what the Hub learned about a machine that its reachability line does not show (its WireGuard port, LAN addresses, relay certificate), so that a change fetched from the Hub is never an empty report (site.md section 7);
 - A command whose reader has gone ends quietly with success, a message that cannot be written leaves the exit status alone, and any other failure to write the output says why: the programs write through `nett_core::output`, and the workspace lints deny `println!` and its kin, which panic instead (architecture.md section 14.3).
 
 **Guards**
@@ -249,6 +250,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_data_plane_failure_is_listed_until_a_retry_succeeds`
 - `nett-hub:logs_carry_no_terminal_color_codes`
 - `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
+- `nett-site:what_the_hub_learns_about_a_machine_is_listed`
 - `nett-cli:a_closed_output_ends_the_command_quietly`
 - `nett-cli:a_closed_error_output_keeps_the_failure`
 - `nett-cli:a_full_output_says_why_and_fails`
