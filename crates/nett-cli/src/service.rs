@@ -115,8 +115,11 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         None => false,
     };
     let binary_changed = copy_self(BINARY)?;
+    // launchd keeps the configuration from load time: a current file can still run as an older
+    // one, which the service itself rewrote after an upgrade
     let plist_changed =
-        replace_if_changed(Path::new(DAEMON.plist), plist(&DAEMON).as_bytes(), 0o644)?;
+        replace_if_changed(Path::new(DAEMON.plist), plist(&DAEMON).as_bytes(), 0o644)?
+            || !launchd::runs_current(&DAEMON).map_err(anyhow::Error::msg)?;
 
     // The public key line is only needed when this machine has not been added to the site yet
     if !desired.exists() {

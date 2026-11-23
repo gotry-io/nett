@@ -162,6 +162,25 @@ jobs:
           if "$nett" reload 2> reload.err; then exit 1; fi
           grep -F 'run with sudo' reload.err
           sudo "$nett" install | grep -F 'The service is running. Nothing changed.'
+          # launchd keeps the configuration it loaded: with an older one loaded and the file current,
+          # as after an upgrade, the service is loaded again (design/release.md section 7)
+          older=/Library/LaunchDaemons/io.gotry.nett.older.plist
+          grep -v -E 'NETT_SERVICE_CONFIG|<string>[0-9a-f]{16}</string>' \
+            /Library/LaunchDaemons/io.gotry.nett.plist | sudo tee "$older" > /dev/null
+          sudo chmod 644 "$older"
+          sudo launchctl bootout system/io.gotry.nett
+          for _ in $(seq 20); do sudo launchctl print system/io.gotry.nett > /dev/null 2>&1 || break; sleep 0.5; done
+          sudo launchctl bootstrap system "$older"
+          sudo rm "$older"
+          if sudo launchctl print system/io.gotry.nett | grep -F 'NETT_SERVICE_CONFIG =>'; then exit 1; fi
+          sudo "$nett" install | grep -F 'Restarted the nett service with the new configuration.'
+          sudo launchctl print system/io.gotry.nett | grep -F 'NETT_SERVICE_CONFIG =>'
+          sudo launchctl print system/io.gotry.nett | grep -F 'MallocNanoZone => 0'
+          sudo "$nett" install | grep -F 'The service is running. Nothing changed.'
+          for _ in $(seq 20); do
+            sudo test -S /var/run/nett/mesh.sock && break
+            sleep 0.5
+          done
           # The desired state changed (same content, different bytes): reload over the local
           # interface and report the result
           python3 -m json.tool ~/.config/nett/nodes/ci/desired.json > reformatted.json

@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `sudo nett install` on a Mac loads the nett service again when launchd still runs it with an
+  older configuration, as after an upgrade that changed it, instead of reporting that nothing
+  changed. The service logs a warning while it runs with an older configuration.
+
 ## [0.9.2] - 2026-11-23
 
 - On macOS the nett service starts without the system allocator's nano zone, which kept about two

@@ -58,7 +58,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
 - A new desired state that changes a pair's candidates keeps the pair on the path it uses, with what was measured and reported of it, instead of starting the pair over: one end of a two-ended pair starting from the first relay while the other stays split the pair until it met again (mesh.md section 8.4);
-- `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4).
+- `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4);
+- launchd keeps the configuration it loaded: `sudo nett install` compares the fingerprint the loaded service carries with the current configuration, not the file, which the service itself rewrites after an upgrade (release.md section 7).
 
 **Guards**
 
@@ -79,6 +80,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:dial_only_pair_stays_together_when_one_ends_candidates_change`
 - `nett-mesh:a_new_candidate_list_keeps_the_path_in_use`
 - `ci:sudo nett install <token> (join the Hub, needs root)` (the service rewrites a launchd configuration that differs)
+- `nett-node:the_loaded_service_shows_the_fingerprint_of_its_configuration`
+- `ci:Full flow of sudo nett install (needs root)` (an older configuration loaded with the file current is loaded again)
 - `lab:port-change`, `lab:relay-restart`
 
 **Not yet guarded**: the restart of the relay by `sudo nett install` with a new program. It needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, it is watched when each release is installed on real machines.
