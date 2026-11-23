@@ -4,9 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
-- A path through a TLS relay answers in one round trip again. nett-relay held each packet it sent
-  to a member until the one before was acknowledged, which made most requests through it take
-  about twice the round trip.
+## [0.9.4] - 2026-11-23
+
+- Requests through a TLS relay take one round trip of the path instead of about two: nett-relay
+  held each packet it sent to a member until the one before it was acknowledged.
 
 ## [0.9.3] - 2026-11-23
 
