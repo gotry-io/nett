@@ -290,6 +290,45 @@ pub fn new_relay_key() -> Result<crate::state::RelayKey, SiteError> {
     Ok(crate::state::RelayKey(key))
 }
 
+/// A padding range for the obfuscated transport (design/obfuscation.md section 4): a minimum from 0
+/// to 64 bytes and a maximum 64 to 256 bytes above it, so sites differ in their handshake lengths.
+pub fn new_obfs_padding() -> Result<nett_mesh::config::ObfsPadding, SiteError> {
+    let [a, b] = random_u16s()?;
+    let min = a % 65;
+    Ok(nett_mesh::config::ObfsPadding {
+        min,
+        max: min + 64 + b % 193,
+    })
+}
+
+/// A port for a relay's obfuscated transport, drawn from 20000-59999 until `free` accepts it
+/// (design/obfuscation.md section 4).
+pub fn new_obfs_port(free: impl Fn(u16) -> bool) -> Result<u16, SiteError> {
+    // A draw hits a taken port about once in a thousand
+    for _ in 0..16 {
+        let [a, _] = random_u16s()?;
+        let port = 20_000 + a % 40_000;
+        if free(port) {
+            return Ok(port);
+        }
+    }
+    Err(SiteError::invalid(
+        "no free port for obfuscated UDP was found; give one with --obfs-port",
+    ))
+}
+
+fn random_u16s() -> Result<[u16; 2], SiteError> {
+    use ring::rand::{SecureRandom as _, SystemRandom};
+    let mut b = [0u8; 4];
+    SystemRandom::new()
+        .fill(&mut b)
+        .map_err(|_| SiteError::invalid("the system random number generator failed"))?;
+    Ok([
+        u16::from_be_bytes([b[0], b[1]]),
+        u16::from_be_bytes([b[2], b[3]]),
+    ])
+}
+
 /// Millisecond time plus 80 random bits: the parts of a new ID (ULID form).
 fn id_parts() -> Result<(u64, [u8; 10]), SiteError> {
     use ring::rand::{SecureRandom as _, SystemRandom};

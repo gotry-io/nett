@@ -42,10 +42,12 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                 if o.relay != m.relay {
                     lines.push(match m.relay {
                         Some(r) => format!(
-                            "~ {name} runs a relay: UDP {}, {}",
+                            "~ {name} runs a relay: UDP {}, {}{}",
                             r.port,
                             r.tls_port
-                                .map_or_else(|| "no TLS".to_owned(), |p| format!("TLS {p}"))
+                                .map_or_else(|| "no TLS".to_owned(), |p| format!("TLS {p}")),
+                            r.obfs_port
+                                .map_or_else(String::new, |p| format!(", obfuscated UDP {p}"))
                         ),
                         None => format!("~ {name} stops its relay"),
                     });
@@ -469,7 +471,7 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
         let ways: Vec<&str> = paths
             .iter()
             .filter(|p| &p.relay.node_id == relay)
-            .map(|p| if p.tls.is_some() { "tls" } else { "udp" })
+            .map(|p| p.via.label())
             .collect();
         let name = state
             .name_of(relay)

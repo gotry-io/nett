@@ -23,7 +23,7 @@ nett adds an obfuscated UDP transport (design/obfuscation.md):
 - **Shape of the TLS transport**: on the member, a loopback port per relay as the WireGuard endpoint and a socket connected to the relay's obfuscated port; on nett-relay, an obfuscated port of its own that unwraps, routes by `mac1` and session index as today, and wraps each leg that needs it. WireGuard is unchanged;
 - **Format version 1**: a 12-byte random salt on every datagram; data messages have their first 16 bytes masked with a keyed BLAKE2s of the salt; handshakes and probes are sealed with ChaCha20-Poly1305 with a time and random padding, and replays and unauthenticated packets get no answer;
 - **Public format, site keys**: the format is open source; each relay's obfuscation key is derived from the site's relay key, and each site draws its own padding range;
-- **Policy**: `fallback` puts obfuscated UDP between UDP and TLS; `prefer` puts it before plain UDP on every path that leaves a LAN. A connection that left plain UDP because it was blocked stays obfuscated until the blocked endpoint changes. The default becomes `prefer` only if a measurement shows obfuscation costs at most 5% of throughput, 0.2 ms of round trip and 10% of CPU, within the memory budget (design/obfuscation.md section 9).
+- **Order**: obfuscated UDP comes between UDP and TLS. An endpoint lost to a block stays avoided until it changes. Obfuscated UDP comes before plain UDP on the paths that leave a LAN only if a measurement shows it costs at most 5% of throughput, 0.2 ms of round trip and 10% of CPU, within the memory budget (design/obfuscation.md section 9).
 
 ## Rationale
 
@@ -48,5 +48,5 @@ nett adds an obfuscated UDP transport (design/obfuscation.md):
 
 - One more UDP port per relay that offers it, to open in the security group;
 - The member's daemon copies each packet once more through the loopback port; the measurement decides whether this is small enough to make obfuscation the default, and a tc-eBPF variant is the next step if kernel WireGuard is what misses;
-- A machine gets obfuscated candidates only once its version knows them;
+- A relay offers obfuscated UDP only once the Hub and every machine run a release that knows it;
 - The format will change as censors adapt; the version byte and the key labels let a new one replace it.

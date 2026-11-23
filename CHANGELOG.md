@@ -4,6 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `nett site relay <machine> --obfs` also serves obfuscated UDP on the relay, for networks that
+  block WireGuard: what it sends looks like random bytes, and members reach the relay over it when
+  plain UDP stops working. The change listing names the port to open in the machine's firewall.
+  Offering it needs the Hub and every machine on this release; the command names the ones that
+  are not.
+- A machine that loses a plain UDP endpoint to a block keeps avoiding it, also after a restart,
+  until the endpoint changes; `nett status` lists such a path as `blocked`.
+
 ## [0.9.5] - 2026-11-23
 
 - The machine that decides the path to a relay's machine also reaches it through that relay over

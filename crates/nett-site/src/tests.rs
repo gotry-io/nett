@@ -18,6 +18,10 @@ use crate::state::{NodeKeys, Part, RuleId, State};
 
 /// A directory removed with everything in it when the returned guard is dropped; keep the
 /// guard for as long as the path is used.
+/// The padding range the tests give a site whose relay offers obfuscated UDP.
+const PADDING: nett_mesh::config::ObfsPadding =
+    nett_mesh::config::ObfsPadding { min: 16, max: 200 };
+
 fn temp_dir(name: &str) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::Builder::new()
         .prefix(&format!("nett-site-lib-{name}-"))
@@ -848,15 +852,17 @@ fn relay_site(dir: &Path) -> (SiteDir, State) {
                 .parse()
                 .expect("fingerprint")
         }),
+        obfs_port: None,
     };
     state
-        .set_relay(&name("r2"), Some(role(Some(443))), key)
+        .set_relay(&name("r2"), Some(role(Some(443))), key, PADDING)
         .expect("r2 relays");
     state
         .set_relay(
             &name("r1"),
             Some(role(None)),
             crate::state::RelayKey([8; 32]),
+            PADDING,
         )
         .expect("r1 relays");
     assert_eq!(
@@ -1001,6 +1007,140 @@ fn connections_go_through_every_relay_udp_first() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// The relay paths of a candidate list, as `<transport> <relay> <address>`.
+fn through(state: &State, candidates: &[Candidate]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter_map(|c| {
+            let (kind, relay, address) = match c {
+                Candidate::Relay {
+                    relay, endpoint, ..
+                } => ("udp", relay, endpoint),
+                Candidate::RelayObfs { relay, address, .. } => ("obfs", relay, address),
+                Candidate::RelayTls { relay, address, .. } => ("tls", relay, address),
+                _ => return None,
+            };
+            Some(format!("{kind} {} {address}", state.name_of(relay)?))
+        })
+        .collect()
+}
+
+fn offer_obfs(state: &mut State, relay: &str, port: u16) {
+    let now = state.machine(&name(relay)).expect("relay").relay;
+    let role = crate::state::RelayRole {
+        obfs_port: Some(port),
+        ..now.expect("runs a relay")
+    };
+    state
+        .set_relay(
+            &name(relay),
+            Some(role),
+            crate::state::RelayKey([0; 32]),
+            PADDING,
+        )
+        .expect("obfuscated");
+}
+
+/// A relay that offers obfuscated UDP is reached over it between UDP and TLS (design/obfuscation.md
+/// section 5); its relay section carries the port, its key and the site's padding range, and the key
+/// in a member's candidate is the same one.
+#[test]
+fn obfuscated_udp_comes_between_udp_and_tls() {
+    let (_dir_tmp, dir) = temp_dir("relay-obfs");
+    let (site, mut state) = relay_site(&dir);
+    let id = |s: &State, n: &str| s.machine(&name(n)).expect("machine").node_id.clone();
+    offer_obfs(&mut state, "r2", 30000);
+    signed(&site, &mut state);
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    assert_eq!(
+        through(&state, path(&mac, &state, "nas")),
+        [
+            "udp r1 198.51.100.1:41822",
+            "udp r2 198.51.100.2:41822",
+            "obfs r2 198.51.100.2:30000",
+            "tls r2 198.51.100.2:443"
+        ]
+    );
+    // mac decides the connection to r2: r2's own relay over each of its transports first
+    assert_eq!(
+        through(&state, path(&mac, &state, "r2")),
+        [
+            "udp r2 198.51.100.2:41822",
+            "obfs r2 198.51.100.2:30000",
+            "tls r2 198.51.100.2:443",
+            "udp r1 198.51.100.1:41822"
+        ]
+    );
+    let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
+    let obfs = r2
+        .relay
+        .expect("r2 runs a relay")
+        .obfs
+        .expect("and offers obfuscated UDP");
+    assert_eq!((obfs.port, obfs.padding), (30000, PADDING));
+    let relay_key = state.relay_key.expect("relay key");
+    assert_eq!(
+        obfs.key,
+        crate::compose::obfs_key(&relay_key, &id(&state, "r2"))
+    );
+    let in_candidate = path(&mac, &state, "nas").iter().find_map(|c| match c {
+        Candidate::RelayObfs { key, padding, .. } => Some((key.clone(), *padding)),
+        _ => None,
+    });
+    assert_eq!(in_candidate, Some((obfs.key.clone(), PADDING)));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// When UDP and obfuscated paths fill a connection's candidates, a TLS path still stays among them:
+/// TLS is what passes where all UDP is dropped.
+#[test]
+fn the_candidate_limit_keeps_a_tls_path() {
+    let (_dir_tmp, dir) = temp_dir("relay-obfs-limit");
+    let (site, mut state) = relay_site(&dir);
+    state
+        .add(
+            name("r3"),
+            MachineOptions {
+                public: true,
+                ipv4: Some("198.51.100.3".parse().expect("ip")),
+                keys: Some(keys(6)),
+                ..MachineOptions::default()
+            },
+            new_node_id().expect("id"),
+        )
+        .expect("add r3");
+    let role = crate::state::RelayRole {
+        port: 41822,
+        tls_port: None,
+        fingerprint: None,
+        obfs_port: Some(30003),
+    };
+    state
+        .set_relay(
+            &name("r3"),
+            Some(role),
+            crate::state::RelayKey([0; 32]),
+            PADDING,
+        )
+        .expect("r3 relays");
+    offer_obfs(&mut state, "r1", 30001);
+    offer_obfs(&mut state, "r2", 30002);
+    signed(&site, &mut state);
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    let paths = through(&state, path(&mac, &state, "nas"));
+    assert_eq!(paths.len(), 5, "{paths:?}");
+    assert!(
+        paths.iter().any(|p| p.starts_with("tls ")),
+        "a TLS path stays: {paths:?}"
+    );
+    assert_eq!(
+        paths.iter().filter(|p| p.starts_with("udp ")).count(),
+        3,
+        "{paths:?}"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// A machine that decides the path to a relay's machine also reaches it through that relay, over
 /// UDP and then TLS, and the relay hands the packets to WireGuard there: the two stay connected
 /// when only the relay's port or only TCP passes between them (design/mesh.md section 5.1).
@@ -1066,10 +1206,11 @@ fn the_deciding_end_reaches_a_relay_machine_through_its_own_relay() {
                 .parse()
                 .expect("fingerprint"),
         ),
+        obfs_port: None,
     };
     let key = state.relay_key.expect("relay key");
     state
-        .set_relay(&name("r1"), Some(role), key)
+        .set_relay(&name("r1"), Some(role), key, PADDING)
         .expect("r1 serves TLS");
     state
         .allow(&["r1".into()], &["r2".into()], vec![tcp(22)], None)
@@ -1104,21 +1245,22 @@ fn relays_need_a_public_machine_and_their_own_port() {
         port,
         tls_port: Some(443),
         fingerprint: None,
+        obfs_port: None,
     };
     let key = crate::state::RelayKey([1; 32]);
     assert!(
         state
-            .set_relay(&name("mac"), Some(role(41822)), key)
+            .set_relay(&name("mac"), Some(role(41822)), key, PADDING)
             .is_err()
     );
     assert!(
         state
-            .set_relay(&name("edge-vps"), Some(role(41820)), key)
+            .set_relay(&name("edge-vps"), Some(role(41820)), key, PADDING)
             .is_err()
     );
     assert!(
         state
-            .set_relay(&name("edge-vps"), Some(role(41821)), key)
+            .set_relay(&name("edge-vps"), Some(role(41821)), key, PADDING)
             .is_err()
     );
     assert_eq!(
@@ -1126,7 +1268,7 @@ fn relays_need_a_public_machine_and_their_own_port() {
         "a refused change leaves the site as it was"
     );
     state
-        .set_relay(&name("edge-vps"), Some(role(41822)), key)
+        .set_relay(&name("edge-vps"), Some(role(41822)), key, PADDING)
         .expect("relay");
     let to_dial_only = MachineChange {
         reachability: Some(Reachability::DialOnly),
@@ -1169,22 +1311,31 @@ fn relay_changes_are_listed_with_the_paths_they_change() {
                     .parse()
                     .expect("fingerprint"),
             ),
+            obfs_port: Some(30000),
         }),
         crate::state::RelayKey([2; 32]),
+        PADDING,
     )
     .expect("relay");
     let lines = describe(&old, &new);
     assert!(
-        lines.contains(&"~ edge-vps runs a relay: UDP 41822, TLS 8443".to_owned()),
+        lines.contains(
+            &"~ edge-vps runs a relay: UDP 41822, TLS 8443, obfuscated UDP 30000".to_owned()
+        ),
         "{lines:?}"
     );
     assert!(
-        lines.contains(&"  ~ mac - nas  punch, relay edge-vps (udp, tls)".to_owned()),
+        lines.contains(&"  ~ mac - nas  punch, relay edge-vps (udp, obfs, tls)".to_owned()),
         "{lines:?}"
     );
     let mut off = new.clone();
-    off.set_relay(&name("edge-vps"), None, crate::state::RelayKey([2; 32]))
-        .expect("off");
+    off.set_relay(
+        &name("edge-vps"),
+        None,
+        crate::state::RelayKey([2; 32]),
+        PADDING,
+    )
+    .expect("off");
     let lines = describe(&new, &off);
     assert!(
         lines.contains(&"~ edge-vps stops its relay".to_owned()),
@@ -1331,8 +1482,10 @@ fn lan_paths_leave_the_relays_their_room() {
                         .parse()
                         .expect("fingerprint"),
                 ),
+                obfs_port: None,
             }),
             crate::state::RelayKey([2; 32]),
+            PADDING,
         )
         .expect("relay");
     signed(&site, &mut state);
@@ -1763,8 +1916,10 @@ fn served_ports_are_signed_listed_with_who_reaches_them_and_bounded() {
                 port: crate::state::DEFAULT_RELAY_PORT,
                 tls_port: Some(443),
                 fingerprint: None,
+                obfs_port: None,
             }),
             crate::state::RelayKey([7; 32]),
+            PADDING,
         )
         .expect("relay");
     assert!(

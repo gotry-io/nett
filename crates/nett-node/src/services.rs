@@ -258,9 +258,15 @@ mod tests {
             port: 41822,
             tls_port: Some(443),
             fingerprint,
+            obfs_port: None,
         };
         state
-            .set_relay(&name("vps"), Some(role(None)), RelayKey([9; 32]))
+            .set_relay(
+                &name("vps"),
+                Some(role(None)),
+                RelayKey([9; 32]),
+                nett_mesh::config::ObfsPadding { min: 16, max: 200 },
+            )
             .expect("relay");
         sign(&mut state);
         assert_eq!(Wants::of(&desired(&state, "vps")), Wants { relay: true });

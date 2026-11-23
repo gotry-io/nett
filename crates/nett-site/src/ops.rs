@@ -8,7 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use nett_core::id::{CredentialId, DeviceId, NodeId};
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
-use nett_mesh::config::Reachability;
+use nett_mesh::config::{ObfsPadding, Reachability};
 use nett_trust::keys::{Ed25519PublicKey, X25519PublicKey};
 use nett_trust::payload::{MeshAddresses, PortRange, ServedPort};
 
@@ -107,16 +107,21 @@ impl State {
     }
 
     /// Runs a relay on a machine, or stops it with `None` (design/site.md section 4.1). `key` becomes
-    /// the site's relay key when it has none yet.
+    /// the site's relay key, and `padding` its padding range for obfuscated UDP, when the site needs
+    /// one and has none yet.
     pub fn set_relay(
         &mut self,
         name: &NodeName,
         role: Option<RelayRole>,
         key: RelayKey,
+        padding: ObfsPadding,
     ) -> Result<(), SiteError> {
         self.attempt(|s| {
             if role.is_some() && s.relay_key.is_none() {
                 s.relay_key = Some(key);
+            }
+            if role.is_some_and(|r| r.obfs_port.is_some()) && s.obfs_padding.is_none() {
+                s.obfs_padding = Some(padding);
             }
             s.machine_mut(name)?.relay = role;
             s.check()

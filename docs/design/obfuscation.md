@@ -44,16 +44,16 @@ Compared with the published formats (ADR 0030): Shadowsocks-2022's UDP format (S
 ## 4. Keys and per-site parameters
 
 - **Keys**: each relay has an obfuscation key, HMAC-SHA256 under the site's relay key (site.md section 8) of `"nett obfuscation v1"`, a zero byte and the relay's node ID. The data key and the control key are derived from it with HKDF-SHA256 under the labels `"data"` and `"control"`. The site and the Hub derive it as they derive probe tokens (mesh.md section 5.2); it is delivered to the relay in its `relay` section and to each member in its candidates through that relay. All of a relay's members share it: whoever holds it can recognize the relay's obfuscated traffic, and that is all it gives, since WireGuard's keys protect the content. It is held like a key (hard rule 10): zeroized in memory, never logged, and the desired state that carries it stays `0600`;
-- **Padding range**: drawn when the site is created, a minimum from 0 to 64 bytes and a maximum 64 to 256 bytes above it, stored in the site state and delivered with the keys. Different sites thus send handshakes of different length distributions;
-- **Obfuscated port**: chosen at random from 20000-59999 when the relay gets the obfuscated transport (section 7), avoiding the ports the machine already uses; `--obfs-port` sets it.
+- **Padding range**: drawn when the site's first relay gets the obfuscated transport, a minimum from 0 to 64 bytes and a maximum 64 to 256 bytes above it, stored in the site state and delivered with the keys. Different sites thus send handshakes of different length distributions;
+- **Obfuscated port**: drawn at random from 20000-59999 when the relay gets the obfuscated transport (section 7), until it is none of the relay port, the machine's WireGuard port and the ports nett itself uses on the host (site.md section 4); `--obfs-port` sets it.
 
 ## 5. Candidates and path selection
 
 - **Candidates**: a `relay_obfs` candidate carries the relay's node ID, the address of its obfuscated port, the relay's obfuscation key, the padding range and the probe token. They are generated like the relay's other transports (site.md section 6): for the deciding end, the relay on the other end over UDP, obfuscated UDP and then TLS; then every other relay over UDP, obfuscated UDP and TLS, until the connection has 6 candidates, and at least one TLS candidate stays among them when any relay serves TLS;
 - **Order and score**: obfuscated UDP is a transport between UDP and TLS: a transport penalty of 10 milliseconds against TLS's 20 (mesh.md section 8.1), and "a path of a better type recovers" counts plain UDP over obfuscated UDP over TLS (section 8.2);
-- **Site policy**: `fallback` (the starting value) uses that order. `prefer` uses obfuscated candidates first on every path that leaves a LAN: a candidate over plain UDP that crosses the public network (public direct, hole-punched direct, a UDP relay) is used only while no obfuscated candidate of the connection works; LAN paths stay plain. Which one becomes the default follows the measurement in section 9;
-- **A block stays avoided**: when a connection leaves plain UDP because every plain UDP candidate stopped answering while an obfuscated one works, the decider records that the endpoint it lost, the address and port of the blocked side, is blocked, and from then on treats the connection as under `prefer`. A block lasts days and probing it from WireGuard again only renews it, so plain UDP is not taken back. The record ends when that endpoint changes (its address or port), or with `nett site obfuscation reset <machine> <machine>`; `nett status` shows it. It is kept in the mesh's state directory so a restart does not try the blocked endpoint again (release.md section 8);
-- **Versions**: a machine gets `relay_obfs` candidates only once the version it reports knows them, and a relay gets its obfuscated port only then; a machine of the previous version keeps its other candidates (adjacent versions interoperate).
+- **Plain UDP first**: plain UDP carries a connection wherever it works, obfuscated UDP where it stops working. Whether obfuscated candidates come first instead on the paths that leave a LAN follows the measurement in section 9;
+- **A block stays avoided**: when a machine switches from a plain UDP path that stopped working (it no longer answers, or its handshakes no longer complete) to an obfuscated one, it records the endpoint it lost, the address and port of the blocked side, as blocked. Plain UDP candidates to a recorded endpoint are neither probed nor taken, on every connection of the machine; other endpoints keep being used, since the blocks found so far list one address and port each. A block lasts days and probing it from WireGuard again only renews it, so plain UDP to it is not taken back. The record ends once no candidate leads to that endpoint (its address or port changed); `nett status` shows such a candidate as `blocked`. The record holds at most 64 endpoints and is kept in the mesh's state directory, so a restart does not try a blocked endpoint again (release.md section 8);
+- **Versions**: a release that does not know `relay_obfs` candidates rejects the whole desired state that carries one, revocations included, so a relay offers obfuscated UDP only once the Hub and every machine run a release that knows it: `nett site relay --obfs` names the Hub and the machines the Hub reports on an older release, a machine that has not reported one included, and stops. Without a Hub, every machine is upgraded first.
 
 ## 6. Measurement
 
@@ -61,7 +61,7 @@ Relay probes and through probes of an obfuscated candidate are sent from the mes
 
 ## 7. Commands, ports and footprint
 
-- `nett site relay <machine> --obfs [--obfs-port <port>]` gives a relay the obfuscated transport, `--no-obfs` removes it; `nett site obfuscation fallback|prefer` sets the site policy; `nett site obfuscation reset <a> <b>` ends a recorded block;
+- `nett site relay <machine> --obfs [--obfs-port <port>]` gives a relay the obfuscated transport, and `--no-obfs` removes it (site.md section 4.1);
 - The relay's obfuscated port is opened in the cloud security group once, like the relay port (mesh.md section 5.5);
 - The member's loopback ports are allocated like the TLS transport's, from `41850`-`41865`, a range the machine's WireGuard port may not use (site.md section 4);
 - Placed on a machine: the record of blocked endpoints in the mesh's state directory, listed in release.md section 8. No new process, service, account or setting.
@@ -78,7 +78,7 @@ The obfuscation protects nothing that WireGuard does not already protect: a cens
 
 ## 9. The measurement that decides the default
 
-Before `prefer` can become the default, obfuscated UDP is measured against plain UDP on the same path, on Linux with kernel WireGuard (one extra copy per packet through the loopback port), on a userspace platform, and through a 1-vCPU relay, first in the lab and then across a real border:
+Before obfuscated candidates can come first, obfuscated UDP is measured against plain UDP on the same path, on Linux with kernel WireGuard (one extra copy per packet through the loopback port), on a userspace platform, and through a 1-vCPU relay, first in the lab and then across a real border:
 
 | Measure | Small enough when |
 |---|---|
@@ -87,7 +87,7 @@ Before `prefer` can become the default, obfuscated UDP is measured against plain
 | CPU at the same rate | at most 10% more |
 | Idle memory | within the budget (nett daemon ≤ 8 MB, nett-relay ≤ 5 MB) |
 
-All four met: the site default becomes `prefer`. Otherwise it stays `fallback`, where obfuscated UDP is taken where measurement shows plain UDP blocked, and section 5's record keeps it there. If kernel WireGuard is what misses, a tc-eBPF program that masks in the kernel is the next thing to measure.
+All four met: obfuscated candidates come first on every path that leaves a LAN, and a plain UDP candidate that crosses the public network (public direct, hole-punched direct, a UDP relay) is used only while no obfuscated candidate of the connection works; LAN paths stay plain. Otherwise plain UDP stays first, obfuscated UDP is taken where plain UDP stops working, and section 5's record keeps it there. If kernel WireGuard is what misses, a tc-eBPF program that masks in the kernel is the next thing to measure.
 
 ## 10. Verification
 
@@ -95,7 +95,8 @@ All four met: the site default becomes `prefer`. Otherwise it stays `fallback`, 
 |---|---|
 | Unit | Round trip of both forms; a tampered, replayed, stale or unknown-version packet is dropped; padding stays in the site's range; over many packets no byte position keeps a value and handshake lengths vary |
 | nett-relay | Unwrap, route and wrap across plain, obfuscated, TLS and loopback legs; no answer to unauthenticated packets; bounded salt set |
-| nett-site | Candidate order and limit, the TLS candidate kept, `prefer` and `fallback`, no obfuscated candidates for a machine of the previous version |
+| Mesh | A plain endpoint lost to obfuscated UDP stays avoided, also after reopening the state directory, and its record ends when the endpoint changes; only a switch away from plain UDP that stopped working counts as a block |
+| nett-site and CLI | Candidate order and limit, the TLS candidate kept, the relay's section and the key members get; the Hub and the machines on an older release are named |
 | Lab | A router drops packets that match WireGuard's signature (first bytes and lengths) in one direction: the pair moves to obfuscated UDP, stays there, and the record survives a restart; the section 9 benchmark |
 | Real link | An obfuscated port on a machine abroad carries traffic for two weeks beside a plain WireGuard port as the control |
 

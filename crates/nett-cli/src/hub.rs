@@ -175,6 +175,28 @@ fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
     request(&hub.target(), "GET", STATUS_PATH, Some(&hub.token), None)
 }
 
+/// The Hub and the machines that run a release older than `version`, as the Hub reports them.
+pub fn older_than(hub: &SiteHub, version: &str) -> anyhow::Result<Vec<String>> {
+    let wanted = version.parse().context("a release version")?;
+    Ok(running_older(&fetch_status(hub)?, &wanted))
+}
+
+/// A machine that has not reported a release counts as older: it may join with any.
+fn running_older(reply: &StatusResponse, wanted: &nett_trust::release::Version) -> Vec<String> {
+    use nett_trust::release::Version;
+    let older = |v: Option<&str>| v.is_none_or(|v| v.parse::<Version>().is_ok_and(|v| v < *wanted));
+    let hub = older(Some(&reply.hub_version)).then(|| "the Hub".to_owned());
+    hub.into_iter()
+        .chain(
+            reply
+                .machines
+                .iter()
+                .filter(|m| older(m.nett_version.as_deref()))
+                .map(|m| m.name.clone()),
+        )
+        .collect()
+}
+
 /// The release the Hub holds, when the Hub or a machine runs an older one, and the command that
 /// approves it (design/hub.md section 3.4).
 fn available(reply: &StatusResponse) -> Option<String> {
@@ -742,6 +764,36 @@ mod tests {
             "peers": [], "problems": problems, "events": []
         }));
         m
+    }
+
+    /// What a feature that needs every end on a release checks (design/obfuscation.md section 5).
+    #[test]
+    fn the_hub_and_machines_on_an_older_release_are_named() {
+        let at = |name: &str, version: Option<&str>| MachineStatus {
+            name: name.into(),
+            nett_version: version.map(str::to_owned),
+            ..machine(true, None, None)
+        };
+        let reply = |hub: &str| StatusResponse {
+            hub_version: hub.into(),
+            hub_upgrade: None,
+            release: None,
+            url: "https://hub.example.com".into(),
+            generation: 1,
+            machines: vec![
+                at("nas", Some("0.10.0")),
+                at("mac", Some("0.9.5")),
+                at("new", None),
+                at("vps", Some("0.10.1")),
+            ],
+            backup: None,
+        };
+        let wanted = "0.10.0".parse().expect("version");
+        assert_eq!(running_older(&reply("0.10.0"), &wanted), ["mac", "new"]);
+        assert_eq!(
+            running_older(&reply("0.9.5"), &wanted),
+            ["the Hub", "mac", "new"]
+        );
     }
 
     #[test]

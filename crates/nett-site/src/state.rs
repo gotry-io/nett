@@ -11,7 +11,9 @@ use nett_core::id::{CredentialId, DeviceId, NodeId};
 use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
-use nett_mesh::config::{MAX_DEVICES, MAX_MEMBERS, MeshPrefixes, Reachability, is_reserved_port};
+use nett_mesh::config::{
+    MAX_DEVICES, MAX_MEMBERS, MeshPrefixes, ObfsPadding, Reachability, is_reserved_port,
+};
 use nett_mesh::lan::LanAddress;
 use nett_trust::admission::AdmissionMaterial;
 use nett_trust::anchors::TrustAnchorsDoc;
@@ -76,6 +78,10 @@ pub struct State {
     /// The release the user approved the Hub's upgrade to (design/release.md section 7, ADR 0027).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hub_upgrade_to: Option<Version>,
+    /// The site's padding range for the obfuscated transport (design/obfuscation.md section 4), drawn
+    /// when a relay first offers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs_padding: Option<ObfsPadding>,
 }
 
 /// A device that joins through a mobile gateway with one WireGuard credential (design/devices.md).
@@ -134,6 +140,10 @@ pub struct RelayRole {
     /// Certificate fingerprint given with `--fingerprint`; with a Hub it is learned instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fingerprint: Option<CertFingerprint>,
+    /// UDP port of the obfuscated transport (design/obfuscation.md section 2); absent when the relay
+    /// does not offer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,6 +212,15 @@ impl Machine {
     /// WireGuard port of a `public` machine.
     pub fn listen_port(&self, default: u16) -> Option<u16> {
         (self.reachability == Reachability::Public).then(|| self.port.unwrap_or(default))
+    }
+
+    /// `port` can carry its relay's obfuscated transport: it is none of the relay port, the WireGuard
+    /// port and the ports nett itself uses on the host. `default` is the site's WireGuard port.
+    pub fn obfs_port_free(&self, default: u16, relay_port: u16, port: u16) -> bool {
+        port != 0
+            && port != relay_port
+            && !is_reserved_port(port)
+            && Some(port) != self.listen_port(default)
     }
 
     /// Address other members use to connect to it: the one given takes precedence, otherwise the
@@ -474,6 +493,7 @@ impl State {
             devices: BTreeMap::new(),
             revoked_credentials: Vec::new(),
             hub_upgrade_to: None,
+            obfs_padding: None,
         }
     }
 
@@ -610,6 +630,21 @@ impl State {
                     return Err(SiteError::invalid(format!(
                         "machine `{name}`: the relay's TLS port must not be 0"
                     )));
+                }
+                if let Some(obfs) = relay.obfs_port {
+                    if !m.obfs_port_free(self.listen_port, relay.port, obfs) {
+                        return Err(SiteError::invalid(format!(
+                            "machine `{name}`: obfuscated port {obfs} is 0, the relay port, the \
+                             WireGuard port, or one nett itself uses on the host; pick another with \
+                             --obfs-port"
+                        )));
+                    }
+                    if !self.obfs_padding.is_some_and(|p| p.is_valid()) {
+                        return Err(SiteError::invalid(
+                            "the site has an obfuscated relay but no valid padding range"
+                                .to_owned(),
+                        ));
+                    }
                 }
                 if self.relay_key.is_none() {
                     return Err(SiteError::invalid(

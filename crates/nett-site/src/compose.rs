@@ -9,8 +9,8 @@ use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
-    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, PathDoc, ProbeToken, Reachability, RelayDoc,
-    RelayMemberDoc,
+    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, ObfsSecret, PathDoc, ProbeToken,
+    Reachability, RelayDoc, RelayMemberDoc, RelayObfsDoc,
 };
 use nett_mesh::prober::is_decider;
 use nett_trust::revocation::Revocation;
@@ -88,15 +88,23 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
     {
         let token = token(key, &path.relay.node_id, &me.node_id);
         let relay = path.relay.node_id.clone();
-        out.push(match path.tls {
-            None => Candidate::Relay {
+        let address = SocketAddr::new(path.ip, path.port);
+        out.push(match path.via {
+            RelayVia::Udp => Candidate::Relay {
                 relay,
-                endpoint: SocketAddr::new(path.ip, path.port),
+                endpoint: address,
                 token,
             },
-            Some(fingerprint) => Candidate::RelayTls {
+            RelayVia::Obfs(padding) => Candidate::RelayObfs {
+                key: obfs_key(key, &path.relay.node_id),
                 relay,
-                address: SocketAddr::new(path.ip, path.port),
+                address,
+                padding,
+                token,
+            },
+            RelayVia::Tls(fingerprint) => Candidate::RelayTls {
+                relay,
+                address,
                 fingerprint,
                 token,
             },
@@ -111,15 +119,34 @@ pub struct RelayPath<'a> {
     pub relay: &'a Machine,
     pub ip: IpAddr,
     pub port: u16,
-    /// TLS with this certificate fingerprint; UDP when absent.
-    pub tls: Option<CertFingerprint>,
+    pub via: RelayVia,
 }
 
-/// The paths of the connection between `a` and `b` through relays (design/site.md section 6):
-/// the relay on one end when the other end decides the path, over UDP and then over TLS, then
-/// every relay other than the two ends that has joined and has a public address, in the order of
-/// their node IDs, first over UDP and then over TLS, while the connection has room for candidates.
-/// The result is the same for both ends.
+/// How a relay path reaches the relay: its UDP relay port, its obfuscated port with the site's
+/// padding range, or TLS with its certificate fingerprint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayVia {
+    Udp,
+    Obfs(nett_mesh::config::ObfsPadding),
+    Tls(CertFingerprint),
+}
+
+impl RelayVia {
+    pub fn label(self) -> &'static str {
+        match self {
+            RelayVia::Udp => "udp",
+            RelayVia::Obfs(_) => "obfs",
+            RelayVia::Tls(_) => "tls",
+        }
+    }
+}
+
+/// The paths of the connection between `a` and `b` through relays (design/site.md section 6,
+/// design/obfuscation.md section 5): the relay on one end when the other end decides the path, over
+/// UDP, obfuscated UDP and then TLS, then every relay other than the two ends that has joined and
+/// has a public address, in the order of their node IDs, first over UDP, then obfuscated UDP, then
+/// TLS, while the connection has room for candidates; a TLS path stays among them when any relay
+/// serves TLS. The result is the same for both ends.
 pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayPath<'a>> {
     if a.policy.is_none() || b.policy.is_none() {
         return Vec::new();
@@ -161,37 +188,85 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
                     .or_else(|| r.public_ipv6().map(IpAddr::V6))?;
                 Some((r, ip, r.relay?))
             });
-        let udp = relay.map(|(r, ip, role)| RelayPath {
-            relay: r,
-            ip,
-            port: role.port,
-            tls: None,
-        });
-        let tls = relay.and_then(|(r, ip, role)| {
-            Some(RelayPath {
-                relay: r,
-                ip,
-                port: role.tls_port?,
-                tls: Some(r.relay_fingerprint()?),
+        let ways: Vec<RelayPath> = relay
+            .into_iter()
+            .flat_map(|(r, ip, role)| {
+                [
+                    udp_path(r, ip, role),
+                    obfs_path(state, r, ip, role),
+                    tls_path(r, ip, role),
+                ]
             })
-        });
-        udp.into_iter().chain(tls)
+            .flatten()
+            .collect();
+        ways
     });
-    let udp = relays.iter().map(|(r, ip, role)| RelayPath {
+    let udp = relays
+        .iter()
+        .filter_map(|(r, ip, role)| udp_path(r, *ip, *role));
+    let obfs = relays
+        .iter()
+        .filter_map(|(r, ip, role)| obfs_path(state, r, *ip, *role));
+    let tls = relays
+        .iter()
+        .filter_map(|(r, ip, role)| tls_path(r, *ip, *role));
+    let all: Vec<RelayPath> = own.chain(udp).chain(obfs).chain(tls).collect();
+    let is_tls = |p: &RelayPath| matches!(p.via, RelayVia::Tls(_));
+    let mut chosen: Vec<RelayPath> = all.iter().take(room).copied().collect();
+    // TLS is what still passes where all UDP is dropped, so the limit does not cut every TLS path
+    if room > 0
+        && !chosen.iter().any(is_tls)
+        && let Some(tls) = all.iter().find(|p| is_tls(p))
+    {
+        chosen.pop();
+        chosen.push(*tls);
+    }
+    chosen
+}
+
+fn udp_path<'a>(r: &'a Machine, ip: IpAddr, role: RelayRole) -> Option<RelayPath<'a>> {
+    Some(RelayPath {
         relay: r,
-        ip: *ip,
+        ip,
         port: role.port,
-        tls: None,
-    });
-    let tls = relays.iter().filter_map(|(r, ip, role)| {
-        Some(RelayPath {
-            relay: r,
-            ip: *ip,
-            port: role.tls_port?,
-            tls: Some(r.relay_fingerprint()?),
-        })
-    });
-    own.chain(udp).chain(tls).take(room).collect()
+        via: RelayVia::Udp,
+    })
+}
+
+fn obfs_path<'a>(
+    state: &State,
+    r: &'a Machine,
+    ip: IpAddr,
+    role: RelayRole,
+) -> Option<RelayPath<'a>> {
+    Some(RelayPath {
+        relay: r,
+        ip,
+        port: role.obfs_port?,
+        via: RelayVia::Obfs(state.obfs_padding?),
+    })
+}
+
+fn tls_path<'a>(r: &'a Machine, ip: IpAddr, role: RelayRole) -> Option<RelayPath<'a>> {
+    Some(RelayPath {
+        relay: r,
+        ip,
+        port: role.tls_port?,
+        via: RelayVia::Tls(r.relay_fingerprint()?),
+    })
+}
+
+/// A relay's obfuscation key (design/obfuscation.md section 4): HMAC-SHA256 of the relay's node ID
+/// under the site's relay key, so the site and the Hub derive the same key.
+pub fn obfs_key(key: &RelayKey, relay: &NodeId) -> ObfsSecret {
+    let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key.0);
+    let mut ctx = ring::hmac::Context::with_key(&key);
+    ctx.update(b"nett obfuscation v1");
+    ctx.update(&[0]);
+    ctx.update(relay.as_str().as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(ctx.sign().as_ref());
+    ObfsSecret(out)
 }
 
 /// The probe token between a member and a relay (design/mesh.md section 5.2): HMAC-SHA256 of the
@@ -245,12 +320,20 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
             })
         })
         .collect();
+    let obfs = role
+        .obfs_port
+        .zip(state.obfs_padding)
+        .map(|(port, padding)| RelayObfsDoc {
+            port,
+            key: obfs_key(key, &me.node_id),
+            padding,
+        });
     Some(RelayDoc {
         port: role.port,
         tls_port: role.tls_port,
         members,
         links,
-        obfs: None,
+        obfs,
     })
 }
 

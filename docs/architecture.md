@@ -150,8 +150,8 @@ It works like a navigation app: there are multiple candidate paths and multiple 
 │ Linux uses kernel WireGuard; platforms without the kernel        │
 │ module use a Rust userspace implementation                       │
 ├─ Transport layer: pluggable (delivers encrypted packets) ────────┤
-│ UDP (default) · TCP/TLS 443 · QUIC 443 (later) ·                 │
-│ obfuscation wrapper (later)                                      │
+│ UDP (default) · obfuscated UDP · TCP/TLS 443 · QUIC 443 (later)  │
+│                                                                  │
 ├─ Path layer: the mesh (path selection, ADR 0013) ────────────────┤
 │ Candidate paths: LAN direct · public direct · via relay ·        │
 │ multi-hop relay                                                  │
