@@ -536,6 +536,7 @@ impl Prober {
                 .as_ref()
                 .and_then(|p| p.paths.as_ref().map(|paths| (p, paths)))
                 .filter(|(_, paths)| Some(paths.role()) == role);
+            let fresh = before.is_none();
             let paths = match (before, role) {
                 (Some((_, paths)), _) if unchanged => Some(paths.clone()),
                 (Some((_, paths)), _) => paths.reconfigured(routes.clone()),
@@ -567,6 +568,9 @@ impl Prober {
             if let Some(p) = paths.as_mut() {
                 p.set_peer_relay(KeyId::of(id.as_str().as_bytes()));
                 p.set_blocked(&self.blocked);
+                if fresh {
+                    p.start_unblocked();
+                }
             }
             let follows_together = role == Some(Role::FollowTogether);
             for (m, (route, _)) in meta.iter().zip(&routes) {
@@ -1872,6 +1876,11 @@ mod tests {
 
     impl Net {
         fn new() -> Self {
+            Self::with_blocked(BTreeSet::new())
+        }
+
+        /// A starts with these endpoints recorded as blocked, as after a restart.
+        fn with_blocked(blocked: BTreeSet<SocketAddr>) -> Self {
             let mesh = Mesh::new(&[1, 2]);
             let (a_priv, a_pub) = keypair(1);
             let (b_priv, b_pub) = keypair(2);
@@ -1926,6 +1935,7 @@ mod tests {
                 wg: addr("198.51.100.2:41820"),
                 mesh: addr("100.88.0.2:41821"),
             };
+            a.prober.set_blocked(blocked);
             a.prober.update(
                 &a.id,
                 Reachability::DialOnly,
@@ -2216,6 +2226,21 @@ mod tests {
             Some(&SwitchReason::Unreachable),
             "{:?}",
             net.switches
+        );
+    }
+
+    /// After a restart, a connection whose first candidate is recorded as blocked starts on the next
+    /// one instead of waiting for the blocked one to fail (design/obfuscation.md section 5).
+    #[test]
+    fn a_restarted_connection_starts_off_a_blocked_endpoint() {
+        let direct = addr("198.51.100.2:41820");
+        let fresh = Net::new();
+        assert_eq!(fresh.a.prober.desired_endpoint(&fresh.b.id), Some(direct));
+        let net = Net::with_blocked([direct].into());
+        assert_eq!(
+            net.a.prober.desired_endpoint(&net.b.id),
+            Some(net.relay),
+            "starts on the relay"
         );
     }
 

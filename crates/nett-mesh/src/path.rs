@@ -766,6 +766,17 @@ impl PeerPaths {
         }
     }
 
+    /// A new connection starts on its first candidate that is not blocked, as after a restart, rather
+    /// than waiting out a blocked one. A two-ended pair starts where both ends do (section 8.4).
+    pub fn start_unblocked(&mut self) {
+        if self.role.together() || !self.candidates[self.current].blocked {
+            return;
+        }
+        if let Some(first) = self.candidates.iter().position(|c| !c.blocked) {
+            self.current = first;
+        }
+    }
+
     /// A plain UDP candidate leads to `endpoint`.
     pub fn leads_to_plain(&self, endpoint: &SocketAddr) -> bool {
         self.candidates.iter().any(|c| {
