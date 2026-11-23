@@ -20,8 +20,9 @@ pub const MAX_OBFS_PADDING: u16 = 320;
 /// The maximum number of TLS relays in one configuration.
 pub const MAX_TARGETS: usize = 16;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// Handed to the transport in memory; it serializes only into the lab's event log, where the keys
+/// read as redacted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TransportConfig {
     /// Port of this machine's WireGuard: WireGuard messages received from the relay are handed to
     /// this port on the loopback address.
@@ -38,8 +39,7 @@ pub struct TransportConfig {
 }
 
 /// One relay reached over the obfuscated UDP transport.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ObfsTarget {
     /// Port on this machine's loopback address: WireGuard and the mesh send packets destined for
     /// this relay here.
@@ -50,15 +50,20 @@ pub struct ObfsTarget {
     pub padding: ObfsPadding,
 }
 
-/// A relay's obfuscation key as the transport is handed it. `Debug` does not print it, and it is
-/// zeroized when dropped (hard rule 10).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+/// A relay's obfuscation key as the transport is handed it. Neither `Debug` nor its serialized form
+/// carries it, and it is zeroized when dropped (hard rule 10).
+#[derive(Clone, PartialEq, Eq)]
 pub struct ObfsKeyBytes(pub [u8; 32]);
 
 impl fmt::Debug for ObfsKeyBytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("ObfsKeyBytes(<redacted>)")
+    }
+}
+
+impl Serialize for ObfsKeyBytes {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("<redacted>")
     }
 }
 
@@ -272,9 +277,25 @@ mod tests {
         };
         let json = serde_json::to_string(&bound).expect("json");
         assert!(json.contains(r#""interface":4"#), "{json}");
-        assert_eq!(
-            serde_json::from_str::<TransportConfig>(&json).expect("parse"),
-            bound
-        );
+    }
+
+    /// Written to the lab's event log, a configuration carries no obfuscation key.
+    #[test]
+    fn a_serialized_configuration_carries_no_key() {
+        let config = TransportConfig {
+            wireguard_port: 41820,
+            targets: vec![],
+            interface: None,
+            obfs: vec![ObfsTarget {
+                listen: "127.0.0.1:41850".parse().expect("addr"),
+                connect: "198.51.100.9:30000".parse().expect("addr"),
+                key: ObfsKeyBytes([0x5a; 32]),
+                padding: ObfsPadding { min: 0, max: 64 },
+            }],
+        };
+        let json = serde_json::to_string(&config).expect("json");
+        assert!(json.contains(r#""key":"<redacted>""#), "{json}");
+        assert!(!json.contains("90"), "no key byte (0x5a = 90): {json}");
+        assert!(!format!("{config:?}").contains("90"), "{config:?}");
     }
 }

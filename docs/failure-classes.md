@@ -287,3 +287,20 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-transport:the_opening_message_goes_first_and_is_never_dropped`
 
 **Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place.
+
+## 10. A secret is readable only where it is meant to go
+
+**Holds**: private keys, tokens, obfuscation keys and the site's relay key are written out only where they are meant to go: the files that keep them (`0600`), and the messages that deliver them to the process that uses them. Everywhere else, a log line, an error, an event file or a `Debug` print, they read as redacted (hard rule 10).
+
+**Breaks when** a type that holds a secret derives `Debug` or `Serialize`, and a structure that contains it is logged or written to an event file whole.
+
+**Where it holds**
+
+- Each key type prints as redacted: the mesh's private key, probe tokens, obfuscation keys, the relay key and the backup key;
+- The transport configuration, which the lab's event file writes whole, serializes its obfuscation keys as redacted; it goes to the transport in memory only.
+
+**Guards**
+
+- `nett-core:a_serialized_configuration_carries_no_key`
+
+**Not yet guarded**: the redacted `Debug` of each key type; each is one implementation next to its type.
