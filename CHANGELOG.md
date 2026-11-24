@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-11-24
+
 - When a machine on the userspace data plane restarts, as one that offers an obfuscated port does on
   Linux, the machines connected to it handshake again within about half a second, told through the
   Hub, where they waited about 15 seconds for WireGuard to handshake again by itself; without the
