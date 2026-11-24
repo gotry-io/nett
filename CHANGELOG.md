@@ -4,6 +4,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- The relay runs in the nett service of a machine that relays. A relay over UDP needs no second
+  service, and nett-relay runs only as the relay's TLS entry, where the relay serves TLS; an
+  upgrade removes `nett-relay.service` from a machine whose relay does not. TLS connections
+  through a relay stay open across a restart of its nett service.
+
 ## [0.10.0] - 2026-11-24
 
 - `nett site relay <machine> --obfs` also serves obfuscated UDP on the relay, for networks that

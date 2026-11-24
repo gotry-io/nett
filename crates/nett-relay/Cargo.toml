@@ -34,7 +34,3 @@ zeroize.workspace = true
 # Test directories removed when a test ends
 tempfile.workspace = true
 
-[features]
-# Lab build: relay allocation is read from a local file (design/prototype.md section 3); official
-# builds do not enable it
-lab = []

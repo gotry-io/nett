@@ -101,7 +101,6 @@ impl Mac1Key {
 
     /// Computes `mac1`: used by tests and lab tools (the flood in scenario 20) to construct
     /// handshake initiations.
-    #[cfg(any(test, feature = "lab"))]
     pub fn compute(&self, signed: &[u8]) -> [u8; 16] {
         let mut mac = Blake2sMac::<U16>::new_from_slice(&self.0).expect("32-byte key");
         mac.update(signed);

@@ -310,7 +310,11 @@ mod tests {
     struct Mesh(TransportConfig);
 
     impl HelperSource for Mesh {
-        fn relay(&self, _: Option<CertFingerprint>) -> Option<Option<RelayAssignment>> {
+        fn relay(&self) -> Option<Option<RelayAssignment>> {
+            Some(None)
+        }
+
+        fn tls_entry(&self, _: CertFingerprint) -> Option<Option<u16>> {
             Some(None)
         }
 

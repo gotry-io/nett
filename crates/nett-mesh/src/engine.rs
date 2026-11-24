@@ -95,7 +95,7 @@ pub struct Engine<D> {
     /// The assignment of the relay on this machine (design/mesh.md section 5.2), and the fingerprint and
     /// time nett-relay reported when it last fetched it.
     relay: Option<RelayAssignment>,
-    relay_fetched: Option<(Option<CertFingerprint>, Instant)>,
+    relay_fetched: Option<(CertFingerprint, Instant)>,
     /// nett-node's Hub session is up, as nett-node last reported.
     hub: bool,
     reachability: Reachability,
@@ -748,16 +748,16 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// nett-relay fetches its assignment, reporting the fingerprint of its TLS certificate.
-    pub fn relay_assignment(
-        &mut self,
-        fingerprint: Option<CertFingerprint>,
-        now: Instant,
-    ) -> Option<RelayAssignment> {
-        if self.relay.is_some() {
-            self.relay_fetched = Some((fingerprint, now));
-        }
+    /// The relay in the daemon asks for its assignment (ADR 0032).
+    pub fn relay_assignment(&self) -> Option<RelayAssignment> {
         self.relay.clone()
+    }
+
+    /// nett-relay asks for the relay's TLS port, reporting the fingerprint of its TLS certificate.
+    pub fn tls_entry(&mut self, fingerprint: CertFingerprint, now: Instant) -> Option<u16> {
+        let tls_port = self.relay.as_ref().and_then(|r| r.tls_port)?;
+        self.relay_fetched = Some((fingerprint, now));
+        Some(tls_port)
     }
 
     /// The TLS transport asks for its configuration.
@@ -1225,7 +1225,7 @@ impl<D: DataPlane> Engine<D> {
             tls_port: a.tls_port,
             members: a.members.len(),
             links: a.links.len(),
-            fingerprint: self.relay_fetched.and_then(|(f, _)| f),
+            fingerprint: self.relay_fetched.map(|(f, _)| f),
             fetched_at: self
                 .relay_fetched
                 .map(|(_, at)| status::wall_time(now, wall, at)),
@@ -1622,9 +1622,7 @@ mod tests {
         });
         let mut events = VecSink::default();
         e.apply(&validated(doc), &mut events).expect("accepted");
-        let assignment = e
-            .relay_assignment(None, Instant::now())
-            .expect("this machine relays");
+        let assignment = e.relay_assignment().expect("this machine relays");
         let address = |n: u8| {
             assignment
                 .members

@@ -43,7 +43,7 @@ pub mod linux {
     pub const RELAY: Unit = Unit {
         name: RELAY_UNIT,
         content: include_str!("../../../packaging/systemd/nett-relay.service"),
-        what: "the relay",
+        what: "the relay's TLS entry",
     };
     pub const UNITS: [Unit; 2] = [DAEMON, RELAY];
     /// The units whose files exist only while the desired state needs them (design/release.md

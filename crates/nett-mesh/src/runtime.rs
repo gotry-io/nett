@@ -65,10 +65,13 @@ enum Msg {
     /// Local status query (design/status.md section 8): the background thread builds a snapshot and returns
     /// it through this channel.
     Status(SyncSender<StatusDoc>),
-    /// nett-relay fetches its assignment (design/status.md section 3.1).
-    Relay(
-        Option<nett_core::transport::CertFingerprint>,
-        SyncSender<Option<crate::helper::RelayAssignment>>,
+    /// The relay in the daemon asks for its assignment (design/mesh.md section 5.2).
+    Relay(SyncSender<Option<crate::helper::RelayAssignment>>),
+    /// nett-relay asks for the TLS entry's port, reporting its certificate (design/status.md
+    /// section 3.1).
+    TlsEntry(
+        nett_core::transport::CertFingerprint,
+        SyncSender<Option<u16>>,
     ),
     /// The TLS transport asks for its configuration.
     Transport(SyncSender<Option<nett_core::transport::TransportConfig>>),
@@ -204,10 +207,12 @@ impl Runtime {
                             // Drop when the querying party has already timed out and left
                             let _ = reply.try_send(doc);
                         }
-                        Ok(Msg::Relay(fingerprint, reply)) => {
-                            let _ = reply.try_send(
-                                worker.engine.relay_assignment(fingerprint, Instant::now()),
-                            );
+                        Ok(Msg::Relay(reply)) => {
+                            let _ = reply.try_send(worker.engine.relay_assignment());
+                        }
+                        Ok(Msg::TlsEntry(fingerprint, reply)) => {
+                            let _ = reply
+                                .try_send(worker.engine.tls_entry(fingerprint, Instant::now()));
                         }
                         Ok(Msg::Transport(reply)) => {
                             let _ = reply.try_send(worker.engine.transport_config());
@@ -344,12 +349,15 @@ impl StatusSource for RuntimeStatus {
 }
 
 impl crate::helper::HelperSource for RuntimeStatus {
-    fn relay(
-        &self,
-        fingerprint: Option<nett_core::transport::CertFingerprint>,
-    ) -> Option<Option<crate::helper::RelayAssignment>> {
+    fn relay(&self) -> Option<Option<crate::helper::RelayAssignment>> {
         let (reply, answer) = sync_channel(1);
-        self.tx.try_send(Msg::Relay(fingerprint, reply)).ok()?;
+        self.tx.try_send(Msg::Relay(reply)).ok()?;
+        answer.recv_timeout(QUERY_TIMEOUT).ok()
+    }
+
+    fn tls_entry(&self, fingerprint: nett_core::transport::CertFingerprint) -> Option<Option<u16>> {
+        let (reply, answer) = sync_channel(1);
+        self.tx.try_send(Msg::TlsEntry(fingerprint, reply)).ok()?;
         answer.recv_timeout(QUERY_TIMEOUT).ok()
     }
 

@@ -117,9 +117,10 @@ pub struct RelayStatus {
     pub tls_port: Option<u16>,
     pub members: usize,
     pub links: usize,
-    /// The fingerprint of the TLS certificate nett-relay reported when it last fetched its assignment.
+    /// The fingerprint of the TLS certificate nett-relay, the relay's TLS entry, reported when it last
+    /// asked for its port.
     pub fingerprint: Option<nett_core::transport::CertFingerprint>,
-    /// When nett-relay last fetched its assignment; empty when it has not since the mesh started.
+    /// When nett-relay last asked for its port; empty when it has not since the mesh started.
     pub fetched_at: Option<Timestamp>,
 }
 

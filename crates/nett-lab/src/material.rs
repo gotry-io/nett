@@ -17,9 +17,8 @@ use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
     Candidate, DesiredMeshDoc, MeshPrefixes, ObfsPadding, ObfsSecret, PathDoc, ProbeToken,
-    Reachability, RelayObfsDoc,
+    Reachability, RelayDoc, RelayMemberDoc, RelayObfsDoc,
 };
-use nett_relay::lab::{MemberDoc, RelayConfig, TlsDoc};
 use nett_trust::admission::{
     AdmissionMaterial, AdmissionProof, AdmissionProofDoc, AdmissionProofKind,
 };
@@ -499,14 +498,13 @@ pub fn generate(
         if fingerprints.contains_key(relay) {
             continue;
         }
-        let dir = nodes
+        let node = nodes
             .iter()
             .find(|n| n.name == relay)
-            .context("relay node")?
-            .dir
-            .clone();
-        let ip = addresses.public_ipv4(relay).context("relay address")?;
-        fingerprints.insert(relay.to_owned(), self_signed(ip, &dir)?);
+            .context("relay node")?;
+        let cert = nett_relay::cert::RelayCert::load_or_create(&relay_cert_dir(node))
+            .context("the relay's certificate")?;
+        fingerprints.insert(relay.to_owned(), cert.fingerprint());
     }
     // Relays with an obfuscated port: one key each, shared by its members (design/obfuscation.md
     // section 4)
@@ -518,7 +516,7 @@ pub fn generate(
         .filter(|(_, over)| *over == Over::Obfs)
         .map(|(relay, _)| (relay.to_owned(), random_token()))
         .collect();
-    write_relay_configs(topo, addresses, &nodes, &tokens, &fingerprints, &obfs_keys)?;
+    let relays = relay_docs(topo, addresses, &nodes, &tokens, &fingerprints, &obfs_keys)?;
 
     let access_rules = signer.access_rules(topo, &nodes, &edges)?;
     let names: BTreeMap<NodeId, NodeName> = nodes
@@ -627,8 +625,7 @@ pub fn generate(
             advertised_routes: routes.clone(),
             devices: vec![],
             names: names.clone(),
-            // Lab relays are separate processes with their own assignment file
-            relay: None,
+            relay: relays.get(&node.name).cloned(),
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {
@@ -727,88 +724,84 @@ fn random_token() -> [u8; 32] {
     token
 }
 
-/// One relay assignment per relay node: the mesh public keys of both ends of the connections
-/// through it, the address of the `public` end, and each member's token.
-fn write_relay_configs(
+/// The relay section of each relay node's desired state (design/mesh.md section 5.2), as the site
+/// composes it: the connections through it, the address of the `public` end, and each member's
+/// token; the TLS port when it serves TLS and the obfuscated port when it offers one. The relay runs
+/// in the node's nett daemon (ADR 0032).
+fn relay_docs(
     topo: &Topology,
     addresses: &dyn Addresses,
     nodes: &[LabNode],
     tokens: &BTreeMap<(String, String), [u8; 32]>,
     fingerprints: &BTreeMap<String, CertFingerprint>,
     obfs_keys: &BTreeMap<String, [u8; 32]>,
-) -> anyhow::Result<()> {
-    let key_of = |name: &str| {
+) -> anyhow::Result<BTreeMap<String, RelayDoc>> {
+    let id_of = |name: &str| {
         nodes
             .iter()
             .find(|n| n.name == name)
-            .map(|n| n.mesh_public_key)
+            .map(|n| n.node_id.clone())
+            .with_context(|| format!("node {name}"))
     };
+    let mut docs = BTreeMap::new();
     for relay in topo
         .nodes
         .iter()
         .filter(|n| n.roles.iter().any(|r| r == "relay"))
     {
-        let mut members = Vec::new();
-        let mut connections = Vec::new();
+        let mut members: Vec<RelayMemberDoc> = Vec::new();
+        let mut links = Vec::new();
         for link in topo.links.iter().filter(|l| {
             l.candidates
                 .iter()
                 .any(|c| relay_of(c).is_some_and(|(r, _)| r == relay.name))
         }) {
             for member in &link.peers {
-                if members
-                    .iter()
-                    .any(|m: &MemberDoc| Some(m.public_key) == key_of(member))
-                {
+                let node = id_of(member)?;
+                if members.iter().any(|m| m.node == node) {
                     continue;
                 }
-                members.push(MemberDoc {
-                    public_key: key_of(member).context("member key")?,
+                members.push(RelayMemberDoc {
+                    node,
                     address: addresses
                         .public_ipv4(member)
                         .map(|ip| SocketAddr::new(ip.into(), LISTEN_PORT)),
-                    token: tokens[&(member.clone(), relay.name.clone())],
+                    token: ProbeToken(tokens[&(member.clone(), relay.name.clone())]),
                 });
             }
-            connections.push([
-                key_of(&link.peers[0]).context("member key")?,
-                key_of(&link.peers[1]).context("member key")?,
-            ]);
+            links.push([id_of(&link.peers[0])?, id_of(&link.peers[1])?]);
         }
-        let dir = nodes
-            .iter()
-            .find(|n| n.name == relay.name)
-            .context("relay node")?
-            .dir
-            .clone();
-        let tls = fingerprints.contains_key(&relay.name).then(|| TlsDoc {
-            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_TLS_PORT),
-            cert: dir.join(TLS_CERT),
-            key: dir.join(TLS_KEY),
-        });
-        let config = RelayConfig {
-            listen: SocketAddr::new(std::net::Ipv6Addr::UNSPECIFIED.into(), RELAY_PORT),
-            tls,
-            obfs: obfs_keys.get(&relay.name).map(|key| RelayObfsDoc {
-                port: RELAY_OBFS_PORT,
-                key: ObfsSecret(*key),
-                padding: OBFS_PADDING,
-            }),
-            members,
-            connections,
-        };
-        write_json(&dir.join("relay.json"), &config)?;
+        docs.insert(
+            relay.name.clone(),
+            RelayDoc {
+                port: RELAY_PORT,
+                tls_port: fingerprints
+                    .contains_key(&relay.name)
+                    .then_some(RELAY_TLS_PORT),
+                members,
+                links,
+                obfs: obfs_keys.get(&relay.name).map(|key| RelayObfsDoc {
+                    port: RELAY_OBFS_PORT,
+                    key: ObfsSecret(*key),
+                    padding: OBFS_PADDING,
+                }),
+            },
+        );
     }
-    Ok(())
+    Ok(docs)
+}
+
+/// The directory of a relay node's TLS certificate, as the nett service creates it in
+/// `/etc/nett/relay` (design/mesh.md section 5.3).
+pub fn relay_cert_dir(node: &LabNode) -> PathBuf {
+    node.dir.join("relay")
 }
 
 const TLS_CERT: &str = "tls-cert.pem";
 const TLS_KEY: &str = "tls-key.pem";
 
-/// Self-signed certificate of the relay (used only in lab runs; in a real deployment the relay node
-/// generates it itself, and the private key never leaves the node). Returns the DER of the leaf
-/// certificate
-/// SHA-256.
+/// A self-signed certificate for the Hub in lab runs, for `ip`. Returns the SHA-256 of the DER of
+/// the leaf certificate.
 pub(crate) fn self_signed(ip: Ipv4Addr, dir: &Path) -> anyhow::Result<CertFingerprint> {
     let (cert, key) = (dir.join(TLS_CERT), dir.join(TLS_KEY));
     cmd::run(

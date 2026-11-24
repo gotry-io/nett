@@ -1,21 +1,18 @@
-# The nett relay: forwards encrypted WireGuard packets between members that cannot reach each other
-# directly, over UDP and TLS. It holds no keys of the mesh and sees only ciphertext.
-# The nett service enables it while this machine runs a relay (`nett site relay`). It fetches its
-# assignment from the nett service through /run/nett/helpers.sock. Its TLS certificate, created by
-# the nett service in /etc/nett/relay, reaches it through LoadCredential; it saves its bindings in
-# /run/nett-relay, which is kept while the service restarts.
+# The nett relay's TLS entry: accepts the TLS connections of members whose UDP is blocked and hands
+# each to the relay in the nett service, which forwards the encrypted WireGuard packets. It holds no
+# keys of the mesh and sees only ciphertext.
+# The nett service enables it while this machine's relay serves TLS (`nett site relay --tls`). It
+# asks the nett service for its ports through /run/nett/helpers.sock. Its TLS certificate, created
+# by the nett service in /etc/nett/relay, reaches it through LoadCredential.
 [Unit]
 Description=nett relay
 After=network-online.target nett.service
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/lib/nett/nett relay --cert ${CREDENTIALS_DIRECTORY} --state ${RUNTIME_DIRECTORY}/relay-state.json
+ExecStart=/usr/local/lib/nett/nett relay --cert ${CREDENTIALS_DIRECTORY}
 LoadCredential=tls-cert.der:/etc/nett/relay/tls-cert.der
 LoadCredential=tls-key.pk8:/etc/nett/relay/tls-key.pk8
-RuntimeDirectory=nett-relay
-RuntimeDirectoryMode=0700
-RuntimeDirectoryPreserve=restart
 # A user systemd allocates while the service runs, which may bind ports below 1024 (TLS on 443) and
 # nothing else
 DynamicUser=yes
@@ -30,9 +27,9 @@ ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
-# Idle use stays under 5 MB; the limit leaves room for many links and TLS connections
+# Idle use stays under 5 MB; the limit leaves room for many TLS connections
 MemoryMax=64M
-# It also exits to bind new ports when its assignment changes them
+# It also exits to listen on new ports when they change
 Restart=always
 RestartSec=2
 

@@ -1,7 +1,7 @@
 # nett on this machine: the mesh (WireGuard, path selection, the DNS responder for names under
-# nett.internal), the TLS transport, and, once the machine has joined a Hub, the connection to its
-# Hub, which also installs new releases into /usr/local/lib/nett after verifying their release
-# signature. Installed by `sudo nett install`.
+# nett.internal), the relay when this machine relays for others, the TLS transport, and, once the
+# machine has joined a Hub, the connection to its Hub, which also installs new releases into
+# /usr/local/lib/nett after verifying their release signature. Installed by `sudo nett install`.
 # Everything it keeps is in /etc/nett, root only: the keys, the desired state, the Hub settings and
 # the trust store. After the desired state changes, `systemctl reload nett` applies it without a
 # restart.
@@ -14,17 +14,20 @@ Wants=network-online.target
 ExecStart=/usr/local/lib/nett/nett daemon --dir /etc/nett
 ExecReload=/bin/kill -HUP $MAINPID
 # Local sockets in /run/nett: mesh.sock answers every local user's status queries and takes changes
-# only from root; helpers.sock gives the relay its assignment and answers only the relay's unit.
-# Others can reach a known name in the directory but not list it
+# only from root; helpers.sock gives the relay's TLS entry its ports and answers only its unit.
+# Others can reach a known name in the directory but not list it. The relay keeps its bindings
+# here too, so connections through it survive a restart of this service; a reboot clears them
 RuntimeDirectory=nett
 RuntimeDirectoryMode=0711
+RuntimeDirectoryPreserve=restart
 # Names under nett.internal go to this machine's DNS responder through systemd-resolved; this step
 # runs with full privileges, changes only the settings of nett0, and does nothing without
 # systemd-resolved
 ExecStartPost=+/usr/local/lib/nett/nett resolver
 # Root, with only the capabilities for WireGuard, nftables, path probes and the DNS responder on the
 # mesh address (UDP 53). It writes only its own directory, the program it upgrades and nett's units;
-# the only program it runs is systemctl, to start or stop the relay and to reload nett's units
+# the only program it runs is systemctl, to start or stop the relay's TLS entry and to reload nett's
+# units
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
 ProtectSystem=strict

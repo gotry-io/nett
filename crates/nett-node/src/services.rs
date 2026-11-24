@@ -1,6 +1,7 @@
 //! nett's services on a machine set up by `sudo nett install` (design/hub.md section 5, design/
-//! release.md section 7): the nett service itself and, on Linux, the relay, which runs only while
-//! the desired state needs it; the units follow the program through upgrades. Every call is
+//! release.md section 7): the nett service itself and, on Linux, nett-relay, the relay's TLS entry,
+//! which runs only while the relay serves TLS (ADR 0032); the units follow the program through
+//! upgrades. Every call is
 //! blocking (it runs systemctl or launchctl): async callers use a blocking thread.
 
 use std::path::Path;
@@ -13,14 +14,15 @@ pub use systemd::{reconcile, refresh_units};
 /// The optional services a desired state needs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Wants {
-    /// This machine runs a relay.
-    pub relay: bool,
+    /// This machine's relay serves TLS: nett-relay is its entry (the relay itself runs in the nett
+    /// daemon).
+    pub relay_tls: bool,
 }
 
 impl Wants {
     pub fn of(doc: &DesiredMeshDoc) -> Self {
         Self {
-            relay: doc.relay.is_some(),
+            relay_tls: doc.relay.as_ref().is_some_and(|r| r.tls_port.is_some()),
         }
     }
 }
@@ -82,15 +84,15 @@ mod systemd {
         let mut problems = Vec::new();
         // Nothing runs a relay on DSM (design/dsm.md section 2)
         if !optional.contains(&RELAY) {
-            if wants.relay {
+            if wants.relay_tls {
                 problems.push(
-                    "this machine's desired state runs a relay, which nett does not run on Synology DSM"
+                    "this machine's relay serves TLS, whose entry nett does not run on Synology DSM; give the relay --no-tls"
                         .to_owned(),
                 );
             }
             return problems;
         }
-        if let Err(e) = set_running(RELAY, wants.relay) {
+        if let Err(e) = set_running(RELAY, wants.relay_tls) {
             tracing::warn!(unit = RELAY.name, error = %e, "changing the relay service");
             problems.push(e);
         }
@@ -269,8 +271,25 @@ mod tests {
             )
             .expect("relay");
         sign(&mut state);
-        assert_eq!(Wants::of(&desired(&state, "vps")), Wants { relay: true });
+        assert_eq!(
+            Wants::of(&desired(&state, "vps")),
+            Wants { relay_tls: true }
+        );
         assert_eq!(Wants::of(&desired(&state, "mac")), Wants::default());
+        // A relay over UDP only runs in the daemon and needs no nett-relay
+        state
+            .set_relay(
+                &name("vps"),
+                Some(RelayRole {
+                    tls_port: None,
+                    ..role(None)
+                }),
+                RelayKey([9; 32]),
+                nett_mesh::config::ObfsPadding { min: 16, max: 200 },
+            )
+            .expect("relay");
+        sign(&mut state);
+        assert_eq!(Wants::of(&desired(&state, "vps")), Wants::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

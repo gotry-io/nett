@@ -66,4 +66,4 @@ tempfile.workspace = true
 # Lab build: lab options of the mesh process (event file, simulated clock skew, transport adapter
 # configuration file), and the relay reading its assignment from a file (design/prototype.md
 # sections 3 and 7); not enabled in official builds
-lab = ["nett-mesh/lab", "nett-relay/lab"]
+lab = ["nett-mesh/lab"]

@@ -1,12 +1,15 @@
-//! The helper socket (design/status.md section 3.1): on Linux nett-relay runs as a user systemd
-//! allocates and fetches its assignment from the nett daemon here (ADR 0013). It is answered only
-//! for a process of the relay's systemd unit (and root), because the replies hold probe tokens. The
-//! TLS transport in the daemon asks the same source directly.
+//! The helper socket (design/status.md section 3.1): on Linux nett-relay, the relay's public TCP
+//! entry, runs as a user systemd allocates and asks the nett daemon here for its ports, reporting
+//! its certificate's fingerprint (ADR 0032). It is answered only for a process of the relay's
+//! systemd unit (and root), since what it reports reaches the Hub. The relay and the transports in
+//! the daemon ask the same source directly.
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::SocketAddr;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use nett_core::transport::{CertFingerprint, TransportConfig};
@@ -31,34 +34,41 @@ pub fn socket_path(status: &Path) -> PathBuf {
     status.with_file_name(SOCKET_NAME)
 }
 
-/// The relay assignment handed to nett-relay (design/mesh.md section 5.2): the members' mesh public keys
-/// resolved from the verified admission material.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+/// The relay assignment the relay in the daemon serves (design/mesh.md section 5.2): the members'
+/// mesh public keys resolved from the verified admission material.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelayAssignment {
     pub port: u16,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_port: Option<u16>,
     pub members: Vec<AssignedMember>,
     pub links: Vec<[X25519PublicKey; 2]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub obfs: Option<crate::config::RelayObfsDoc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssignedMember {
     pub public_key: X25519PublicKey,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<SocketAddr>,
     pub token: ProbeToken,
 }
 
-/// The mesh behind the helper socket and the TLS transport.
+/// What nett-relay needs to serve the relay's TLS entry (design/mesh.md section 5.3): the TCP port to
+/// listen on, and the loopback port of the relay in the daemon it hands each connection to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TlsEntry {
+    pub tls_port: u16,
+    pub handoff_port: u16,
+}
+
+/// The mesh behind the helper socket, the relay and the transports.
 pub trait HelperSource: Send + 'static {
-    /// The current relay assignment (`None` inside when this machine is not a relay), recording the
+    /// The current relay assignment (`None` inside when this machine is not a relay); `None` when the
+    /// background thread is busy.
+    fn relay(&self) -> Option<Option<RelayAssignment>>;
+    /// The relay's TLS port (`None` inside when this machine's relay serves no TLS), recording the
     /// fingerprint nett-relay reported; `None` when the background thread is busy.
-    fn relay(&self, fingerprint: Option<CertFingerprint>) -> Option<Option<RelayAssignment>>;
+    fn tls_entry(&self, fingerprint: CertFingerprint) -> Option<Option<u16>>;
     /// The TLS transport's configuration (`None` inside before the interface is ready); `None` when
     /// the background thread is busy.
     fn transport(&self) -> Option<Option<TransportConfig>>;
@@ -73,9 +83,9 @@ struct Request {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct RelayReply {
+struct TlsEntryReply {
     v: u32,
-    relay: Option<RelayAssignment>,
+    entry: Option<TlsEntry>,
 }
 
 /// The thread that answers the helpers. Dropping it stops the thread and deletes the socket.
@@ -85,18 +95,27 @@ pub struct HelperServer {
 
 impl HelperServer {
     /// Creates the socket at `path` (`0666`: every connection is checked by the caller's user) and
-    /// starts accepting connections.
-    pub fn spawn(path: &Path, source: impl HelperSource) -> std::io::Result<Self> {
+    /// starts accepting connections. `handoff` is the relay's hand-off port, 0 while the relay has
+    /// none.
+    pub fn spawn(
+        path: &Path,
+        source: impl HelperSource,
+        handoff: Arc<AtomicU16>,
+    ) -> std::io::Result<Self> {
         LocalServer::spawn(path, 0o666, "nett-helpers", move |stream| {
-            handle(stream, &source)
+            handle(stream, &source, &handoff)
         })
         .map(|server| Self { _server: server })
     }
 }
 
-fn handle(stream: UnixStream, source: &impl HelperSource) -> std::io::Result<()> {
+fn handle(
+    stream: UnixStream,
+    source: &impl HelperSource,
+    handoff: &AtomicU16,
+) -> std::io::Result<()> {
     stream.set_write_timeout(Some(IO_TIMEOUT))?;
-    let result = answer(&stream, source);
+    let result = answer(&stream, source, handoff);
     let _ = stream.shutdown(std::net::Shutdown::Write);
     let _ = std::io::copy(
         &mut Deadline::new(&stream).take(MAX_DRAIN),
@@ -105,7 +124,11 @@ fn handle(stream: UnixStream, source: &impl HelperSource) -> std::io::Result<()>
     result
 }
 
-fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()> {
+fn answer(
+    stream: &UnixStream,
+    source: &impl HelperSource,
+    handoff: &AtomicU16,
+) -> std::io::Result<()> {
     let uid = peer_uid(stream)?;
     let mut line = String::new();
     BufReader::new(Deadline::new(stream).take(MAX_REQUEST)).read_line(&mut line)?;
@@ -124,13 +147,24 @@ fn answer(stream: &UnixStream, source: &impl HelperSource) -> std::io::Result<()
     }
     let allowed = uid == 0 || caller_unit(stream).as_deref() == Some(RELAY_UNIT);
     let bytes = match request.query.as_str() {
-        "relay" if allowed => {
-            let Some(relay) = source.relay(request.fingerprint) else {
+        "tls_entry" if allowed => {
+            let Some(fingerprint) = request.fingerprint else {
+                return reply_error(stream, "bad_request", "the query needs a fingerprint");
+            };
+            let Some(tls_port) = source.tls_entry(fingerprint) else {
                 return reply_error(stream, "busy", "the nett daemon is busy; try again");
             };
-            serde_json::to_vec(&RelayReply { v: VERSION, relay })
+            // The entry has nothing to hand connections to until the relay has its port
+            let handoff_port = handoff.load(Ordering::Acquire);
+            let entry = tls_port
+                .filter(|_| handoff_port != 0)
+                .map(|tls_port| TlsEntry {
+                    tls_port,
+                    handoff_port,
+                });
+            serde_json::to_vec(&TlsEntryReply { v: VERSION, entry })
         }
-        "relay" => {
+        "tls_entry" => {
             return reply_error(
                 stream,
                 "permission_denied",
@@ -194,16 +228,17 @@ fn status_uid(status: &str) -> Option<u32> {
     line.split_whitespace().nth(1)?.parse().ok()
 }
 
-/// nett-relay: fetches its assignment, reporting the fingerprint of its TLS certificate.
-pub fn fetch_relay(
+/// nett-relay: asks for the TLS entry's ports, reporting the fingerprint of its TLS certificate.
+pub fn fetch_tls_entry(
     path: &Path,
-    fingerprint: Option<CertFingerprint>,
-) -> Result<Option<RelayAssignment>, QueryError> {
-    let request = serde_json::json!({"v": VERSION, "query": "relay", "fingerprint": fingerprint});
+    fingerprint: CertFingerprint,
+) -> Result<Option<TlsEntry>, QueryError> {
+    let request =
+        serde_json::json!({"v": VERSION, "query": "tls_entry", "fingerprint": fingerprint});
     let value = send(path, &request, QUERY_TIMEOUT)?;
-    let reply: RelayReply =
+    let reply: TlsEntryReply =
         serde_json::from_value(value).map_err(|e| QueryError::Reply(e.to_string()))?;
-    Ok(reply.relay)
+    Ok(reply.entry)
 }
 
 #[cfg(test)]
@@ -213,12 +248,11 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct Fake {
-        seen: Arc<Mutex<Vec<Option<CertFingerprint>>>>,
+        seen: Arc<Mutex<Vec<CertFingerprint>>>,
     }
 
     impl HelperSource for Fake {
-        fn relay(&self, fingerprint: Option<CertFingerprint>) -> Option<Option<RelayAssignment>> {
-            self.seen.lock().expect("lock").push(fingerprint);
+        fn relay(&self) -> Option<Option<RelayAssignment>> {
             Some(Some(RelayAssignment {
                 port: 41822,
                 tls_port: Some(443),
@@ -232,11 +266,18 @@ mod tests {
             }))
         }
 
+        fn tls_entry(&self, fingerprint: CertFingerprint) -> Option<Option<u16>> {
+            self.seen.lock().expect("lock").push(fingerprint);
+            Some(Some(443))
+        }
+
         fn transport(&self) -> Option<Option<TransportConfig>> {
             Some(None)
         }
     }
 
+    /// nett-relay gets the TLS port and the relay's hand-off port, and its fingerprint is recorded;
+    /// before the relay has a hand-off port it gets nothing to serve.
     #[test]
     fn helpers_fetch_their_configuration() {
         let dir_tmp = tempfile::Builder::new()
@@ -247,7 +288,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join(SOCKET_NAME);
         let fake = Fake::default();
-        let server = HelperServer::spawn(&path, fake.clone()).expect("server");
+        let handoff = Arc::new(AtomicU16::new(0));
+        let server = HelperServer::spawn(&path, fake.clone(), handoff.clone()).expect("server");
         use std::os::unix::fs::PermissionsExt as _;
         let mode = std::fs::metadata(&path)
             .expect("socket")
@@ -263,11 +305,20 @@ mod tests {
         // Tests run as root in the lab container and as a normal user elsewhere: only root (or the
         // helper's own user) gets an answer
         let me = rustix::process::geteuid().as_raw();
-        match fetch_relay(&path, Some(fingerprint)) {
-            Ok(relay) => {
+        match fetch_tls_entry(&path, fingerprint) {
+            Ok(entry) => {
                 assert_eq!(me, 0);
-                assert_eq!(relay.expect("assigned").port, 41822);
-                assert_eq!(*fake.seen.lock().expect("lock"), [Some(fingerprint)]);
+                assert_eq!(entry, None, "no hand-off port yet");
+                handoff.store(50123, Ordering::Release);
+                let entry = fetch_tls_entry(&path, fingerprint).expect("entry");
+                assert_eq!(
+                    entry,
+                    Some(TlsEntry {
+                        tls_port: 443,
+                        handoff_port: 50123
+                    })
+                );
+                assert_eq!(*fake.seen.lock().expect("lock"), [fingerprint, fingerprint]);
             }
             Err(QueryError::Refused { code, .. }) => {
                 assert_ne!(me, 0);

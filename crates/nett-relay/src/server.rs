@@ -1,59 +1,40 @@
-//! The relay's receive/send loop (design/mesh.md sections 5.1-5.3): one single-threaded tokio task
-//! owns the [`Relay`] and receives UDP packets and messages on TLS (WebSocket) connections, then
-//! forwards or answers according to the result. Each TLS connection has its own task, which
-//! exchanges messages with the main loop only over bounded channels; when a queue is full the
-//! packet is dropped (WireGuard retransmits on its own) and the main loop never blocks.
+//! The relay's receive/send loop (design/mesh.md sections 5.1-5.3), in the nett daemon (ADR 0032):
+//! one task owns the [`Relay`] and receives on the relay port, the obfuscated port and the TLS
+//! hand-off port, then forwards or answers according to the result. nett-relay terminates each TLS
+//! connection and hands its messages here from a socket of its own on the loopback address, one
+//! datagram each; an empty datagram says the connection closed. A packet that cannot go out at once
+//! is dropped (WireGuard retransmits on its own), so the loop never blocks.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use futures_util::{SinkExt as _, StreamExt as _};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio_rustls::TlsAcceptor;
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 use crate::relay::{AssignedMember, ConnId, Outcome, PeerAddr, Relay, RelayState};
 use nett_transport::obfs::{Obfuscator, Salts};
-use nett_transport::queue;
 use nett_trust::keys::X25519PublicKey;
 use ring::rand::SystemRandom;
 
 const EXPIRE_INTERVAL: Duration = Duration::from_secs(1);
 /// Outer packets are at most about 1360 bytes (design/mesh.md section 4); leave some margin.
-const MAX_DATAGRAM: usize = 2048;
+pub(crate) const MAX_DATAGRAM: usize = 2048;
 /// A datagram on the obfuscated port: a message of up to [`MAX_DATAGRAM`] with the salt, the sealed
 /// form's header and tag, and the largest padding.
 const MAX_OBFS_DATAGRAM: usize = MAX_DATAGRAM + 512;
 /// Interval for saving state (design/mesh.md section 5.2).
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
 /// Upper limit on TLS connections, and on those among them that are waiting for authentication.
-const MAX_TLS_CONNECTIONS: usize = 1024;
-const MAX_UNAUTHENTICATED: usize = 64;
-/// Time limit for the TLS and WebSocket handshakes; how long after a connection is established an
-/// authenticated probe must arrive (design/mesh.md section 5.3).
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
-/// The queue of messages the TLS connections hand to the main loop; each connection's send queue is
-/// [`nett_transport::queue`].
-const EVENT_QUEUE: usize = 4096;
-
-/// Listens for the TLS entry point on `addr`.
-pub fn tls_listener(addr: SocketAddr) -> std::io::Result<TcpListener> {
-    let socket = if addr.is_ipv4() {
-        tokio::net::TcpSocket::new_v4()?
-    } else {
-        tokio::net::TcpSocket::new_v6()?
-    };
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr)?;
-    socket.listen(1024)
-}
+pub(crate) const MAX_TLS_CONNECTIONS: usize = 1024;
+pub(crate) const MAX_UNAUTHENTICATED: usize = 64;
+/// How long after a connection opens an authenticated probe must arrive (design/mesh.md section 5.3).
+pub(crate) const AUTH_TIMEOUT: Duration = Duration::from_secs(30);
+/// A TLS connection the relay has heard nothing from for this long is taken as gone, as when
+/// nett-relay ended without saying so: its member keeps a keepalive every 25 seconds.
+const HANDOFF_IDLE: Duration = Duration::from_secs(120);
 
 /// The obfuscated port (design/obfuscation.md section 2): what arrives is unwrapped before it is
 /// routed, and what goes to a member bound here is wrapped.
@@ -63,22 +44,32 @@ pub struct ObfsIngress {
     pub rng: SystemRandom,
 }
 
-/// The TLS entry point on the relay port.
-pub struct TlsIngress {
-    pub listener: TcpListener,
-    pub acceptor: TlsAcceptor,
-}
-
-enum Event {
-    Opened(ConnId, queue::Sender<Vec<u8>>),
-    Packet(ConnId, Vec<u8>),
-    Closed(ConnId),
-}
-
-struct Conn {
-    tx: queue::Sender<Vec<u8>>,
+/// One TLS connection, as nett-relay hands it over: the loopback address it sends from.
+struct Handoff {
+    id: ConnId,
     opened: Instant,
+    seen: Instant,
     authenticated: bool,
+}
+
+/// The TLS connections handed over, by the address they come from and by their ID.
+#[derive(Default)]
+struct Handoffs {
+    by_addr: HashMap<SocketAddr, Handoff>,
+    by_id: HashMap<ConnId, SocketAddr>,
+    next: u64,
+}
+
+impl Handoffs {
+    fn remove(&mut self, from: SocketAddr, relay: &mut Relay) {
+        if let Some(conn) = self.by_addr.remove(&from) {
+            self.by_id.remove(&conn.id);
+            if conn.authenticated {
+                tracing::info!(conn = conn.id.0, "TLS connection closed");
+            }
+            relay.closed(conn.id);
+        }
+    }
 }
 
 /// A changed assignment from the mesh (design/mesh.md section 5.2).
@@ -91,14 +82,14 @@ pub struct Assignment {
 /// Bound on assignments waiting to be applied: the fetcher sends one only when it changed.
 pub const ASSIGNMENT_QUEUE: usize = 4;
 
-/// Runs until `shutdown` completes. `udp` is the dual-stack relay port, `obfs` the obfuscated port when
-/// the relay offers it. `state` is the file holding
-/// the index table: restored at startup, and written once per second and again before exit, so
-/// connections through the relay survive a restart. Assignments arriving on `updates` are applied in
-/// place.
+/// Runs until `shutdown` completes. `udp` is the dual-stack relay port, `handoff` the loopback port
+/// nett-relay hands TLS connections to when the relay serves TLS, `obfs` the obfuscated port when
+/// the relay offers it. `state` is the file holding the index table: restored at startup, and
+/// written once per second and again before exit, so connections through the relay survive a
+/// restart. Assignments arriving on `updates` are applied in place.
 pub async fn serve(
     udp: UdpSocket,
-    tls: Option<TlsIngress>,
+    handoff: Option<UdpSocket>,
     obfs: Option<ObfsIngress>,
     mut relay: Relay,
     state: Option<PathBuf>,
@@ -124,10 +115,9 @@ pub async fn serve(
             Err(error) => tracing::warn!(%error, "relay state not restored"),
         }
     }
-    let (events_tx, mut events) = mpsc::channel(EVENT_QUEUE);
-    let mut conns: HashMap<ConnId, Conn> = HashMap::new();
-    let mut next_conn = 0u64;
+    let mut conns = Handoffs::default();
     let mut buf = vec![0u8; MAX_DATAGRAM];
+    let mut hbuf = vec![0u8; MAX_DATAGRAM];
     // The obfuscated port's datagram, what it unwraps to, and what is wrapped for a member bound there
     let mut obuf = vec![0u8; MAX_OBFS_DATAGRAM];
     let mut plain = Vec::with_capacity(MAX_DATAGRAM);
@@ -150,9 +140,46 @@ pub async fn serve(
                 let from = PeerAddr::Udp(unmap(from));
                 let packet = &buf[..len];
                 let outcome = relay.handle(from, packet, Instant::now(), now_ms());
-                dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, packet, outcome, &mut dropped);
+                dispatch(&udp, handoff.as_ref(), obfs.as_ref(), &mut wire, &conns.by_id, from, packet, outcome, &mut dropped);
             }
-            received = recv_obfs(obfs.as_ref(), &mut obuf) => {
+            received = recv_on(handoff.as_ref(), &mut hbuf) => {
+                let (len, from) = received?;
+                if len == 0 {
+                    conns.remove(from, &mut relay);
+                    continue;
+                }
+                let now = Instant::now();
+                let unauthenticated = conns.by_addr.values().filter(|c| !c.authenticated).count();
+                if !conns.by_addr.contains_key(&from) {
+                    if conns.by_addr.len() >= MAX_TLS_CONNECTIONS || unauthenticated >= MAX_UNAUTHENTICATED {
+                        dropped += 1;
+                        continue;
+                    }
+                    conns.next += 1;
+                    let id = ConnId(conns.next);
+                    conns.by_id.insert(id, from);
+                    conns.by_addr.insert(from, Handoff { id, opened: now, seen: now, authenticated: false });
+                }
+                let Some(conn) = conns.by_addr.get_mut(&from) else { continue };
+                conn.seen = now;
+                let packet = &hbuf[..len];
+                if conn.authenticated {
+                    let from = PeerAddr::Tls(conn.id);
+                    let outcome = relay.handle(from, packet, now, now_ms());
+                    dispatch(&udp, handoff.as_ref(), obfs.as_ref(), &mut wire, &conns.by_id, from, packet, outcome, &mut dropped);
+                } else if let Some(reply) = relay.authenticate(conn.id, packet, now_ms()) {
+                    conn.authenticated = true;
+                    tracing::info!(conn = conn.id.0, "TLS connection authenticated");
+                    if let Some(h) = handoff.as_ref() {
+                        drop(h.try_send_to(&reply, from));
+                    }
+                } else {
+                    // The first message is not an authenticated probe: forget the connection and
+                    // send no reply; nett-relay closes it when nothing comes back in time
+                    conns.remove(from, &mut relay);
+                }
+            }
+            received = recv_on(obfs.as_ref().map(|o| &o.socket), &mut obuf) => {
                 let (len, from) = received?;
                 let Some(o) = obfs.as_ref() else { continue };
                 // What does not unwrap is dropped and gets no answer (hard rule 2)
@@ -162,7 +189,7 @@ pub async fn serve(
                 }
                 let from = PeerAddr::Obfs(unmap(from));
                 let outcome = relay.handle(from, &plain, Instant::now(), now_ms());
-                dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, &plain, outcome, &mut dropped);
+                dispatch(&udp, handoff.as_ref(), obfs.as_ref(), &mut wire, &conns.by_id, from, &plain, outcome, &mut dropped);
             }
             Some(update) = next_update(&mut updates) => {
                 match relay.reassign(&update.members, &update.connections) {
@@ -174,51 +201,25 @@ pub async fn serve(
                     Err(error) => tracing::warn!(%error, "relay assignment not applied; keeping the previous one"),
                 }
             }
-            accepted = accept(tls.as_ref()) => {
-                let Ok((stream, peer)) = accepted else { continue };
-                let unauthenticated = conns.values().filter(|c| !c.authenticated).count();
-                if conns.len() >= MAX_TLS_CONNECTIONS || unauthenticated >= MAX_UNAUTHENTICATED {
-                    tracing::debug!(%peer, "too many TLS connections; closing");
-                    continue;
-                }
-                let Some(ingress) = tls.as_ref() else { continue };
-                next_conn += 1;
-                let id = ConnId(next_conn);
-                tokio::spawn(connection(id, stream, ingress.acceptor.clone(), events_tx.clone()));
-            }
-            Some(event) = events.recv() => match event {
-                Event::Opened(id, tx) => {
-                    conns.insert(id, Conn { tx, opened: Instant::now(), authenticated: false });
-                }
-                Event::Packet(id, packet) => {
-                    let Some(conn) = conns.get_mut(&id) else { continue };
-                    if conn.authenticated {
-                        let from = PeerAddr::Tls(id);
-                        let outcome = relay.handle(from, &packet, Instant::now(), now_ms());
-                        dispatch(&udp, obfs.as_ref(), &mut wire, &conns, from, &packet, outcome, &mut dropped);
-                    } else if let Some(reply) = relay.authenticate(id, &packet, now_ms()) {
-                        conn.authenticated = true;
-                        tracing::info!(conn = id.0, "TLS connection authenticated");
-                        conn.tx.push(reply);
-                    } else {
-                        // The first message is not an authenticated probe: close the connection and
-                        // send no reply
-                        conns.remove(&id);
-                    }
-                }
-                Event::Closed(id) => {
-                    if conns.remove(&id).is_some_and(|c| c.authenticated) {
-                        tracing::info!(conn = id.0, "TLS connection closed");
-                    }
-                    relay.closed(id);
-                }
-            },
             _ = tick.tick() => {
                 let now = Instant::now();
                 relay.expire(now);
-                // A connection that has not authenticated in time: drop the sender, and the
-                // connection task ends with it
-                conns.retain(|_, c| c.authenticated || now.saturating_duration_since(c.opened) < AUTH_TIMEOUT);
+                // A connection that has not authenticated in time, or that went quiet
+                let gone: Vec<SocketAddr> = conns
+                    .by_addr
+                    .iter()
+                    .filter(|(_, c)| {
+                        if c.authenticated {
+                            now.saturating_duration_since(c.seen) >= HANDOFF_IDLE
+                        } else {
+                            now.saturating_duration_since(c.opened) >= AUTH_TIMEOUT
+                        }
+                    })
+                    .map(|(from, _)| *from)
+                    .collect();
+                for from in gone {
+                    conns.remove(from, &mut relay);
+                }
                 if let Some(path) = &state
                     && now.saturating_duration_since(last_save) >= SAVE_INTERVAL
                     && saving.as_ref().is_none_or(tokio::task::JoinHandle::is_finished)
@@ -252,26 +253,15 @@ async fn next_update(updates: &mut Option<mpsc::Receiver<Assignment>>) -> Option
     }
 }
 
-async fn recv_obfs(
-    obfs: Option<&ObfsIngress>,
+/// Receives on a socket the relay may not have; waits forever without one.
+async fn recv_on(
+    socket: Option<&UdpSocket>,
     buf: &mut [u8],
 ) -> std::io::Result<(usize, SocketAddr)> {
-    match obfs {
-        Some(o) => o.socket.recv_from(buf).await,
+    match socket {
+        Some(s) => s.recv_from(buf).await,
         None => std::future::pending().await,
     }
-}
-
-async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketAddr)> {
-    let Some(ingress) = tls else {
-        return std::future::pending().await;
-    };
-    let (stream, peer) = ingress.listener.accept().await?;
-    // Each message is one tunnel packet and goes out at once, as over UDP: Nagle's algorithm would
-    // hold it until the previous one is acknowledged, and probes and keepalives share the
-    // connection, so most requests through the relay would wait a round trip more
-    drop(stream.set_nodelay(true));
-    Ok((stream, peer))
 }
 
 /// The result of running [`Relay::handle`]. A send failure (for example the peer has no route yet
@@ -279,9 +269,10 @@ async fn accept(tls: Option<&TlsIngress>) -> std::io::Result<(TcpStream, SocketA
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     udp: &UdpSocket,
+    handoff: Option<&UdpSocket>,
     obfs: Option<&ObfsIngress>,
     wire: &mut Vec<u8>,
-    conns: &HashMap<ConnId, Conn>,
+    conns: &HashMap<ConnId, SocketAddr>,
     from: PeerAddr,
     packet: &[u8],
     outcome: Outcome,
@@ -290,8 +281,8 @@ fn dispatch(
     let mut send = |to: PeerAddr, data: &[u8]| match to {
         PeerAddr::Udp(addr) => drop(udp.try_send_to(data, map_v6(addr))),
         PeerAddr::Tls(id) => {
-            if let Some(conn) = conns.get(&id) {
-                conn.tx.push(data.to_vec());
+            if let (Some(h), Some(addr)) = (handoff, conns.get(&id)) {
+                drop(h.try_send_to(data, *addr));
             }
         }
         PeerAddr::Obfs(addr) => {
@@ -315,61 +306,6 @@ fn dispatch(
             tracing::debug!(?reason, ?from, dropped, "relay dropped a packet");
         }
     }
-}
-
-/// One TLS connection: TLS and WebSocket handshakes, after which each binary message is a WireGuard
-/// packet or a relay probe.
-async fn connection(
-    id: ConnId,
-    stream: TcpStream,
-    acceptor: TlsAcceptor,
-    events: mpsc::Sender<Event>,
-) {
-    let config = WebSocketConfig::default()
-        .max_message_size(Some(MAX_DATAGRAM))
-        .max_frame_size(Some(MAX_DATAGRAM));
-    let handshake = async {
-        let tls = acceptor.accept(stream).await.ok()?;
-        tokio_tungstenite::accept_async_with_config(tls, Some(config))
-            .await
-            .ok()
-    };
-    let Ok(Some(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await else {
-        return;
-    };
-    let (tx, mut rx) = queue::queue();
-    if events.send(Event::Opened(id, tx)).await.is_err() {
-        return;
-    }
-    let (mut sink, mut source) = ws.split();
-    loop {
-        tokio::select! {
-            incoming = source.next() => match incoming {
-                Some(Ok(Message::Binary(data))) => {
-                    if data.len() <= MAX_DATAGRAM
-                        && events.send(Event::Packet(id, data.to_vec())).await.is_err()
-                    {
-                        break;
-                    }
-                }
-                // Keepalives are answered automatically by the WebSocket library
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                _ => break,
-            },
-            outgoing = rx.recv() => match outgoing {
-                Some(data) => {
-                    if sink.send(Message::binary(data)).await.is_err() {
-                        break;
-                    }
-                }
-                // The main loop no longer needs this connection (authentication failed or timed
-                // out)
-                None => break,
-            },
-        }
-    }
-    drop(sink.close().await);
-    drop(events.send(Event::Closed(id)).await);
 }
 
 fn load(path: &Path) -> std::io::Result<Option<RelayState>> {
@@ -433,52 +369,6 @@ fn map_v6(addr: SocketAddr) -> SocketAddr {
     }
 }
 
-/// Builds the server configuration for the TLS entry point from PEM files: TLS 1.3 only, with ring
-/// as the crypto backend.
-pub fn tls_acceptor(cert: &Path, key: &Path) -> Result<TlsAcceptor, TlsSetupError> {
-    use rustls::pki_types::pem::PemObject as _;
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-    let chain = CertificateDer::pem_file_iter(cert)
-        .and_then(|certs| certs.collect::<Result<Vec<_>, _>>())
-        .map_err(|e| TlsSetupError::Certificate(e.to_string()))?;
-    // The error message does not contain private key material (hard rule 10)
-    let key = PrivateKeyDer::from_pem_file(key).map_err(|_| TlsSetupError::Key)?;
-    acceptor(chain, key)
-}
-
-/// The server configuration for the relay's own certificate (design/mesh.md section 5.3).
-pub fn cert_acceptor(cert: &crate::cert::RelayCert) -> Result<TlsAcceptor, TlsSetupError> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-    acceptor(
-        vec![CertificateDer::from(cert.cert.clone())],
-        PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.key_der().to_vec())),
-    )
-}
-
-fn acceptor(
-    chain: Vec<rustls::pki_types::CertificateDer<'static>>,
-    key: rustls::pki_types::PrivateKeyDer<'static>,
-) -> Result<TlsAcceptor, TlsSetupError> {
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
-    let config = rustls::ServerConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| TlsSetupError::Config(e.to_string()))?
-        .with_no_client_auth()
-        .with_single_cert(chain, key)
-        .map_err(|e| TlsSetupError::Config(e.to_string()))?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum TlsSetupError {
-    #[error("reading the TLS certificate chain: {0}")]
-    Certificate(String),
-    #[error("reading the TLS private key failed (file missing, unreadable, or not PEM)")]
-    Key,
-    #[error("building the TLS configuration: {0}")]
-    Config(String),
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,47 +376,100 @@ mod tests {
     use nett_mesh::probe::{KeyId, OuterProbe, OuterReply, ProbeKey, RELAY_PROBE};
     use nett_trust::keys::X25519PublicKey;
 
-    /// Each message on a TLS relay connection is one tunnel packet, so both ends send it at once
-    /// instead of holding it until the one before is acknowledged (Nagle's algorithm): with probes
-    /// and keepalives sharing the connection, that held most requests through the relay a round
-    /// trip longer.
+    /// A TLS connection handed over on the loopback address (ADR 0032): what it sends before an
+    /// authenticated probe gets no answer and is forgotten; once a probe authenticates it, it is
+    /// that member's address, forwarded to and from as any other; an empty datagram closes it.
     #[test]
-    fn both_ends_of_a_tls_relay_connection_send_each_packet_at_once() {
-        let dir_tmp = tempfile::Builder::new()
-            .prefix("nett-relay-nodelay-")
-            .tempdir()
-            .expect("temp dir");
-        let cert =
-            crate::cert::RelayCert::load_or_create(&dir_tmp.path().join("cert")).expect("cert");
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let ingress = TlsIngress {
-                listener: tls_listener("127.0.0.1:0".parse().expect("addr")).expect("listener"),
-                acceptor: cert_acceptor(&cert).expect("acceptor"),
-            };
-            let addr = ingress.listener.local_addr().expect("addr");
-            let connector =
-                nett_transport::client::connector(cert.fingerprint()).expect("connector");
-            let member = tokio::spawn(async move {
-                nett_transport::client::connect(addr, None, &connector).await
-            });
-            let (stream, _) = accept(Some(&ingress)).await.expect("accepted");
-            let relay_end = stream.nodelay().expect("relay end");
-            let (events, _opened) = mpsc::channel(EVENT_QUEUE);
-            tokio::spawn(connection(
-                ConnId(1),
-                stream,
-                ingress.acceptor.clone(),
-                events,
-            ));
-            let ws = member.await.expect("task").expect("connected");
-            let member_end = ws.get_ref().get_ref().0.nodelay().expect("member end");
-            assert!(relay_end, "the relay holds small packets back");
-            assert!(member_end, "the member holds small packets back");
+    fn a_handed_over_tls_connection_authenticates_and_carries_its_member() {
+        use crate::wg::tests::{data, initiation, response};
+
+        let (a, b) = ([1; 32], [2; 32]);
+        let plain_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("a's socket");
+        plain_a
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("timeout");
+        let member = |k: [u8; 32], address| AssignedMember {
+            public_key: X25519PublicKey::from_bytes(k),
+            address,
+            token: [k[0]; 32],
+        };
+        let relay = Relay::new(
+            &[
+                member(a, Some(plain_a.local_addr().expect("addr"))),
+                member(b, None),
+            ],
+            &[(
+                X25519PublicKey::from_bytes(a),
+                X25519PublicKey::from_bytes(b),
+            )],
+        )
+        .expect("assignment");
+        let udp = std::net::UdpSocket::bind("[::]:0").expect("relay socket");
+        let handoff = std::net::UdpSocket::bind("127.0.0.1:0").expect("hand-off socket");
+        for s in [&udp, &handoff] {
+            s.set_nonblocking(true).expect("nonblocking");
+        }
+        let relay_addr = SocketAddr::from(([127, 0, 0, 1], udp.local_addr().expect("addr").port()));
+        let handoff_addr = handoff.local_addr().expect("addr");
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let server = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async move {
+                let udp = UdpSocket::from_std(udp).expect("tokio socket");
+                let handoff = UdpSocket::from_std(handoff).expect("tokio socket");
+                serve(udp, Some(handoff), None, relay, None, None, async {
+                    drop(stopped.await);
+                })
+                .await
+            })
         });
+
+        // b's TLS connection, as nett-relay hands it over: a socket of its own on loopback
+        let conn = std::net::UdpSocket::bind("127.0.0.1:0").expect("b's connection");
+        conn.connect(handoff_addr).expect("connect");
+        conn.set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        let mut buf = [0u8; MAX_DATAGRAM];
+        let mut receive = || conn.recv(&mut buf).ok().map(|len| buf[..len].to_vec());
+
+        conn.send(&initiation(11, &a)).expect("send");
+        assert_eq!(receive(), None, "nothing before an authenticated probe");
+
+        let probe_key = ProbeKey::from_token(&[2; 32]);
+        let probe = OuterProbe {
+            kind: RELAY_PROBE,
+            key_id: KeyId::of(&b),
+            seq: 1,
+            sent_ms: now_ms(),
+        };
+        conn.send(&probe.encode(&probe_key)).expect("probe");
+        let reply = receive().expect("a reply to the probe");
+        assert!(OuterReply::verify(&reply, &probe_key).is_some());
+
+        let mut plain = [0u8; MAX_DATAGRAM];
+        conn.send(&initiation(11, &a)).expect("initiation");
+        let (len, _) = plain_a
+            .recv_from(&mut plain)
+            .expect("a gets the initiation");
+        assert_eq!(plain[..len], initiation(11, &a)[..]);
+        plain_a
+            .send_to(&response(22, 11, &b), relay_addr)
+            .expect("a answers");
+        assert_eq!(receive(), Some(response(22, 11, &b)), "b gets the response");
+        plain_a.send_to(&data(11), relay_addr).expect("a's data");
+        assert_eq!(receive(), Some(data(11)), "b gets a's data");
+
+        // Closed: a's packets no longer reach it
+        conn.send(&[]).expect("close");
+        std::thread::sleep(Duration::from_millis(100));
+        plain_a.send_to(&data(11), relay_addr).expect("a's data");
+        assert_eq!(receive(), None, "a closed connection gets nothing");
+
+        stop.send(()).expect("relay still running");
+        server.join().expect("server thread").expect("serve");
     }
 
     /// The obfuscated port unwraps what it receives, routes it as the relay port does, and wraps only

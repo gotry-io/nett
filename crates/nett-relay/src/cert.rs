@@ -227,7 +227,7 @@ mod tests {
         let dir = dir_tmp.path().join("dir");
         let _ = std::fs::remove_dir_all(&dir);
         let cert = RelayCert::load_or_create(&dir).expect("created");
-        let acceptor = crate::server::cert_acceptor(&cert).expect("acceptor");
+        let acceptor = crate::entry::cert_acceptor(&cert).expect("acceptor");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -258,7 +258,7 @@ mod tests {
                 .await
                 .expect("bind");
             let addr = listener.local_addr().expect("addr");
-            let acceptor = crate::server::cert_acceptor(&cert).expect("acceptor");
+            let acceptor = crate::entry::cert_acceptor(&cert).expect("acceptor");
             tokio::spawn(async move {
                 if let Ok((stream, _)) = listener.accept().await {
                     let _ = acceptor.accept(stream).await;

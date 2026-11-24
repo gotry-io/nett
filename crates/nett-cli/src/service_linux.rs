@@ -152,21 +152,21 @@ pub fn install(args: &InstallArgs) -> anyhow::Result<()> {
         ),
         None => {}
     }
-    // Without a Hub the relay follows the imported desired state; with one, the nett service starts
-    // and stops it
+    // Without a Hub the relay's TLS entry follows the imported desired state; with one, the nett
+    // service starts and stops it
     if !linked && let Some(doc) = read_doc(&desired) {
         let wants = nett_node::services::Wants::of(&doc);
         for problem in nett_node::services::reconcile(wants) {
             messages.push(problem);
         }
-        if wants.relay {
+        if wants.relay_tls {
             messages.push(format!(
                 "{} runs; `nett status` shows its TLS fingerprint for `nett site relay --fingerprint`.",
                 RELAY.what
             ));
         }
     }
-    // A running relay keeps the old program until it restarts; try-restart leaves a stopped one
+    // A running TLS entry keeps the old program until it restarts; try-restart leaves a stopped one
     // alone
     let helpers: Vec<Unit> = nett_node::platform::linux::installed_optional();
     if binary_changed && !helpers.is_empty() {

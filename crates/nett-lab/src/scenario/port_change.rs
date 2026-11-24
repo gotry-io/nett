@@ -109,6 +109,8 @@ pub fn port_change(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<R
     );
 
     let changed_at = now_ms();
+    // Every desired state, the relays' sections included: a relay applies its changed assignment in
+    // place (design/mesh.md section 5.2)
     for n in &generated.nodes {
         let file = n.dir.join("desired.json");
         let mut doc = read_json(&file)?;
@@ -121,14 +123,6 @@ pub fn port_change(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<R
             .pid(&n.name)
             .with_context(|| format!("process of {}", n.name))?;
         run("kill", ["-HUP", &pid.to_string()])?;
-    }
-    // A relay keeps running and applies its changed assignment in place
-    for (name, relay) in &lab.relays {
-        let file = node(name)?.dir.join("relay.json");
-        let mut doc = read_json(&file)?;
-        retarget(&mut doc, b_public.into());
-        write_json(&file, &doc)?;
-        run("kill", ["-HUP", &relay.id().to_string()])?;
     }
     let moved = wait_for(b, "its interface on the new port", |ev| {
         ev.iter()

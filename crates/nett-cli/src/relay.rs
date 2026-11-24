@@ -1,35 +1,31 @@
-//! `nett relay`: the relay service (design/mesh.md section 5.2). It fetches its assignment from the
-//! nett daemon over the helper socket, takes its TLS certificate from `--cert` (systemd's
-//! credentials) and saves its bindings to `--state`; the lab build can instead read the assignment
-//! from a local file (`--config`). Exits on `SIGTERM` or `SIGINT`, and when the assignment changes its
-//! ports (the service manager starts it again).
+//! `nett relay`: nett-relay, the relay's public TCP entry (ADR 0032, design/mesh.md section 5.3). It
+//! asks the nett daemon over the helper socket for the relay's TLS port and hand-off port, takes
+//! its TLS certificate from `--cert` (systemd's credentials), and hands each TLS connection to the
+//! relay in the daemon. Exits on `SIGTERM` or `SIGINT`, and when its ports change (the service
+//! manager starts it again).
 
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 use tokio::signal::unix::{SignalKind, signal};
 
-pub const USAGE: &str = "usage: nett relay --cert <dir> --state <file> [--socket <helpers.sock>]\n\n\
-Started by systemd on a machine that runs a relay (`nett site relay`).";
-#[cfg(feature = "lab")]
-const LAB_USAGE: &str = "lab: nett relay --config <relay.json> [--state <relay-state.json>] reads its assignment from a file, again on SIGHUP";
+pub const USAGE: &str = "usage: nett relay --cert <dir> [--socket <helpers.sock>]\n\n\
+Started by systemd on a machine whose relay serves TLS (`nett site relay --tls`).";
 
 pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
     let mut socket =
         nett_mesh::helper::socket_path(std::path::Path::new(nett_mesh::status::DEFAULT_SOCKET));
-    let (mut cert, mut state) = (None, None);
-    #[cfg(feature = "lab")]
-    let mut config = None;
+    let mut cert = None;
     while let Some(arg) = parser.next()? {
         match arg {
             lexopt::Arg::Long("socket") => socket = PathBuf::from(parser.value()?),
             lexopt::Arg::Long("cert") => cert = Some(PathBuf::from(parser.value()?)),
-            lexopt::Arg::Long("state") => state = Some(PathBuf::from(parser.value()?)),
-            #[cfg(feature = "lab")]
-            lexopt::Arg::Long("config") => config = Some(PathBuf::from(parser.value()?)),
             other => return Err(other.unexpected().into()),
         }
     }
+    let Some(cert) = cert else {
+        anyhow::bail!(USAGE);
+    };
     tracing_subscriber::fmt()
         .with_max_level(tracing_subscriber::filter::LevelFilter::INFO)
         .with_writer(std::io::stderr)
@@ -49,87 +45,14 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = interrupt.recv() => {}
             }
         };
-        #[cfg(feature = "lab")]
-        if let Some(config) = config {
-            return lab(config, state, shutdown).await;
-        }
-        let (Some(cert), Some(state)) = (cert, state) else {
-            anyhow::bail!(USAGE);
-        };
         let cert =
             nett_relay::cert::RelayCert::load(&cert).context("the relay's TLS certificate")?;
-        let ended = nett_relay::service::run(socket, cert, state, shutdown)
+        let ended = nett_relay::service::run_entry(socket, cert, shutdown)
             .await
-            .context("relay")?;
+            .context("relay TLS entry")?;
         if ended == nett_relay::service::Ended::PortsChanged {
-            tracing::info!("relay stopped to bind its new ports");
+            tracing::info!("relay TLS entry stopped to listen on its new ports");
         }
         Ok(())
     })
-}
-
-/// The lab build: the assignment comes from a file written by `nett-lab` (design/prototype.md
-/// section 3). `SIGHUP` reads the file again and applies it in place, as the service applies each
-/// assignment it fetches.
-#[cfg(feature = "lab")]
-async fn lab(
-    path: PathBuf,
-    state: Option<PathBuf>,
-    shutdown: impl std::future::Future<Output = ()>,
-) -> anyhow::Result<()> {
-    use nett_relay::lab::RelayConfig;
-    use nett_relay::server::{ASSIGNMENT_QUEUE, TlsIngress, serve, tls_acceptor, tls_listener};
-    fn read(path: &std::path::Path) -> anyhow::Result<RelayConfig> {
-        let text = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        serde_json::from_slice(&text).context("parsing the relay assignment")
-    }
-    let config = read(&path)?;
-    let relay = config.relay().context("relay assignment")?;
-    let udp = tokio::net::UdpSocket::bind(config.listen)
-        .await
-        .with_context(|| format!("binding {}", config.listen))?;
-    let tls = match &config.tls {
-        Some(doc) => {
-            let acceptor = tls_acceptor(&doc.cert, &doc.key).context("TLS ingress")?;
-            let listener =
-                tls_listener(doc.listen).with_context(|| format!("binding {}", doc.listen))?;
-            Some(TlsIngress { listener, acceptor })
-        }
-        None => None,
-    };
-    let obfs = match &config.obfs {
-        Some(doc) => Some(
-            nett_relay::service::obfs_ingress(doc)
-                .await
-                .context("obfuscated ingress")?,
-        ),
-        None => None,
-    };
-    tracing::info!(
-        listen = %config.listen,
-        tls = ?config.tls.as_ref().map(|t| t.listen),
-        obfs = ?config.obfs.as_ref().map(|o| o.port),
-        members = config.members.len(),
-        "relay started ({LAB_USAGE})"
-    );
-    let (updates, received) = tokio::sync::mpsc::channel(ASSIGNMENT_QUEUE);
-    let mut hangup = signal(SignalKind::hangup()).context("installing the SIGHUP handler")?;
-    let reload = tokio::spawn(async move {
-        while hangup.recv().await.is_some() {
-            match read(&path) {
-                Ok(config) => {
-                    if updates.send(config.assignment()).await.is_err() {
-                        break;
-                    }
-                }
-                Err(error) => tracing::warn!(
-                    error = format!("{error:#}"),
-                    "relay assignment not reloaded"
-                ),
-            }
-        }
-    });
-    let served = serve(udp, tls, obfs, relay, state, Some(received), shutdown).await;
-    reload.abort();
-    served.context("relay socket")
 }

@@ -1,7 +1,8 @@
 //! `nett daemon`: the nett service, one process per machine run by the service manager (ADR 0013).
 //! It runs the mesh, whose desired state comes from a local file and is re-read on `SIGHUP` or a
-//! `reload` on the local interface (design/local-signing.md section 5, status.md section 4.1), and
-//! the TLS transport; with a Hub configuration in its directory it also runs nett-node, which
+//! `reload` on the local interface (design/local-signing.md section 5, status.md section 4.1), the
+//! relay on a machine that relays (ADR 0032) and the transports; with a Hub configuration in its
+//! directory it also runs nett-node, which
 //! connects the machine to its Hub, on a thread of its own. `nett keys` generates the mesh private
 //! key and the identity private key on this machine (local-signing.md section 3). The event file
 //! and simulated clock skew exist only in the lab build (the `lab` feature).
@@ -39,6 +40,9 @@ use tokio::signal::unix::{SignalKind, signal};
 pub const DESIRED_FILE: &str = "desired.json";
 pub const MESH_KEY_FILE: &str = "mesh.key";
 pub const IDENTITY_KEY_FILE: &str = "identity.key";
+/// The relay's saved bindings, next to the daemon's sockets (design/mesh.md section 5.2).
+#[cfg(target_os = "linux")]
+const RELAY_STATE: &str = "relay-state.json";
 
 struct Args {
     /// The keys, the desired state, the Hub configuration and the trust store.
@@ -62,7 +66,7 @@ struct LabArgs {
 }
 
 pub const USAGE: &str = "usage: nett daemon --dir <directory> [--socket <path>]\n\n\
-The nett service: the mesh, the TLS transport and, with hub.json in the directory, the connection\n\
+The nett service: the mesh, the relay, the transports and, with hub.json in the directory, the connection\n\
 to the Hub. Started by systemd, launchd or `nett container`; `sudo nett install` installs it. The\n\
 directory holds mesh.key, identity.key, desired.json, hub.json and the trust store (state/).";
 pub const KEYS_USAGE: &str = "usage: nett keys --dir <directory>\n\n\
@@ -370,23 +374,36 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         runtime.handle().clone(),
     );
     let worker = worker.context("starting the mesh worker thread")?;
-    // The local interface is for people and the relay: if a socket cannot be created, record it and
-    // continue meshing as usual (hard rule 8)
+    // The relay's hand-off port, which nett-relay hands TLS connections to (ADR 0032)
+    #[cfg(target_os = "linux")]
+    let handoff = Arc::new(std::sync::atomic::AtomicU16::new(0));
+    // The local interface is for people and the relay's TLS entry: if a socket cannot be created,
+    // record it and continue meshing as usual (hard rule 8)
     #[cfg(target_os = "linux")]
     let helpers_path = nett_mesh::helper::socket_path(&args.socket);
     #[cfg(target_os = "linux")]
-    let helpers = match HelperServer::spawn(&helpers_path, worker.status_source(reload_tx.clone()))
-    {
+    let helpers = match HelperServer::spawn(
+        &helpers_path,
+        worker.status_source(reload_tx.clone()),
+        handoff.clone(),
+    ) {
         Ok(server) => Some(server),
         Err(e) => {
-            tracing::warn!(socket = %helpers_path.display(), error = %e, "helper socket unavailable; nett-relay cannot fetch its assignment");
+            tracing::warn!(socket = %helpers_path.display(), error = %e, "helper socket unavailable; the relay's TLS entry cannot start");
             None
         }
     };
-    // This process carries the TLS transport and asks its worker thread for the configuration
-    // (ADR 0013)
+    // This process carries the relay and the transports and asks its worker thread for their
+    // configuration (ADR 0013, ADR 0032)
     let transport: Arc<dyn nett_mesh::helper::HelperSource + Sync> =
         Arc::new(worker.status_source(reload_tx.clone()));
+    // Relays run on Linux (design/site.md section 4.1)
+    #[cfg(target_os = "linux")]
+    let relay_mesh: Arc<dyn nett_mesh::helper::HelperSource + Sync> =
+        Arc::new(worker.status_source(reload_tx.clone()));
+    // Kept while the service restarts (`RuntimeDirectoryPreserve=restart`), gone with a reboot
+    #[cfg(target_os = "linux")]
+    let relay_state = args.socket.with_file_name(RELAY_STATE);
     let mesh: Arc<dyn nett_mesh::status::StatusSource + Sync> =
         Arc::new(worker.status_source(reload_tx.clone()));
     let status = match StatusServer::spawn(&args.socket, worker.status_source(reload_tx)) {
@@ -439,6 +456,17 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 tracing::error!(%error, "the TLS transport stopped; paths over TLS stay down until nett restarts");
             }
         });
+        #[cfg(target_os = "linux")]
+        let (stop_relay, relay_stopped) = tokio::sync::oneshot::channel::<()>();
+        #[cfg(target_os = "linux")]
+        let relay = tokio::spawn(nett_relay::service::run_in_daemon(
+            relay_mesh,
+            relay_state,
+            handoff,
+            async {
+                let _ = relay_stopped.await;
+            },
+        ));
         let worker = nett_mesh::run::run(source, worker, shutdown).await?;
         if let Some(node) = node {
             let stopped =
@@ -451,13 +479,26 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         }
         drop(stop_transport);
         let _ = transport.await;
-        drop(status);
+        // A local socket's server joins its thread as it goes, which waits out the thread's poll:
+        // on a blocking thread, so the relay on this runtime keeps forwarding meanwhile
         #[cfg(target_os = "linux")]
-        drop(helpers);
-        tokio::task::spawn_blocking(move || worker.shutdown())
+        let servers = (status, helpers);
+        #[cfg(not(target_os = "linux"))]
+        let servers = status;
+        let _ = tokio::task::spawn_blocking(move || drop(servers)).await;
+        let stopped = tokio::task::spawn_blocking(move || worker.shutdown())
             .await
             .context("stopping the mesh worker")?
-            .map_err(anyhow::Error::msg)?;
+            .map_err(anyhow::Error::msg);
+        // The relay forwards for others until the process is about to exit, and saves its
+        // bindings as it stops, so a restart interrupts the connections through it only for the
+        // moment the daemon takes to start again
+        #[cfg(target_os = "linux")]
+        {
+            drop(stop_relay);
+            let _ = relay.await;
+        }
+        stopped?;
         tracing::info!("nett stopped");
         anyhow::Ok(())
     })

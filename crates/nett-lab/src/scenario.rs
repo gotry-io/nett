@@ -92,7 +92,8 @@ impl Report {
 struct Lab {
     underlay: Underlay,
     processes: Vec<(String, Child)>,
-    /// nett-relay on a relay node.
+    /// nett-relay, the TLS entry of a relay node whose relay serves TLS (the relay itself runs in
+    /// the node's nett daemon, ADR 0032).
     relays: Vec<(String, Child)>,
     /// Helper processes for measurement (probe streams, long-lived connections).
     helpers: Vec<Child>,
@@ -359,10 +360,7 @@ fn start_with(
             Err(e) => return Err(e).with_context(|| format!("removing {}", events.display())),
         }
         lab.spawn_with(node, nett, &extra(&node.name))?;
-        if topo
-            .node(&node.name)
-            .is_some_and(|n| n.roles.iter().any(|r| r == "relay"))
-        {
+        if material::relay_cert_dir(node).exists() {
             lab.spawn_relay(node, nett)?;
         }
     }
@@ -422,6 +420,9 @@ impl Lab {
         Ok(())
     }
 
+    /// Starts nett-relay, the relay's TLS entry, on a relay node that serves TLS, with the
+    /// certificate the material created, as the nett service creates it (design/mesh.md section
+    /// 5.3).
     fn spawn_relay(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
         let net = self.underlay.node(&node.name).context("planned node")?;
         let child = spawn_in(
@@ -429,10 +430,10 @@ impl Lab {
             nett,
             [
                 "relay".as_ref(),
-                "--config".as_ref(),
-                node.dir.join("relay.json").as_os_str(),
-                "--state".as_ref(),
-                node.dir.join("relay-state.json").as_os_str(),
+                "--socket".as_ref(),
+                nett_mesh::helper::socket_path(&node.dir.join("mesh.sock")).as_os_str(),
+                "--cert".as_ref(),
+                material::relay_cert_dir(node).as_os_str(),
             ],
             &node.dir.join("relay.log"),
         )?;
@@ -454,14 +455,12 @@ impl Lab {
         Ok(())
     }
 
-    /// Restarts nett-relay on a relay node (scenario 3).
+    /// Restarts a relay: the relay runs in the node's nett daemon (ADR 0032), which saves its
+    /// bindings as it stops and restores them as it starts; kernel WireGuard keeps the node's own
+    /// sessions meanwhile. Its TLS entry keeps its connections and follows the new hand-off port.
     fn restart_relay(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
-        if let Some(pos) = self.relays.iter().position(|(n, _)| *n == node.name) {
-            let (_, mut child) = self.relays.remove(pos);
-            child.kill().ok();
-            child.wait().ok();
-        }
-        self.spawn_relay(node, nett)
+        self.stop(&node.name)?;
+        self.spawn(node, nett)
     }
 
     /// Ends a node's nett daemon and waits for it to exit.
@@ -1600,8 +1599,17 @@ pub struct RelayRun {
     /// The relay where traffic is after the fault; empty when there is no traffic.
     pub after: Option<String>,
     pub outage_ms: u64,
+    /// The longest gap within [`FAULT_WINDOW`] of the fault, where a relay's restart falls.
+    pub fault_outage_ms: u64,
     pub tcp_ended: Option<String>,
 }
+
+/// The longest outage a relay's restart may cause: the daemon's exit and start, a few probe
+/// intervals (design/prototype.md scenario 3).
+const RESTART_OUTAGE_MS: u64 = 500;
+/// The time after a fault within which a relay's restart has finished: the daemon exits within
+/// a second and starts again in a fraction of one.
+const FAULT_WINDOW: Duration = Duration::from_secs(3);
 
 /// How long after the fault to start counting.
 const RELAY_FAULT_HOLD: Duration = Duration::from_secs(20);
@@ -1662,12 +1670,15 @@ fn relay_fault_run(
     let end_ms = now_ms();
     let after = busiest(&monitor).map(|i| links[i].0.clone());
     let outage = probe_stats(&probe_file, fault_ms - 1000, end_ms)?;
+    let window_ms = u64::try_from(FAULT_WINDOW.as_millis()).unwrap_or(u64::MAX);
+    let at_fault = probe_stats(&probe_file, fault_ms - 1000, fault_ms + window_ms)?;
     let tcp = tcp_stats(&tcp_file, fault_ms - 2000, end_ms)?;
     Ok(RelayRun {
         system: system.to_owned(),
         faulted: links[current].0.clone(),
         after,
         outage_ms: outage.max_gap_ms,
+        fault_outage_ms: at_fault.max_gap_ms,
         tcp_ended: tcp.ended,
     })
 }
@@ -1848,7 +1859,22 @@ pub fn relay_fault(
         n.2 == 0,
         format!("{} of {repeat} runs reset the connection", n.2),
     );
-    if kind != RelayFault::Restart {
+    if kind == RelayFault::Restart {
+        // The relay restarts with its daemon (ADR 0032), which forwards until it exits and restores
+        // its bindings as it starts: the pair stays on it, through no more than the restart
+        let nett_runs: Vec<&RelayRun> = runs.iter().filter(|r| r.system == "nett").collect();
+        let stayed = nett_runs
+            .iter()
+            .all(|r| r.after.as_ref() == Some(&r.faulted));
+        let restart = nett_runs.iter().map(|r| r.fault_outage_ms).max();
+        report.check(
+            "nett:restart-keeps-the-relay",
+            stayed && restart.is_some_and(|max| max <= RESTART_OUTAGE_MS),
+            format!(
+                "longest gap during the restart {restart:?} ms; traffic stayed on the relay: {stayed}"
+            ),
+        );
+    } else {
         let moved = runs
             .iter()
             .filter(|r| r.system == "nett")

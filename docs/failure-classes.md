@@ -139,11 +139,12 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: every wait has a total time limit, and a backoff starts over once things work again; a transfer whose length depends on the link instead stops when it makes no progress, and holds up nothing while it runs. A slow disk, a slow client or a flood never stalls forwarding or a server: costly work runs off the loop, and floods are capped per source before it. A process that stops lets its sessions finish and record their end.
 
-**Breaks when** disk writes run in the forwarding loop; a time limit applies to each read instead of the whole request; every handshake is handled before any limit; a reconnect wait only grows; a command reports done while the service is still exiting; a server exits under its long-lived connections.
+**Breaks when** disk writes run in the forwarding loop; a join or another wait runs on the thread the relay forwards on; a time limit applies to each read instead of the whole request; every handshake is handled before any limit; a reconnect wait only grows; a command reports done while the service is still exiting; a server exits under its long-lived connections.
 
 **Where it holds**
 
-- nett-relay saves its state on a blocking thread, one save at a time (mesh.md section 5.2);
+- The relay saves its state on a blocking thread, one save at a time (mesh.md section 5.2);
+- The relay shares the nett daemon's runtime (ADR 0032): what the daemon does as it stops that waits (joining the local sockets' threads, which wait out their poll, and stopping the mesh's thread) runs on blocking threads, and the relay stops last, so a restart interrupts the connections through it only for the restart itself;
 - The local socket gives each request and the input after it a total time limit (status.md section 4);
 - The userspace data plane caps handshake messages per source and in total before the session layer (userspace.md section 4.1);
 - nett-node's reconnect wait starts over after a session that outlasted the longest wait (protocol.md section 8);
@@ -156,6 +157,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 **Guards**
 
 - `nett-relay:a_stuck_state_write_does_not_hold_up_forwarding`
+- `lab:relay-restart` (the pair stays on the restarted relay, and no gap within 3 s of the restart lasts more than 0.5 s)
 - `nett-mesh:a_slow_client_cannot_hold_the_socket_past_the_time_limit`
 - `nett-mesh:handshake_floods_are_capped_per_source_and_in_total`
 - `nett-mesh:over_budget_handshakes_get_no_response`
@@ -232,7 +234,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 - The probe port, the one port nett binds that a WireGuard or relay port may not be, is rejected when the desired state is built and when it is applied; the transports' loopback ports go around the machine's own WireGuard and relay ports instead of forbidding them, and a WireGuard port the system assigns avoids them (site.md section 4, mesh.md sections 5.3 and 5.5);
 - `sudo nett install`, running as root, opens the desired state from the user's directory without following links or blocking, and checks the file it opened;
-- The target names of a release manifest are checked before the Hub names files after them, and the version and target a node asks for are only compared with what the Hub holds, never used as a path (release.md section 7).
+- The target names of a release manifest are checked before the Hub names files after them, and the version and target a node asks for are only compared with what the Hub holds, never used as a path (release.md section 7);
+- A TLS connection nett-relay hands to the relay in the daemon gets nothing forwarded and no answer until an authenticated probe identifies its member, and nett-relay closes one the relay has not answered within 30 seconds (mesh.md section 5.3).
 
 **Guards**
 
@@ -242,6 +245,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:reads_only_regular_files_without_following_links_or_blocking`
 - `nett-trust:manifests_and_versions_from_the_network_are_checked`
 - `nett-hub:nodes_fetch_the_program_of_a_release_from_the_hub`
+- `nett-relay:a_handed_over_tls_connection_authenticates_and_carries_its_member`
 
 ## 8. Output says what happened and what to do
 

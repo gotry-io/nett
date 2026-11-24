@@ -22,7 +22,7 @@ nett-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 nett-mesh.workspace = true
-nett-relay = { workspace = true, features = ["lab"] }
+nett-relay.workspace = true
 # Hub scenarios (design/hub.md section 10): site state, join tokens, Hub configuration, and, when
 # simulating a compromised Hub, directly rewriting its database
 nett-hub.workspace = true
