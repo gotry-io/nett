@@ -15,7 +15,7 @@ This document is the overall design of nett: what runs on each machine, how the 
 │   nett-relay by SNI                                              │
 │ nett-hub: public API · authentication · desired state · audit    │
 │           SQLite · node gateway                                  │
-│ nett-relay: relay and public transport entry (low privilege)     │
+│ nett-relay: the relay's public TCP entry (low privilege)         │
 │ nett daemon: the mesh, nett-node                                 │
 └───────────────┬──────────────────────────────────────────────────┘
                 │ Control: WebSocket over TLS + Protobuf (node connects out)
@@ -33,7 +33,7 @@ External: phone ─standard WireGuard─► mobile gateway
 | Plane | Carries | Components | Does not depend on |
 |---|---|---|---|
 | Control plane | Desired state, inventory and link status, tasks | Hub ⇄ nett-node (WebSocket + Noise, see design/protocol.md) | The mesh: the Hub endpoint list keeps at least one endpoint that does not go through the mesh (protocol.md section 8) |
-| Mesh data plane | IP traffic between members | The mesh in the nett daemon (WireGuard, path layer, DNS, filtering, the TLS transport) + nett-relay (see design/mesh.md) | The Hub being online; nett-node running (ADR 0013) |
+| Mesh data plane | IP traffic between members | The mesh in the nett daemon (WireGuard, path layer, DNS, filtering, the relay, the transports) + nett-relay for the relay's TLS entry (see design/mesh.md) | The Hub being online; nett-node running (ADR 0013) |
 | Ingress plane | Traffic from public visitors through the Edge (the user's own reverse proxy) to services | Edge → mesh → service (section 8) | The Hub being online; nett-node running |
 
 The ingress plane depends on the mesh data plane. The control plane can use the mesh as a route (for example, connecting to the Hub through another ingress node), but cannot rely on the mesh alone; otherwise one faulty mesh configuration would leave nodes unable to receive a fix.
@@ -43,17 +43,17 @@ The ingress plane depends on the mesh data plane. The control plane can use the 
 | Role | Responsible for | Not responsible for | Privileges | Listens on public network |
 |---|---|---|---|---|
 | **Hub** | Stores desired state; aggregates node and link status; public API; distributes the mesh topology; forwards signed policies | Operating machines directly; raising any node's privileges on its own; sitting on the data path | Normal | Exposed through the local reverse proxy (section 4) |
-| **nett daemon** | The one nett service on every machine (`nett daemon`, ADR 0013): runs the mesh and, once the machine has a Hub, nett-node, below | Running a shell; accessing Docker; running AI logic | Root; on Linux with only `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE`, on a file system that is read-only except its directory, the program and nett's units (section 13.2); TUN permission on userspace platforms | Only the WireGuard port (the mesh, below) |
+| **nett daemon** | The one nett service on every machine (`nett daemon`, ADR 0013): runs the mesh, the relay on a machine that relays (ADR 0032) and, once the machine has a Hub, nett-node, below | Running a shell; accessing Docker; running AI logic | Root; on Linux with only `CAP_NET_ADMIN`, `CAP_NET_RAW` and `CAP_NET_BIND_SERVICE`, on a file system that is read-only except its directory, the program and nett's units (section 13.2); TUN permission on userspace platforms | Only UDP: the WireGuard port, and where the machine offers them its obfuscated port and its relay's ports |
 | **nett-node** (in the nett daemon) | Control agent, on a thread of its own: enrolls, connects to the Hub; hands signed material to the mesh in the same process and starts and stops nett-relay; reports inventory and link status; upgrades (section 3) | Listening on any port; executing arbitrary commands; deciding privileges on its own | The daemon's | No |
 | **The mesh** (in the nett daemon) | WireGuard configuration, path layer (measurement, path selection, switchover), DNS, access rules and address translation, admission material verification, the TLS transport (ciphertext only); keeps working while nett-node is stopped (ADR 0013) | Connecting to the Hub; executing external commands | The daemon's: `CAP_NET_ADMIN` and `CAP_NET_RAW` for WireGuard, nftables and probing on the WireGuard port (ADR 0021), `CAP_NET_BIND_SERVICE` for DNS on the mesh address | Only the WireGuard port: answers only authenticated probes and, like the kernel implementation, does not respond to unauthenticated packets |
-| **nett-relay** | Relays encrypted packets; accepts transports such as TCP/TLS; probe responses; per-connection forwarding (CONNECT) | Decrypting mesh traffic; any management function | Low | Yes |
+| **nett-relay** | The relay's public TCP entry: terminates the TLS transport and per-connection forwarding (CONNECT), and hands their messages to the relay in the nett daemon over the loopback address (ADR 0032) | Decrypting mesh traffic; holding a mesh private key; any management function | Low | Yes (TCP) |
 | **Edge** | A reverse proxy the user runs on the ingress node (any implementation): terminates TLS and forwards requests to services through the mesh by domain name; nett does not generate or manage its configuration (section 8) | Any management function | Low | Yes |
 | **Signing tool** (`nett site`) | Maintains the site on the user's own computer; computes, displays and signs changes that raise privileges (design/site.md) | Running as a daemon; connecting to nodes directly | Holds the recovery key | No |
 
 **Three principles**
 
 1. **Management and traffic are separate**: when the Hub and the nodes are both stopped, websites and the mesh keep working; changes are temporarily impossible.
-2. **Privileged components are not exposed; exposed components are not privileged**: the nett daemon listens on no public address (its mesh provides DNS, probe responses and the ports its signed node policy serves only on the mesh address, ADR 0028); all public listeners are handled by separate low-privilege processes (Edge, nett-relay). The WireGuard UDP port is listened on by the kernel or the nett daemon, answers only authenticated probes, and does not respond at all to unauthenticated packets.
+2. **Privileged components are not exposed; exposed components are not privileged**: the nett daemon listens publicly only on UDP: its WireGuard port and, where the machine offers them, its obfuscated port and its relay's ports (its mesh provides DNS, probe responses and the ports its signed node policy serves only on the mesh address, ADR 0028); all public TCP listeners are handled by separate low-privilege processes (Edge, nett-relay for the relay's TLS entry, ADR 0032). The WireGuard UDP port is listened on by the kernel or the nett daemon, the obfuscated port by the nett daemon on the userspace data plane (ADR 0031), the relay's ports by the relay in the nett daemon; they answer only authenticated probes and handshakes and forward only what the relay's assignment allows, a datagram on an obfuscated port is opened with the site's key before anything else reads it, and none responds at all to unauthenticated packets.
 3. **Decision and execution are separate; raising privileges requires a signature**: a compromised Hub cannot exceed its authority: signing happens on the user's own computer, and the content to be signed is computed and displayed locally by the signing tool, not through the Hub (ADR 0024, design/auth.md section 2). Mesh members, advertised routes and access rules are likewise composed of signed artifacts (ADR 0014).
 
 ## 3. nett-node
@@ -82,7 +82,7 @@ The mesh module and the following roles can be switched. Roles are written in th
 | Switch | Effect | Typically enabled on |
 |---|---|---|
 | **mesh** module | Runs the mesh; this machine joins the mesh directly (see above) | Nodes that join the mesh directly |
-| `relay` | Runs nett-relay to relay for other nodes (section 6.4) | `public` nodes |
+| `relay` | Relays for other nodes in the nett daemon, and runs nett-relay while the relay serves TLS (section 6.4) | `public` nodes |
 | `gateway` | Mobile gateway (section 7) | The Hub host or other `public` nodes |
 | `subnet_router` | Smart gateway; brings a LAN prefix into the mesh (section 6.6) | One per LAN |
 | `edge` | Declares that this machine runs an Edge and how to identify traffic sent by the Edge; an Edge address is allocated accordingly (section 8) | Ingress nodes |
@@ -171,7 +171,7 @@ Control plane: Hub (addresses, public keys, candidate paths, relay list, link qu
 |---|---|
 | LAN direct | The peer's LAN addresses (the Hub issues each node's LAN addresses to its peers, and probing decides which ones work) |
 | Public direct | At least one end is reachable from outside (`public`; IPv4 and IPv6 are judged separately) |
-| Via relay | Forwarded through the nett-relay of some `public` node |
+| Via relay | Forwarded through the relay of some `public` node |
 | Multi-hop relay | Through two or more relays (for example, over a high-quality line when crossing borders) |
 | Hole-punched direct | At least one end is behind a cone NAT, or both ends have global IPv6 addresses; the mapped address is taken from the source address seen by a `public` node, agreed over the current tunnel, then packets are sent simultaneously from the WireGuard port, and the switch happens after the path is verified; a failure does not affect the current connection (design/mesh.md section 6.1); both ends behind symmetric NAT comes later |
 
@@ -187,7 +187,7 @@ Path selection:
 
 - **All `public` nodes are relay-capable** (`dial-only` nodes and phones cannot relay for other nodes). The Hub decides which relays to actually use based on location, measured quality, traffic quota and spare resources.
 - **A relay only forwards encrypted packets and cannot see the content**, so end-to-end encryption is unaffected.
-- Relaying is handled by the separate low-privilege process nett-relay, which consumes resources only while forwarding traffic.
+- Relaying runs in the nett daemon of a `public` machine that relays (ADR 0032), with bounded tables, and consumes resources only while forwarding traffic; the separate low-privilege process nett-relay terminates its public TCP.
 - Each relay uses a single UDP port. On the Hub host it shares 443 with the Hub: the reverse proxy in front of the Hub hands nett-relay's domain off to nett-relay by SNI (section 4, ADR 0011).
 
 ### 6.5 Network reachability
@@ -269,7 +269,7 @@ nett contains no AI logic. AI, like any other external program, uses nett only t
 | Hub | Rust: axum, SQLite + sqlx, utoipa, rustls; webauthn-rs and rust-embed are added with the web console (ADR 0024) |
 | node | Rust: tokio (single-threaded), tokio-tungstenite, prost, hyper; rustls-platform-verifier (the operating system verifies a Hub's public certificate and the website's, design/hub.md section 4); WireGuard is managed through netlink against the kernel implementation (only the few message types used are encoded; no netlink library) |
 | Shared by all components | serde, serde_json; ring (signature verification, hashing, HMAC, HKDF, also the crypto backend of rustls); x25519-dalek (derives the keys for direct probing between members from the mesh private key; ring cannot import an existing private key); rustix (system calls for netlink and raw sockets; nftables rules are also installed through netlink, without calling the `nft` command); lexopt (command-line parsing) |
-| nett-relay | Rust: tokio, rustls (via tokio-rustls), tokio-tungstenite (WebSocket for the TLS transport entry), hyper (HTTP/2 CONNECT); blake2 (computes `mac1` per the WireGuard protocol); quinn later (QUIC) |
+| The relay (in the nett daemon) and nett-relay | The relay: blake2 (computes `mac1` per the WireGuard protocol), quinn later (QUIC); nett-relay: tokio, rustls (via tokio-rustls), tokio-tungstenite (WebSocket for the TLS transport entry), hyper (HTTP/2 CONNECT) |
 | TLS transport (in the nett daemon) | Rust: rustls (via tokio-rustls, verifying certificates by fingerprint), tokio-tungstenite, on the daemon's tokio runtime |
 | Userspace WireGuard | The `noise` layer of gotatun, for platforms without the kernel module (design/userspace.md section 3) |
 | Protocols | Public: REST + JSON (OpenAPI 3.1), plus SSE when the web console arrives; internal: WebSocket + Protobuf |

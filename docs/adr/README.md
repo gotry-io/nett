@@ -16,7 +16,7 @@ One record per decision with a long-term architectural impact: context, decision
 | [0008](0008-phones-through-mobile-gateway.md) | Phones join over standard WireGuard through a mobile gateway | Accepted; pairing see 0024 |
 | [0009](0009-caddy-as-first-edge.md) | The reverse proxy in front of the Hub defaults to Caddy | Accepted |
 | [0010](0010-ai-via-api-only.md) | AI connects only through the Hub API; node has no AI logic | Accepted |
-| [0011](0011-nett-relay.md) | nett-relay: independent low-privilege relay and transport entry point | Accepted |
+| [0011](0011-nett-relay.md) | nett-relay: independent low-privilege relay and transport entry point | Accepted; the relay runs in the daemon, see 0032 |
 | [0012](0012-single-binary-packaging.md) | Single node-side executable, run as multiple processes by subcommand | Accepted; install script see 0024 |
 | [0013](0013-one-daemon-per-machine.md) | One nett daemon per machine | Accepted |
 | [0014](0014-signed-mesh-membership.md) | The mesh member table consists of signed artifacts | Accepted |
@@ -35,7 +35,9 @@ One record per decision with a long-term architectural impact: context, decision
 | [0027](0027-upgrades-by-approval.md) | Upgrades start when the user approves them | Accepted |
 | [0028](0028-serve-loopback-services.md) | Serve: mesh ports forwarded to services on loopback | Accepted |
 | [0029](0029-relay-paths-measured-end-to-end.md) | Relay paths are measured end to end | Accepted |
-| [0030](0030-obfuscated-udp-transport.md) | Obfuscated UDP transport: WireGuard wrapped in a public format with site keys | Accepted |
+| [0030](0030-obfuscated-udp-transport.md) | Obfuscated UDP transport: WireGuard wrapped in a public format with site keys | Accepted; a machine's own port see 0031 |
+| [0031](0031-obfuscated-ports-in-the-userspace-data-plane.md) | Obfuscated ports in the userspace data plane | Accepted |
+| [0032](0032-relay-in-the-daemon.md) | The relay runs in the nett daemon; public TCP stays in nett-relay | Accepted |
 
 Template:
 
