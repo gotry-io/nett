@@ -20,8 +20,8 @@ use crate::path::{
 };
 use crate::probe::{
     self, DIRECT_PROBE, DIRECT_REPLY, KeyId, OuterProbe, OuterReply, PUNCH_ACK, PUNCH_PROPOSAL,
-    ProbeKey, PunchMessage, RELAY_PROBE, RelayReport, SWITCH_ACK, SWITCH_PROPOSAL, SwitchMessage,
-    SwitchTarget, THROUGH_PROBE, THROUGH_REPLY, TUNNEL_PROBE_PORT, Through,
+    ProbeKey, PunchMessage, RELAY_PROBE, RelayReport, RestartNotice, SWITCH_ACK, SWITCH_PROPOSAL,
+    SwitchMessage, SwitchTarget, THROUGH_PROBE, THROUGH_REPLY, TUNNEL_PROBE_PORT, Through,
 };
 use crate::punch::{Observations, Punch, PunchEvent};
 
@@ -195,6 +195,8 @@ struct Peer {
     latest_probe_ms: u64,
     /// When the paths to it were last probed on request (design/status.md section 4.3).
     probed_on_request: Option<Instant>,
+    /// The restart number of the peer's latest restart notice handled (design/mesh.md section 8.4).
+    heard_restart: Option<u32>,
     last_activity: Option<Instant>,
     /// WireGuard's byte count for this peer (received and sent), sampled for the traffic rate.
     bytes: VecDeque<(Instant, u64)>,
@@ -294,6 +296,12 @@ pub struct Prober {
     hub: bool,
     /// The mapped address that `public` nodes report to this machine (design/mesh.md section 6.1).
     observations: Observations,
+    /// Drawn as the mesh starts: what this machine's restart notices carry (design/mesh.md section
+    /// 8.4).
+    restart: u32,
+    /// Peers whose restart notice was just handled, and when each was sent (Unix ms), for the
+    /// caller; at most one per peer.
+    restarted: Vec<(NodeId, u64)>,
     /// Events to be reported by the caller.
     events: Vec<Event>,
 }
@@ -487,8 +495,63 @@ impl Prober {
             clock_trusted: false,
             hub: false,
             observations: Observations::default(),
+            restart: random_u32(),
+            restarted: Vec::new(),
             events: Vec::new(),
         }
+    }
+
+    /// The notices that this machine restarted, through the Hub, to `peers` (design/mesh.md section
+    /// 8.4).
+    pub fn restart_notices<'a>(
+        &self,
+        peers: impl IntoIterator<Item = &'a NodeId>,
+        now_ms: u64,
+    ) -> Vec<Outgoing> {
+        let notice = RestartNotice {
+            restart: self.restart,
+        };
+        peers
+            .into_iter()
+            .filter_map(|id| {
+                let key = self.peers.get(id)?.switch_key.as_ref()?;
+                Some(Outgoing::Hub {
+                    peer: id.clone(),
+                    data: notice.seal(now_ms, key).to_vec(),
+                })
+            })
+            .collect()
+    }
+
+    pub fn public_key(&self, peer: &NodeId) -> Option<X25519PublicKey> {
+        self.peers.get(peer).map(|p| p.public_key)
+    }
+
+    /// The peer's path that leads to `endpoint`, for a follower that names where it handshakes
+    /// again; a direct path when none of them does.
+    pub fn route_to(&self, peer: &NodeId, endpoint: SocketAddr) -> Route {
+        self.peers
+            .get(peer)
+            .and_then(|p| p.routes.iter().find(|(r, _)| r.endpoint() == endpoint))
+            .map_or(Route::Direct(endpoint), |(r, _)| *r)
+    }
+
+    /// Peers whose restart notice came since the last call, and when each was sent (Unix ms).
+    pub fn take_restarted(&mut self) -> Vec<(NodeId, u64)> {
+        std::mem::take(&mut self.restarted)
+    }
+
+    /// A peer restarted: the decider of the pair handshakes again on the path it is on, the switch
+    /// to carry out; `None` for a peer this machine has no path selection state for, which follows
+    /// on the endpoint WireGuard has (design/mesh.md section 8.4).
+    pub fn handshake_again(&mut self, peer: &NodeId, at: Instant) -> Option<Switch> {
+        let p = self.peers.get_mut(peer)?;
+        let public_key = p.public_key;
+        let action = p
+            .paths
+            .as_mut()?
+            .handshake_again(SwitchReason::PeerRestarted, at);
+        switch_of(peer, public_key, action)
     }
 
     /// Takes the events to report.
@@ -660,6 +723,7 @@ impl Prober {
                         .unwrap_or_default(),
                     latest_probe_ms: previous.as_ref().map_or(0, |p| p.latest_probe_ms),
                     probed_on_request: previous.as_ref().and_then(|p| p.probed_on_request),
+                    heard_restart: previous.as_ref().and_then(|p| p.heard_restart),
                     last_activity: previous.as_ref().and_then(|p| p.last_activity),
                     bytes: previous.map(|p| p.bytes).unwrap_or_default(),
                 },
@@ -1497,6 +1561,16 @@ impl Prober {
         let Some(key) = self.peers.get(sender).and_then(|p| p.switch_key.clone()) else {
             return vec![];
         };
+        if let Some((notice, sent_ms)) = RestartNotice::open(data, &key, now_ms) {
+            if let Some(peer) = self.peers.get_mut(sender)
+                && peer.heard_restart != Some(notice.restart)
+            {
+                peer.heard_restart = Some(notice.restart);
+                self.restarted.retain(|(id, _)| id != sender);
+                self.restarted.push((sender.clone(), sent_ms));
+            }
+            return vec![];
+        }
         let Some(message) = SwitchMessage::open(data, &key, now_ms) else {
             return vec![];
         };
@@ -1866,7 +1940,8 @@ fn switch_of(peer: &NodeId, public_key: X25519PublicKey, action: Action) -> Opti
     }
 }
 
-/// Random number for random retries: used only to stagger the two ends' retries, with no security role.
+/// Random number for random retries, which only staggers the two ends' retries, and for the restart
+/// number, which only tells one restart from the next: neither has a security role.
 fn random_u32() -> u32 {
     use ring::rand::SecureRandom as _;
     let mut b = [0u8; 4];

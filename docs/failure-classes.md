@@ -103,7 +103,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: a pair leaves a path only for a failure that another path can help, and returns only on evidence that covers the condition it left for. A hold waits on the improvement, not on one candidate. A re-handshake counts as done only when WireGuard confirms it.
 
-**Breaks when** queueing is read as loss (every path shares the bottleneck); a loss at one end of the pair, or on a link every path shares, is read as the current path's, a candidate's few probes look clean by chance, and the pair leaves for it and a better score brings it back; a candidate's sparse probes keep a loss it had by chance, which holds a much faster path back; a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure; a failover target is chosen on replies from before the failure, so the relay that stopped with the current path is taken again over its other transport; a two-ended switch is proposed through a tunnel that has not answered on the current path, and the decider switches alone; an outage the follower measured on the path it is leaving is acted on after it carried out the decider's proposal, and it waits for another proposal and then rotates away on its own.
+**Breaks when** queueing is read as loss (every path shares the bottleneck); a loss at one end of the pair, or on a link every path shares, is read as the current path's, a candidate's few probes look clean by chance, and the pair leaves for it and a better score brings it back; a candidate's sparse probes keep a loss it had by chance, which holds a much faster path back; a peer that restarts makes plain UDP fail twice within the hour while obfuscated UDP fails too, and the plain endpoint is recorded as blocked; a peer that restarts loses its sessions, its paths answer their probes again, and the pair moves between its direct paths with the dead session until WireGuard handshakes again by itself; a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure; a failover target is chosen on replies from before the failure, so the relay that stopped with the current path is taken again over its other transport; a two-ended switch is proposed through a tunnel that has not answered on the current path, and the decider switches alone; an outage the follower measured on the path it is leaving is acted on after it carried out the decider's proposal, and it waits for another proposal and then rotates away on its own.
 
 **Where it holds**
 
@@ -111,12 +111,13 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - Before a candidate's score decides a switch, a check of 40 probes measures the candidates and the current path alike, and a candidate's score counts the loss it showed there: the pair leaves for loss only for a candidate measured clean, and compares one that loses alike without the loss, so a loss every path shares moves nothing, a much faster path is still taken, and a loss a candidate had by chance does not hold it back (mesh.md section 8.2);
 - A path left while losing packets returns, by whichever rule, only once at most 2 of its last 60 probes are lost (mesh.md section 8.2);
 - The 30-second holds last while some candidate qualifies, and the switch goes to the best one when they end (mesh.md section 8.2);
+- A path that answers its probes while its tunnel does not has lost its session, not its way: the handshake is redone once on it, as soon as it answers, before any switch, and at once when the peer says through the Hub that it restarted (mesh.md sections 8.2 and 8.4);
 - After a re-handshake, completion is confirmed and the handshake repeated once on the same relay; a peer under load gets the time WireGuard's cookie retry needs (mesh.md section 8.4);
 - A failover, and the relay a `dial-only` decider proposes through the Hub, take only a path that answered since the failure was suspected, and the earlier replies of the paths that did not answer no longer make them a better path (mesh.md sections 8.2 and 8.4);
 - A `dial-only` decider whose pair has traffic proposes a better path through the tunnel only once the tunnel has answered since the pair moved onto the current path (mesh.md section 8.4);
 - A `dial-only` end carries out a switch both ends agreed on before it measures in the same step, so what it measures is about the path the pair is on (mesh.md section 8.4);
 - When several better types answer, the switch goes to the best of them, not through each in turn (mesh.md section 8.2);
-- A plain endpoint is recorded as blocked, and avoided from then on, only once its failure lasts: 5 minutes without an answer while obfuscated UDP carries the pair, or a second failure within the hour; one failure it recovers from, such as a first handshake lost at start-up, records nothing (obfuscation.md section 5);
+- A plain endpoint is recorded as blocked, and avoided from then on, only once its failure lasts: 5 minutes without an answer while obfuscated UDP carries the pair, or a second failure within the hour; one failure it recovers from, such as a first handshake lost at start-up, records nothing, and a failure of obfuscated UDP to the same peer ends the suspicion, as the peer or the network was down (obfuscation.md section 5);
 - A pair on the obfuscated path to the peer's own port moves to a much faster relay only over obfuscated UDP: being faster never gives up obfuscation (mesh.md section 8.2, obfuscation.md section 5).
 
 **Guards**
@@ -149,8 +150,13 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_recovery_goes_to_the_best_type_that_answers`
 - `nett-mesh:one_failure_that_recovers_records_no_block`
 - `nett-mesh:a_second_failure_within_the_hour_records_the_block`
+- `nett-mesh:a_peer_that_restarts_records_no_block`
+- `nett-mesh:a_peer_that_restarts_is_handshaken_again_as_soon_as_it_answers`
+- `nett-mesh:a_machine_that_started_tells_the_peers_it_has_no_session_with`
+- `nett-mesh:a_peer_that_restarted_is_handshaken_again`
+- `nett-mesh:a_restart_notice_authenticates_expires_and_is_no_switch_message`
 - `nett-mesh:only_plain_udp_given_up_for_obfuscated_udp_counts_as_blocked`
-- `lab:congestion`, `lab:lossy-direct`, `lab:faster-relay`, `lab:wg-cookie`, `lab:wg-rehandshake`, `lab:wireguard-block`
+- `lab:congestion`, `lab:lossy-direct`, `lab:faster-relay`, `lab:wg-cookie`, `lab:wg-rehandshake`, `lab:wireguard-block`, `lab:obfs-restart`, `lab:hub-restart`
 
 ## 4. Waits are bounded and nothing slow holds up a loop that must keep going
 

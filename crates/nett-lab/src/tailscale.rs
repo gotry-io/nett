@@ -31,7 +31,12 @@ pub struct TailscaleLab {
     sockets: BTreeMap<String, PathBuf>,
     /// Headscale.
     control: Option<Child>,
-    children: Vec<Child>,
+    /// Each node's tailscaled.
+    nodes: BTreeMap<String, Child>,
+    /// The certificate bundle tailscaled trusts, and the directory of the nodes' state, used on
+    /// restart.
+    bundle: PathBuf,
+    dir: PathBuf,
     /// Number and certificate directory of a standalone DERP, used on restart.
     derp_args: Vec<(usize, PathBuf)>,
     derps: Vec<(usize, Child)>,
@@ -44,7 +49,7 @@ impl Drop for TailscaleLab {
             child.kill().ok();
             child.wait().ok();
         }
-        for child in &mut self.children {
+        for child in self.nodes.values_mut() {
             child.kill().ok();
             child.wait().ok();
         }
@@ -89,7 +94,9 @@ impl TailscaleLab {
         let mut lab = Self {
             sockets: BTreeMap::new(),
             control: None,
-            children: Vec::new(),
+            nodes: BTreeMap::new(),
+            bundle: PathBuf::new(),
+            dir: dir.clone(),
             derp_args: Vec::new(),
             derps: Vec::new(),
         };
@@ -191,30 +198,9 @@ impl TailscaleLab {
             .and_then(|v| v["key"].as_str().map(str::to_owned))
             .context("headscale did not return a pre-auth key")?;
 
+        lab.bundle = bundle_path;
         for name in nodes {
-            let node_dir = dir.join(name);
-            std::fs::create_dir_all(&node_dir)
-                .with_context(|| format!("creating {}", node_dir.display()))?;
-            let sock = node_dir.join("tailscaled.sock");
-            let child = spawn_in(
-                &netns(name),
-                Path::new("env"),
-                [
-                    format!("SSL_CERT_FILE={}", bundle_path.display()),
-                    // Do not report to Tailscale's logging service
-                    "TS_NO_LOGS_NO_SUPPORT=true".to_owned(),
-                    "tailscaled".to_owned(),
-                    format!("--state={}", node_dir.join("tailscaled.state").display()),
-                    format!("--statedir={}", node_dir.display()),
-                    format!("--socket={}", sock.display()),
-                    "--tun=tailscale0".to_owned(),
-                    format!("--port={TAILSCALED_PORT}"),
-                ],
-                &node_dir.join("tailscaled.log"),
-            )?;
-            lab.children.push(child);
-            wait_until(&format!("tailscaled on {name}"), || sock.exists())?;
-            lab.sockets.insert((*name).to_owned(), sock);
+            lab.start_node(name)?;
             lab.cli(
                 name,
                 &[
@@ -228,6 +214,44 @@ impl TailscaleLab {
             )?;
         }
         Ok(lab)
+    }
+
+    /// Starts tailscaled in the node's namespace, with the state kept in its directory: on a restart
+    /// it logs in again by itself.
+    pub fn start_node(&mut self, name: &str) -> anyhow::Result<()> {
+        let node_dir = self.dir.join(name);
+        std::fs::create_dir_all(&node_dir)
+            .with_context(|| format!("creating {}", node_dir.display()))?;
+        let sock = node_dir.join("tailscaled.sock");
+        // The socket of a tailscaled that was stopped would read as ready
+        std::fs::remove_file(&sock).ok();
+        let child = spawn_in(
+            &netns(name),
+            Path::new("env"),
+            [
+                format!("SSL_CERT_FILE={}", self.bundle.display()),
+                "TS_NO_LOGS_NO_SUPPORT=true".to_owned(),
+                "tailscaled".to_owned(),
+                format!("--state={}", node_dir.join("tailscaled.state").display()),
+                format!("--statedir={}", node_dir.display()),
+                format!("--socket={}", sock.display()),
+                "--tun=tailscale0".to_owned(),
+                format!("--port={TAILSCALED_PORT}"),
+            ],
+            &node_dir.join("tailscaled.log"),
+        )?;
+        self.nodes.insert(name.to_owned(), child);
+        wait_until(&format!("tailscaled on {name}"), || sock.exists())?;
+        self.sockets.insert(name.to_owned(), sock);
+        Ok(())
+    }
+
+    /// Stops the node's tailscaled (scenario 34).
+    pub fn stop_node(&mut self, name: &str) {
+        if let Some(mut child) = self.nodes.remove(name) {
+            child.kill().ok();
+            child.wait().ok();
+        }
     }
 
     fn start_derp(&mut self, i: usize) -> anyhow::Result<()> {

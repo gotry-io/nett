@@ -238,6 +238,7 @@ impl Runtime {
                                 &message,
                                 Instant::now(),
                                 clock.now_ms(),
+                                &mut worker.events,
                             );
                             worker.send_all(out);
                             tick_now = true;

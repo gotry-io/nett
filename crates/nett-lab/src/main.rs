@@ -54,6 +54,10 @@ const USAGE: &str = "usage:
   nett-lab run wireguard-block --topology obfs.toml --nett <path/to/nett> --out <dir>
   nett-lab run machine-obfs --topology machine-obfs.toml --nett <path/to/nett> --out <dir>
       (a censor blocks each port a sends WireGuard to: the pair moves to obfuscated UDP and stays)
+  nett-lab run obfs-restart --topology machine-obfs.toml --nett <path/to/nett> --out <dir> [--with-tailscale]
+      (b, which offers its own obfuscated port, and c restart together: nothing is recorded as blocked)
+  nett-lab run hub-restart --topology hub-restart.toml --nett <path/to/nett> --out <dir> [--with-tailscale]
+      (b and then c restart and tell their peers through the Hub: each pair handshakes again at once)
   nett-lab run lossy-direct --topology failover.toml --nett <path/to/nett> --out <dir>
       (the direct path loses 20% for five minutes: the pair leaves it once and returns when the loss ends)
   nett-lab run port-change --topology failover.toml --nett <path/to/nett> --out <dir>
@@ -221,6 +225,7 @@ fn run() -> anyhow::Result<bool> {
                 "serve" => scenario::serve(&topology, &nett()?, &out)?,
                 "hub" => scenario::hub(&topology, &nett()?, &out, soak)?,
                 "hub-relay" => scenario::hub_relay(&topology, &nett()?, &out)?,
+                "hub-restart" => scenario::hub_restart(&topology, &nett()?, &out, with_tailscale)?,
                 "devices" => scenario::devices(&topology, &nett()?, &out)?,
                 "throughput" => {
                     scenario::throughput(&topology, &nett()?, &out, duration_s, rate_mbit)?
@@ -229,6 +234,9 @@ fn run() -> anyhow::Result<bool> {
                 "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
                 "wireguard-block" => scenario::wireguard_block(&topology, &nett()?, &out)?,
                 "machine-obfs" => scenario::machine_obfs(&topology, &nett()?, &out)?,
+                "obfs-restart" => {
+                    scenario::obfs_restart(&topology, &nett()?, &out, with_tailscale)?
+                }
                 "lossy-direct" => scenario::lossy_direct(&topology, &nett()?, &out)?,
                 "port-change" => scenario::port_change(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(

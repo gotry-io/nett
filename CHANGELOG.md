@@ -4,6 +4,17 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- When a machine on the userspace data plane restarts, as one that offers an obfuscated port does on
+  Linux, the machines connected to it handshake again within about half a second, told through the
+  Hub, where they waited about 15 seconds for WireGuard to handshake again by itself; without the
+  Hub, about 3 seconds after its restart, once its paths answer again. In the lab Tailscale took
+  1.0-1.2 seconds.
+- Two machines that restart together, as when both are upgraded at once, no longer record the
+  plain WireGuard port of the one that offers an obfuscated port as blocked: plain UDP that fails
+  while obfuscated UDP to the same machine fails too is not taken for a block.
+- A machine whose direct path to another is very fast, within 5 ms, now moves to that machine's
+  new obfuscated port without a restart.
+
 ## [0.11.1] - 2026-11-24
 
 - On Linux the userspace data plane receives and sends up to 64 datagrams per system call. In

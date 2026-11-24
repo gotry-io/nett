@@ -31,6 +31,15 @@ const SETTLE: Duration = Duration::from_secs(60);
 const WATCH: Duration = Duration::from_secs(30);
 /// How long b's nett daemon has to exit once its desired state needs the other data plane.
 const EXIT_WITHIN: Duration = Duration::from_secs(10);
+/// Between the restart of b and c together and b's second one, as two machines upgraded at once
+/// restart a few seconds apart.
+const RESTART_GAP: Duration = Duration::from_secs(5);
+/// The longest a probe stream may stop when b restarts without a Hub to tell its peers: the probes
+/// find the path answering while the tunnel does not and the handshake is redone, about 3 seconds,
+/// where WireGuard alone takes 15 (design/mesh.md section 8.2).
+const RESTART_GAP_LIMIT_MS: u64 = 5_000;
+/// What a nett daemon logs as it records an endpoint as blocked.
+const BLOCK_LOGGED: &str = "plain UDP to this endpoint is blocked";
 
 pub fn machine_obfs(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
     let topo = Topology::load(topology)?;
@@ -189,6 +198,190 @@ pub fn machine_obfs(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<
     finish(&lab, out, report, &generated.nodes)
 }
 
+/// Both ends restart together (design/prototype.md scenario 34, design/obfuscation.md section 5),
+/// as when both are upgraded at once: b, which offers its own obfuscated port, and c, which reaches
+/// it there on the userspace data plane, stop and start again, and b once more a few seconds later.
+/// Plain WireGuard to b passes, so a plain path that fails meanwhile fails because b is down, not
+/// because it is plain: no endpoint is recorded as blocked, and both pairs return to b's port.
+pub fn obfs_restart(
+    topology: &Path,
+    nett: &Path,
+    out: &Path,
+    with_tailscale: bool,
+) -> anyhow::Result<Report> {
+    let mut report = nett_restart(topology, nett, out)?;
+    if with_tailscale {
+        let topo = Topology::load(topology)?;
+        let gaps = tailscale_restart(&topo, &out.join("tailscale"))?;
+        for (name, gap) in ["a", "c"].into_iter().zip(gaps) {
+            report.record(
+                &format!("tailscale:{name}:longest-gap-since-the-restart"),
+                format!("{gap} ms"),
+            );
+        }
+        write_report(out, &report)?;
+    }
+    Ok(report)
+}
+
+/// Probe streams from a and c to `target`, port 7000 and 7100: the files they write.
+pub(super) fn probe_streams(
+    lab: &mut Lab,
+    target: std::net::IpAddr,
+    out: &Path,
+) -> anyhow::Result<[std::path::PathBuf; 2]> {
+    let mut files = Vec::new();
+    for (from, port) in [("a", 7000u16), ("c", 7100)] {
+        let addr = std::net::SocketAddr::new(target, port).to_string();
+        let file = out.join(format!("probe-{from}.txt"));
+        lab.helper(
+            "b",
+            &[
+                "probe-recv",
+                "--listen",
+                &addr,
+                "--out",
+                &file.to_string_lossy(),
+            ],
+            &out.join(format!("probe-recv-{from}.log")),
+        )?;
+        std::thread::sleep(Duration::from_millis(300));
+        lab.helper(
+            from,
+            &["probe-send", "--to", &addr],
+            &out.join(format!("probe-send-{from}.log")),
+        )?;
+        files.push(file);
+    }
+    Ok([files[0].clone(), files[1].clone()])
+}
+
+/// The longest gap in a probe stream from `from_ms` until now.
+pub(super) fn longest_gap(file: &Path, from_ms: u64) -> anyhow::Result<u64> {
+    Ok(probe_stats(file, from_ms, now_ms())?.max_gap_ms)
+}
+
+/// Scenario 34 with Tailscale in nett's place, in the same topology: b's and c's tailscaled stop
+/// and start again together, and b's once more [`RESTART_GAP`] later; the longest gaps in a's and
+/// c's probe streams to b since.
+fn tailscale_restart(topo: &Topology, out: &Path) -> anyhow::Result<[u64; 2]> {
+    use crate::tailscale::TailscaleLab;
+    let underlay = Underlay::plan(topo)?;
+    underlay.down()?;
+    std::fs::create_dir_all(out).with_context(|| format!("creating {}", out.display()))?;
+    underlay.up(topo)?;
+    let mut lab = Lab {
+        underlay,
+        processes: Vec::new(),
+        relays: Vec::new(),
+        helpers: Vec::new(),
+    };
+    let mut ts = TailscaleLab::up(out, &["a", "b", "c"])?;
+    let ip_b = ts.ipv4("b")?;
+    // tailscale ping stops at the first direct reply
+    for from in ["a", "c"] {
+        ts.cli(from, &["ping", "-c", "20", &ip_b.to_string()]).ok();
+    }
+    let files = probe_streams(&mut lab, ip_b.into(), out)?;
+    std::thread::sleep(WATCH);
+    let restarted = now_ms();
+    ts.stop_node("b");
+    ts.stop_node("c");
+    ts.start_node("b")?;
+    ts.start_node("c")?;
+    std::thread::sleep(RESTART_GAP);
+    ts.stop_node("b");
+    ts.start_node("b")?;
+    std::thread::sleep(SETTLE + WATCH);
+    let gaps = [
+        longest_gap(&files[0], restarted)?,
+        longest_gap(&files[1], restarted)?,
+    ];
+    drop(ts);
+    drop(lab);
+    Ok(gaps)
+}
+
+fn nett_restart(topology: &Path, nett: &Path, out: &Path) -> anyhow::Result<Report> {
+    let topo = Topology::load(topology)?;
+    let underlay = Underlay::plan(&topo)?;
+    underlay.down()?;
+    let generated = material::generate(&topo, &underlay, out, false)?;
+    let mut lab = start(&topo, &generated, underlay, nett)?;
+    let mut report = Report::new("34-obfs-restart");
+    for node in &generated.nodes {
+        wait_for(node, "peers_applied", |ev| count(ev, "peers_applied") > 0)?;
+    }
+    let node = |name: &str| {
+        generated
+            .nodes
+            .iter()
+            .find(|n| n.name == name)
+            .with_context(|| format!("node {name}"))
+    };
+    let (a, b, c) = (node("a")?, node("b")?, node("c")?);
+    // Traffic from both keeps both pairs measuring their paths
+    let files = probe_streams(&mut lab, b.mesh_ipv4.into(), out)?;
+    for (name, client) in [("a", a), ("c", c)] {
+        let reached = wait_tunnel(nett, client, b, SETTLE, PathKindDoc::DirectObfs);
+        report.check(
+            &format!("{name}:on-the-obfuscated-port"),
+            reached.is_ok(),
+            reached
+                .as_ref()
+                .map(|s| candidates(s, b))
+                .unwrap_or_else(|e| format!("{e:#}")),
+        );
+    }
+    std::thread::sleep(WATCH);
+    let logged = |n: &LabNode| {
+        std::fs::read_to_string(n.dir.join("nett.log"))
+            .unwrap_or_default()
+            .matches(BLOCK_LOGGED)
+            .count()
+    };
+    let before = [logged(a), logged(c)];
+    let restarted = now_ms();
+    lab.stop("b")?;
+    lab.stop("c")?;
+    lab.spawn(b, nett)?;
+    lab.spawn(c, nett)?;
+    std::thread::sleep(RESTART_GAP);
+    lab.stop("b")?;
+    lab.spawn(b, nett)?;
+    for (name, client) in [("a", a), ("c", c)] {
+        let back = wait_tunnel(nett, client, b, SETTLE, PathKindDoc::DirectObfs);
+        report.check(
+            &format!("{name}:back-on-the-obfuscated-port"),
+            back.is_ok(),
+            back.as_ref()
+                .map(|s| candidates(s, b))
+                .unwrap_or_else(|e| format!("{e:#}")),
+        );
+    }
+    std::thread::sleep(WATCH);
+    for (((name, client), before), file) in [("a", a), ("c", c)].into_iter().zip(before).zip(&files)
+    {
+        let gap = longest_gap(file, restarted)?;
+        report.check(
+            &format!("{name}:longest-gap-since-the-restart"),
+            gap <= RESTART_GAP_LIMIT_MS,
+            format!("{gap} ms"),
+        );
+        let recorded = logged(client) - before;
+        report.check(
+            &format!("{name}:no-block-recorded"),
+            recorded == 0,
+            format!("{recorded} endpoints recorded as blocked since the restart"),
+        );
+        report.record(
+            &format!("{name}:switches-since-the-restart"),
+            format!("{:?}", switches_since(client, restarted)),
+        );
+    }
+    finish(&lab, out, report, &generated.nodes)
+}
+
 fn finish(lab: &Lab, out: &Path, mut report: Report, nodes: &[LabNode]) -> anyhow::Result<Report> {
     if !report.passed {
         report.record("diagnosis", diagnose(lab, nodes));
@@ -198,7 +391,7 @@ fn finish(lab: &Lab, out: &Path, mut report: Report, nodes: &[LabNode]) -> anyho
 }
 
 /// Waits until a's path to b is of `kind` and its tunnel has completed a handshake.
-fn wait_tunnel(
+pub(super) fn wait_tunnel(
     nett: &Path,
     a: &LabNode,
     b: &LabNode,

@@ -1,0 +1,33 @@
+# Scenario 35: b, public, offers its own obfuscated port; a (kernel WireGuard) and c (userspace data
+# plane), each behind a cone NAT, reach it there; all three join through the Hub that runs in h
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "h"
+reachability = "public"
+
+[[node]]
+name = "b"
+reachability = "public"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "nat-a"
+
+[[node]]
+name = "c"
+reachability = "dial-only"
+behind = "nat-c"
+userspace = true
+
+[[router]]
+name = "nat-a"
+nat = "cone"
+
+[[router]]
+name = "nat-c"
+nat = "cone"

@@ -766,6 +766,7 @@ jobs:
               Scenario 27: the network drops the peer's WireGuard port toward a relay, and the pair stays off that relay | relay-port-block --topology crates/nett-lab/topologies/far-leg.toml
               Scenario 32: a censor blocks each port WireGuard is sent to, and the pair moves to obfuscated UDP and stays there, also after a restart | wireguard-block --topology crates/nett-lab/topologies/obfs.toml
               Scenario 33: a machine's own obfuscated port, with plain WireGuard to it dropped, directly and through a relay, and the data plane following the port | machine-obfs --topology crates/nett-lab/topologies/machine-obfs.toml
+              Scenario 34: the machine with the obfuscated port and a member reaching it restart together, and nothing is recorded as blocked | obfs-restart --topology crates/nett-lab/topologies/machine-obfs.toml
               Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
           - group: nat
             title: NAT, hole punching, MTU and access control
@@ -782,6 +783,7 @@ jobs:
               Devices through a mobile gateway on the userspace data plane (design/userspace.md section 4.2) | devices --userspace g --topology crates/nett-lab/topologies/devices.toml
               Scenario 31: a served port reaches a loopback service from an allowed member only, never from outside the mesh | serve --topology crates/nett-lab/topologies/serve.toml
               Hub: push, apply, the mesh keeps working when the Hub stops, catch-up after recovery, forged members and old-version rules are rejected (design/hub.md section 10) | hub --topology crates/nett-lab/topologies/direct.toml
+              Scenario 35: a machine that restarts tells its peers through the Hub, and each pair handshakes again at once, the decider on its path and the follower on its endpoint | hub-restart --topology crates/nett-lab/topologies/hub-restart.toml
           - group: handshake
             title: WireGuard handshake
             scenarios: |

@@ -480,9 +480,13 @@ pub enum SwitchReason {
     BetterType,
     /// A better path of the same type.
     BetterScore,
-    /// The current relay still replies to probes but the tunnel is down: it lost the index of this connection,
-    /// so re-handshake on the same relay (section 8.4).
-    RelayLostSession,
+    /// The current path still answers probes but the tunnel is down: the session was lost, as when a
+    /// relay lost the index of this connection or the peer restarted, so handshake again on the same
+    /// path (section 8.4).
+    SessionLost,
+    /// The peer said through the Hub that it restarted, losing its sessions: handshake again on the
+    /// same path at once (section 8.4).
+    PeerRestarted,
     /// The handshake still has not completed when due after a re-handshake (for example the peer's reply was
     /// carried to the old relay by a late packet on the old path): re-handshake once more on the same
     /// relay (section 8.4).
@@ -1295,13 +1299,10 @@ impl PeerPaths {
                         next: now + BURST_SPACING,
                         since: now,
                     };
-                    // When the current path is via a relay, also probe that relay: if it can still reply, it lost the index
-                    // of this connection
-                    let current_is_relay = self.current_kind().via_relay();
+                    // The current path is probed too: if it still answers, the session was lost, as when a
+                    // relay lost the index of this connection or the peer restarted
                     for index in 0..self.candidates.len() {
-                        if self.role != Role::FollowTogether
-                            && (index != self.current || current_is_relay)
-                        {
+                        if self.role != Role::FollowTogether {
                             actions.extend(self.probe_candidate(index, now, false));
                         }
                     }
@@ -1704,23 +1705,8 @@ impl PeerPaths {
                 return Some(Action::Lost { since });
             }
             let current = &self.candidates[self.current];
-            if current.kind.via_relay()
-                && !self.rehandshake_tried
-                && current.last_reply.is_some_and(|t| t >= since)
-            {
-                self.rehandshake_tried = true;
-                let route = current.route;
-                let rtt_ms = self.tunnel.rtt_ms;
-                self.tunnel = PathStats::seeded(rtt_ms);
-                self.clear_tunnel_probes();
-                self.phase = Phase::Normal;
-                self.high_loss_since = None;
-                self.expect_handshake(now, rtt_ms);
-                return Some(Action::Switch {
-                    to: route,
-                    rehandshake: true,
-                    reason: SwitchReason::RelayLostSession,
-                });
+            if !self.rehandshake_tried && current.last_reply.is_some_and(|t| t >= since) {
+                return Some(self.handshake_again(SwitchReason::SessionLost, now));
             }
             let action = self.fail_over(now, since, SwitchReason::Unreachable);
             if action.is_none() {
@@ -1755,6 +1741,24 @@ impl PeerPaths {
             self.high_loss_since = None;
         }
         None
+    }
+
+    /// Handshakes again on the path the pair is on, once until the tunnel answers: its session was
+    /// lost (section 8.4).
+    pub fn handshake_again(&mut self, reason: SwitchReason, now: Instant) -> Action {
+        self.rehandshake_tried = true;
+        let route = self.candidates[self.current].route;
+        let rtt_ms = self.tunnel.rtt_ms;
+        self.tunnel = PathStats::seeded(rtt_ms);
+        self.clear_tunnel_probes();
+        self.phase = Phase::Normal;
+        self.high_loss_since = None;
+        self.expect_handshake(now, rtt_ms);
+        Action::Switch {
+            to: route,
+            rehandshake: true,
+            reason,
+        }
     }
 
     /// Since suspected failure the peer's packets are still arriving, and an in-tunnel reply (including late
@@ -2015,6 +2019,13 @@ impl PeerPaths {
             reason,
             SwitchReason::Unreachable | SwitchReason::HandshakeIncomplete
         );
+        // Obfuscated UDP failed as well: the peer or the network was down, and a plain path that
+        // failed meanwhile did not fail for being plain
+        if failed && self.candidates[self.current].kind.obfuscated() {
+            for c in &mut self.candidates {
+                c.suspected = None;
+            }
+        }
         if failed
             && matches!(
                 self.candidates[self.current].kind,
@@ -2719,7 +2730,14 @@ mod tests {
         let broke = sim.now;
         sim.one_way[0] = true;
         sim.run(Duration::from_secs(20));
-        let (at, to, _, reason) = sim.switches[0];
+        // Direct still answers probes, so a handshake on it is tried first (section 8.4)
+        assert_eq!(
+            (sim.switches[0].1, sim.switches[0].3),
+            (direct(), SwitchReason::SessionLost),
+            "{:?}",
+            sim.switches
+        );
+        let (at, to, _, reason) = sim.switches[1];
         assert_eq!((to, reason), (relay(1), SwitchReason::Unreachable));
         let took = at.saturating_duration_since(broke);
         assert!(
@@ -2858,14 +2876,16 @@ mod tests {
             (direct(), PathKind::Direct),
             (relay(1), PathKind::Relay),
         ]);
+        // Probes get through and WireGuard does not: a handshake does not help
         sim.tunnel_broken[0] = true;
+        sim.fix_on_rehandshake = false;
         sim.run(Duration::from_secs(300));
         // The first failure does not count; after that, the wait before each return to direct doubles: 10, 20, 40,
-        // 80 seconds
+        // 80 seconds. A handshake again on direct is not a return to it
         let returns: Vec<Instant> = sim
             .switches
             .iter()
-            .filter(|s| s.1 == direct())
+            .filter(|s| s.1 == direct() && s.3 == SwitchReason::BetterType)
             .map(|s| s.0)
             .collect();
         let waits: Vec<Duration> = returns
@@ -2913,6 +2933,33 @@ mod tests {
     /// where WireGuard alone would handshake again only after 15 seconds (design/mesh.md section
     /// 8.2, design/prototype.md scenario 34).
     #[test]
+    fn a_peer_that_restarts_is_handshaken_again_as_soon_as_it_answers() {
+        let mut sim = Sim::new(vec![
+            (direct_obfs(), PathKind::DirectObfs),
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.run(Duration::from_secs(40));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        sim.up = vec![false; 3];
+        sim.tunnel_broken = vec![true; 3];
+        sim.run(Duration::from_secs(2));
+        sim.up = vec![true; 3];
+        let back = sim.now;
+        sim.run(Duration::from_secs(30));
+        let (at, to, rehandshake, reason) = *sim.switches.first().expect("handshook again");
+        assert_eq!(
+            (to, rehandshake, reason),
+            (direct_obfs(), true, SwitchReason::SessionLost),
+            "{:?}",
+            sim.switches
+        );
+        let took = at.saturating_duration_since(back);
+        assert!(took <= Duration::from_millis(1500), "took {took:?}");
+        assert_eq!(sim.switches.len(), 1, "{:?}", sim.switches);
+    }
+
+    #[test]
     fn rehandshakes_on_a_relay_that_lost_the_session() {
         let mut sim = Sim::new(vec![
             (relay(1), PathKind::Relay),
@@ -2927,7 +2974,7 @@ mod tests {
         let (at, to, rehandshake, reason) = sim.switches[0];
         assert_eq!(
             (to, rehandshake, reason),
-            (relay(1), true, SwitchReason::RelayLostSession)
+            (relay(1), true, SwitchReason::SessionLost)
         );
         assert!(at.saturating_duration_since(lost) <= Duration::from_millis(3600));
         // After the re-handshake relay 1 works again, and it stays on relay 1
@@ -3037,7 +3084,7 @@ mod tests {
             [
                 SwitchReason::BetterScore,
                 SwitchReason::HandshakeIncomplete,
-                SwitchReason::RelayLostSession
+                SwitchReason::SessionLost
             ]
         );
         assert!(
@@ -3091,7 +3138,7 @@ mod tests {
         assert_eq!(
             reasons,
             [
-                (relay(1), SwitchReason::RelayLostSession),
+                (relay(1), SwitchReason::SessionLost),
                 (relay(1), SwitchReason::HandshakeIncomplete),
                 (relay(2), SwitchReason::Unreachable)
             ]
@@ -3714,6 +3761,43 @@ mod tests {
         sim.up[0] = false;
         sim.run(Duration::from_secs(10));
         assert_eq!(sim.paths.take_newly_blocked(), Some(direct().endpoint()));
+    }
+
+    /// While a peer restarts, its paths come and go, the obfuscated ones too: the pair moves from
+    /// obfuscated UDP to plain and back, and plain fails more than once within the hour. A plain path
+    /// that failed while obfuscated UDP failed as well did not fail for being plain, so no block is
+    /// recorded, as when both ends of a pair upgrade together (design/obfuscation.md section 5).
+    #[test]
+    fn a_peer_that_restarts_records_no_block() {
+        let mut sim = Sim::new(vec![
+            (direct_obfs(), PathKind::DirectObfs),
+            (direct(), PathKind::Direct),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.run(Duration::from_secs(40));
+        let mut blocked = None;
+        for _ in 0..3 {
+            // Obfuscated UDP fails and the pair moves to plain; its backoff keeps the pair there
+            sim.up[0] = false;
+            sim.run(Duration::from_secs(5));
+            sim.up[0] = true;
+            sim.run(Duration::from_millis(500));
+            // Then plain fails too, and the pair moves back to obfuscated UDP
+            sim.up[1] = false;
+            sim.run(Duration::from_secs(5));
+            sim.up[1] = true;
+            sim.run(Duration::from_secs(5));
+            blocked = blocked.or(sim.paths.take_newly_blocked());
+        }
+        let plain_failures = sim
+            .switches
+            .windows(2)
+            .filter(|w| w[0].1 == direct() && w[1].3 == SwitchReason::Unreachable)
+            .count();
+        assert!(plain_failures >= 2, "{:?}", sim.switches);
+        sim.run(BLOCK_WINDOW + BLOCK_SILENCE);
+        blocked = blocked.or(sim.paths.take_newly_blocked());
+        assert_eq!(blocked, None, "{:?}", sim.switches);
     }
 
     /// Through a relay, obfuscated UDP is taken over plain UDP; to the peer's own obfuscated port,

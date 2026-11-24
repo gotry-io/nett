@@ -25,6 +25,7 @@ pub const SWITCH_PROPOSAL: u8 = 0x84;
 pub const SWITCH_ACK: u8 = 0x85;
 pub const PUNCH_PROPOSAL: u8 = 0x86;
 pub const PUNCH_ACK: u8 = 0x87;
+pub const RESTART_NOTICE: u8 = 0x88;
 pub use nett_core::transport::{RELAY_PROBE, RELAY_REPLY};
 /// A probe a relay forwards to the peer, and the peer's reply it forwards back (ADR 0029).
 pub const THROUGH_PROBE: u8 = 0x92;
@@ -351,29 +352,71 @@ impl SwitchMessage {
 }
 
 impl SwitchMessage {
-    /// The message relayed through the Hub: `message | send time (Unix ms) | checksum`. The Hub cannot
-    /// forge it; the send time limits replay.
+    /// The message relayed through the Hub, sealed by [`seal_relayed`].
     pub fn seal(&self, sent_ms: u64, key: &ProbeKey) -> [u8; HUB_SWITCH_LEN] {
-        let mut b = [0u8; HUB_SWITCH_LEN];
-        b[..SWITCH_LEN].copy_from_slice(&self.encode());
-        b[SWITCH_LEN..SWITCH_LEN + 8].copy_from_slice(&sent_ms.to_be_bytes());
-        let mac = key.mac(&b[..SWITCH_LEN + 8]);
-        b[SWITCH_LEN + 8..].copy_from_slice(&mac);
-        b
+        seal_relayed(&self.encode(), sent_ms, key)
     }
 
-    /// Opens a message relayed through the Hub: `None` when it is malformed, does not authenticate, or
-    /// was sent more than [`MAX_CLOCK_SKEW_MS`] from this machine's clock.
+    /// Opens a message relayed through the Hub: `None` when [`open_relayed`] refuses it or it is not a
+    /// switch message.
     pub fn open(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<Self> {
-        if b.len() != HUB_SWITCH_LEN || !key.verify(&b[..SWITCH_LEN + 8], &b[SWITCH_LEN + 8..]) {
+        Self::decode(&open_relayed(b, key, now_ms)?.0)
+    }
+}
+
+/// A message relayed through the Hub: `message | send time (Unix ms) | checksum` under the pair's
+/// path switch key. The Hub cannot forge it; the send time limits replay.
+fn seal_relayed(message: &[u8; SWITCH_LEN], sent_ms: u64, key: &ProbeKey) -> [u8; HUB_SWITCH_LEN] {
+    let mut b = [0u8; HUB_SWITCH_LEN];
+    b[..SWITCH_LEN].copy_from_slice(message);
+    b[SWITCH_LEN..SWITCH_LEN + 8].copy_from_slice(&sent_ms.to_be_bytes());
+    let mac = key.mac(&b[..SWITCH_LEN + 8]);
+    b[SWITCH_LEN + 8..].copy_from_slice(&mac);
+    b
+}
+
+/// The message and its send time: `None` when it is malformed, does not authenticate, or was sent
+/// more than [`MAX_CLOCK_SKEW_MS`] from this machine's clock.
+fn open_relayed(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<([u8; SWITCH_LEN], u64)> {
+    if b.len() != HUB_SWITCH_LEN || !key.verify(&b[..SWITCH_LEN + 8], &b[SWITCH_LEN + 8..]) {
+        return None;
+    }
+    let mut sent = [0u8; 8];
+    sent.copy_from_slice(&b[SWITCH_LEN..SWITCH_LEN + 8]);
+    let sent_ms = u64::from_be_bytes(sent);
+    if now_ms.abs_diff(sent_ms) > MAX_CLOCK_SKEW_MS {
+        return None;
+    }
+    let mut message = [0u8; SWITCH_LEN];
+    message.copy_from_slice(&b[..SWITCH_LEN]);
+    Some((message, sent_ms))
+}
+
+/// A member that restarted tells a peer, through the Hub only (design/mesh.md section 8.4):
+/// `type | 0 | 0 | 0 | restart number | 0 × 8`, sealed as the switch messages relayed there. A
+/// release that does not know the type drops it, as it does any message it cannot decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartNotice {
+    /// Drawn at random as the sender's mesh starts.
+    pub restart: u32,
+}
+
+impl RestartNotice {
+    pub fn seal(&self, sent_ms: u64, key: &ProbeKey) -> [u8; HUB_SWITCH_LEN] {
+        let mut b = [0u8; SWITCH_LEN];
+        b[0] = RESTART_NOTICE;
+        b[4..8].copy_from_slice(&self.restart.to_be_bytes());
+        seal_relayed(&b, sent_ms, key)
+    }
+
+    /// The notice and when it was sent (Unix ms), as [`open_relayed`] lets it through.
+    pub fn open(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<(Self, u64)> {
+        let (b, sent_ms) = open_relayed(b, key, now_ms)?;
+        if b[0] != RESTART_NOTICE || b[1..4] != [0; 3] || b[8..] != [0; 8] {
             return None;
         }
-        let mut sent = [0u8; 8];
-        sent.copy_from_slice(&b[SWITCH_LEN..SWITCH_LEN + 8]);
-        if now_ms.abs_diff(u64::from_be_bytes(sent)) > MAX_CLOCK_SKEW_MS {
-            return None;
-        }
-        Self::decode(&b[..SWITCH_LEN])
+        let restart = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
+        Some((Self { restart }, sent_ms))
     }
 }
 
@@ -598,6 +641,42 @@ pub const UNSPECIFIED: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECI
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A restart notice opens with the pair's key while fresh, carries its send time, and is not
+    /// taken for a switch message, so a release that does not know it drops it.
+    #[test]
+    fn a_restart_notice_authenticates_expires_and_is_no_switch_message() {
+        let own = PrivateKey::from_bytes([3; 32]);
+        let peer_secret = PrivateKey::from_bytes([4; 32]);
+        let key = ProbeKey::path_switch(&own, &peer_secret.public_key()).expect("key");
+        let theirs = ProbeKey::path_switch(&peer_secret, &own.public_key()).expect("key");
+        let notice = RestartNotice {
+            restart: 0xdead_beef,
+        };
+        let sealed = notice.seal(1_000_000, &key);
+        assert_eq!(
+            RestartNotice::open(&sealed, &theirs, 1_000_500),
+            Some((notice, 1_000_000))
+        );
+        assert_eq!(
+            RestartNotice::open(&sealed, &theirs, 1_000_000 + MAX_CLOCK_SKEW_MS + 1),
+            None,
+            "too old"
+        );
+        let mut forged = sealed;
+        forged[4] ^= 1;
+        assert_eq!(RestartNotice::open(&forged, &theirs, 1_000_000), None);
+        assert_eq!(SwitchMessage::open(&sealed, &theirs, 1_000_000), None);
+        let switch = SwitchMessage {
+            kind: SWITCH_PROPOSAL,
+            round: 7,
+            target: SwitchTarget::Relay(KeyId([5; 8])),
+        };
+        assert_eq!(
+            RestartNotice::open(&switch.seal(1_000_000, &key), &theirs, 1_000_000),
+            None
+        );
+    }
 
     #[test]
     fn switch_messages_through_the_hub_authenticate_and_expire() {

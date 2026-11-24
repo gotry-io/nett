@@ -29,9 +29,9 @@ use crate::helper::{AssignedMember, RelayAssignment};
 use crate::key::PrivateKey;
 use crate::loopback::LoopbackPorts;
 use crate::members::{MemberSet, OwnPolicy};
-use crate::path::{CandidateState, PathKind, Role, Route};
+use crate::path::{CandidateState, PathKind, Role, Route, SwitchReason};
 use crate::probe::{KeyId, NatType};
-use crate::prober::{ACTIVE_WINDOW, Incoming, Loopbacks, Outgoing, Prober};
+use crate::prober::{ACTIVE_WINDOW, Incoming, Loopbacks, Outgoing, Prober, Switch};
 use crate::routes::Routes;
 use crate::status::{
     self, CandidateStateDoc, CandidateStatus, ConfigStatus, NatKind, NatStatus, NodeRef,
@@ -46,6 +46,9 @@ pub const DIAL_ONLY_KEEPALIVE_SECS: u16 = 25;
 /// Interval for reading each peer's state (traffic, endpoint): after an endpoint is changed by roaming it
 /// is corrected within this time (section 8.3).
 const STATS_INTERVAL: Duration = Duration::from_millis(100);
+/// A machine tells its peers that it restarted at most this long after its mesh started: later, the
+/// probes have recovered every pair (design/mesh.md section 8.4).
+const RESTART_NOTICE_WITHIN: Duration = Duration::from_secs(60);
 /// After a data plane update fails, the desired state in effect is applied again after this long,
 /// then after twice as long each time, up to [`RETRY_MAX`] (design/mesh.md section 15).
 pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -114,6 +117,10 @@ pub struct Engine<D> {
     /// deciding and executing, what is read is still the old peer's handshake time.
     rehandshaked_at: HashMap<X25519PublicKey, u64>,
     last_stats: Option<Instant>,
+    /// The first advance, taken as the start of the mesh, and whether its restart notices went out or
+    /// their time passed (section 8.4).
+    started: Option<Instant>,
+    restart_told: bool,
     clock_trusted: bool,
     /// Loopback endpoints of TLS relays on the TLS transport, and the idle ports most recently set
     /// (design/mesh.md section 5.3).
@@ -184,6 +191,8 @@ impl<D: DataPlane> Engine<D> {
             traffic: HashMap::new(),
             rehandshaked_at: HashMap::new(),
             last_stats: None,
+            started: None,
+            restart_told: false,
             clock_trusted: false,
             tls_endpoints: BTreeSet::new(),
             tls_guarded: None,
@@ -871,18 +880,80 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// A switch message from a peer, relayed through the Hub (design/mesh.md section 8.4).
+    /// A switch message or a restart notice from a peer, relayed through the Hub (design/mesh.md
+    /// section 8.4). A peer that restarted lost its sessions: a session with it from before the
+    /// notice was sent is handshaken again at once, by the decider on the path the pair is on and by
+    /// a follower on the endpoint WireGuard has.
     pub fn on_hub_message(
         &mut self,
         peer: &NodeId,
         data: &[u8],
         at: Instant,
         now_ms: u64,
+        events: &mut impl EventSink,
     ) -> Vec<Outgoing> {
-        match self.prober.as_mut() {
-            Some(prober) => prober.on_hub_message(peer, data, at, now_ms),
-            None => Vec::new(),
+        let Some(prober) = self.prober.as_mut() else {
+            return Vec::new();
+        };
+        let out = prober.on_hub_message(peer, data, at, now_ms);
+        let mut switches = Vec::new();
+        for (id, sent_ms) in prober.take_restarted() {
+            let Some(public_key) = prober.public_key(&id) else {
+                continue;
+            };
+            let traffic = self.traffic.get(&public_key);
+            let before = traffic
+                .and_then(|t| t.last_handshake)
+                .is_some_and(|t| unix_ms(t) < sent_ms);
+            if !before {
+                continue;
+            }
+            if let Some(switch) = prober.handshake_again(&id, at) {
+                switches.push(switch);
+            } else if let Some(endpoint) = traffic.and_then(|t| t.endpoint) {
+                switches.push(Switch {
+                    to: prober.route_to(&id, endpoint),
+                    peer: id,
+                    public_key,
+                    rehandshake: true,
+                    reason: SwitchReason::PeerRestarted,
+                });
+            }
         }
+        self.carry_out(switches, now_ms, events);
+        out
+    }
+
+    /// Once nett-node reports the Hub session up, within [`RESTART_NOTICE_WITHIN`] of the start,
+    /// tells each peer that WireGuard shows no handshake with since the start that this machine
+    /// restarted (section 8.4): kernel WireGuard keeps its sessions across a restart, the userspace
+    /// data plane does not.
+    fn tell_restart(&mut self, now: Instant, now_ms: u64) -> Vec<Outgoing> {
+        let started = *self.started.get_or_insert(now);
+        if self.restart_told {
+            return Vec::new();
+        }
+        if now.saturating_duration_since(started) >= RESTART_NOTICE_WITHIN {
+            self.restart_told = true;
+            return Vec::new();
+        }
+        let Some(prober) = self.prober.as_ref() else {
+            return Vec::new();
+        };
+        if !self.hub || self.last_stats.is_none() {
+            return Vec::new();
+        }
+        self.restart_told = true;
+        let fresh: Vec<NodeId> = prober
+            .peer_ids()
+            .filter(|(_, key)| {
+                self.traffic
+                    .get(*key)
+                    .is_some_and(|t| t.last_handshake.is_none())
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        prober.restart_notices(&fresh, now_ms)
     }
 
     /// TLS loopback ports that no peer is using: drops packets entering the WireGuard port from them
@@ -1011,6 +1082,17 @@ impl<D: DataPlane> Engine<D> {
             events.emit(Event::TrustStoreFailed { reason });
         }
         self.guard_idle_tls(events);
+        self.carry_out(switches, now_ms, events);
+        let mut out = out;
+        out.extend(self.tell_restart(now, now_ms));
+        out
+    }
+
+    /// Reads each peer's traffic and endpoint: peers with traffic are probed at the frequency of section 7;
+    /// when the decider finds the endpoint changed by roaming it changes it back (section 8.3).
+    /// Carries out switches: a re-handshake removes the peer and adds it back with the new endpoint,
+    /// another switch only moves its endpoint.
+    fn carry_out(&mut self, switches: Vec<Switch>, now_ms: u64, events: &mut impl EventSink) {
         for switch in switches {
             let result = if switch.rehandshake {
                 match self.members.get(&switch.peer) {
@@ -1046,11 +1128,8 @@ impl<D: DataPlane> Engine<D> {
                 }),
             }
         }
-        out
     }
 
-    /// Reads each peer's traffic and endpoint: peers with traffic are probed at the frequency of section 7;
-    /// when the decider finds the endpoint changed by roaming it changes it back (section 8.3).
     fn check_peers(&mut self, now: Instant, events: &mut impl EventSink) {
         let Some(prober) = self.prober.as_mut() else {
             return;
@@ -1442,11 +1521,13 @@ fn interface_spec(me: &Member, desired: &DesiredMesh) -> InterfaceSpec {
 /// milliseconds). With no re-handshake there is nothing to confirm; a handshake time earlier than the
 /// re-handshake belongs to the old peer (state read between deciding and executing).
 fn handshake_since(last_handshake: Option<SystemTime>, rehandshaked_ms: Option<u64>) -> bool {
-    let done_ms = last_handshake.map(|t| {
-        t.duration_since(UNIX_EPOCH)
-            .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
-    });
+    let done_ms = last_handshake.map(unix_ms);
     matches!((done_ms, rehandshaked_ms), (Some(done), Some(at)) if done >= at)
+}
+
+fn unix_ms(t: SystemTime) -> u64 {
+    t.duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 fn peer_spec<'a>(
@@ -2326,6 +2407,117 @@ mod tests {
         assert!(!handshake_since(at(900), None));
         assert!(handshake_since(at(1_000), Some(1_000)));
         assert!(handshake_since(at(1_030), Some(1_000)));
+    }
+
+    /// Once nett-node has the Hub session, a machine that just started tells the peers WireGuard has
+    /// no handshake with that it restarted, once; a peer whose session kernel WireGuard kept is not
+    /// told, and nothing is sent once the first minute has passed (design/mesh.md section 8.4).
+    #[test]
+    fn a_machine_that_started_tells_the_peers_it_has_no_session_with() {
+        let mesh = Mesh::new(&[1, 2, 3]);
+        let doc = mesh.desired(
+            1,
+            vec![
+                mesh.material(1, 1),
+                mesh.material(2, 1),
+                mesh.material(3, 1),
+            ],
+        );
+        let told = |late: Duration| {
+            let mut e = engine(1);
+            let mut events = VecSink::default();
+            e.apply(&validated(doc.clone()), &mut events)
+                .expect("accepted");
+            // Kernel WireGuard kept the session with 3 across the restart
+            e.dataplane
+                .handshakes
+                .insert(mesh_key(3), SystemTime::now() - Duration::from_secs(60));
+            let start = Instant::now();
+            let hub = |out: Vec<Outgoing>| -> Vec<NodeId> {
+                out.into_iter()
+                    .filter_map(|o| match o {
+                        Outgoing::Hub { peer, .. } => Some(peer),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let before = hub(e.tick(start, 1_000_000, &mut events));
+            assert!(before.is_empty(), "no Hub yet: {before:?}");
+            e.set_hub(true);
+            let at = start + late;
+            let mut sent = hub(e.tick(at, 1_000_000, &mut events));
+            sent.extend(hub(e.tick(
+                at + Duration::from_secs(1),
+                1_001_000,
+                &mut events,
+            )));
+            sent
+        };
+        assert_eq!(told(Duration::from_secs(2)), [node_id(2)]);
+        assert!(told(RESTART_NOTICE_WITHIN).is_empty());
+    }
+
+    /// A peer that says it restarted lost its sessions: a session older than the notice is
+    /// handshaken again once per restart, by the decider on the path it is on and by a follower on the
+    /// endpoint WireGuard has, and a session made since is left alone (design/mesh.md section 8.4).
+    #[test]
+    fn a_peer_that_restarted_is_handshaken_again() {
+        let mesh = Mesh::new(&[1, 2]);
+        let wireguard: SocketAddr = "198.51.100.2:41820".parse().expect("addr");
+        let handshaken_again = |decides: bool| {
+            let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+            if !decides {
+                // The dial-only end decides
+                doc.reachability = Reachability::Public;
+                doc.paths[0].peer_reachability = Reachability::DialOnly;
+            }
+            let mut e = engine(1);
+            let mut events = VecSink::default();
+            e.apply(&validated(doc), &mut events).expect("accepted");
+            e.dataplane
+                .set_endpoint(&mesh_key(2), wireguard)
+                .expect("endpoint");
+            let now_ms = 1_800_000_000_000u64;
+            e.dataplane.handshakes.insert(
+                mesh_key(2),
+                UNIX_EPOCH + Duration::from_millis(now_ms - 30_000),
+            );
+            let start = Instant::now();
+            e.tick(start, now_ms, &mut events);
+            // The pair's key is the same at both ends
+            let key =
+                crate::probe::ProbeKey::path_switch(&PrivateKey::from_bytes([1; 32]), &mesh_key(2))
+                    .expect("key");
+            let notice = |restart: u32, sent_ms: u64| {
+                crate::probe::RestartNotice { restart }
+                    .seal(sent_ms, &key)
+                    .to_vec()
+            };
+            e.on_hub_message(&node_id(2), &notice(7, now_ms), start, now_ms, &mut events);
+            // The same restart once more: handled already
+            e.on_hub_message(&node_id(2), &notice(7, now_ms), start, now_ms, &mut events);
+            // A later restart, but the session now is newer than its notice
+            e.dataplane.handshakes.insert(
+                mesh_key(2),
+                UNIX_EPOCH + Duration::from_millis(now_ms + 500),
+            );
+            e.tick(start + Duration::from_secs(1), now_ms + 1_000, &mut events);
+            e.on_hub_message(
+                &node_id(2),
+                &notice(8, now_ms),
+                start,
+                now_ms + 1_000,
+                &mut events,
+            );
+            e.dataplane
+                .rehandshakes
+                .iter()
+                .map(|p| p.endpoint)
+                .collect::<Vec<_>>()
+        };
+        let path: SocketAddr = "192.0.2.2:41820".parse().expect("addr");
+        assert_eq!(handshaken_again(true), [Some(path)]);
+        assert_eq!(handshaken_again(false), [Some(wireguard)]);
     }
 
     /// The transports' loopback ports are handed to be opened when the desired state is applied,

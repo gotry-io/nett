@@ -174,7 +174,8 @@ pub struct LinkReport {
     pub status: ::prost::alloc::vec::Vec<u8>,
 }
 /// Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
-/// down (design/mesh.md section 8.4). node → Hub: node_id is the peer it is for; Hub → node: the
+/// down, or a member's notice to a peer that it restarted (design/mesh.md section 8.4). node → Hub:
+/// node_id is the peer it is for; Hub → node: the
 /// peer it came from. The message is authenticated end to end by the two meshes and opaque
 /// to nett-node and the Hub, which passes it on only between members the site connects
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
