@@ -1700,8 +1700,9 @@ impl PeerPaths {
     }
 
     /// A UDP relay much faster than the current direct path, held for [`FASTER_RELAY_HOLD`] while the
-    /// pair is not busy and the path is not queuing (section 8.2). Pairs that switch together keep the
-    /// order of path types.
+    /// pair is not busy and the path is not queuing (section 8.2). From the obfuscated path to the
+    /// peer's own port only an obfuscated relay counts, so being faster never gives up obfuscation.
+    /// Pairs that switch together keep the order of path types.
     fn check_faster_relay(
         &mut self,
         now: Instant,
@@ -1712,14 +1713,20 @@ impl PeerPaths {
         let queuing = self
             .last_late_reply
             .is_some_and(|t| now.saturating_duration_since(t) < LATE_HORIZON);
-        let eligible =
-            self.role == Role::Decide && current_kind == PathKind::Direct && !self.busy && !queuing;
+        let eligible = self.role == Role::Decide
+            && matches!(current_kind, PathKind::Direct | PathKind::DirectObfs)
+            && !self.busy
+            && !queuing;
+        let relay_kind = |kind: PathKind| match current_kind {
+            PathKind::DirectObfs => kind == PathKind::RelayObfs,
+            _ => matches!(kind, PathKind::Relay | PathKind::RelayObfs),
+        };
         let faster = current_score.filter(|_| eligible).and_then(|current| {
             self.candidates
                 .iter()
                 .enumerate()
                 .filter(|(_, c)| {
-                    matches!(c.kind, PathKind::Relay | PathKind::RelayObfs)
+                    relay_kind(c.kind)
                         && c.far_leg
                         && !c.broken_beyond(now)
                         && c.stats.consecutive_successes >= BETTER_TYPE_SUCCESSES
@@ -2794,6 +2801,40 @@ mod tests {
         let (_, to, _, reason) = *sim.switches.first().expect("moved to a better relay");
         assert!(to == relay(2) || to == relay(3), "{to:?}");
         assert_eq!(reason, SwitchReason::BetterScore);
+    }
+
+    /// On the obfuscated path to the peer's own port, a much faster relay is taken only over
+    /// obfuscated UDP: a faster plain relay would give up obfuscation (design/obfuscation.md section
+    /// 5). Back on the peer's port once it comes close again.
+    #[test]
+    fn a_faster_relay_from_the_obfuscated_direct_path_is_an_obfuscated_one() {
+        let mut sim = Sim::new(vec![
+            (direct_obfs(), PathKind::DirectObfs),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.rtt = vec![250 * MS, 130 * MS];
+        sim.far_leg = vec![None, Some(Duration::ZERO)];
+        sim.run(Duration::from_secs(90));
+        assert!(
+            sim.switches.is_empty(),
+            "not onto plain UDP: {:?}",
+            sim.switches
+        );
+
+        let mut sim = Sim::new(vec![
+            (direct_obfs(), PathKind::DirectObfs),
+            (relay(1), PathKind::Relay),
+            (relay_obfs(1), PathKind::RelayObfs),
+        ]);
+        sim.rtt = vec![250 * MS, 130 * MS, 140 * MS];
+        sim.far_leg = vec![None, Some(Duration::ZERO), Some(Duration::ZERO)];
+        sim.run(Duration::from_secs(70));
+        let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
+        assert_eq!(moves, [(relay_obfs(1), SwitchReason::BetterScore)]);
+        sim.rtt[0] = 130 * MS;
+        sim.run(Duration::from_secs(20));
+        let (_, to, _, reason) = sim.switches[1];
+        assert_eq!((to, reason), (direct_obfs(), SwitchReason::BetterType));
     }
 
     #[test]

@@ -113,7 +113,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A `dial-only` decider whose pair has traffic proposes a better path through the tunnel only once the tunnel has answered since the pair moved onto the current path (mesh.md section 8.4);
 - A `dial-only` end carries out a switch both ends agreed on before it measures in the same step, so what it measures is about the path the pair is on (mesh.md section 8.4);
 - When several better types answer, the switch goes to the best of them, not through each in turn (mesh.md section 8.2);
-- A plain endpoint is recorded as blocked, and avoided from then on, only once its failure lasts: 5 minutes without an answer while obfuscated UDP carries the pair, or a second failure within the hour; one failure it recovers from, such as a first handshake lost at start-up, records nothing (obfuscation.md section 5).
+- A plain endpoint is recorded as blocked, and avoided from then on, only once its failure lasts: 5 minutes without an answer while obfuscated UDP carries the pair, or a second failure within the hour; one failure it recovers from, such as a first handshake lost at start-up, records nothing (obfuscation.md section 5);
+- A pair on the obfuscated path to the peer's own port moves to a much faster relay only over obfuscated UDP: being faster never gives up obfuscation (mesh.md section 8.2, obfuscation.md section 5).
 
 **Guards**
 
@@ -124,6 +125,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:late_tunnel_replies_keep_a_congested_path`
 - `nett-mesh:a_path_left_for_loss_returns_once_its_loss_is_low`
 - `nett-mesh:a_path_left_for_a_faster_relay_while_lossy_is_held_too`
+- `nett-mesh:a_faster_relay_from_the_obfuscated_direct_path_is_an_obfuscated_one`
 - `nett-mesh:two_equally_fast_relays_do_not_restart_the_hold`
 - `nett-mesh:two_equally_better_paths_do_not_restart_the_hold`
 - `nett-mesh:retries_a_rehandshake_that_did_not_complete`
