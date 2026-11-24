@@ -66,6 +66,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The program of a release that could not be fetched is fetched again later, by nodes and by the Hub, after 1 minute and then twice as long each time up to an hour; a version is marked failed only when fetching again cannot change the outcome (release.md section 7);
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
 - A new desired state that changes a pair's candidates keeps the pair on the path it uses, with what was measured and reported of it, instead of starting the pair over: one end of a two-ended pair starting from the first relay while the other stays split the pair until it met again (mesh.md section 8.4);
+- A candidate a new desired state adds is probed every second for its first minute, as one at startup, also while the direct path in use is within 5 ms, where a candidate tried and never answered is left alone: a peer's new obfuscated port is taken without a restart (mesh.md section 7);
 - `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4);
 - launchd keeps the configuration it loaded: `sudo nett install` compares the fingerprint the loaded service carries with the current configuration, not the file, which the service itself rewrites after an upgrade (release.md section 7);
 - On Linux the data plane follows the desired state: the daemon starts on the userspace data plane when the desired state it starts from gives the machine an obfuscated port and on kernel WireGuard otherwise, and an accepted desired state that needs the other one is saved and the daemon exits to start on it; the userspace data plane takes over the interface and probe copy rules kernel WireGuard left (userspace.md section 4.2).
@@ -88,6 +89,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:problems_after_applying_follow_the_reported_status`
 - `nett-mesh:dial_only_pair_stays_together_when_one_ends_candidates_change`
 - `nett-mesh:a_new_candidate_list_keeps_the_path_in_use`
+- `nett-mesh:a_better_candidate_added_while_direct_is_fast_is_tried`
 - `nett-mesh:a_blocked_record_ends_when_its_endpoint_changes`
 - `ci:sudo nett install <token> (join the Hub, needs root)` (the service rewrites a launchd configuration that differs)
 - `nett-node:the_loaded_service_shows_the_fingerprint_of_its_configuration`

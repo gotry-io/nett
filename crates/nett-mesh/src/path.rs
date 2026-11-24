@@ -1591,9 +1591,10 @@ impl PeerPaths {
         let c = &self.candidates[index];
         let better = c.kind < self.current_kind();
         let first_reply = c.stats.consecutive_successes == 1;
+        // A candidate never tried, as one a new desired state adds, starts its minute of discovery
         let discovering = c.last_reply.is_none()
             && c.first_probe
-                .is_some_and(|t| now.saturating_duration_since(t) < DISCOVERY_WINDOW);
+                .is_none_or(|t| now.saturating_duration_since(t) < DISCOVERY_WINDOW);
         let interval = if !active {
             IDLE_CANDIDATE_INTERVAL
         } else if self.fast_recovery(index, now) {
@@ -2882,6 +2883,35 @@ mod tests {
         );
     }
 
+    /// A candidate of a better type that a new desired state adds, as when the peer starts offering
+    /// its own obfuscated port, is probed and taken although the direct path in use is within 5 ms:
+    /// the rule that leaves a fast direct path alone is for addresses that were tried and never
+    /// answered, and this one was never tried (design/mesh.md section 7, ADR 0021).
+    #[test]
+    fn a_better_candidate_added_while_direct_is_fast_is_tried() {
+        let mut sim = Sim::new(vec![(direct(), PathKind::Direct)]);
+        sim.run(Duration::from_secs(90));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        sim.paths = sim
+            .paths
+            .reconfigured(vec![
+                (direct_obfs(), PathKind::DirectObfs),
+                (direct(), PathKind::Direct),
+            ])
+            .expect("paths");
+        sim.grow();
+        let added = sim.now;
+        sim.run(Duration::from_secs(10));
+        let (at, to, _, reason) = *sim.switches.first().expect("moved to the new candidate");
+        assert_eq!((to, reason), (direct_obfs(), SwitchReason::BetterType));
+        assert!(at.saturating_duration_since(added) <= Duration::from_secs(3));
+    }
+
+    /// A peer that restarts loses its sessions: once it is back its probes answer on every path and
+    /// no tunnel works until a handshake. The pair handshakes again on the path it is on as soon as
+    /// that path answers, rather than moving to another direct path that has no session either,
+    /// where WireGuard alone would handshake again only after 15 seconds (design/mesh.md section
+    /// 8.2, design/prototype.md scenario 34).
     #[test]
     fn rehandshakes_on_a_relay_that_lost_the_session() {
         let mut sim = Sim::new(vec![
