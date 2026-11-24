@@ -792,14 +792,12 @@ impl<D: DataPlane> Engine<D> {
                     .members
                     .iter()
                     .filter_map(|m| {
+                        let this = m.node == self.node_id;
                         Some(AssignedMember {
                             public_key: key(&m.node)?,
-                            address: if m.node == self.node_id {
-                                own
-                            } else {
-                                m.address
-                            },
+                            address: if this { own } else { m.address },
                             token: m.token.clone(),
+                            obfs: m.obfs.clone().filter(|_| !this),
                         })
                     })
                     .collect(),
@@ -1737,6 +1735,7 @@ mod tests {
                     node: node_id(n),
                     address: Some(SocketAddr::new([192, 0, 2, n].into(), 41820)),
                     token: crate::config::ProbeToken([n; 32]),
+                    obfs: None,
                 })
                 .into(),
             links: vec![[node_id(1), node_id(2)]],
@@ -2517,6 +2516,7 @@ mod tests {
                     node: node_id(n),
                     address: None,
                     token: ProbeToken([n; 32]),
+                    obfs: None,
                 })
                 .into(),
             links: vec![[node_id(1), node_id(2)]],

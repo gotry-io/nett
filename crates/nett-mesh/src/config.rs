@@ -103,6 +103,10 @@ pub struct RelayMemberDoc {
     pub address: Option<SocketAddr>,
     /// Probe token between this member and the relay.
     pub token: ProbeToken,
+    /// The member's own obfuscated port, at the address's IP, which a relay that offers obfuscated
+    /// UDP reaches it through instead (design/obfuscation.md section 2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<ObfsPortDoc>,
 }
 
 /// Network reachability of a node (design/architecture.md section 6.5).
@@ -689,6 +693,14 @@ fn check_relay(relay: &RelayDoc) -> Result<(), ConfigError> {
         if !members.insert(&m.node) {
             return Err(ConfigError::Relay(format!(
                 "member {} is listed twice",
+                m.node
+            )));
+        }
+        if let Some(obfs) = &m.obfs
+            && (m.address.is_none() || obfs.port == 0 || !obfs.padding.is_valid())
+        {
+            return Err(ConfigError::Relay(format!(
+                "member {}'s obfuscated port needs its address, a port and a valid padding range",
                 m.node
             )));
         }

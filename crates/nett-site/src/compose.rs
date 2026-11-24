@@ -327,10 +327,14 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
                     .or_else(|| m.public_ipv6().map(IpAddr::V6))
                     .map(|ip| SocketAddr::new(ip, port))
             });
+            // A relay that offers obfuscated UDP reaches a member's own obfuscated port, so neither
+            // leg through it is plain (design/obfuscation.md section 2)
+            let obfs = own_obfs(state, m).filter(|_| role.obfs_port.is_some());
             Some(RelayMemberDoc {
                 token: token(key, &me.node_id, &id),
                 node: id,
                 address,
+                obfs,
             })
         })
         .collect();

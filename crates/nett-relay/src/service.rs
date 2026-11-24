@@ -65,6 +65,8 @@ pub async fn obfs_ingress(doc: &ObfsPortDoc) -> Result<ObfsIngress, ServiceError
         socket,
         obfuscator: nett_mesh::obfs::Obfuscator::new(&key, padding),
         rng: ring::rand::SystemRandom::new(),
+        salts: nett_mesh::obfs::Salts::default(),
+        members: std::collections::HashMap::new(),
     })
 }
 
@@ -184,7 +186,11 @@ async fn open(
         None => None,
     };
     let obfs = match &assignment.obfs {
-        Some(doc) => Some(obfs_ingress(doc).await?),
+        Some(doc) => {
+            let mut ingress = obfs_ingress(doc).await?;
+            ingress.set_members(&first.member_ports);
+            Some(ingress)
+        }
         None => None,
     };
     tracing::info!(
@@ -368,17 +374,32 @@ async fn fetch_answer(helpers: &Path, fingerprint: CertFingerprint) -> Option<Op
     }
 }
 
+/// The assignment as the relay serves it: a member that offers an obfuscated port is reached there
+/// when this relay offers one too, from that port (design/obfuscation.md section 2).
 fn convert(a: &RelayAssignment) -> Assignment {
+    let member_port = |m: &nett_mesh::helper::AssignedMember| {
+        let obfs = m.obfs.as_ref().filter(|_| a.obfs.is_some())?;
+        Some((
+            SocketAddr::new(m.address?.ip(), obfs.port),
+            obfs.key.clone(),
+            obfs.padding,
+        ))
+    };
     Assignment {
         members: a
             .members
             .iter()
-            .map(|m| AssignedMember {
-                public_key: m.public_key,
-                address: m.address,
-                token: m.token.0,
+            .map(|m| {
+                let port = member_port(m);
+                AssignedMember {
+                    public_key: m.public_key,
+                    address: port.as_ref().map(|p| p.0).or(m.address),
+                    obfs: port.is_some(),
+                    token: m.token.0,
+                }
             })
             .collect(),
         connections: a.links.iter().map(|[x, y]| (*x, *y)).collect(),
+        member_ports: a.members.iter().filter_map(member_port).collect(),
     }
 }

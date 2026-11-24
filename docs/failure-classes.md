@@ -28,6 +28,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 - `nett-transport:packets_cross_wrapped_and_only_the_relay_is_heard`
 - `nett-relay:the_obfuscated_port_routes_between_plain_and_obfuscated_members`
+- `nett-relay:a_member_with_its_own_obfuscated_port_is_reached_there_with_its_key`
 - `nett-site:machines_the_hub_sees_on_their_own_lan_connect_over_it`
 - `nett-site:every_lan_address_a_peer_reports_is_a_candidate`
 - `nett-mesh:an_authenticated_probe_is_answered_from_any_address`

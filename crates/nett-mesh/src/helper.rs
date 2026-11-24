@@ -50,6 +50,8 @@ pub struct AssignedMember {
     pub public_key: X25519PublicKey,
     pub address: Option<SocketAddr>,
     pub token: ProbeToken,
+    /// The member's own obfuscated port, at the address's IP (design/obfuscation.md section 2).
+    pub obfs: Option<crate::config::ObfsPortDoc>,
 }
 
 /// What nett-relay needs to serve the relay's TLS entry (design/mesh.md section 5.3): the TCP port to
@@ -260,6 +262,7 @@ mod tests {
                     public_key: X25519PublicKey::from_bytes([1; 32]),
                     address: None,
                     token: ProbeToken([2; 32]),
+                    obfs: None,
                 }],
                 links: vec![],
                 obfs: None,

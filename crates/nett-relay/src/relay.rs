@@ -92,6 +92,9 @@ pub struct AssignedMember {
     /// The address of a `public` member is delivered with the allocation; the address of a
     /// `dial-only` member is determined by the handshake.
     pub address: Option<SocketAddr>,
+    /// `address` is the member's own obfuscated port, reached through the relay's obfuscated port
+    /// (design/obfuscation.md section 2).
+    pub obfs: bool,
     pub token: [u8; 32],
 }
 
@@ -214,8 +217,14 @@ impl Relay {
                     key_id: KeyId::of(m.public_key.as_bytes()),
                     probe_key: ProbeKey::from_token(&m.token),
                     assigned: m.address,
-                    bound: m.address.map(PeerAddr::Udp),
-                    local: m.address.is_some_and(|a| a.ip().is_loopback()),
+                    bound: m.address.map(|a| {
+                        if m.obfs {
+                            PeerAddr::Obfs(a)
+                        } else {
+                            PeerAddr::Udp(a)
+                        }
+                    }),
+                    local: !m.obfs && m.address.is_some_and(|a| a.ip().is_loopback()),
                     unconfirmed: None,
                     last_change: None,
                 })
@@ -715,6 +724,7 @@ mod tests {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: X25519PublicKey::from_bytes(k),
             address: a.map(sock),
+            obfs: false,
             token: [k[0]; 32],
         };
         Relay::new(
@@ -776,6 +786,7 @@ mod tests {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: key(k),
             address: a.map(sock),
+            obfs: false,
             token: [k[0]; 32],
         };
         // C joins with a link to A; B and A keep their link, binding and sessions
@@ -837,6 +848,7 @@ mod tests {
         let member = |k: [u8; 32]| AssignedMember {
             public_key: X25519PublicKey::from_bytes(k),
             address: None,
+            obfs: false,
             token: [k[0]; 32],
         };
         Relay::new(
@@ -979,6 +991,7 @@ mod tests {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: key(k),
             address: a.map(sock),
+            obfs: false,
             token: [k[0]; 32],
         };
         let (public, local) = ("198.51.100.1:41820", "127.0.0.1:41820");
@@ -1031,6 +1044,7 @@ mod tests {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: key(k),
             address: a.map(sock),
+            obfs: false,
             token: [k[0]; 32],
         };
         let links = [(key(A), key(B))];
@@ -1088,6 +1102,7 @@ mod tests {
         let member = |k: [u8; 32], a: Option<&str>| AssignedMember {
             public_key: key(k),
             address: a.map(sock),
+            obfs: false,
             token: [k[0]; 32],
         };
         let mut r = relay();

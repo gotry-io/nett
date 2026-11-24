@@ -768,6 +768,7 @@ fn relay_docs(
                         .public_ipv4(member)
                         .map(|ip| SocketAddr::new(ip.into(), LISTEN_PORT)),
                     token: ProbeToken(tokens[&(member.clone(), relay.name.clone())]),
+                    obfs: None,
                 });
             }
             links.push([id_of(&link.peers[0])?, id_of(&link.peers[1])?]);

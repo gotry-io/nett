@@ -1147,10 +1147,10 @@ fn a_machines_own_obfuscated_port_comes_first_after_the_lan_paths() {
         Candidate::DirectObfs { .. }
     ));
     let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
-    let own = r2.obfs.expect("r2's own port");
+    let own = r2.obfs.clone().expect("r2's own port");
     assert_eq!(
-        (own.port, own.key, own.padding),
-        (30100, machine_key, PADDING)
+        (own.port, &own.key, own.padding),
+        (30100, &machine_key, PADDING)
     );
     assert!(
         r2.paths
@@ -1159,6 +1159,26 @@ fn a_machines_own_obfuscated_port_comes_first_after_the_lan_paths() {
             .all(|c| !matches!(c, Candidate::DirectObfs { .. })),
         "r2 decides for no machine with a port"
     );
+    // A relay reaches r2's port only from an obfuscated port of its own
+    let r2_on_r1 = |state: &State| {
+        let r1 = desired(state, &name("r1")).expect("ok").expect("signed");
+        r1.relay
+            .expect("r1 relays")
+            .members
+            .into_iter()
+            .find(|m| m.node == id(state, "r2"))
+            .expect("r2 is on r1's links")
+    };
+    assert_eq!(r2_on_r1(&state).obfs, None);
+    let mut with_relay_obfs = state.clone();
+    offer_obfs(&mut with_relay_obfs, "r1", 30001);
+    signed(&site, &mut with_relay_obfs);
+    let member = r2_on_r1(&with_relay_obfs);
+    assert_eq!(
+        member.obfs.as_ref().map(|o| (o.port, o.padding)),
+        Some((30100, PADDING))
+    );
+    assert_eq!(member.obfs.map(|o| o.key), Some(own.key.clone()));
 
     for bad in [41820, 41822, 41821, 0] {
         assert!(
