@@ -18,6 +18,7 @@ pub mod lab;
 pub mod lan;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod loopback;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod members;

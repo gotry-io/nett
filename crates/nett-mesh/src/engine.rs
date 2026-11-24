@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::id::NodeId;
@@ -26,6 +27,7 @@ use crate::devices::{Device, Devices};
 use crate::event::{Event, EventSink};
 use crate::helper::{AssignedMember, RelayAssignment};
 use crate::key::PrivateKey;
+use crate::loopback::LoopbackPorts;
 use crate::members::{MemberSet, OwnPolicy};
 use crate::path::{CandidateState, PathKind, Role, Route};
 use crate::probe::{KeyId, NatType};
@@ -142,6 +144,8 @@ pub struct Engine<D> {
     fit: Option<DataPlaneFit>,
     /// An accepted desired state needs the other data plane.
     restart: bool,
+    /// The transports' loopback ports, opened before WireGuard is pointed at them.
+    loopback: Option<Arc<LoopbackPorts>>,
     /// Loopback ports of TLS relays on the TLS transport -> the relay's TLS address: local status shows
     /// the latter.
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
@@ -197,6 +201,7 @@ impl<D: DataPlane> Engine<D> {
             retry: None,
             fit: None,
             restart: false,
+            loopback: None,
             tls_relays: BTreeMap::new(),
             trust: TrustStore::in_memory(),
         }
@@ -206,6 +211,13 @@ impl<D: DataPlane> Engine<D> {
     /// process is asked to start again ([`Engine::restart_wanted`]).
     pub fn with_data_plane_fit(mut self, fit: DataPlaneFit) -> Self {
         self.fit = Some(fit);
+        self
+    }
+
+    /// Opens each new loopback port of the transports in `ports` before WireGuard is pointed at it
+    /// (design/mesh.md section 5.3); the transports take them from there.
+    pub fn with_loopback(mut self, ports: Arc<LoopbackPorts>) -> Self {
+        self.loopback = Some(ports);
         self
     }
 
@@ -757,15 +769,25 @@ impl<D: DataPlane> Engine<D> {
         }
     }
 
-    /// Configuration of the TLS transport (design/mesh.md section 5.3): TLS targets and the actual
-    /// WireGuard port, handed out when changed. Called before peers are configured: when packets that
-    /// WireGuard sends to the loopback port arrive, the TLS transport is already listening.
+    /// Configuration of the TLS and obfuscated transports (design/mesh.md section 5.3): their targets
+    /// and the actual WireGuard port, handed out when changed. Called before peers are configured, and
+    /// opens each new loopback port first: what WireGuard sends there waits for the transport instead
+    /// of being refused.
     fn update_transport(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
         let Some(interface) = &self.interface else {
             return;
         };
         let config = desired.transport(interface.listen_port, self.dataplane.inline_obfs());
         if self.transport.as_ref() != Some(&config) {
+            if let Some(ports) = &self.loopback {
+                let listen: Vec<SocketAddr> = config
+                    .targets
+                    .iter()
+                    .map(|t| t.listen)
+                    .chain(config.obfs.iter().map(|t| t.listen))
+                    .collect();
+                ports.prepare(&listen);
+            }
             events.emit(Event::TransportConfigChanged {
                 config: config.clone(),
             });
@@ -2304,6 +2326,45 @@ mod tests {
         assert!(!handshake_since(at(900), None));
         assert!(handshake_since(at(1_000), Some(1_000)));
         assert!(handshake_since(at(1_030), Some(1_000)));
+    }
+
+    /// The transports' loopback ports are handed to be opened when the desired state is applied,
+    /// before WireGuard is pointed at them (design/mesh.md section 5.3); a new list lets go of the
+    /// ports no longer in it.
+    #[test]
+    fn loopback_ports_are_opened_before_wireguard_is_pointed_at_them() {
+        use crate::config::{Candidate, PathDoc, ProbeToken};
+        use nett_core::transport::CertFingerprint;
+        let mesh = Mesh::new(&[1, 2]);
+        let ports = Arc::new(LoopbackPorts::default());
+        let mut e = engine(1).with_loopback(ports.clone());
+        let mut events = VecSink::default();
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::Public,
+            candidates: vec![Candidate::RelayTls {
+                relay: node_id(9),
+                address: "198.51.100.9:443".parse().expect("addr"),
+                fingerprint: CertFingerprint([1; 32]),
+                token: ProbeToken([9; 32]),
+            }],
+        }];
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
+        let loopback = SocketAddr::new(
+            std::net::Ipv4Addr::LOCALHOST.into(),
+            crate::config::TLS_LOOPBACK_BASE,
+        );
+        assert_eq!(ports.listed(), [loopback]);
+        let peers = e.dataplane.peers.as_ref().expect("peers");
+        assert_eq!(peers[0].endpoint, Some(loopback));
+
+        doc.paths[0].candidates = vec![Candidate::Direct {
+            endpoint: "192.0.2.2:41820".parse().expect("addr"),
+        }];
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        assert!(ports.listed().is_empty());
     }
 
     #[test]

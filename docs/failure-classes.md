@@ -303,14 +303,15 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: every TCP connection that carries a tunnel's packets or a forwarded stream sends each write at once: as the UDP path would for a tunnel, and as the two ends would see it without a forwarder in between. Every UDP socket that carries a tunnel's packets holds a burst, so a short delay in reading it drops nothing.
 
-**Breaks when** a socket keeps Nagle's algorithm: a small packet waits until the one before it is acknowledged, and with probes and keepalives sharing the connection most requests through it wait a round trip and the peer's delayed acknowledgement more; or a UDP socket keeps the system's default receive buffer, which holds less than 2 ms at gigabit rates, and TCP inside the tunnel reads the drops as congestion.
+**Breaks when** a socket keeps Nagle's algorithm: a small packet waits until the one before it is acknowledged, and with probes and keepalives sharing the connection most requests through it wait a round trip and the peer's delayed acknowledgement more; or a UDP socket keeps the system's default receive buffer, which holds less than 2 ms at gigabit rates, and TCP inside the tunnel reads the drops as congestion; or WireGuard is pointed at a loopback port its transport has not opened yet, and the first handshake is refused and waits for WireGuard's retry 5 seconds later; or a change to some transport targets starts every target again and drops their connections.
 
 **Where it holds**
 
 - Both ends of a TLS relay connection turn Nagle's algorithm off: the TLS transport when it connects, nett-relay when it accepts (mesh.md section 5.3);
 - A served port's forwarder turns it off on both of its connections (mesh.md section 12.1);
 - A TLS relay connection that falls behind sends its newest packets: each end's send queue keeps 32 and drops the oldest, and the probe that opens the connection goes first and is never dropped (mesh.md section 5.3);
-- Every socket that carries tunnel traffic asks for a 1 MiB receive buffer: the WireGuard port socket, the relay's sockets, and the transports' loopback ports and the obfuscated transport's socket to its relay (userspace.md section 4).
+- Every socket that carries tunnel traffic asks for a 1 MiB receive buffer: the WireGuard port socket, the relay's sockets, and the transports' loopback ports and the obfuscated transport's socket to its relay (userspace.md section 4);
+- The mesh opens each new loopback port of the transports before it points WireGuard at it, and the transports take it from there; targets that stay keep their task and connection when others change (mesh.md section 5.3).
 
 **Guards**
 
@@ -318,6 +319,10 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-transport:a_full_send_queue_drops_its_oldest_packet`
 - `nett-transport:the_opening_message_goes_first_and_is_never_dropped`
 - `nett-mesh:the_buffer_never_shrinks`
+- `nett-mesh:a_new_port_is_open_before_its_transport_takes_it`
+- `nett-mesh:loopback_ports_are_opened_before_wireguard_is_pointed_at_them`
+- `nett-transport:a_packet_sent_before_the_transport_starts_is_not_lost`
+- `nett-transport:a_target_that_stays_keeps_its_task_when_others_change`
 
 **Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place. The same holds for each transport's request for a larger receive buffer, one call beside the socket it opens; the throughput scenario (design/obfuscation.md section 9) shows a missing one as retransmissions, and runs before releases that change a transport rather than in CI, since its numbers need a quiet machine.
 

@@ -386,11 +386,15 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             Err(e) => return Err(e.into()),
         }
     };
+    // The transports' loopback ports: the mesh opens each before WireGuard is pointed at it, and the
+    // transports in this process take them (design/mesh.md section 5.3)
+    let loopback = Arc::new(nett_mesh::loopback::LoopbackPorts::default());
     #[cfg(target_os = "linux")]
     let worker = match kernel {
         Some(dataplane) => Runtime::spawn(
             Engine::new(node_id, key, dataplane)
                 .with_trust_store(trust)
+                .with_loopback(loopback.clone())
                 .with_data_plane_fit(kernel_fits),
             sink,
             clock,
@@ -402,8 +406,9 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             let tun = LinuxTun::open()?;
             // Taken for the obfuscated port where kernel WireGuard is there to go back to
             let for_obfs = obfs && !userspace && tun.netfilter();
-            let engine =
-                Engine::new(node_id, key, UserspaceDataPlane::new(tun)).with_trust_store(trust);
+            let engine = Engine::new(node_id, key, UserspaceDataPlane::new(tun))
+                .with_trust_store(trust)
+                .with_loopback(loopback.clone());
             let engine = if for_obfs {
                 engine.with_data_plane_fit(userspace_fits)
             } else {
@@ -420,7 +425,9 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     };
     #[cfg(target_os = "macos")]
     let worker = Runtime::spawn(
-        Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?)).with_trust_store(trust),
+        Engine::new(node_id, key, UserspaceDataPlane::new(MacTun::open()?))
+            .with_trust_store(trust)
+            .with_loopback(loopback.clone()),
         sink,
         clock,
         nett_mesh::dns::PORT,
@@ -509,7 +516,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
             let stopped = async {
                 let _ = stopped.await;
             };
-            if let Err(error) = nett_transport::forward::run(transport, stopped).await {
+            if let Err(error) = nett_transport::forward::run(transport, loopback, stopped).await {
                 tracing::error!(%error, "the TLS transport stopped; paths over TLS stay down until nett restarts");
             }
         });

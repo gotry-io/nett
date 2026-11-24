@@ -13,8 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use nett_core::transport::{RELAY_PROBE, RELAY_REPLY, TlsTarget, TransportConfig};
+use nett_core::transport::{ObfsTarget, RELAY_PROBE, RELAY_REPLY, TlsTarget, TransportConfig};
 use nett_mesh::helper::HelperSource;
+use nett_mesh::loopback::LoopbackPorts;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -58,68 +59,111 @@ async fn fetch(
         .map_err(|e| ForwardError::Invalid(e.to_string()))
 }
 
-/// Runs until `shutdown` completes. When there is no configuration yet it waits, and when the
-/// configuration changes it rebuilds all forwarding tasks with the new one.
+/// Runs until `shutdown` completes. When there is no configuration yet it waits; when the
+/// configuration changes, targets that stay keep their task and connection, and only the ones that
+/// changed are started or stopped. A new target serves the loopback port the mesh opened for it
+/// ahead (`ports`), so what WireGuard sent there before the task started is not lost.
 pub async fn run(
     mesh: Arc<dyn HelperSource + Sync>,
+    ports: Arc<LoopbackPorts>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), ForwardError> {
     tokio::pin!(shutdown);
-    let mut current: Option<(TransportConfig, Vec<JoinHandle<()>>)> = None;
+    let mut current: Option<TransportConfig> = None;
+    let mut tls: Vec<(TlsTarget, JoinHandle<()>)> = Vec::new();
+    let mut obfs: Vec<(ObfsTarget, JoinHandle<()>)> = Vec::new();
     let mut poll = tokio::time::interval(CONFIG_POLL);
     loop {
         tokio::select! {
             () = &mut shutdown => break,
             _ = poll.tick() => {
                 let Some(config) = fetch(&mesh).await? else { continue };
-                if current.as_ref().is_some_and(|(seen, _)| *seen == config) {
+                if current.as_ref() == Some(&config) {
                     continue;
                 }
                 config.validate().map_err(|e| ForwardError::Invalid(e.to_string()))?;
-                if let Some((_, tasks)) = current.take() {
-                    for task in tasks {
-                        task.abort();
-                    }
+                // Every task forwards to WireGuard's port through the interface: when those change,
+                // every target starts again
+                let same_base = current.as_ref().is_some_and(|c| {
+                    (c.wireguard_port, c.interface) == (config.wireguard_port, config.interface)
+                });
+                if !same_base {
+                    stop(&mut tls, |_| false);
+                    stop(&mut obfs, |_| false);
                 }
                 let wireguard = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), config.wireguard_port);
+                stop(&mut tls, |t| config.targets.contains(t));
+                stop(&mut obfs, |t| config.obfs.contains(t));
+                for t in &config.targets {
+                    if !tls.iter().any(|(running, _)| running == t) {
+                        let task = target_or_log(t.clone(), wireguard, config.interface, ports.clone());
+                        tls.push((t.clone(), tokio::spawn(task)));
+                    }
+                }
+                for t in &config.obfs {
+                    if !obfs.iter().any(|(running, _)| running == t) {
+                        let task = crate::obfuscated::target_or_log(
+                            t.clone(),
+                            wireguard,
+                            config.interface,
+                            ports.clone(),
+                        );
+                        obfs.push((t.clone(), tokio::spawn(task)));
+                    }
+                }
                 tracing::info!(
                     targets = config.targets.len(),
                     obfuscated = config.obfs.len(),
                     "transport config applied"
                 );
-                let tasks = config
-                    .targets
-                    .iter()
-                    .cloned()
-                    .map(|t| tokio::spawn(target_or_log(t, wireguard, config.interface)))
-                    .chain(config.obfs.iter().cloned().map(|t| {
-                        tokio::spawn(crate::obfuscated::target_or_log(
-                            t,
-                            wireguard,
-                            config.interface,
-                        ))
-                    }))
-                    .collect();
-                current = Some((config, tasks));
+                current = Some(config);
             }
         }
     }
-    if let Some((_, tasks)) = current {
-        for task in tasks {
+    stop(&mut tls, |_| false);
+    stop(&mut obfs, |_| false);
+    Ok(())
+}
+
+/// Stops the tasks whose target `keep` does not keep.
+fn stop<T>(tasks: &mut Vec<(T, JoinHandle<()>)>, keep: impl Fn(&T) -> bool) {
+    tasks.retain(|(target, task)| {
+        let kept = keep(target);
+        if !kept {
             task.abort();
         }
+        kept
+    });
+}
+
+/// The loopback port of a target: the one the mesh opened ahead, or opened here.
+pub(crate) async fn loopback_port(
+    ports: &LoopbackPorts,
+    listen: SocketAddr,
+) -> std::io::Result<UdpSocket> {
+    match ports.take(listen) {
+        Some(socket) => UdpSocket::from_std(socket),
+        None => {
+            let socket = UdpSocket::bind(listen).await?;
+            nett_mesh::sockbuf::enlarge_receive_buffer(&socket);
+            Ok(socket)
+        }
     }
-    Ok(())
 }
 
 /// Runs one relay's forwarding until the task is aborted with its configuration: a port that fails
 /// is opened again, so the relay stays reachable once the cause goes away.
-async fn target_or_log(target: TlsTarget, wireguard: SocketAddr, interface: Option<u32>) {
+async fn target_or_log(
+    target: TlsTarget,
+    wireguard: SocketAddr,
+    interface: Option<u32>,
+    ports: Arc<LoopbackPorts>,
+) {
     let listen = target.listen;
     let mut delay = REOPEN_DELAY;
     loop {
         let started = Instant::now();
-        if let Err(error) = target_loop(target.clone(), wireguard, interface).await {
+        if let Err(error) = target_loop(target.clone(), wireguard, interface, &ports).await {
             // A port that worked for a while starts over from the shortest delay
             if started.elapsed() > REOPEN_MAX {
                 delay = REOPEN_DELAY;
@@ -152,9 +196,9 @@ async fn target_loop(
     target: TlsTarget,
     wireguard: SocketAddr,
     interface: Option<u32>,
+    ports: &LoopbackPorts,
 ) -> std::io::Result<()> {
-    let udp = UdpSocket::bind(target.listen).await?;
-    nett_mesh::sockbuf::enlarge_receive_buffer(&udp);
+    let udp = loopback_port(ports, target.listen).await?;
     let connector = client::connector(target.fingerprint).map_err(std::io::Error::other)?;
     let (events_tx, mut events) = mpsc::channel(EVENT_QUEUE);
     let mut link: Option<Link> = None;
@@ -307,7 +351,7 @@ mod tests {
     use super::*;
 
     /// The mesh answering for the forwarding that runs inside it.
-    struct Mesh(TransportConfig);
+    struct Mesh(std::sync::Mutex<TransportConfig>);
 
     impl HelperSource for Mesh {
         fn relay(&self) -> Option<Option<RelayAssignment>> {
@@ -319,7 +363,7 @@ mod tests {
         }
 
         fn transport(&self) -> Option<Option<TransportConfig>> {
-            Some(Some(self.0.clone()))
+            Some(Some(self.0.lock().expect("config").clone()))
         }
     }
 
@@ -344,9 +388,13 @@ mod tests {
             obfs: vec![],
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {
-            let _ = stopped.await;
-        }));
+        let forwarding = tokio::spawn(run(
+            Arc::new(Mesh(config.into())),
+            Arc::default(),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("sender");
         let deadline = Instant::now() + Duration::from_secs(5);
         let connected = loop {
@@ -365,6 +413,66 @@ mod tests {
             }
         };
         assert!(connected.expect("accepted").1.ip().is_loopback());
+        drop(stop);
+        forwarding.await.expect("task").expect("stopped cleanly");
+    }
+
+    /// Where the relay sees the packets sent to `listen` come from.
+    async fn source(wireguard: &UdpSocket, relay: &UdpSocket, listen: SocketAddr) -> SocketAddr {
+        let mut buf = [0u8; 256];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            assert!(Instant::now() < deadline, "nothing reached the relay");
+            wireguard
+                .send_to(&[RELAY_PROBE, 1, 2, 3], listen)
+                .await
+                .expect("send");
+            if let Ok(Ok((_, from))) =
+                tokio::time::timeout(Duration::from_millis(100), relay.recv_from(&mut buf)).await
+            {
+                return from;
+            }
+        }
+    }
+
+    /// A target that stays keeps its task and its connection when another target is added: the
+    /// relay of the first sees the same socket before and after the change.
+    #[tokio::test]
+    async fn a_target_that_stays_keeps_its_task_when_others_change() {
+        use nett_core::transport::{ObfsKeyBytes, ObfsPadding};
+        let relay = UdpSocket::bind("127.0.0.1:0").await.expect("relay");
+        let free = || {
+            std::net::UdpSocket::bind("127.0.0.1:0")
+                .and_then(|s| s.local_addr())
+                .expect("free port")
+        };
+        let target = |listen| ObfsTarget {
+            listen,
+            connect: relay.local_addr().expect("relay address"),
+            key: ObfsKeyBytes([4; 32]),
+            padding: ObfsPadding { min: 8, max: 64 },
+        };
+        let (first, second) = (target(free()), target(free()));
+        let config = |obfs: Vec<ObfsTarget>| TransportConfig {
+            wireguard_port: 51820,
+            targets: vec![],
+            interface: None,
+            obfs,
+        };
+        let mesh = Arc::new(Mesh(config(vec![first.clone()]).into()));
+        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let forwarding = tokio::spawn(run(mesh.clone(), Arc::default(), async move {
+            let _ = stopped.await;
+        }));
+        let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("sender");
+        let before = source(&wireguard, &relay, first.listen).await;
+        *mesh.0.lock().expect("config") = config(vec![first.clone(), second]);
+        tokio::time::sleep(CONFIG_POLL * 2).await;
+        assert_eq!(
+            source(&wireguard, &relay, first.listen).await,
+            before,
+            "the first target's task was started again"
+        );
         drop(stop);
         forwarding.await.expect("task").expect("stopped cleanly");
     }
@@ -389,9 +497,13 @@ mod tests {
             obfs: vec![],
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
-        let forwarding = tokio::spawn(run(Arc::new(Mesh(config)), async move {
-            let _ = stopped.await;
-        }));
+        let forwarding = tokio::spawn(run(
+            Arc::new(Mesh(config.into())),
+            Arc::default(),
+            async move {
+                let _ = stopped.await;
+            },
+        ));
         // The forwarding meets the held port first
         tokio::time::sleep(Duration::from_millis(300)).await;
         drop(holder);

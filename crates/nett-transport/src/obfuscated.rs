@@ -6,6 +6,7 @@
 //! only that port's datagrams: nothing here listens on a public address (hard rule 2).
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::transport::{ObfsTarget, RELAY_PROBE, RELAY_REPLY};
@@ -14,6 +15,7 @@ use ring::rand::SystemRandom;
 use tokio::net::UdpSocket;
 
 use crate::forward::{REOPEN_DELAY, REOPEN_MAX};
+use nett_mesh::loopback::LoopbackPorts;
 use nett_mesh::obfs::{MAX_MESSAGE, MAX_OVERHEAD, ObfsKey, Obfuscator, Padding, Salts};
 
 /// The largest datagram from an obfuscated port: the largest message, wrapped.
@@ -25,12 +27,13 @@ pub(crate) async fn target_or_log(
     target: ObfsTarget,
     wireguard: SocketAddr,
     interface: Option<u32>,
+    ports: Arc<LoopbackPorts>,
 ) {
     let listen = target.listen;
     let mut delay = REOPEN_DELAY;
     loop {
         let started = Instant::now();
-        if let Err(error) = target_loop(&target, wireguard, interface).await {
+        if let Err(error) = target_loop(&target, wireguard, interface, &ports).await {
             // A port that worked for a while starts over from the shortest delay
             if started.elapsed() > REOPEN_MAX {
                 delay = REOPEN_DELAY;
@@ -46,8 +49,9 @@ async fn target_loop(
     target: &ObfsTarget,
     wireguard: SocketAddr,
     interface: Option<u32>,
+    ports: &LoopbackPorts,
 ) -> std::io::Result<()> {
-    let local = UdpSocket::bind(target.listen).await?;
+    let local = crate::forward::loopback_port(ports, target.listen).await?;
     let relay = connected(target.connect, interface).await?;
     for socket in [&local, &relay] {
         nett_mesh::sockbuf::enlarge_receive_buffer(socket);
@@ -147,6 +151,44 @@ mod tests {
             .expect("a free port")
     }
 
+    /// What WireGuard sends to a loopback port the mesh opened ahead reaches the obfuscated port once
+    /// the transport serves it, so the first handshake of a new path is not lost while the transport
+    /// starts (design/mesh.md section 5.3).
+    #[tokio::test]
+    async fn a_packet_sent_before_the_transport_starts_is_not_lost() {
+        let key = [9u8; 32];
+        let padding = Padding::new(8, 64).expect("padding");
+        let relay = UdpSocket::bind("127.0.0.1:0").await.expect("relay");
+        let wireguard = UdpSocket::bind("127.0.0.1:0").await.expect("wireguard");
+        let target = ObfsTarget {
+            listen: free_loopback_port(),
+            connect: relay.local_addr().expect("addr"),
+            key: ObfsKeyBytes(key),
+            padding: ObfsPadding { min: 8, max: 64 },
+        };
+        let ports = Arc::new(LoopbackPorts::default());
+        ports.prepare(&[target.listen]);
+        let mut handshake = vec![1u8, 0, 0, 0];
+        handshake.resize(148, 0x55);
+        wireguard
+            .send_to(&handshake, target.listen)
+            .await
+            .expect("sent before the transport runs");
+        let wg_addr = wireguard.local_addr().expect("addr");
+        let task = tokio::spawn(target_or_log(target, wg_addr, None, ports));
+        let mut buf = vec![0u8; MAX_DATAGRAM];
+        let (len, _) = tokio::time::timeout(Duration::from_secs(2), relay.recv_from(&mut buf))
+            .await
+            .expect("in time")
+            .expect("relay receives");
+        let o = Obfuscator::new(&ObfsKey::from_bytes(key), padding);
+        let mut plain = Vec::new();
+        o.unwrap(now_ms(), &mut Salts::default(), &buf[..len], &mut plain)
+            .expect("unwraps");
+        assert_eq!(plain, handshake);
+        task.abort();
+    }
+
     /// Packets from the loopback port reach the relay wrapped, the relay's datagrams reach
     /// WireGuard unwrapped, a relay reply goes back to the port that sent the probe, and neither a
     /// datagram from anywhere but the relay nor one that does not unwrap reaches WireGuard.
@@ -165,7 +207,8 @@ mod tests {
         };
         let listen = target.listen;
         let wg_addr = wireguard.local_addr().expect("addr");
-        let task = tokio::spawn(async move { target_or_log(target, wg_addr, None).await });
+        let task =
+            tokio::spawn(async move { target_or_log(target, wg_addr, None, Arc::default()).await });
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         let o = Obfuscator::new(&ObfsKey::from_bytes(key), padding);
