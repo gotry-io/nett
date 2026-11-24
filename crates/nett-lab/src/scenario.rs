@@ -3719,9 +3719,7 @@ pub fn wg_rehandshake(
         let Some((switch_at, _, _)) = switched.first().cloned() else {
             anyhow::bail!("a did not switch away from {relay}");
         };
-        // The kernel sends the handshake initiation immediately when the peer is added back, which
-        // may be a millisecond earlier than the mesh records the switch event
-        let seen = run_.handshakes_since(switch_at.saturating_sub(100));
+        let seen = run_.handshakes_since(switch_at.saturating_sub(SWITCH_EVENT_LAG_MS));
         let inits: Vec<u64> = seen
             .iter()
             .filter(|h| h.kind == 1 && h.outgoing)
@@ -3881,6 +3879,11 @@ fn nft_packets(ns: &str, table: &str) -> anyhow::Result<u64> {
 /// better path of the same type to last 30 seconds) and for WireGuard to retry several rounds with
 /// a cookie.
 const COOKIE_FLOOD: Duration = Duration::from_secs(90);
+/// A switch's event is written once the switch is applied, and the handshake initiation it starts
+/// can leave up to a millisecond before that (kernel WireGuard sends it as the peer is added back,
+/// the userspace data plane as the switch applies): handshakes are counted from this long before
+/// the event.
+const SWITCH_EVENT_LAG_MS: u64 = 100;
 
 /// How a changes relay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3986,7 +3989,7 @@ fn cookie_once(
     let first_switch = switches.first().map(|s| s.0);
     let seen: Vec<Handshake> = handshakes(&run_.capture, run_.a_ipv4)
         .into_iter()
-        .filter(|h| first_switch.is_some_and(|t| h.at_ms >= t))
+        .filter(|h| first_switch.is_some_and(|t| h.at_ms + SWITCH_EVENT_LAG_MS >= t))
         .collect();
     let cookies_to_a = seen.iter().filter(|h| h.kind == 3 && !h.outgoing).count();
     let initiations = seen.iter().filter(|h| h.kind == 1 && h.outgoing).count();
@@ -4008,7 +4011,7 @@ fn cookie_once(
         &format!("{label}:handshakes"),
         format!(
             "after the first switch: {initiations} initiations sent, {cookies_to_a} cookie replies received, first response after {:?} ms",
-            completed.zip(first_switch).map(|(c, s)| c - s)
+            completed.zip(first_switch).map(|(c, s)| c.saturating_sub(s))
         ),
     );
     // The userspace data plane limits per source (design/userspace.md section 4.1): the flooded
