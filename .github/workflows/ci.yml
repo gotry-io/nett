@@ -237,7 +237,7 @@ jobs:
           grep -F 'Connecting this machine to the Hub at https://127.0.0.1:8443' join.log
           for _ in $(seq 40); do
             "$nett" site status --json \
-              | jq -e '.machines[] | select(.name == "ci") | .online and .result == "applied"' && break
+              | jq -e '.generation as $g | .machines[] | select(.name == "ci") | .online and .result == "applied" and (.applied_generation // 0) >= $g' && break
             sleep 0.5
           done
           "$nett" site status | tee site-status.log
@@ -267,7 +267,7 @@ jobs:
           grep -F 'Joining the site through the Hub at https://127.0.0.1:8443' enroll.log
           for _ in $(seq 40); do
             "$nett" site status --json \
-              | jq -e '.machines[] | select(.name == "ci-new") | .online and .result == "applied"' && break
+              | jq -e '.generation as $g | .machines[] | select(.name == "ci-new") | .online and .result == "applied" and (.applied_generation // 0) >= $g' && break
             sleep 0.5
           done
           "$nett" site status | tee site-status.log
