@@ -787,6 +787,7 @@ jobs:
             scenarios: |
               Scenario 20(a)(b): handshake after removing and re-adding a peer, retry after dropping the first handshake initiation | wg-rehandshake --repeat 3 --topology crates/nett-lab/topologies/relays.toml
               Scenario 20(c): cookie through the relay when the peer is under load | wg-cookie --topology crates/nett-lab/topologies/relays.toml
+              Scenario 20(c) on the userspace data plane: a handshake through the relay answered under a flood, and the pair switches once although every path loses | wg-cookie --userspace b --topology crates/nett-lab/topologies/relays.toml
           - group: rekey
             title: Key rotation and WireGuard port
             scenarios: |

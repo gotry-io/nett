@@ -151,7 +151,7 @@ Checked items are met; the others name the stage that verifies them.
   - [x] On Linux, the userspace data plane applies the kernel data plane's nftables rules on its TUN: filter, Edge, forwarding (userspace.md section 4.2)
   - [x] A machine's own obfuscated port in the userspace data plane, the data plane following the desired state, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
   - [x] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`): obfuscated UDP to a machine's port at 95-99% of plain kernel WireGuard on one CPU (design/obfuscation.md section 9)
-  - [ ] The userspace data plane under a handshake flood: tunnel loss and relay switching back and forth in scenario 20(c), with batches and without (design/userspace.md section 9)
+  - [x] The userspace data plane under a handshake flood: the pair leaves a path for its loss only for one measured to lose less, and compares paths that lose alike on latency (mesh.md section 8.2); the loss is the socket's buffer filling while the kernel processes the flood (design/userspace.md section 9)
 - Then QUIC transport and UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 

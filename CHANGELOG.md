@@ -14,6 +14,11 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   a change to the relays a machine reaches no longer drops the TLS connections of the others.
 - `nett site status` names a public machine whose WireGuard port answers no probe from machines
   that reach it otherwise, with those machines, and suggests `nett site set <machine> --obfs`.
+- A pair whose packets are lost on every path, for example at a machine flooded with handshakes,
+  stays on its path instead of moving between relays, and still moves to a much faster one: while
+  a pair loses packets, its paths get 40 probes each in 2 seconds, it leaves a path for its loss
+  only for one that lost at most 1 of them, and compares paths that lose alike on latency. A relay
+  left for its loss is taken back only once its loss has been low for about a minute.
 
 ## [0.11.0] - 2026-11-24
 
