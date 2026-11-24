@@ -2,14 +2,15 @@
 //! hands it the packets received on the WireGuard port and the TUN, and sends and receives according to
 //! the [`Action`] it returns; control commands are executed in the same thread, so state needs no locks.
 //!
-//! Inbound: demultiplex -> decrypt -> validate the inner packet -> the source must be within that peer's
-//! `AllowedIPs` -> the destination must be this machine -> filter -> TUN.
+//! Inbound: open what is obfuscated -> demultiplex -> decrypt -> validate the inner packet -> the source
+//! must be within that peer's `AllowedIPs` -> the destination must be this machine -> filter -> TUN.
 //! Outbound: TUN -> longest prefix match of the destination address to a peer -> record the connection ->
-//! encrypt -> the peer's current endpoint. A packet that fails any step is dropped with no response.
+//! encrypt -> the peer's current endpoint, wrapped where it is obfuscated. A packet that fails any step
+//! is dropped with no response.
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::prefix::IpPrefix;
 use nett_trust::keys::X25519PublicKey;
@@ -18,8 +19,10 @@ use super::filter::Filter;
 use super::packet;
 use super::session::{Output, Sessions};
 use crate::access::FilterSpec;
-use crate::dataplane::{PeerSpec, PeerStat};
+use crate::config::{ObfsPadding, ObfsSecret};
+use crate::dataplane::{ObfsSpec, PeerSpec, PeerStat, UdpPort};
 use crate::dns::NameTable;
+use crate::obfs::{ObfsKey, Obfuscator, Padding, Salts};
 use crate::probe::{OUTER_LEN, WG_COOKIE_LEN, WG_COOKIE_REPLY, WG_PORT_MESSAGES};
 
 /// The maximum number of handshake messages per source IP per second that enter the session layer
@@ -79,13 +82,58 @@ impl HandshakeBudget {
 /// Actions for the data plane to perform.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// Send from the WireGuard port.
-    Udp { to: SocketAddr, datagram: Vec<u8> },
+    /// Send from the WireGuard port or the obfuscated port, already wrapped where it is obfuscated.
+    Udp {
+        port: UdpPort,
+        to: SocketAddr,
+        datagram: Vec<u8>,
+    },
     /// Write to the TUN, handing it to this machine's protocol stack.
     Tun(Vec<u8>),
     /// Hand to the engine ([`crate::prober::Incoming::WgPort`]): probe messages, and copies of cookie
-    /// replies.
-    Probe { from: SocketAddr, data: Vec<u8> },
+    /// replies, with the port they came in on.
+    Probe {
+        port: UdpPort,
+        from: SocketAddr,
+        data: Vec<u8>,
+    },
+}
+
+/// One obfuscated port's keys, and the salts of the sealed messages opened with them.
+struct Codec {
+    key: ObfsSecret,
+    padding: ObfsPadding,
+    obfuscator: Obfuscator,
+    salts: Salts,
+}
+
+impl Codec {
+    /// `None` for a padding range the format does not take, which the desired state's validation
+    /// already refuses.
+    fn new(key: &ObfsSecret, padding: ObfsPadding) -> Option<Self> {
+        let range = Padding::new(padding.min, padding.max).ok()?;
+        Some(Self {
+            key: key.clone(),
+            padding,
+            obfuscator: Obfuscator::new(&ObfsKey::from_bytes(key.0), range),
+            salts: Salts::default(),
+        })
+    }
+
+    /// Keeps the salts it remembers when the keys stay the same, so a change elsewhere does not let
+    /// a recent message be replayed.
+    fn reuse(old: Option<Self>, key: &ObfsSecret, padding: ObfsPadding) -> Option<Self> {
+        match old {
+            Some(c) if c.key == *key && c.padding == padding => Some(c),
+            _ => Self::new(key, padding),
+        }
+    }
+}
+
+fn wall_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[derive(Debug)]
@@ -93,6 +141,10 @@ struct Peer {
     key: X25519PublicKey,
     allowed: Vec<IpPrefix>,
     endpoint: Option<SocketAddr>,
+    /// The port its endpoint was learned on: an endpoint that came in through this machine's
+    /// obfuscated port is answered through it. Set only from a packet WireGuard authenticated, so a
+    /// forged source address moves no peer's replies between the ports.
+    port: UdpPort,
     keepalive: Option<u16>,
     rx_bytes: u64,
     tx_bytes: u64,
@@ -104,6 +156,7 @@ impl Peer {
             key: spec.public_key,
             allowed: spec.allowed_ips.clone(),
             endpoint: spec.endpoint,
+            port: UdpPort::WireGuard,
             keepalive: spec.persistent_keepalive,
             rx_bytes: 0,
             tx_bytes: 0,
@@ -132,6 +185,13 @@ pub struct Plane<S> {
     handshakes: HandshakeBudget,
     /// The names this machine's own DNS queries are answered from (design/userspace.md section 4).
     names: NameTable,
+    /// This machine's obfuscated port (design/userspace.md section 4.1).
+    own_obfs: Option<Codec>,
+    /// Peers' obfuscated ports this machine reaches from its WireGuard port.
+    peer_obfs: HashMap<SocketAddr, Codec>,
+    rng: ring::rand::SystemRandom,
+    /// Reused for what a datagram opens to.
+    opened: Vec<u8>,
 }
 
 impl<S: Sessions> Plane<S> {
@@ -145,7 +205,34 @@ impl<S: Sessions> Plane<S> {
             guarded: BTreeSet::new(),
             handshakes: HandshakeBudget::new(Instant::now()),
             names: NameTable::new(),
+            own_obfs: None,
+            peer_obfs: HashMap::new(),
+            rng: ring::rand::SystemRandom::new(),
+            opened: Vec::new(),
         }
+    }
+
+    /// This machine's obfuscated port and the peers' ports (design/userspace.md section 4.1). A peer
+    /// whose endpoint came in through this machine's port goes back to the WireGuard port when the
+    /// port goes away.
+    pub fn set_obfs(&mut self, spec: &ObfsSpec) {
+        self.own_obfs = spec
+            .port
+            .as_ref()
+            .and_then(|p| Codec::reuse(self.own_obfs.take(), &p.key, p.padding));
+        if self.own_obfs.is_none() {
+            for p in &mut self.peers {
+                p.port = UdpPort::WireGuard;
+            }
+        }
+        let mut old = std::mem::take(&mut self.peer_obfs);
+        self.peer_obfs = spec
+            .peers
+            .iter()
+            .filter_map(|(addr, key, padding)| {
+                Some((*addr, Codec::reuse(old.remove(addr), key, *padding)?))
+            })
+            .collect();
     }
 
     pub fn set_names(&mut self, names: NameTable) {
@@ -183,6 +270,7 @@ impl<S: Sessions> Plane<S> {
             peer.keepalive = spec.persistent_keepalive;
             if spec.endpoint.is_some() {
                 peer.endpoint = spec.endpoint;
+                peer.port = UdpPort::WireGuard;
             }
             next.push(peer);
         }
@@ -201,7 +289,9 @@ impl<S: Sessions> Plane<S> {
             .iter_mut()
             .find(|p| p.key == *key)
             .ok_or(UnknownPeer)?;
+        // The path layer reaches it from the WireGuard port: a peer's obfuscated port among them
         peer.endpoint = Some(endpoint);
+        peer.port = UdpPort::WireGuard;
         Ok(())
     }
 
@@ -234,9 +324,70 @@ impl<S: Sessions> Plane<S> {
             .collect()
     }
 
-    /// A packet received on the WireGuard port.
+    /// A packet received on the WireGuard port: what comes from a peer's obfuscated port is opened
+    /// with that peer's key first, and dropped when it does not open.
     pub fn from_udp(
         &mut self,
+        from: SocketAddr,
+        datagram: &[u8],
+        now: Instant,
+        out: &mut Vec<Action>,
+    ) {
+        if self.peer_obfs.contains_key(&from) {
+            let mut opened = std::mem::take(&mut self.opened);
+            let codec = self.peer_obfs.get_mut(&from).expect("present");
+            if codec
+                .obfuscator
+                .unwrap(wall_ms(), &mut codec.salts, datagram, &mut opened)
+                .is_ok()
+            {
+                self.receive(UdpPort::WireGuard, from, &opened, now, out);
+            }
+            self.opened = opened;
+            return;
+        }
+        self.receive(UdpPort::WireGuard, from, datagram, now, out);
+    }
+
+    /// A datagram received on this machine's obfuscated port: opened with this machine's key, and
+    /// dropped without an answer when it does not open (hard rule 2).
+    pub fn from_obfs(
+        &mut self,
+        from: SocketAddr,
+        datagram: &[u8],
+        now: Instant,
+        out: &mut Vec<Action>,
+    ) {
+        let Some(codec) = self.own_obfs.as_mut() else {
+            return;
+        };
+        let mut opened = std::mem::take(&mut self.opened);
+        if codec
+            .obfuscator
+            .unwrap(wall_ms(), &mut codec.salts, datagram, &mut opened)
+            .is_ok()
+        {
+            self.receive(UdpPort::Obfs, from, &opened, now, out);
+        }
+        self.opened = opened;
+    }
+
+    /// A probe message from the engine, sent from `port` (design/userspace.md section 4.1).
+    pub fn probe_out(
+        &mut self,
+        port: UdpPort,
+        to: SocketAddr,
+        data: Vec<u8>,
+        out: &mut Vec<Action>,
+    ) {
+        self.udp(port, to, data, out);
+    }
+
+    /// What came in on `port`, opened where it was obfuscated, is demultiplexed as on the WireGuard
+    /// port (design/userspace.md section 4.1).
+    fn receive(
+        &mut self,
+        port: UdpPort,
         from: SocketAddr,
         datagram: &[u8],
         now: Instant,
@@ -249,6 +400,7 @@ impl<S: Sessions> Plane<S> {
         {
             if datagram.len() == OUTER_LEN {
                 out.push(Action::Probe {
+                    port,
                     from,
                     data: datagram.to_vec(),
                 });
@@ -269,6 +421,7 @@ impl<S: Sessions> Plane<S> {
         }
         if datagram[0] == WG_COOKIE_REPLY && datagram.len() == WG_COOKIE_LEN {
             out.push(Action::Probe {
+                port,
                 from,
                 data: datagram.to_vec(),
             });
@@ -281,15 +434,17 @@ impl<S: Sessions> Plane<S> {
                 Output::Authenticated { peer, from } => {
                     if let Some(p) = self.peer_mut(&peer) {
                         p.endpoint = Some(from);
+                        p.port = port;
                         p.rx_bytes += datagram.len() as u64;
                         authenticated = Some(peer);
                     }
                 }
+                // An answer to what just came in goes back the way it came
                 Output::SendTo { to, datagram } => {
                     if let Some(p) = authenticated.and_then(|k| self.peer_mut(&k)) {
                         p.tx_bytes += datagram.len() as u64;
                     }
-                    out.push(Action::Udp { to, datagram });
+                    self.udp(port, to, datagram, out);
                 }
                 Output::SendToPeer { peer, datagram } => self.send_to_peer(&peer, datagram, out),
                 Output::Deliver { peer, packet } => self.deliver(&peer, packet, now, out),
@@ -345,7 +500,14 @@ impl<S: Sessions> Plane<S> {
         for o in outputs {
             match o {
                 Output::SendToPeer { peer, datagram } => self.send_to_peer(&peer, datagram, out),
-                Output::SendTo { to, datagram } => out.push(Action::Udp { to, datagram }),
+                Output::SendTo { to, datagram } => {
+                    let port = self
+                        .peers
+                        .iter()
+                        .find(|p| p.endpoint == Some(to))
+                        .map_or(UdpPort::WireGuard, |p| p.port);
+                    self.udp(port, to, datagram, out);
+                }
                 Output::Deliver { peer, packet } => self.deliver(&peer, packet, now, out),
                 Output::Authenticated { .. } => {}
             }
@@ -365,7 +527,34 @@ impl<S: Sessions> Plane<S> {
             return;
         };
         peer.tx_bytes += datagram.len() as u64;
-        out.push(Action::Udp { to, datagram });
+        let port = peer.port;
+        self.udp(port, to, datagram, out);
+    }
+
+    /// Sends from `port`: wrapped with this machine's key from its obfuscated port, wrapped with the
+    /// peer's key to a peer's obfuscated port, plain otherwise. What cannot be wrapped is dropped, as
+    /// a lost packet.
+    fn udp(&mut self, port: UdpPort, to: SocketAddr, datagram: Vec<u8>, out: &mut Vec<Action>) {
+        let codec = match port {
+            UdpPort::Obfs => self.own_obfs.as_ref(),
+            UdpPort::WireGuard => self.peer_obfs.get(&to),
+        };
+        let datagram = match codec {
+            Some(codec) => {
+                let mut wrapped = Vec::with_capacity(datagram.len() + crate::obfs::MAX_OVERHEAD);
+                if codec
+                    .obfuscator
+                    .wrap(&self.rng, wall_ms(), &datagram, &mut wrapped)
+                    .is_err()
+                {
+                    return;
+                }
+                wrapped
+            }
+            None if port == UdpPort::Obfs => return,
+            None => datagram,
+        };
+        out.push(Action::Udp { port, to, datagram });
     }
 
     /// Longest prefix match: the longest prefix among the peer's `AllowedIPs` that contains `dst`.
@@ -410,6 +599,7 @@ impl<S: Sessions> Plane<S> {
 mod tests {
     use super::*;
     use crate::access::{FilterRule, Match};
+    use crate::config::{ObfsPadding, ObfsSecret};
     use crate::key::PrivateKey;
     use crate::probe::{DIRECT_PROBE, RELAY_PROBE, RELAY_REPLY};
     use crate::userspace::packet::build;
@@ -486,7 +676,7 @@ mod tests {
             } else {
                 (&*b, &mut *a, &mut tun_a)
             };
-            if let Action::Udp { to, datagram } = action {
+            if let Action::Udp { to, datagram, .. } = action {
                 assert_eq!(to, receiver.at);
                 let mut out = Vec::new();
                 receiver.plane.from_udp(sender.at, &datagram, now, &mut out);
@@ -571,6 +761,203 @@ mod tests {
         let out = send(&mut b, &reply);
         let (_, at_a) = exchange(&mut b, &mut a, out);
         assert_eq!(at_a, [reply]);
+    }
+
+    const OBFS_KEY: ObfsSecret = ObfsSecret([5; 32]);
+    const OBFS_PADDING: ObfsPadding = ObfsPadding { min: 8, max: 64 };
+
+    /// b offers an obfuscated port, which a reaches from its WireGuard port with b's key.
+    fn obfuscated_pair() -> (Node, Node, SocketAddr) {
+        let (mut a, mut b) = pair(true);
+        let port = sa("198.51.100.2:30000");
+        b.plane.set_obfs(&ObfsSpec {
+            port: Some(crate::config::ObfsPortDoc {
+                port: port.port(),
+                key: OBFS_KEY,
+                padding: OBFS_PADDING,
+            }),
+            peers: vec![],
+        });
+        a.plane.set_obfs(&ObfsSpec {
+            port: None,
+            peers: vec![(port, OBFS_KEY, OBFS_PADDING)],
+        });
+        a.plane.set_endpoint(&b.key, port).expect("b is a peer");
+        (a, b, port)
+    }
+
+    /// A plain WireGuard message: type 1 to 4 and three zero bytes.
+    fn plain_wireguard(d: &[u8]) -> bool {
+        d.len() >= 4 && (1..=4).contains(&d[0]) && d[1..4] == [0, 0, 0]
+    }
+
+    /// What an exchange left: the packets each side wrote to its TUN, and every datagram on the wire.
+    #[derive(Default)]
+    struct Crossed {
+        tun_a: Vec<Vec<u8>>,
+        tun_b: Vec<Vec<u8>>,
+        wire: Vec<Vec<u8>>,
+    }
+
+    /// Carries a's datagrams to b's obfuscated port and b's back from it, as the network would, until
+    /// there are none.
+    fn exchange_obfs(
+        a: &mut Node,
+        b: &mut Node,
+        port: SocketAddr,
+        start: Vec<(bool, Action)>,
+    ) -> Crossed {
+        let now = Instant::now();
+        let Crossed {
+            mut tun_a,
+            mut tun_b,
+            mut wire,
+        } = Crossed::default();
+        let mut pending = start;
+        let mut rounds = 0;
+        while let Some((by_a, action)) = pending.pop() {
+            rounds += 1;
+            assert!(rounds < 100, "packets keep bouncing");
+            let Action::Udp {
+                port: from_port,
+                to,
+                datagram,
+            } = action
+            else {
+                continue;
+            };
+            wire.push(datagram.clone());
+            let mut out = Vec::new();
+            if by_a {
+                assert_eq!((from_port, to), (UdpPort::WireGuard, port));
+                b.plane.from_obfs(a.at, &datagram, now, &mut out);
+            } else {
+                assert_eq!((from_port, to), (UdpPort::Obfs, a.at));
+                a.plane.from_udp(port, &datagram, now, &mut out);
+            }
+            for o in out {
+                match o {
+                    Action::Tun(p) if by_a => tun_b.push(p),
+                    Action::Tun(p) => tun_a.push(p),
+                    other => pending.push((!by_a, other)),
+                }
+            }
+        }
+        Crossed { tun_a, tun_b, wire }
+    }
+
+    /// The tunnel crosses an obfuscated port wrapped both ways (design/userspace.md section 4.1): a
+    /// wraps with b's key on its WireGuard port and opens what comes back from b's port; b opens
+    /// with its key and answers through its port. What does not open there is dropped without an
+    /// answer, a forged plain packet does not move b's replies to its WireGuard port, and once b's
+    /// port goes away b answers from its WireGuard port again.
+    #[test]
+    fn an_obfuscated_port_carries_the_tunnel_wrapped_both_ways() {
+        let (mut a, mut b, port) = obfuscated_pair();
+        let syn = build::tcp(a.mesh, 40000, b.mesh, 22, SYN);
+        let out = send(&mut a, &syn);
+        let start = out.into_iter().map(|o| (true, o)).collect();
+        let Crossed {
+            tun_b: at_b, wire, ..
+        } = exchange_obfs(&mut a, &mut b, port, start);
+        assert_eq!(at_b, [syn]);
+        assert!(wire.len() >= 3, "handshake and data: {}", wire.len());
+        assert!(!wire.iter().any(|d| plain_wireguard(d)), "nothing plain");
+        assert_eq!(b.plane.stats(SystemTime::now())[0].endpoint, Some(a.at));
+
+        let now = Instant::now();
+        let mut out = Vec::new();
+        b.plane.from_obfs(a.at, &wire[0], now, &mut out);
+        assert!(out.is_empty(), "a replay: {out:?}");
+        let mut handshake = vec![1u8, 0, 0, 0];
+        handshake.resize(148, 7);
+        b.plane.from_obfs(a.at, &handshake, now, &mut out);
+        assert!(out.is_empty(), "plain on the obfuscated port: {out:?}");
+        let mut forged = vec![4u8, 0, 0, 0];
+        forged.resize(96, 9);
+        b.plane.from_udp(a.at, &forged, now, &mut out);
+        assert!(out.is_empty(), "{out:?}");
+
+        let reply = build::tcp(b.mesh, 22, a.mesh, 40000, SYN | 0x10);
+        let out = send(&mut b, &reply);
+        let start = out.into_iter().map(|o| (false, o)).collect();
+        let Crossed {
+            tun_a: at_a, wire, ..
+        } = exchange_obfs(&mut a, &mut b, port, start);
+        assert_eq!(at_a, std::slice::from_ref(&reply));
+        assert!(!wire.iter().any(|d| plain_wireguard(d)));
+
+        b.plane.set_obfs(&ObfsSpec::default());
+        let out = send(&mut b, &reply);
+        assert!(
+            matches!(&out[..], [Action::Udp { port: UdpPort::WireGuard, to, datagram }]
+                if *to == a.at && plain_wireguard(datagram)),
+            "{out:?}"
+        );
+    }
+
+    /// A probe goes back through the port it came in on (design/obfuscation.md section 6): wrapped
+    /// to a peer's obfuscated port and opened from it, opened on this machine's port and answered
+    /// through it; to anywhere else it stays plain, and with no port of its own nothing goes out
+    /// through one.
+    #[test]
+    fn probes_go_back_through_the_port_they_came_in_on() {
+        let (mut a, mut b, port) = obfuscated_pair();
+        let now = Instant::now();
+        let probe = vec![DIRECT_PROBE; OUTER_LEN];
+        let mut out = Vec::new();
+        a.plane
+            .probe_out(UdpPort::WireGuard, port, probe.clone(), &mut out);
+        let [Action::Udp { datagram, .. }] = &out[..] else {
+            panic!("{out:?}");
+        };
+        assert_ne!(datagram, &probe, "wrapped");
+        let mut at_b = Vec::new();
+        b.plane.from_obfs(a.at, datagram, now, &mut at_b);
+        assert_eq!(
+            at_b,
+            [Action::Probe {
+                port: UdpPort::Obfs,
+                from: a.at,
+                data: probe.clone()
+            }]
+        );
+        let reply = vec![crate::probe::DIRECT_REPLY; OUTER_LEN];
+        let mut back = Vec::new();
+        b.plane
+            .probe_out(UdpPort::Obfs, a.at, reply.clone(), &mut back);
+        let [
+            Action::Udp {
+                port: UdpPort::Obfs,
+                datagram,
+                ..
+            },
+        ] = &back[..]
+        else {
+            panic!("{back:?}");
+        };
+        let mut at_a = Vec::new();
+        a.plane.from_udp(port, datagram, now, &mut at_a);
+        assert_eq!(
+            at_a,
+            [Action::Probe {
+                port: UdpPort::WireGuard,
+                from: port,
+                data: reply
+            }]
+        );
+
+        let mut plain = Vec::new();
+        a.plane.probe_out(
+            UdpPort::WireGuard,
+            sa("198.51.100.2:41820"),
+            probe.clone(),
+            &mut plain,
+        );
+        assert!(matches!(&plain[..], [Action::Udp { datagram, .. }] if *datagram == probe));
+        let mut none = Vec::new();
+        a.plane.probe_out(UdpPort::Obfs, b.at, probe, &mut none);
+        assert!(none.is_empty(), "a has no obfuscated port");
     }
 
     #[test]
@@ -666,14 +1053,20 @@ mod tests {
             out,
             [
                 Action::Probe {
+                    port: UdpPort::WireGuard,
                     from,
                     data: vec![DIRECT_PROBE; OUTER_LEN]
                 },
                 Action::Probe {
+                    port: UdpPort::WireGuard,
                     from,
                     data: vec![RELAY_REPLY; OUTER_LEN]
                 },
-                Action::Probe { from, data: cookie }
+                Action::Probe {
+                    port: UdpPort::WireGuard,
+                    from,
+                    data: cookie
+                }
             ]
         );
     }

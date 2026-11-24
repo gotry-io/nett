@@ -27,10 +27,10 @@ mod dataplane {
     use super::worker::{Command, ProbeQueue, ProbeSender, Worker};
     use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
     #[cfg(test)]
-    use crate::dataplane::ProbePort;
+    use crate::dataplane::UdpPort;
     use crate::dataplane::{
-        DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, PeerSpec, PeerStat, WgPortProbes,
-        automatic_port,
+        DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, ObfsSpec, PeerSpec, PeerStat,
+        WgPortProbes, automatic_port,
     };
     use crate::key::PrivateKey;
 
@@ -55,6 +55,9 @@ mod dataplane {
         fn underlay_interface(&self) -> Option<u32> {
             None
         }
+        /// The underlay socket on `port` is no longer used: the platform lets go of what it keeps
+        /// of it, so the port is free.
+        fn release_underlay(&self, _port: u16) {}
         /// A socket bound to this machine's mesh address that sends and receives only through the mesh
         /// interface.
         fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket>;
@@ -103,6 +106,8 @@ mod dataplane {
         socket: UdpSocket,
         /// The port the WireGuard socket is actually bound to.
         listen_port: u16,
+        /// The obfuscated port the data plane thread listens on.
+        obfs_port: Option<u16>,
         probes: Option<ProbeQueue>,
     }
 
@@ -228,6 +233,7 @@ mod dataplane {
                 public_key,
                 socket,
                 listen_port,
+                obfs_port: None,
                 probes: Some(probes),
             });
             Ok(InterfaceState {
@@ -308,15 +314,16 @@ mod dataplane {
             let recv = running.probes.take().ok_or(DataPlaneError::Worker(
                 "probes on the WireGuard port are already open",
             ))?;
-            let socket = running
-                .socket
-                .try_clone()
-                .map_err(|source| DataPlaneError::Os {
-                    op: "share the WireGuard socket",
-                    source,
-                })?;
+            let send: ProbeSender =
+                running
+                    .worker
+                    .probe_sender()
+                    .map_err(|source| DataPlaneError::Os {
+                        op: "open the queue of probes to send",
+                        source,
+                    })?;
             Ok(WgPortProbes {
-                send: Box::new(ProbeSender { socket }),
+                send: Box::new(send),
                 recv: Box::new(recv),
             })
         }
@@ -335,6 +342,47 @@ mod dataplane {
 
         fn underlay_interface(&self) -> Option<u32> {
             self.platform.underlay_interface()
+        }
+
+        fn inline_obfs(&self) -> bool {
+            true
+        }
+
+        fn apply_obfs(&mut self, spec: &ObfsSpec) -> Result<(), DataPlaneError> {
+            if spec.peers.len() > nett_core::transport::MAX_TARGETS {
+                return Err(DataPlaneError::Unsupported(
+                    "more peers' obfuscated ports than the transports take",
+                ));
+            }
+            let running = self
+                .running
+                .as_ref()
+                .ok_or(DataPlaneError::Worker("the interface is not up yet"))?;
+            let port = spec.port.as_ref().map(|p| p.port);
+            // A port that stays is kept, so what is on its way to it is not lost
+            let socket = if port == running.obfs_port {
+                None
+            } else {
+                let bind = |port| {
+                    self.platform
+                        .bind_underlay(port)
+                        .map_err(|source| DataPlaneError::Os {
+                            op: "bind the obfuscated port",
+                            source,
+                        })
+                };
+                Some(port.map(bind).transpose()?)
+            };
+            let spec = spec.clone();
+            let replaced = socket.is_some();
+            self.worker()?.call(|r| Command::Obfs(spec, socket, r))?;
+            if let Some(running) = self.running.as_mut() {
+                let old = std::mem::replace(&mut running.obfs_port, port);
+                if let Some(old) = old.filter(|_| replaced) {
+                    self.platform.release_underlay(old);
+                }
+            }
+            Ok(())
         }
     }
 
@@ -386,8 +434,8 @@ mod dataplane {
             fn configure(&mut self, _spec: &InterfaceSpec) -> Result<(), DataPlaneError> {
                 Ok(())
             }
-            fn bind_underlay(&self, _port: u16) -> io::Result<UdpSocket> {
-                UdpSocket::bind("127.0.0.1:0")
+            fn bind_underlay(&self, port: u16) -> io::Result<UdpSocket> {
+                UdpSocket::bind(("127.0.0.1", port))
             }
             fn bind_tunnel(&self, _addr: SocketAddr) -> io::Result<UdpSocket> {
                 Err(io::Error::other("not used"))
@@ -523,7 +571,68 @@ mod dataplane {
             probes_a.send.send(b.at, &probe).expect("send");
             let got = probes_b.recv.recv().expect("recv");
             // The source port is a's WireGuard port
-            assert_eq!(got, [(ProbePort::WireGuard, a.at, probe)]);
+            assert_eq!(got, [(UdpPort::WireGuard, a.at, probe)]);
+        }
+
+        /// b's obfuscated port carries the tunnel and the probes through the data plane threads: a
+        /// reaches it from its WireGuard port with b's key, b answers through it (design/userspace.md
+        /// section 4.1).
+        #[test]
+        fn an_obfuscated_port_carries_the_tunnel_and_the_probes() {
+            use crate::config::{ObfsPadding, ObfsPortDoc, ObfsSecret};
+            let (mut a, mut b) = (node("100.88.0.1"), node("100.88.0.2"));
+            let free = UdpSocket::bind("127.0.0.1:0")
+                .and_then(|s| s.local_addr())
+                .expect("a free port");
+            let (key, padding) = (ObfsSecret([5; 32]), ObfsPadding { min: 8, max: 64 });
+            b.plane
+                .apply_obfs(&ObfsSpec {
+                    port: Some(ObfsPortDoc {
+                        port: free.port(),
+                        key: key.clone(),
+                        padding,
+                    }),
+                    peers: vec![],
+                })
+                .expect("b's port");
+            a.plane
+                .apply_obfs(&ObfsSpec {
+                    port: None,
+                    peers: vec![(free, key, padding)],
+                })
+                .expect("b's port at a");
+            a.plane
+                .sync_peers(&[PeerSpec {
+                    endpoint: Some(free),
+                    ..peer(&b)
+                }])
+                .expect("peers");
+            b.plane.sync_peers(&[peer(&a)]).expect("peers");
+            b.plane.apply_filter(&allow_from(&a)).expect("filter");
+
+            let packet = build::udp(a.mesh, 4000, b.mesh, 53);
+            a.host.send(&packet).expect("into a's tun");
+            let got = expect_packet(&b.host, Duration::from_secs(5)).expect("at b's tun");
+            assert_eq!(got, packet);
+            let reply = build::udp(b.mesh, 53, a.mesh, 4000);
+            b.host.send(&reply).expect("into b's tun");
+            assert_eq!(expect_packet(&a.host, Duration::from_secs(5)), Some(reply));
+            assert_eq!(b.plane.peer_stats().expect("stats")[0].endpoint, Some(a.at));
+
+            let probes_a = a.plane.wg_port_probes(0).expect("probes");
+            let probes_b = b.plane.wg_port_probes(0).expect("probes");
+            let (mut recv_a, mut recv_b) = (probes_a.recv, probes_b.recv);
+            let probe = vec![DIRECT_PROBE; OUTER_LEN];
+            probes_a.send.send(free, &probe).expect("send");
+            assert_eq!(
+                recv_b.recv().expect("recv"),
+                [(UdpPort::Obfs, a.at, probe.clone())]
+            );
+            probes_b.send.send_obfs(a.at, &probe).expect("send");
+            assert_eq!(
+                recv_a.recv().expect("recv"),
+                [(UdpPort::WireGuard, free, probe)]
+            );
         }
 
         #[test]

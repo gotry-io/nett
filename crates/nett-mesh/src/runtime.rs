@@ -27,7 +27,7 @@ use nett_trust::payload::ServedPort;
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::coord::{Coordinator, Inbound};
-use crate::dataplane::{DataPlane, ProbePort, WgPortProbes, WgPortSend};
+use crate::dataplane::{DataPlane, UdpPort, WgPortProbes, WgPortSend};
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
 use crate::path::FAST_RECOVERY_INTERVAL;
@@ -633,8 +633,8 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                 if let Ok(probes) = log.recv() {
                     for (port, from, data) in probes {
                         let kind = match port {
-                            ProbePort::WireGuard => Incoming::WgPort,
-                            ProbePort::Obfs => Incoming::ObfsPort,
+                            UdpPort::WireGuard => Incoming::WgPort,
+                            UdpPort::Obfs => Incoming::ObfsPort,
                         };
                         forward(&tx, &dropped, kind, from, data);
                     }

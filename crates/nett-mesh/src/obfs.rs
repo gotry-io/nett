@@ -32,6 +32,9 @@ const TAG_LEN: usize = 16;
 pub use nett_core::transport::MAX_OBFS_PADDING as MAX_PADDING;
 /// The largest message the transport carries; outer WireGuard packets are about 1360 bytes.
 pub const MAX_MESSAGE: usize = 2048;
+/// What wrapping adds to a message at most: the salt, the sealed form's header and tag, and the
+/// largest padding.
+pub const MAX_OVERHEAD: usize = SALT_LEN + SEALED_HEADER + TAG_LEN + MAX_PADDING as usize;
 /// A sealed message whose time differs from the receiver's clock by more than this is dropped.
 const MAX_SKEW_MS: u64 = 30_000;
 /// How long a sealed message's salt is remembered, so a replay within the time window is dropped.

@@ -345,6 +345,13 @@ impl Platform for MacTun {
         underlay.index.map(u32::from)
     }
 
+    fn release_underlay(&self, port: u16) {
+        let mut underlay = self.underlay.lock().unwrap_or_else(PoisonError::into_inner);
+        underlay
+            .sockets
+            .retain(|s| s.local_addr().map_or(true, |a| a.port() != port));
+    }
+
     fn bind_tunnel(&self, addr: SocketAddr) -> io::Result<UdpSocket> {
         let socket = UdpSocket::bind(addr)?;
         sys::bind_to_interface(socket.as_fd(), self.index, addr.is_ipv6())?;

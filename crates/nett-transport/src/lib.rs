@@ -9,6 +9,5 @@
 
 pub mod client;
 pub mod forward;
-pub mod obfs;
 mod obfuscated;
 pub mod queue;

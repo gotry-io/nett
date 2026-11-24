@@ -37,7 +37,7 @@ pub enum ServiceError {
     #[error("the relay assignment from the nett service is not valid: {0}")]
     Assignment(#[from] AssignmentError),
     #[error("the relay assignment's obfuscation padding is not valid: {0}")]
-    Obfs(#[from] nett_transport::obfs::ObfsError),
+    Obfs(#[from] nett_mesh::obfs::ObfsError),
     #[error("binding {what} port {port}: {source}")]
     Bind {
         what: &'static str,
@@ -59,11 +59,11 @@ pub async fn obfs_ingress(doc: &ObfsPortDoc) -> Result<ObfsIngress, ServiceError
                 port: doc.port,
                 source,
             })?;
-    let padding = nett_transport::obfs::Padding::new(doc.padding.min, doc.padding.max)?;
-    let key = nett_transport::obfs::ObfsKey::from_bytes(doc.key.0);
+    let padding = nett_mesh::obfs::Padding::new(doc.padding.min, doc.padding.max)?;
+    let key = nett_mesh::obfs::ObfsKey::from_bytes(doc.key.0);
     Ok(ObfsIngress {
         socket,
-        obfuscator: nett_transport::obfs::Obfuscator::new(&key, padding),
+        obfuscator: nett_mesh::obfs::Obfuscator::new(&key, padding),
         rng: ring::rand::SystemRandom::new(),
     })
 }

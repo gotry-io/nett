@@ -112,12 +112,25 @@ pub trait WgPortSend: Send {
     }
 }
 
-/// Which of this machine's public UDP ports a probe message came in on.
+/// One of this machine's public UDP ports: what came in on it, and what goes out from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProbePort {
+pub enum UdpPort {
     WireGuard,
     /// This machine's obfuscated port, opened by the data plane (design/obfuscation.md section 2).
     Obfs,
+}
+
+/// This machine's obfuscated port, and the peers' obfuscated ports it reaches, for a data plane that
+/// opens and wraps them itself ([`DataPlane::inline_obfs`], design/userspace.md section 4.1).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObfsSpec {
+    pub port: Option<crate::config::ObfsPortDoc>,
+    /// Each peer's obfuscated port, with its key and the site's padding range.
+    pub peers: Vec<(
+        SocketAddr,
+        crate::config::ObfsSecret,
+        crate::config::ObfsPadding,
+    )>,
 }
 
 /// Copies of probe messages and cookie replies received on the WireGuard port, and probe messages
@@ -125,7 +138,7 @@ pub enum ProbePort {
 pub trait WgPortRecv: Send {
     /// A batch of (port, source address, UDP payload). Waits at most half a second and returns empty
     /// on timeout: the caller uses this to periodically check whether it should exit.
-    fn recv(&mut self) -> std::io::Result<Vec<(ProbePort, SocketAddr, Vec<u8>)>>;
+    fn recv(&mut self) -> std::io::Result<Vec<(UdpPort, SocketAddr, Vec<u8>)>>;
 }
 
 /// Probes on the WireGuard port: the sending end goes to the thread that hosts the engine, the
@@ -243,6 +256,18 @@ pub trait DataPlane: Send {
     /// obfuscated transport carries it through a loopback port (design/obfuscation.md section 2).
     fn inline_obfs(&self) -> bool {
         false
+    }
+
+    /// Opens this machine's obfuscated port, and wraps for the peers' ports, as `spec` gives them
+    /// (design/userspace.md section 4.1). Only the userspace data plane holds the socket WireGuard
+    /// reads, so only it offers a port of this machine.
+    fn apply_obfs(&mut self, spec: &ObfsSpec) -> Result<(), DataPlaneError> {
+        match spec.port {
+            None => Ok(()),
+            Some(_) => Err(DataPlaneError::Unsupported(
+                "an obfuscated port of this machine, which needs the userspace data plane",
+            )),
+        }
     }
 
     /// The names this machine's own DNS queries are answered from when they reach the data plane

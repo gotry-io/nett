@@ -15,7 +15,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::relay::{AssignedMember, ConnId, Outcome, PeerAddr, Relay, RelayState};
-use nett_transport::obfs::{Obfuscator, Salts};
+use nett_mesh::obfs::{Obfuscator, Salts};
 use nett_trust::keys::X25519PublicKey;
 use ring::rand::SystemRandom;
 
@@ -479,7 +479,7 @@ mod tests {
     #[test]
     fn the_obfuscated_port_routes_between_plain_and_obfuscated_members() {
         use crate::wg::tests::{data, initiation, response};
-        use nett_transport::obfs::{ObfsKey, Obfuscator, Padding, Salts};
+        use nett_mesh::obfs::{ObfsKey, Obfuscator, Padding, Salts};
 
         let (a, b) = ([1; 32], [2; 32]);
         let plain_a = std::net::UdpSocket::bind("127.0.0.1:0").expect("a's socket");

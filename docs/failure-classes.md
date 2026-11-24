@@ -21,7 +21,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The current candidate shows the tunnel's measurement (status.md section 6);
 - A path through a relay is measured end to end once a through probe has come back through that relay: the relay forwards it to the peer's WireGuard address and the peer answers, so neither the relay answering for its own leg nor a report of the peer's leg made before it broke makes the path look good; 30 seconds without a through reply while the relay answers, the path is judged from its segments again and held off as broken beyond the relay until the peer reports its leg working (mesh.md section 7.2, ADR 0029);
 - Judged from its segments, a path through a relay has a round trip only with the peer's leg: until the peer reports it, this end's probes show only that the relay answers, so the path is no better path to move to, and a failover takes it after the paths whose whole round trip is known, the relay on the peer's own machine among them (mesh.md section 7.2);
-- Whether a LAN path works is found by probing it: every LAN address a peer reports is a candidate whatever the Hub sees of the two, an authenticated probe is answered from any address, the address the peer's probes come from is learned when another NAT sits inside the LAN, and both `dial-only` ends probe their LAN paths (mesh.md sections 6 and 7).
+- Whether a LAN path works is found by probing it: every LAN address a peer reports is a candidate whatever the Hub sees of the two, an authenticated probe is answered from any address, the address the peer's probes come from is learned when another NAT sits inside the LAN, and both `dial-only` ends probe their LAN paths (mesh.md sections 6 and 7);
+- A peer's obfuscated port is probed the way the tunnel reaches it, wrapped from the WireGuard port on the userspace data plane and through the obfuscated transport's loopback port on kernel WireGuard, and a reply counts only when it comes back that way; a probe on this machine's obfuscated port is answered through that port, so a peer that probes both of its ports measures each (obfuscation.md section 6).
 
 **Guards**
 
@@ -42,6 +43,9 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:a_break_beyond_a_relay_moves_to_another_relay`
 - `nett-mesh:a_relay_that_never_answered_is_reported_lost`
 - `nett-mesh:the_current_candidate_shows_the_tunnels_measurement`
+- `nett-mesh:a_peers_obfuscated_port_is_probed_the_way_the_tunnel_reaches_it`
+- `nett-mesh:a_probe_on_the_obfuscated_port_is_answered_through_it`
+- `nett-mesh:probes_go_back_through_the_port_they_came_in_on`
 - `lab:wgport`, `lab:relay-far-leg`, `lab:relay-port-block`
 
 ## 2. What is derived from a source follows it when it changes
@@ -238,7 +242,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The probe port, the one port nett binds that a WireGuard or relay port may not be, is rejected when the desired state is built and when it is applied; the transports' loopback ports go around the machine's own WireGuard and relay ports instead of forbidding them, and a WireGuard port the system assigns avoids them (site.md section 4, mesh.md sections 5.3 and 5.5);
 - `sudo nett install`, running as root, opens the desired state from the user's directory without following links or blocking, and checks the file it opened;
 - The target names of a release manifest are checked before the Hub names files after them, and the version and target a node asks for are only compared with what the Hub holds, never used as a path (release.md section 7);
-- A TLS connection nett-relay hands to the relay in the daemon gets nothing forwarded and no answer until an authenticated probe identifies its member, and nett-relay closes one the relay has not answered within 30 seconds (mesh.md section 5.3).
+- A TLS connection nett-relay hands to the relay in the daemon gets nothing forwarded and no answer until an authenticated probe identifies its member, and nett-relay closes one the relay has not answered within 30 seconds (mesh.md section 5.3);
+- Every datagram on a machine's obfuscated port is opened with its key before WireGuard or the mesh reads it, and what does not open, a replay among it, gets no answer; which port a peer is answered through is learned only from a packet WireGuard authenticated, so a forged source address moves no peer's replies between the ports (userspace.md section 4.1).
 
 **Guards**
 
@@ -249,6 +254,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-trust:manifests_and_versions_from_the_network_are_checked`
 - `nett-hub:nodes_fetch_the_program_of_a_release_from_the_hub`
 - `nett-relay:a_handed_over_tls_connection_authenticates_and_carries_its_member`
+- `nett-mesh:an_obfuscated_port_carries_the_tunnel_wrapped_both_ways`
+- `nett-mesh:an_obfuscated_port_carries_the_tunnel_and_the_probes`
 
 ## 8. Output says what happened and what to do
 

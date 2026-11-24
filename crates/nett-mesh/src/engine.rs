@@ -20,7 +20,7 @@ use nett_trust::keys::X25519PublicKey;
 use crate::access::{AccessRules, EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
-    DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, PeerSpec,
+    DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, ObfsSpec, PeerSpec,
 };
 use crate::devices::{Device, Devices};
 use crate::event::{Event, EventSink};
@@ -124,6 +124,8 @@ pub struct Engine<D> {
     filter: Option<FilterSpec>,
     edge: Option<Option<EdgeSpec>>,
     ingress: Option<Option<IngressSpec>>,
+    /// The obfuscated ports applied to the data plane; `None` until applied, and after a failure.
+    obfs: Option<ObfsSpec>,
     installed_routes: Option<Vec<IpPrefix>>,
     /// Node names in the most recently accepted desired state, and the time of acceptance (local status,
     /// design/status.md sections 5 and 6).
@@ -180,6 +182,7 @@ impl<D: DataPlane> Engine<D> {
             filter: None,
             edge: None,
             ingress: None,
+            obfs: None,
             installed_routes: None,
             names: BTreeMap::new(),
             applied_at: None,
@@ -521,6 +524,7 @@ impl<D: DataPlane> Engine<D> {
             return;
         }
         self.apply_ingress(events);
+        self.apply_obfs(desired, events);
 
         self.reachability = desired.reachability;
         let (trusted, hub) = (self.clock_trusted, self.hub);
@@ -604,6 +608,35 @@ impl<D: DataPlane> Engine<D> {
             Ok(()) => self.ingress = Some(ingress),
             Err(e) => {
                 self.ingress = None;
+                events.emit(Event::DataPlaneFailed {
+                    reason: e.to_string(),
+                });
+            }
+        }
+    }
+
+    /// This machine's obfuscated port and, where the data plane wraps for them itself, the peers'
+    /// ports (design/userspace.md section 4.1): after the filter and before the peers, so the first
+    /// handshake to a peer's port is already wrapped. On failure, retried on the next desired state.
+    fn apply_obfs(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        let spec = ObfsSpec {
+            port: desired.obfs.clone(),
+            peers: if self.dataplane.inline_obfs() {
+                desired
+                    .peer_obfs_ports()
+                    .map(|(addr, key, padding)| (addr, key.clone(), padding))
+                    .collect()
+            } else {
+                Vec::new()
+            },
+        };
+        if self.obfs.as_ref() == Some(&spec) {
+            return;
+        }
+        match self.dataplane.apply_obfs(&spec) {
+            Ok(()) => self.obfs = Some(spec),
+            Err(e) => {
+                self.obfs = None;
                 events.emit(Event::DataPlaneFailed {
                     reason: e.to_string(),
                 });

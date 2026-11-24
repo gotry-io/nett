@@ -21,6 +21,7 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod macos;
 pub mod members;
+pub mod obfs;
 pub mod path;
 pub mod probe;
 pub mod prober;

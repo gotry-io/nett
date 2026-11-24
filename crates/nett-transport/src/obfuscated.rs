@@ -14,11 +14,10 @@ use ring::rand::SystemRandom;
 use tokio::net::UdpSocket;
 
 use crate::forward::{REOPEN_DELAY, REOPEN_MAX};
-use crate::obfs::{MAX_MESSAGE, ObfsKey, Obfuscator, Padding, Salts};
+use nett_mesh::obfs::{MAX_MESSAGE, MAX_OVERHEAD, ObfsKey, Obfuscator, Padding, Salts};
 
-/// The largest datagram from a relay: a message with the salt, the sealed form's header and tag, and
-/// the largest padding.
-const MAX_DATAGRAM: usize = MAX_MESSAGE + 512;
+/// The largest datagram from an obfuscated port: the largest message, wrapped.
+const MAX_DATAGRAM: usize = MAX_MESSAGE + MAX_OVERHEAD;
 
 /// Runs one obfuscated port's forwarding until the task is aborted with its configuration: a port
 /// that fails is opened again, so the port stays reachable once the cause goes away.

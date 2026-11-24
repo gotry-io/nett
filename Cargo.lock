@@ -1425,6 +1425,7 @@ name = "nett-mesh"
 version = "0.10.0"
 dependencies = [
  "base64 0.23.1",
+ "blake2 0.11.0",
  "bytes",
  "gotatun",
  "libc",
@@ -1545,7 +1546,6 @@ dependencies = [
 name = "nett-transport"
 version = "0.10.0"
 dependencies = [
- "blake2 0.11.0",
  "futures-util",
  "nett-core",
  "nett-mesh",
@@ -1557,7 +1557,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-tungstenite 0.30.0",
  "tracing",
- "zeroize",
 ]
 
 [[package]]
