@@ -22,6 +22,7 @@ use crate::access::{AccessRules, EdgeSpec, FilterSpec, IngressSpec};
 use crate::config::{DesiredMesh, Reachability};
 use crate::dataplane::{
     DataPlane, INTERFACE_NAME, InterfaceAddress, InterfaceSpec, MESH_MTU, ObfsSpec, PeerSpec,
+    PeerStat,
 };
 use crate::devices::{Device, Devices};
 use crate::event::{Event, EventSink};
@@ -49,6 +50,10 @@ const STATS_INTERVAL: Duration = Duration::from_millis(100);
 /// A machine tells its peers that it restarted at most this long after its mesh started: later, the
 /// probes have recovered every pair (design/mesh.md section 8.4).
 const RESTART_NOTICE_WITHIN: Duration = Duration::from_secs(60);
+/// Allowed for a restart notice's trip through the Hub: the peer's start is taken this much earlier,
+/// so a session made since is never handshaken again, and one made less than this long before the
+/// restart, which is rare, is left to the probes.
+const RESTART_NOTICE_TRANSIT_MS: u64 = 1_000;
 /// After a data plane update fails, the desired state in effect is applied again after this long,
 /// then after twice as long each time, up to [`RETRY_MAX`] (design/mesh.md section 15).
 pub(crate) const RETRY_FIRST: Duration = Duration::from_secs(1);
@@ -881,9 +886,11 @@ impl<D: DataPlane> Engine<D> {
     }
 
     /// A switch message or a restart notice from a peer, relayed through the Hub (design/mesh.md
-    /// section 8.4). A peer that restarted lost its sessions: a session with it from before the
-    /// notice was sent is handshaken again at once, by the decider on the path the pair is on and by
-    /// a follower on the endpoint WireGuard has.
+    /// section 8.4). A peer that restarted lost its sessions: a session with it from before it
+    /// started, placed on this machine's clock by how long before its notice it started, is
+    /// handshaken again at once, by the decider on the path the pair is on and by a follower on the
+    /// endpoint WireGuard has. A session made since, as when the peer handshook as soon as it sent
+    /// again, is left alone.
     pub fn on_hub_message(
         &mut self,
         peer: &NodeId,
@@ -896,21 +903,35 @@ impl<D: DataPlane> Engine<D> {
             return Vec::new();
         };
         let out = prober.on_hub_message(peer, data, at, now_ms);
+        let restarted = prober.take_restarted();
+        if restarted.is_empty() {
+            return out;
+        }
+        // Read now: the peer may have handshaken since the last read, as it does as soon as it
+        // sends again
+        let stats: HashMap<X25519PublicKey, PeerStat> = self
+            .dataplane
+            .peer_stats()
+            .map(|stats| stats.into_iter().map(|s| (s.public_key, s)).collect())
+            .unwrap_or_default();
         let mut switches = Vec::new();
-        for (id, sent_ms) in prober.take_restarted() {
+        for (id, started_ago_ms) in restarted {
             let Some(public_key) = prober.public_key(&id) else {
                 continue;
             };
-            let traffic = self.traffic.get(&public_key);
-            let before = traffic
-                .and_then(|t| t.last_handshake)
-                .is_some_and(|t| unix_ms(t) < sent_ms);
-            if !before {
+            let Some(stat) = stats.get(&public_key) else {
+                continue;
+            };
+            // The notice took a while through the Hub: the start is taken that much earlier
+            let started_ms = now_ms
+                .saturating_sub(u64::from(started_ago_ms))
+                .saturating_sub(RESTART_NOTICE_TRANSIT_MS);
+            if !stat.last_handshake.is_some_and(|t| unix_ms(t) < started_ms) {
                 continue;
             }
             if let Some(switch) = prober.handshake_again(&id, at) {
                 switches.push(switch);
-            } else if let Some(endpoint) = traffic.and_then(|t| t.endpoint) {
+            } else if let Some(endpoint) = stat.endpoint {
                 switches.push(Switch {
                     to: prober.route_to(&id, endpoint),
                     peer: id,
@@ -953,7 +974,7 @@ impl<D: DataPlane> Engine<D> {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        prober.restart_notices(&fresh, now_ms)
+        prober.restart_notices(&fresh, now_ms, now.saturating_duration_since(started))
     }
 
     /// TLS loopback ports that no peer is using: drops packets entering the WireGuard port from them
@@ -2488,23 +2509,39 @@ mod tests {
             let key =
                 crate::probe::ProbeKey::path_switch(&PrivateKey::from_bytes([1; 32]), &mesh_key(2))
                     .expect("key");
-            let notice = |restart: u32, sent_ms: u64| {
-                crate::probe::RestartNotice { restart }
-                    .seal(sent_ms, &key)
-                    .to_vec()
+            let notice = |restart: u32, sent_ms: u64, started_ago_ms: u32| {
+                crate::probe::RestartNotice {
+                    restart,
+                    started_ago_ms,
+                }
+                .seal(sent_ms, &key)
+                .to_vec()
             };
-            e.on_hub_message(&node_id(2), &notice(7, now_ms), start, now_ms, &mut events);
-            // The same restart once more: handled already
-            e.on_hub_message(&node_id(2), &notice(7, now_ms), start, now_ms, &mut events);
-            // A later restart, but the session now is newer than its notice
-            e.dataplane.handshakes.insert(
-                mesh_key(2),
-                UNIX_EPOCH + Duration::from_millis(now_ms + 500),
-            );
-            e.tick(start + Duration::from_secs(1), now_ms + 1_000, &mut events);
             e.on_hub_message(
                 &node_id(2),
-                &notice(8, now_ms),
+                &notice(7, now_ms, 1_000),
+                start,
+                now_ms,
+                &mut events,
+            );
+            // The same restart once more: handled already
+            e.on_hub_message(
+                &node_id(2),
+                &notice(7, now_ms, 1_000),
+                start,
+                now_ms,
+                &mut events,
+            );
+            // A later restart 2 seconds before its notice, with a session made since: the peer
+            // handshook as soon as it sent again, before its notice went out, and after the
+            // statistics were last read
+            e.dataplane.handshakes.insert(
+                mesh_key(2),
+                UNIX_EPOCH + Duration::from_millis(now_ms + 700),
+            );
+            e.on_hub_message(
+                &node_id(2),
+                &notice(8, now_ms + 1_000, 2_000),
                 start,
                 now_ms + 1_000,
                 &mut events,

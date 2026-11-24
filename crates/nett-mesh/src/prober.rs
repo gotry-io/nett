@@ -299,9 +299,9 @@ pub struct Prober {
     /// Drawn as the mesh starts: what this machine's restart notices carry (design/mesh.md section
     /// 8.4).
     restart: u32,
-    /// Peers whose restart notice was just handled, and when each was sent (Unix ms), for the
-    /// caller; at most one per peer.
-    restarted: Vec<(NodeId, u64)>,
+    /// Peers whose restart notice was just handled, and how long before its notice each started
+    /// (ms), for the caller; at most one per peer.
+    restarted: Vec<(NodeId, u32)>,
     /// Events to be reported by the caller.
     events: Vec<Event>,
 }
@@ -507,9 +507,11 @@ impl Prober {
         &self,
         peers: impl IntoIterator<Item = &'a NodeId>,
         now_ms: u64,
+        started_ago: Duration,
     ) -> Vec<Outgoing> {
         let notice = RestartNotice {
             restart: self.restart,
+            started_ago_ms: u32::try_from(started_ago.as_millis()).unwrap_or(u32::MAX),
         };
         peers
             .into_iter()
@@ -536,8 +538,9 @@ impl Prober {
             .map_or(Route::Direct(endpoint), |(r, _)| *r)
     }
 
-    /// Peers whose restart notice came since the last call, and when each was sent (Unix ms).
-    pub fn take_restarted(&mut self) -> Vec<(NodeId, u64)> {
+    /// Peers whose restart notice came since the last call, and how long before its notice each
+    /// started (ms).
+    pub fn take_restarted(&mut self) -> Vec<(NodeId, u32)> {
         std::mem::take(&mut self.restarted)
     }
 
@@ -1561,13 +1564,13 @@ impl Prober {
         let Some(key) = self.peers.get(sender).and_then(|p| p.switch_key.clone()) else {
             return vec![];
         };
-        if let Some((notice, sent_ms)) = RestartNotice::open(data, &key, now_ms) {
+        if let Some(notice) = RestartNotice::open(data, &key, now_ms) {
             if let Some(peer) = self.peers.get_mut(sender)
                 && peer.heard_restart != Some(notice.restart)
             {
                 peer.heard_restart = Some(notice.restart);
                 self.restarted.retain(|(id, _)| id != sender);
-                self.restarted.push((sender.clone(), sent_ms));
+                self.restarted.push((sender.clone(), notice.started_ago_ms));
             }
             return vec![];
         }

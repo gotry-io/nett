@@ -393,12 +393,15 @@ fn open_relayed(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<([u8; SWITCH_LE
 }
 
 /// A member that restarted tells a peer, through the Hub only (design/mesh.md section 8.4):
-/// `type | 0 | 0 | 0 | restart number | 0 × 8`, sealed as the switch messages relayed there. A
-/// release that does not know the type drops it, as it does any message it cannot decode.
+/// `type | 0 | 0 | 0 | restart number | started ago | 0 × 4`, sealed as the switch messages relayed
+/// there. A release that does not know the type drops it, as it does any message it cannot decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RestartNotice {
     /// Drawn at random as the sender's mesh starts.
     pub restart: u32,
+    /// How long before sending the notice the sender's mesh started (ms): the receiver places the
+    /// start on its own clock, which the two machines need not agree on.
+    pub started_ago_ms: u32,
 }
 
 impl RestartNotice {
@@ -406,17 +409,20 @@ impl RestartNotice {
         let mut b = [0u8; SWITCH_LEN];
         b[0] = RESTART_NOTICE;
         b[4..8].copy_from_slice(&self.restart.to_be_bytes());
+        b[8..12].copy_from_slice(&self.started_ago_ms.to_be_bytes());
         seal_relayed(&b, sent_ms, key)
     }
 
-    /// The notice and when it was sent (Unix ms), as [`open_relayed`] lets it through.
-    pub fn open(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<(Self, u64)> {
-        let (b, sent_ms) = open_relayed(b, key, now_ms)?;
-        if b[0] != RESTART_NOTICE || b[1..4] != [0; 3] || b[8..] != [0; 8] {
+    /// The notice, as [`open_relayed`] lets it through.
+    pub fn open(b: &[u8], key: &ProbeKey, now_ms: u64) -> Option<Self> {
+        let (b, _) = open_relayed(b, key, now_ms)?;
+        if b[0] != RESTART_NOTICE || b[1..4] != [0; 3] || b[12..] != [0; 4] {
             return None;
         }
-        let restart = u32::from_be_bytes([b[4], b[5], b[6], b[7]]);
-        Some((Self { restart }, sent_ms))
+        Some(Self {
+            restart: u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
+            started_ago_ms: u32::from_be_bytes([b[8], b[9], b[10], b[11]]),
+        })
     }
 }
 
@@ -652,11 +658,12 @@ mod tests {
         let theirs = ProbeKey::path_switch(&peer_secret, &own.public_key()).expect("key");
         let notice = RestartNotice {
             restart: 0xdead_beef,
+            started_ago_ms: 1_500,
         };
         let sealed = notice.seal(1_000_000, &key);
         assert_eq!(
             RestartNotice::open(&sealed, &theirs, 1_000_500),
-            Some((notice, 1_000_000))
+            Some(notice)
         );
         assert_eq!(
             RestartNotice::open(&sealed, &theirs, 1_000_000 + MAX_CLOCK_SKEW_MS + 1),
