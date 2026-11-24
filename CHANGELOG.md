@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-24
+
 - The relay runs in the nett service of a machine that relays. A relay over UDP needs no second
   service, and nett-relay runs only as the relay's TLS entry, where the relay serves TLS; an
   upgrade removes `nett-relay.service` from a machine whose relay does not. TLS connections
@@ -19,8 +21,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   Linux the machine runs nett's userspace data plane while it offers the port, and nett starts
   again once to change data plane when the port is added or removed; the change listing says so
   and names the port to open in its firewall. In the lab, with everything on one CPU, a path to
-  such a port carried about 440-690 Mbit/s where plain kernel WireGuard carried 900. Offering it needs the Hub and every machine on this
-  release; the command names the ones that are not.
+  such a port carried about 440-690 Mbit/s where plain kernel WireGuard carried 900. Offering it
+  needs the Hub and every machine on this release; the command names the ones that are not.
 - Obfuscated UDP through the relay on a peer's own machine ranks with the other paths through
   relays, after the plain direct path: the peer's own obfuscated port takes its place.
 
