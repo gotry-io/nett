@@ -187,7 +187,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: what nett assumes about an operating system (where a packet to the machine's own address goes, which checksums it fills, which socket options apply, how a service manager hands over credentials, what a peer in another PID namespace looks like) is tested on that system, as root where it needs root.
 
-**Breaks when** behavior is reasoned from another platform or from documentation, and only the real system shows the difference.
+**Breaks when** behavior is reasoned from another platform or from documentation, or code is built only against another C library than the one releases link, and only the real system shows the difference.
 
 **Where it holds**
 
@@ -198,6 +198,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - On Synology DSM, which loads the TUN driver only for packages that need it, `nett install` loads it before it starts the services (dsm.md section 6.2);
 - A kernel without the WireGuard family gets the userspace data plane, and tearing down there leaves nftables alone: only the kernel data plane makes nett's tables, and a kernel without nftables may not answer at all (dsm.md section 5).
 - On macOS a public certificate is verified by the system, and no root certificates are read into the nett service: reading them through the Security framework leaves several megabytes in the allocator at each connection, which Linux returns (hub.md section 4).
+- Calls into the C library are built for musl, which releases link, as well as for glibc, which the tests and the lab run on: the two declare some arguments differently, such as the flags of `recvmmsg` (userspace.md section 4);
 - On macOS the nett service runs without the allocator's nano zone, which keeps a page per size and CPU it has used and held megabytes for kilobytes of live objects; the running service is checked for it, since only the system shows which zones a process uses (architecture.md section 13.1).
 
 **Guards**
@@ -214,6 +215,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-node:a_connector_for_a_public_certificate_loads_no_root_store`
 - `nett-node:the_plist_is_valid_and_runs_the_copy`
 - `ci:utun, addresses and routes (needs root)`
+- `ci:Build this version and 99.0.0 of nett and nett-hub, statically linked`
 - `ci:Full flow of sudo nett install (needs root)`
 
 ## 6. A mechanism some roles skip is not what all roles rely on

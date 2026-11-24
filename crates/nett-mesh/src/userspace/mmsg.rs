@@ -53,6 +53,8 @@ impl RecvBatch {
             hdr.msg_iov = std::ptr::from_mut(&mut iovecs[i]);
             hdr.msg_iovlen = 1;
         }
+        // glibc declares the flags as a signed int and musl, which releases link, as an unsigned one
+        let flags = libc::MSG_DONTWAIT as _;
         // SAFETY: each header points at its own name and at an iovec covering its own slot of the
         // slab, all of which outlive the call; the kernel writes at most SLOT bytes per slot and
         // the sizes given for the names
@@ -61,7 +63,7 @@ impl RecvBatch {
                 socket.as_raw_fd(),
                 msgs.as_mut_ptr(),
                 SLOTS as libc::c_uint,
-                libc::MSG_DONTWAIT,
+                flags,
                 std::ptr::null_mut(),
             )
         };
