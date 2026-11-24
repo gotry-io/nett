@@ -84,6 +84,9 @@ pub enum Outgoing {
     Transport { to: SocketAddr, data: Vec<u8> },
     /// Sent from the WireGuard port (section 7.1): direct probes, and probes of UDP relays.
     WgPort { to: SocketAddr, data: Vec<u8> },
+    /// Sent wrapped from this machine's obfuscated port (design/obfuscation.md section 2): replies
+    /// to what came in there.
+    ObfsPort { to: SocketAddr, data: Vec<u8> },
     /// Handed to nett-node, which relays it through the Hub to the peer's nett-node (section 8.4).
     Hub { peer: NodeId, data: Vec<u8> },
 }
@@ -97,6 +100,9 @@ pub enum Incoming {
     Transport,
     /// The copy on the WireGuard port.
     WgPort,
+    /// This machine's obfuscated port, opened by the userspace data plane (design/obfuscation.md
+    /// section 2): handled as the WireGuard port, and answered through the port it came in on.
+    ObfsPort,
 }
 
 /// How a peer's path selection state appears in local status (design/status.md section 6).
@@ -133,7 +139,10 @@ pub struct Switch {
 }
 
 enum CandidateMeta {
-    Direct,
+    /// `loopback`: the candidate is the peer's obfuscated port, reached through the obfuscated
+    /// transport's loopback port (design/obfuscation.md section 2); probes go there and their replies
+    /// come back through it.
+    Direct { loopback: bool },
     /// `via`: how the relay is reached; only a measurement over its UDP relay port counts as this
     /// machine's UDP measurement to the relay.
     Relay {
@@ -333,36 +342,73 @@ pub fn is_decider(
     }
 }
 
+/// The loopback ports of the transports, by what they reach.
+#[derive(Debug, Clone, Copy)]
+pub struct Loopbacks<'a> {
+    /// Each TLS relay's ([`crate::config::DesiredMesh::tls_endpoints`]).
+    pub tls: &'a BTreeMap<NodeId, SocketAddr>,
+    /// Each obfuscated relay's ([`crate::config::DesiredMesh::obfs_endpoints`]).
+    pub obfs: &'a BTreeMap<NodeId, SocketAddr>,
+    /// Each peer's obfuscated port's on kernel WireGuard
+    /// ([`crate::config::DesiredMesh::peer_obfs_endpoints`]); `None` where the data plane wraps for
+    /// them on the WireGuard socket and the candidate's address is the endpoint.
+    pub peer_obfs: Option<&'a BTreeMap<SocketAddr, SocketAddr>>,
+}
+
+#[cfg(test)]
+static NO_LOOPBACK: BTreeMap<NodeId, SocketAddr> = BTreeMap::new();
+
+#[cfg(test)]
+impl Loopbacks<'static> {
+    /// No transport's loopback ports, and peers' obfuscated ports reached on the WireGuard socket.
+    pub const NONE: Self = Self {
+        tls: &NO_LOOPBACK,
+        obfs: &NO_LOOPBACK,
+        peer_obfs: None,
+    };
+}
+
 /// A candidate's endpoint in WireGuard and the information used for measurement. The endpoint of a TLS
-/// or obfuscated candidate is its transport's loopback port, given by `tls` or `obfs`; such a
-/// candidate that was not assigned a port is not used.
+/// or obfuscated candidate is its transport's loopback port, given by `loopbacks`; such a candidate
+/// that was not assigned a port is not used.
 fn routes(
     candidates: &[Candidate],
-    tls: &BTreeMap<NodeId, SocketAddr>,
-    obfs: &BTreeMap<NodeId, SocketAddr>,
+    loopbacks: Loopbacks<'_>,
 ) -> (Vec<(Route, PathKind)>, Vec<CandidateMeta>) {
+    let plain = || CandidateMeta::Direct { loopback: false };
     candidates
         .iter()
         .filter_map(|c| match c {
-            Candidate::Direct { endpoint } => Some((
-                (Route::Direct(*endpoint), PathKind::Direct),
-                CandidateMeta::Direct,
-            )),
-            Candidate::Lan { endpoint } => Some((
-                (Route::Direct(*endpoint), PathKind::Lan),
-                CandidateMeta::Direct,
-            )),
+            Candidate::Direct { endpoint } => {
+                Some(((Route::Direct(*endpoint), PathKind::Direct), plain()))
+            }
+            Candidate::DirectObfs { endpoint, .. } => match loopbacks.peer_obfs {
+                None => Some(((Route::Direct(*endpoint), PathKind::DirectObfs), plain())),
+                Some(ports) => Some((
+                    (Route::Direct(*ports.get(endpoint)?), PathKind::DirectObfs),
+                    CandidateMeta::Direct { loopback: true },
+                )),
+            },
+            Candidate::Lan { endpoint } => {
+                Some(((Route::Direct(*endpoint), PathKind::Lan), plain()))
+            }
             Candidate::Relay {
                 relay,
                 endpoint,
                 token,
             } => Some(relay_route(relay, *endpoint, token, Via::Udp)),
-            Candidate::RelayObfs { relay, token, .. } => {
-                Some(relay_route(relay, *obfs.get(relay)?, token, Via::Obfs))
-            }
-            Candidate::RelayTls { relay, token, .. } => {
-                Some(relay_route(relay, *tls.get(relay)?, token, Via::Tls))
-            }
+            Candidate::RelayObfs { relay, token, .. } => Some(relay_route(
+                relay,
+                *loopbacks.obfs.get(relay)?,
+                token,
+                Via::Obfs,
+            )),
+            Candidate::RelayTls { relay, token, .. } => Some(relay_route(
+                relay,
+                *loopbacks.tls.get(relay)?,
+                token,
+                Via::Tls,
+            )),
             // The address for hole punching is exchanged during hole punching, and becomes a candidate only after
             // the punch succeeds
             Candidate::Punch => None,
@@ -499,9 +545,7 @@ impl Prober {
     }
 
     /// Updates from the admitted members and the candidate paths in the desired state. Peers whose candidate
-    /// list has not changed keep their path selection state. `tls` is the loopback port of each TLS relay
-    /// on the TLS transport ([`crate::config::DesiredMesh::tls_endpoints`]).
-    #[allow(clippy::too_many_arguments)]
+    /// list has not changed keep their path selection state.
     pub fn update(
         &mut self,
         own_id: &NodeId,
@@ -509,24 +553,14 @@ impl Prober {
         private_key: &PrivateKey,
         members: &BTreeMap<NodeId, Member>,
         paths: &BTreeMap<NodeId, PeerPathConfig>,
-        tls: &BTreeMap<NodeId, SocketAddr>,
-        obfs: &BTreeMap<NodeId, SocketAddr>,
+        loopbacks: Loopbacks<'_>,
     ) {
         let mut next = BTreeMap::new();
         self.monitored.clear();
         for (id, member) in members.iter().filter(|(id, _)| *id != own_id) {
             let config = paths.get(id);
             let candidates = config.map(|c| c.candidates.as_slice()).unwrap_or_default();
-            let (mut routes, mut meta) = routes(candidates, tls, obfs);
-            // Obfuscated UDP through the relay on the peer's own machine reaches the peer itself
-            let peer_relay = KeyId::of(id.as_str().as_bytes());
-            for (route, kind) in &mut routes {
-                if *kind == PathKind::RelayObfs
-                    && matches!(route, Route::Relay { relay, .. } if *relay == peer_relay)
-                {
-                    *kind = PathKind::PeerRelayObfs;
-                }
-            }
+            let (mut routes, mut meta) = routes(candidates, loopbacks);
             let configured = routes.len();
             let role = config.and_then(|c| role(own_id, own_reach, id, c.reachability));
             let punch_wanted =
@@ -558,7 +592,7 @@ impl Prober {
             {
                 for extra in &prev.routes[prev.configured..] {
                     routes.push(*extra);
-                    meta.push(CandidateMeta::Direct);
+                    meta.push(CandidateMeta::Direct { loopback: false });
                 }
             }
             let together = match before {
@@ -845,7 +879,7 @@ impl Prober {
                         };
                         let peer = &self.peers[&id];
                         match (&peer.meta[index], route) {
-                            (CandidateMeta::Direct, Route::Direct(to)) => {
+                            (CandidateMeta::Direct { loopback }, Route::Direct(to)) => {
                                 if let Some(key) = &peer.direct_key {
                                     let probe = OuterProbe {
                                         kind: DIRECT_PROBE,
@@ -853,9 +887,11 @@ impl Prober {
                                         seq: wire,
                                         sent_ms: now_ms,
                                     };
-                                    out.push(Outgoing::WgPort {
-                                        to,
-                                        data: probe.encode(key).to_vec(),
+                                    let data = probe.encode(key).to_vec();
+                                    out.push(if *loopback {
+                                        Outgoing::Transport { to, data }
+                                    } else {
+                                        Outgoing::WgPort { to, data }
                                     });
                                 }
                             }
@@ -1228,6 +1264,16 @@ impl Prober {
         at: Instant,
         now_ms: u64,
     ) -> Vec<Outgoing> {
+        if kind == Incoming::ObfsPort {
+            return self
+                .on_packet(Incoming::WgPort, from, data, at, now_ms)
+                .into_iter()
+                .map(|o| match o {
+                    Outgoing::WgPort { to, data } => Outgoing::ObfsPort { to, data },
+                    o => o,
+                })
+                .collect();
+        }
         match (kind, data.first().copied()) {
             (Incoming::Tunnel, Some(probe::TUNNEL_PROBE)) => {
                 // Reply only to probes from the mesh address of an admitted member; the source has already been
@@ -1335,7 +1381,7 @@ impl Prober {
                                 peer.routes[index] = entry;
                             } else {
                                 peer.routes.push(entry);
-                                peer.meta.push(CandidateMeta::Direct);
+                                peer.meta.push(CandidateMeta::Direct { loopback: false });
                             }
                         }
                     }
@@ -1356,7 +1402,8 @@ impl Prober {
                 self.on_cookie_reply(from, at);
                 vec![]
             }
-            (Incoming::WgPort, Some(DIRECT_REPLY)) => {
+            (Incoming::WgPort | Incoming::Transport, Some(DIRECT_REPLY)) => {
+                let over_transport = kind == Incoming::Transport;
                 let Some(key_id) = OuterReply::peek(data) else {
                     return vec![];
                 };
@@ -1370,18 +1417,33 @@ impl Prober {
                 else {
                     return vec![];
                 };
-                match self.outstanding.remove(&reply.seq) {
-                    Some((owner, Pending::Candidate { index, local }, _)) if owner == id => {
-                        // The source the other side sees is the mapped address of this machine's WireGuard port (design/mesh.md
-                        // section 6.1)
-                        self.observations.record(from.ip(), reply.observed, at);
+                // A reply comes back the way its probe went: a candidate reached through the
+                // obfuscated transport is answered through it, any other on the WireGuard port
+                let loopback = |index: usize| {
+                    matches!(
+                        self.peers[&id].meta.get(index),
+                        Some(CandidateMeta::Direct { loopback }) if *loopback == over_transport
+                    )
+                };
+                match self.outstanding.get(&reply.seq).cloned() {
+                    Some((owner, Pending::Candidate { index, local }, _))
+                        if owner == id && loopback(index) =>
+                    {
+                        self.outstanding.remove(&reply.seq);
+                        // The source the other side sees is the mapped address of this machine's
+                        // WireGuard port (design/mesh.md section 6.1); through the transport it is
+                        // the transport's socket
+                        if !over_transport {
+                            self.observations.record(from.ip(), reply.observed, at);
+                        }
                         if let Some(paths) =
                             self.peers.get_mut(&owner).and_then(|p| p.paths.as_mut())
                         {
                             paths.on_candidate_reply(index, local, at, None);
                         }
                     }
-                    Some((owner, Pending::Punch, _)) if owner == id => {
+                    Some((owner, Pending::Punch, _)) if owner == id && !over_transport => {
+                        self.outstanding.remove(&reply.seq);
                         if let Some(punch) =
                             self.peers.get_mut(&owner).and_then(|p| p.punch.as_mut())
                         {
@@ -1576,7 +1638,7 @@ impl Prober {
                 peer.routes[index] = route;
             } else {
                 peer.routes.push(route);
-                peer.meta.push(CandidateMeta::Direct);
+                peer.meta.push(CandidateMeta::Direct { loopback: false });
             }
         }
         let events = punch.take_events();
@@ -1951,8 +2013,7 @@ mod tests {
                 &a_priv,
                 &members,
                 &paths(2, Reachability::Public, TOKEN_A, "198.51.100.2:41820"),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                Loopbacks::NONE,
             );
             b.prober.update(
                 &b.id,
@@ -1960,8 +2021,7 @@ mod tests {
                 &b_priv,
                 &members,
                 &paths(1, Reachability::DialOnly, TOKEN_B, "203.0.113.1:41820"),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                Loopbacks::NONE,
             );
             for node in [&mut a, &mut b] {
                 let peer = if node.id == node_id(1) {
@@ -2471,8 +2531,7 @@ mod tests {
                     c.extend(punch.then_some(Candidate::Punch));
                     c
                 }),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                Loopbacks::NONE,
             );
             b.prober.update(
                 &b.id,
@@ -2484,8 +2543,7 @@ mod tests {
                     c.extend(punch.then_some(Candidate::Punch));
                     c
                 }),
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                Loopbacks::NONE,
             );
             let now = Instant::now();
             for (node, peer) in [(&mut a, node_id(2)), (&mut b, node_id(1))] {
@@ -2532,8 +2590,7 @@ mod tests {
                 &b_priv,
                 &self.members,
                 &paths,
-                &BTreeMap::new(),
-                &BTreeMap::new(),
+                Loopbacks::NONE,
             );
         }
 
@@ -2627,6 +2684,8 @@ mod tests {
                         }
                     }
                 }
+                // Neither end has an obfuscated port here
+                Outgoing::ObfsPort { .. } => {}
                 Outgoing::Hub { peer, data } => {
                     let dst = if from_a { &self.b } else { &self.a };
                     if !self.hub || peer != dst.id {
@@ -2794,8 +2853,10 @@ mod tests {
                     },
                 )]
                 .into(),
-                &tls,
-                &BTreeMap::new(),
+                Loopbacks {
+                    tls: &tls,
+                    ..Loopbacks::NONE
+                },
             );
             let (out, _) = prober.tick(Instant::now(), 1_700_000_000_000);
             out.into_iter()
@@ -2821,6 +2882,14 @@ mod tests {
 
     /// A pair of admitted members, 1 and 2, as prober 1 sees them: 2 has `candidates`, and 1 is `own`.
     fn prober_of_one(own: Reachability, candidates: Vec<Candidate>) -> (Prober, ProbeKey, KeyId) {
+        prober_of_one_with(own, candidates, Loopbacks::NONE)
+    }
+
+    fn prober_of_one_with(
+        own: Reachability,
+        candidates: Vec<Candidate>,
+        loopbacks: Loopbacks<'_>,
+    ) -> (Prober, ProbeKey, KeyId) {
         let mesh = Mesh::new(&[1, 2]);
         let (a_priv, a_pub) = keypair(1);
         let (b_priv, b_pub) = keypair(2);
@@ -2852,11 +2921,99 @@ mod tests {
                 },
             )]
             .into(),
-            &BTreeMap::new(),
-            &BTreeMap::new(),
+            loopbacks,
         );
         let key = ProbeKey::direct(&b_priv, &a_pub).expect("key");
         (a, key, KeyId::of(b_pub.as_bytes()))
+    }
+
+    /// A peer's obfuscated port is probed the way the tunnel reaches it (design/obfuscation.md
+    /// section 6): on kernel WireGuard through the obfuscated transport's loopback port, whose reply
+    /// alone answers the probe; on the userspace data plane at the port itself from the WireGuard
+    /// port, which wraps it.
+    #[test]
+    fn a_peers_obfuscated_port_is_probed_the_way_the_tunnel_reaches_it() {
+        let port = addr("198.51.100.2:30000");
+        let loopback = addr("127.0.0.1:41851");
+        // The pair starts on the first candidate, which the tunnel's own probes measure
+        let candidates = vec![
+            Candidate::Direct {
+                endpoint: addr("198.51.100.2:41820"),
+            },
+            Candidate::DirectObfs {
+                endpoint: port,
+                key: crate::config::ObfsSecret([3; 32]),
+                padding: crate::config::ObfsPadding { min: 0, max: 64 },
+            },
+        ];
+        let now = Instant::now();
+        let now_ms = 1_700_000_000_000;
+        let probes = |out: &[Outgoing]| -> Vec<(bool, SocketAddr, Vec<u8>)> {
+            out.iter()
+                .filter_map(|o| match o {
+                    Outgoing::Transport { to, data } => Some((true, *to, data.clone())),
+                    Outgoing::WgPort { to, data } if data[0] == DIRECT_PROBE => {
+                        Some((false, *to, data.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let ports: BTreeMap<SocketAddr, SocketAddr> = [(port, loopback)].into();
+        let kernel = Loopbacks {
+            peer_obfs: Some(&ports),
+            ..Loopbacks::NONE
+        };
+        let (mut a, key, key_id) =
+            prober_of_one_with(Reachability::DialOnly, candidates.clone(), kernel);
+        let sent = probes(&a.tick(now, now_ms).0);
+        let to: Vec<(bool, SocketAddr)> = sent.iter().map(|(t, to, _)| (*t, *to)).collect();
+        assert!(to.contains(&(true, loopback)), "{to:?}");
+        assert!(!to.iter().any(|(_, to)| *to == port), "{to:?}");
+        assert_eq!(
+            a.peer_view(&node_id(2), now).expect("peer").routes[1],
+            (Route::Direct(loopback), PathKind::DirectObfs)
+        );
+        let (_, _, data) = sent
+            .iter()
+            .find(|(t, ..)| *t)
+            .expect("through the transport");
+        let probe = OuterProbe::verify(data, &key, now_ms).expect("a probe from 1");
+        let reply = probe
+            .reply(key_id, addr("203.0.113.9:1"))
+            .encode(&key)
+            .to_vec();
+        // Answered on the WireGuard port instead: not the path this probe measures
+        a.on_packet(Incoming::WgPort, port, &reply, now, now_ms);
+        assert!(a.outstanding.contains_key(&probe.seq));
+        a.on_packet(Incoming::Transport, loopback, &reply, now, now_ms);
+        assert!(!a.outstanding.contains_key(&probe.seq), "answered");
+
+        let (mut a, _, _) = prober_of_one_with(Reachability::DialOnly, candidates, Loopbacks::NONE);
+        let to: Vec<(bool, SocketAddr)> = probes(&a.tick(now, now_ms).0)
+            .into_iter()
+            .map(|(t, to, _)| (t, to))
+            .collect();
+        assert!(to.contains(&(false, port)), "{to:?}");
+        assert!(!to.iter().any(|(t, _)| *t), "{to:?}");
+    }
+
+    /// A probe on this machine's obfuscated port is answered through that port, so a peer that
+    /// probes both of this machine's ports measures each (design/obfuscation.md section 6).
+    #[test]
+    fn a_probe_on_the_obfuscated_port_is_answered_through_it() {
+        let (mut a, key, key_id) = prober_of_one(Reachability::Public, vec![]);
+        let now_ms = 1_700_000_000_000;
+        let probe = probe_from_two(&key, key_id, 1, now_ms);
+        let from = addr("198.51.100.5:41820");
+        let replies = a.on_packet(Incoming::ObfsPort, from, &probe, Instant::now(), now_ms);
+        assert!(
+            matches!(replies[..], [Outgoing::ObfsPort { to, .. }] if to == from),
+            "{replies:?}"
+        );
+        let replies = a.on_packet(Incoming::WgPort, from, &probe, Instant::now(), now_ms);
+        assert!(matches!(replies[..], [Outgoing::WgPort { .. }]));
     }
 
     /// Member 2's direct probe, sent at `sent_ms`.

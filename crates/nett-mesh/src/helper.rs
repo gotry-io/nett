@@ -42,7 +42,7 @@ pub struct RelayAssignment {
     pub tls_port: Option<u16>,
     pub members: Vec<AssignedMember>,
     pub links: Vec<[X25519PublicKey; 2]>,
-    pub obfs: Option<crate::config::RelayObfsDoc>,
+    pub obfs: Option<crate::config::ObfsPortDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

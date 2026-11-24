@@ -39,6 +39,19 @@ pub fn describe(old: &State, new: &State) -> Vec<String> {
                 if let Some(text) = learned_text(&o.learned, &m.learned, reach_changed) {
                     lines.push(format!("~ {name}: learned {text}"));
                 }
+                if o.obfs_port != m.obfs_port {
+                    lines.push(match m.obfs_port {
+                        Some(p) => format!(
+                            "~ {name}: obfuscated UDP on port {p}, which its firewall must let in; on \
+                             Linux nett moves to the userspace data plane, and its connections pause \
+                             while nett restarts"
+                        ),
+                        None => format!(
+                            "~ {name}: no obfuscated port; on Linux nett moves back to kernel \
+                             WireGuard, and its connections pause while nett restarts"
+                        ),
+                    });
+                }
                 if o.relay != m.relay {
                     lines.push(match m.relay {
                         Some(r) => format!(
@@ -455,6 +468,19 @@ pub fn path_kind(state: &State, a: &NodeId, b: &NodeId) -> String {
     };
     let public = |m: &Machine| m.reachability == Reachability::Public;
     let mut parts = Vec::new();
+    // The end that decides reaches the other's obfuscated port
+    let obfs = [(ma, mb), (mb, ma)].into_iter().any(|(me, peer)| {
+        peer.obfs_port.is_some()
+            && nett_mesh::prober::is_decider(
+                &me.node_id,
+                me.reachability,
+                &peer.node_id,
+                peer.reachability,
+            )
+    });
+    if obfs {
+        parts.push("direct (obfs)".to_owned());
+    }
     parts.push(if public(ma) || public(mb) {
         "direct".to_owned()
     } else {

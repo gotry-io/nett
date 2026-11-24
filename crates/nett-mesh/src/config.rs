@@ -6,7 +6,7 @@
 //! Signed artifacts are only parsed for format here; signatures and admission are verified item by item by
 //! [`crate::members`] and are never skipped because of the source.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -56,6 +56,10 @@ pub struct DesiredMeshDoc {
     /// The relay this machine runs, with the links assigned to it (design/mesh.md section 5.2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayDoc>,
+    /// This machine's obfuscated port, beside its WireGuard port (design/obfuscation.md section 2,
+    /// ADR 0031).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs: Option<ObfsPortDoc>,
 }
 
 /// One device credential in the desired state (design/devices.md section 4).
@@ -87,7 +91,7 @@ pub struct RelayDoc {
     pub links: Vec<[NodeId; 2]>,
     /// The obfuscated UDP transport, when the relay offers it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub obfs: Option<RelayObfsDoc>,
+    pub obfs: Option<ObfsPortDoc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +138,15 @@ pub struct PathDoc {
 pub enum Candidate {
     /// Direct public path: the address of the peer's WireGuard port.
     Direct { endpoint: SocketAddr },
+    /// Obfuscated UDP to the peer's own obfuscated port (design/obfuscation.md section 5): its
+    /// address, its key and the site's padding range. The userspace data plane wraps for it on the
+    /// WireGuard socket; on kernel WireGuard the endpoint is the obfuscated transport's loopback port
+    /// for this address.
+    DirectObfs {
+        endpoint: SocketAddr,
+        key: ObfsSecret,
+        padding: ObfsPadding,
+    },
     /// Via a relay: the relay's node ID, the address of the relay port, and the probe token between this
     /// machine and this relay (design/mesh.md section 5.2).
     Relay {
@@ -172,12 +185,13 @@ pub enum Candidate {
 /// going around the machine's own UDP ports (ADR 0013: allocated by the mesh; design/mesh.md
 /// section 5.3).
 pub const TLS_LOOPBACK_BASE: u16 = 41830;
-/// The obfuscated transport's loopback ports, allocated the same way (design/obfuscation.md section 7).
+/// The obfuscated transport's loopback ports, allocated the same way, relays first and then peers'
+/// obfuscated ports in the order of their addresses (design/obfuscation.md section 7).
 pub const OBFS_LOOPBACK_BASE: u16 = 41850;
 /// The machine's own UDP ports a transport's loopback ports may have to go around: its WireGuard
-/// port, its relay port and its relay's obfuscated port. Each binds every local address, loopback
-/// included.
-const OWN_UDP_PORTS: u16 = 3;
+/// port, its obfuscated port, its relay port and its relay's obfuscated port. Each binds every local
+/// address, loopback included.
+const OWN_UDP_PORTS: u16 = 4;
 const TLS_LOOPBACK_LAST: u16 = TLS_LOOPBACK_BASE + MAX_TARGETS as u16 + OWN_UDP_PORTS - 1;
 const OBFS_LOOPBACK_LAST: u16 = OBFS_LOOPBACK_BASE + MAX_TARGETS as u16 + OWN_UDP_PORTS - 1;
 
@@ -266,11 +280,11 @@ impl Drop for ObfsSecret {
 
 pub use nett_core::transport::ObfsPadding;
 
-/// A relay's obfuscated UDP transport (design/obfuscation.md section 2): its port, its key and the
-/// site's padding range.
+/// An obfuscated port, a machine's own or its relay's (design/obfuscation.md section 2): the port, its
+/// key and the site's padding range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RelayObfsDoc {
+pub struct ObfsPortDoc {
     pub port: u16,
     pub key: ObfsSecret,
     pub padding: ObfsPadding,
@@ -305,15 +319,17 @@ pub enum ConfigError {
     TlsTargetConflict(NodeId),
     #[error("paths list more than {MAX_TARGETS} TLS relays")]
     TooManyTlsRelays,
-    #[error("obfuscated relay {0} is listed with different addresses, keys or padding")]
-    ObfsTargetConflict(NodeId),
-    #[error("paths list more than {MAX_TARGETS} obfuscated relays")]
-    TooManyObfsRelays,
+    #[error("obfuscated port {0} is listed with different keys or padding")]
+    ObfsTargetConflict(String),
+    #[error("paths list more than {MAX_TARGETS} obfuscated ports, relays' and peers' together")]
+    TooManyObfsTargets,
     #[error(
-        "obfuscated relay {0} has a padding range outside 0-{max}",
+        "obfuscated port {0} has a padding range outside 0-{max}",
         max = nett_core::transport::MAX_OBFS_PADDING
     )]
-    ObfsPadding(NodeId),
+    ObfsPadding(String),
+    #[error("this machine's obfuscated port: {0}")]
+    Obfs(String),
     #[error("desired state lists more than {max} {what}")]
     TooMany { what: &'static str, max: usize },
     #[error("relay: {0}")]
@@ -339,12 +355,15 @@ pub struct DesiredMesh {
     pub devices: Vec<DeviceDoc>,
     pub names: BTreeMap<NodeId, NodeName>,
     pub relay: Option<RelayDoc>,
+    pub obfs: Option<ObfsPortDoc>,
     /// TLS targets of the TLS transport, coming from the same place as [`DesiredMesh::tls_endpoints`].
     tls_targets: Vec<TlsTarget>,
     tls_endpoints: BTreeMap<NodeId, SocketAddr>,
-    /// The obfuscated transport's targets and loopback ports, allocated like the TLS ones.
+    /// The obfuscated transport's targets and loopback ports, allocated like the TLS ones: relays'
+    /// by node ID, peers' obfuscated ports by address.
     obfs_targets: Vec<ObfsTarget>,
     obfs_endpoints: BTreeMap<NodeId, SocketAddr>,
+    peer_obfs_endpoints: BTreeMap<SocketAddr, SocketAddr>,
     /// The document before validation: saved into the trust store after the whole is accepted, and used when
     /// the desired state file is rejected at startup.
     doc: DesiredMeshDoc,
@@ -370,20 +389,49 @@ impl DesiredMesh {
         &self.obfs_endpoints
     }
 
-    /// Targets of the obfuscated transport: loopback port and the relay's obfuscated port.
+    /// Targets of the obfuscated transport: loopback port and the obfuscated port it reaches.
     pub fn obfs_targets(&self) -> &[ObfsTarget] {
         &self.obfs_targets
     }
 
-    /// Configuration handed to the TLS transport: the WireGuard port is the port the interface actually
-    /// listens on (possibly assigned by the system); the data plane fills in the interface when it hands
-    /// the configuration out.
-    pub fn transport(&self, wireguard_port: u16) -> TransportConfig {
+    /// The endpoint in WireGuard of each peer's obfuscated port on kernel WireGuard: the loopback
+    /// port the transport opens for it. The userspace data plane wraps for these ports itself and
+    /// uses none of them.
+    pub fn peer_obfs_endpoints(&self) -> &BTreeMap<SocketAddr, SocketAddr> {
+        &self.peer_obfs_endpoints
+    }
+
+    /// The peers' obfuscated ports this machine reaches, with their keys and padding ranges.
+    pub fn peer_obfs_ports(&self) -> impl Iterator<Item = (SocketAddr, &ObfsSecret, ObfsPadding)> {
+        self.paths
+            .values()
+            .flat_map(|p| &p.candidates)
+            .filter_map(|c| match c {
+                Candidate::DirectObfs {
+                    endpoint,
+                    key,
+                    padding,
+                } => Some((*endpoint, key, *padding)),
+                _ => None,
+            })
+    }
+
+    /// Configuration handed to the TLS and obfuscated transports: the WireGuard port is the port the
+    /// interface actually listens on (possibly assigned by the system); the data plane fills in the
+    /// interface when it hands the configuration out. A data plane that wraps for peers' obfuscated
+    /// ports itself (`inline_obfs`) leaves them out.
+    pub fn transport(&self, wireguard_port: u16, inline_obfs: bool) -> TransportConfig {
+        let peers: BTreeSet<SocketAddr> = self.peer_obfs_endpoints.values().copied().collect();
         TransportConfig {
             wireguard_port,
             targets: self.tls_targets.clone(),
             interface: None,
-            obfs: self.obfs_targets.clone(),
+            obfs: self
+                .obfs_targets
+                .iter()
+                .filter(|t| !(inline_obfs && peers.contains(&t.listen)))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -444,9 +492,13 @@ impl DesiredMesh {
         if tls.len() > MAX_TARGETS {
             return Err(ConfigError::TooManyTlsRelays);
         }
+        if let Some(obfs) = &doc.obfs {
+            check_own_obfs(&doc, obfs)?;
+        }
         let own: Vec<u16> = doc
             .listen_port
             .into_iter()
+            .chain(doc.obfs.as_ref().map(|o| o.port))
             .chain(
                 doc.relay
                     .iter()
@@ -466,37 +518,63 @@ impl DesiredMesh {
                 fingerprint,
             });
         }
-        let mut obfs: BTreeMap<NodeId, (SocketAddr, &ObfsSecret, ObfsPadding)> = BTreeMap::new();
+        // The obfuscated ports this machine reaches: relays' by node ID, then peers' by address
+        type Port<'a> = (SocketAddr, &'a ObfsSecret, ObfsPadding);
+        let mut relays: BTreeMap<NodeId, Port> = BTreeMap::new();
+        let mut peers: BTreeMap<SocketAddr, (&ObfsSecret, ObfsPadding)> = BTreeMap::new();
         for c in doc.paths.iter().flat_map(|p| &p.candidates) {
-            if let Candidate::RelayObfs {
-                relay,
-                address,
-                key,
-                padding,
-                ..
-            } = c
-            {
-                if !padding.is_valid() {
-                    return Err(ConfigError::ObfsPadding(relay.clone()));
-                }
-                if obfs
-                    .insert(relay.clone(), (*address, key, *padding))
-                    .is_some_and(|prev| prev != (*address, key, *padding))
-                {
-                    return Err(ConfigError::ObfsTargetConflict(relay.clone()));
-                }
+            let (named, port) = match c {
+                Candidate::RelayObfs {
+                    relay,
+                    address,
+                    key,
+                    padding,
+                    ..
+                } => (relay.to_string(), (*address, key, *padding)),
+                Candidate::DirectObfs {
+                    endpoint,
+                    key,
+                    padding,
+                } => (endpoint.to_string(), (*endpoint, key, *padding)),
+                _ => continue,
+            };
+            if !port.2.is_valid() {
+                return Err(ConfigError::ObfsPadding(named));
+            }
+            let conflict = match c {
+                Candidate::RelayObfs { relay, .. } => relays
+                    .insert(relay.clone(), port)
+                    .is_some_and(|prev| prev != port),
+                _ => peers
+                    .insert(port.0, (port.1, port.2))
+                    .is_some_and(|prev| prev != (port.1, port.2)),
+            };
+            if conflict {
+                return Err(ConfigError::ObfsTargetConflict(named));
             }
         }
-        if obfs.len() > MAX_TARGETS {
-            return Err(ConfigError::TooManyObfsRelays);
+        if relays.len() + peers.len() > MAX_TARGETS {
+            return Err(ConfigError::TooManyObfsTargets);
         }
         let mut obfs_endpoints = BTreeMap::new();
+        let mut peer_obfs_endpoints = BTreeMap::new();
         let mut obfs_targets = Vec::new();
+        let ports = relays
+            .into_iter()
+            .map(|(relay, port)| (Some(relay), port))
+            .chain(
+                peers
+                    .into_iter()
+                    .map(|(addr, (key, padding))| (None, (addr, key, padding))),
+            );
         for (port, (relay, (connect, key, padding))) in
-            loopback_ports(OBFS_LOOPBACK_BASE, &own).zip(obfs)
+            loopback_ports(OBFS_LOOPBACK_BASE, &own).zip(ports)
         {
             let listen = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-            obfs_endpoints.insert(relay, listen);
+            match relay {
+                Some(relay) => obfs_endpoints.insert(relay, listen),
+                None => peer_obfs_endpoints.insert(connect, listen),
+            };
             obfs_targets.push(ObfsTarget {
                 listen,
                 connect,
@@ -532,13 +610,46 @@ impl DesiredMesh {
             devices: doc.devices,
             names: doc.names,
             relay: doc.relay,
+            obfs: doc.obfs,
             tls_targets: targets,
             tls_endpoints,
             obfs_targets,
             obfs_endpoints,
+            peer_obfs_endpoints,
             doc: source,
         })
     }
+}
+
+/// This machine's obfuscated port is on a `public` machine, has a valid padding range and is none of
+/// its other UDP ports.
+fn check_own_obfs(doc: &DesiredMeshDoc, obfs: &ObfsPortDoc) -> Result<(), ConfigError> {
+    if doc.reachability != Reachability::Public {
+        return Err(ConfigError::Obfs(
+            "only a public machine offers one: others reach it at its public address".into(),
+        ));
+    }
+    let relay_port =
+        |r: &RelayDoc| r.port == obfs.port || r.obfs.as_ref().map(|o| o.port) == Some(obfs.port);
+    if obfs.port == 0
+        || is_reserved_port(obfs.port)
+        || doc.listen_port == Some(obfs.port)
+        || doc.relay.as_ref().is_some_and(relay_port)
+    {
+        return Err(ConfigError::Obfs(format!(
+            "port {} is 0, the probe port, the WireGuard port or one of the relay's ports",
+            obfs.port
+        )));
+    }
+    if !obfs.padding.is_valid() {
+        return Err(ConfigError::Obfs(format!(
+            "padding {}-{} is not within 0-{} with the minimum first",
+            obfs.padding.min,
+            obfs.padding.max,
+            nett_core::transport::MAX_OBFS_PADDING
+        )));
+    }
+    Ok(())
 }
 
 /// The relay section is consistent: ports in range, members listed once, links between listed members.
@@ -746,7 +857,7 @@ mod tests {
             tls_port: Some(443),
             members: vec![],
             links: vec![],
-            obfs: Some(RelayObfsDoc {
+            obfs: Some(ObfsPortDoc {
                 port: TLS_LOOPBACK_BASE,
                 key: ObfsSecret([1; 32]),
                 padding: ObfsPadding { min: 0, max: 64 },
@@ -773,7 +884,7 @@ mod tests {
             ports(desired.tls_endpoints()),
             [TLS_LOOPBACK_BASE + 1, TLS_LOOPBACK_BASE + 2]
         );
-        let transport = desired.transport(OBFS_LOOPBACK_BASE);
+        let transport = desired.transport(OBFS_LOOPBACK_BASE, false);
         assert_eq!(transport.validate(), Ok(()));
     }
 
@@ -806,7 +917,7 @@ mod tests {
             (port(8), port(9)),
             (TLS_LOOPBACK_BASE, TLS_LOOPBACK_BASE + 1)
         );
-        let transport = desired.transport(51000);
+        let transport = desired.transport(51000, false);
         assert_eq!(transport.targets.len(), 2);
         assert_eq!(transport.wireguard_port, 51000);
         assert_eq!(transport.validate(), Ok(()));
@@ -816,5 +927,93 @@ mod tests {
             DesiredMesh::from_doc(doc),
             Err(ConfigError::TlsTargetConflict(_))
         ));
+    }
+    /// A peer's obfuscated port gets a loopback port after the relays', for kernel WireGuard; a data
+    /// plane that wraps itself leaves it out of the transport. This machine's own obfuscated port is
+    /// only on a public machine and is none of its other ports, which the loopback ports go around.
+    #[test]
+    fn peers_obfuscated_ports_get_loopback_ports_after_the_relays() {
+        use crate::testutil::{Mesh, node_id};
+        let padding = ObfsPadding { min: 0, max: 64 };
+        let direct = |peer: u8| Candidate::DirectObfs {
+            endpoint: format!("198.51.100.{peer}:30000").parse().expect("addr"),
+            key: ObfsSecret([peer; 32]),
+            padding,
+        };
+        let relay = Candidate::RelayObfs {
+            relay: node_id(9),
+            address: "198.51.100.9:30001".parse().expect("addr"),
+            key: ObfsSecret([9; 32]),
+            padding,
+            token: ProbeToken([9; 32]),
+        };
+        let mesh = Mesh::new(&[1]);
+        let mut doc = mesh.desired(1, vec![]);
+        doc.reachability = Reachability::Public;
+        doc.listen_port = Some(41820);
+        doc.obfs = Some(ObfsPortDoc {
+            port: OBFS_LOOPBACK_BASE + 1,
+            key: ObfsSecret([1; 32]),
+            padding,
+        });
+        doc.paths = vec![
+            PathDoc {
+                peer: node_id(3),
+                peer_reachability: Reachability::Public,
+                candidates: vec![direct(3), relay.clone()],
+            },
+            PathDoc {
+                peer: node_id(2),
+                peer_reachability: Reachability::Public,
+                candidates: vec![direct(2)],
+            },
+        ];
+        let desired = DesiredMesh::from_doc(doc.clone()).expect("valid");
+        let at =
+            |peer: u8| -> SocketAddr { format!("198.51.100.{peer}:30000").parse().expect("addr") };
+        assert_eq!(
+            desired.obfs_endpoints()[&node_id(9)].port(),
+            OBFS_LOOPBACK_BASE
+        );
+        assert_eq!(
+            [2, 3].map(|p| desired.peer_obfs_endpoints()[&at(p)].port()),
+            [OBFS_LOOPBACK_BASE + 2, OBFS_LOOPBACK_BASE + 3],
+            "after the relay, going around this machine's own obfuscated port"
+        );
+        assert_eq!(desired.peer_obfs_ports().count(), 2);
+        let kernel = desired.transport(41820, false);
+        let inline = desired.transport(41820, true);
+        assert_eq!((kernel.obfs.len(), inline.obfs.len()), (3, 1));
+        assert_eq!(inline.obfs[0].listen.port(), OBFS_LOOPBACK_BASE);
+
+        // The same address with another key
+        let mut conflict = doc.clone();
+        conflict.paths[1].candidates = vec![Candidate::DirectObfs {
+            endpoint: at(3),
+            key: ObfsSecret([7; 32]),
+            padding,
+        }];
+        assert!(matches!(
+            DesiredMesh::from_doc(conflict),
+            Err(ConfigError::ObfsTargetConflict(_))
+        ));
+        // Not public, or on one of its own ports
+        for change in [
+            |d: &mut DesiredMeshDoc| d.reachability = Reachability::DialOnly,
+            |d: &mut DesiredMeshDoc| d.listen_port = Some(OBFS_LOOPBACK_BASE + 1),
+            |d: &mut DesiredMeshDoc| {
+                d.obfs.as_mut().expect("obfs").port = TUNNEL_PROBE_PORT;
+            },
+            |d: &mut DesiredMeshDoc| {
+                d.obfs.as_mut().expect("obfs").padding = ObfsPadding { min: 9, max: 1 };
+            },
+        ] {
+            let mut bad = doc.clone();
+            change(&mut bad);
+            assert!(matches!(
+                DesiredMesh::from_doc(bad),
+                Err(ConfigError::Obfs(_))
+            ));
+        }
     }
 }

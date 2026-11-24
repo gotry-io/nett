@@ -901,6 +901,7 @@ fn connections_go_through_every_relay_udp_first() {
         c.iter()
             .map(|c| match c {
                 Candidate::Direct { endpoint } => format!("direct {endpoint}"),
+                Candidate::DirectObfs { endpoint, .. } => format!("direct obfs {endpoint}"),
                 Candidate::Lan { endpoint } => format!("lan {endpoint}"),
                 Candidate::Punch => "punch".into(),
                 Candidate::Relay {
@@ -1041,10 +1042,9 @@ fn offer_obfs(state: &mut State, relay: &str, port: u16) {
         .expect("obfuscated");
 }
 
-/// A relay that offers obfuscated UDP is reached over it before UDP and TLS, and the obfuscated path
-/// to a relay's own machine comes before the direct one (design/obfuscation.md section 5); its relay
-/// section carries the port, its key and the site's padding range, and the key in a member's
-/// candidate is the same one.
+/// A relay that offers obfuscated UDP is reached over it before UDP and TLS (design/obfuscation.md
+/// section 5); its relay section carries the port, its key and the site's padding range, and the
+/// key in a member's candidate is the same one.
 #[test]
 fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
     let (_dir_tmp, dir) = temp_dir("relay-obfs");
@@ -1062,8 +1062,8 @@ fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
             "tls r2 198.51.100.2:443"
         ]
     );
-    // mac decides the connection to r2: r2's own relay over each of its transports first, the
-    // obfuscated one before even the direct path
+    // mac decides the connection to r2: after the direct path, r2's own relay over each of its
+    // transports, the obfuscated one first
     assert_eq!(
         through(&state, path(&mac, &state, "r2")),
         [
@@ -1074,7 +1074,7 @@ fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
         ]
     );
     assert!(
-        matches!(path(&mac, &state, "r2")[0], Candidate::RelayObfs { .. }),
+        matches!(path(&mac, &state, "r2")[0], Candidate::Direct { .. }),
         "{:?}",
         path(&mac, &state, "r2")
     );
@@ -1088,13 +1088,119 @@ fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
     let relay_key = state.relay_key.expect("relay key");
     assert_eq!(
         obfs.key,
-        crate::compose::obfs_key(&relay_key, &id(&state, "r2"))
+        crate::compose::obfs_key(
+            &relay_key,
+            crate::compose::ObfsPortOf::Relay,
+            &id(&state, "r2")
+        )
     );
     let in_candidate = path(&mac, &state, "nas").iter().find_map(|c| match c {
         Candidate::RelayObfs { key, padding, .. } => Some((key.clone(), *padding)),
         _ => None,
     });
     assert_eq!(in_candidate, Some((obfs.key.clone(), PADDING)));
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// A machine's own obfuscated port (ADR 0031): the end that decides a connection to it reaches it
+/// there first after the LAN paths, with the machine's key, which differs from its relay's; the
+/// machine's desired state carries the port, the key and the site's padding range. It needs a
+/// public machine and a port of its own, and removing it removes the candidates.
+#[test]
+fn a_machines_own_obfuscated_port_comes_first_after_the_lan_paths() {
+    use crate::compose::{ObfsPortOf, obfs_key};
+    let (_dir_tmp, dir) = temp_dir("machine-obfs");
+    let (site, mut state) = relay_site(&dir);
+    let id = |s: &State, n: &str| s.machine(&name(n)).expect("machine").node_id.clone();
+    let key = crate::state::RelayKey([0; 32]);
+    state
+        .set_obfs(&name("r2"), Some(30100), key, PADDING)
+        .expect("r2 offers a port");
+    state
+        .allow(&["r1".into()], &["r2".into()], vec![tcp(22)], None)
+        .expect("allow");
+    signed(&site, &mut state);
+    let relay_key = state.relay_key.expect("relay key");
+    let machine_key = obfs_key(&relay_key, ObfsPortOf::Machine, &id(&state, "r2"));
+    assert_ne!(
+        machine_key,
+        obfs_key(&relay_key, ObfsPortOf::Relay, &id(&state, "r2"))
+    );
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    assert_eq!(
+        path(&mac, &state, "r2")[..2],
+        [
+            Candidate::DirectObfs {
+                endpoint: "198.51.100.2:30100".parse().expect("addr"),
+                key: machine_key.clone(),
+                padding: PADDING,
+            },
+            Candidate::Direct {
+                endpoint: "198.51.100.2:41820".parse().expect("addr"),
+            },
+        ]
+    );
+    // r1 and r2 are both public: only the end with the smaller node ID decides, and r1 has it
+    let r1 = desired(&state, &name("r1")).expect("ok").expect("signed");
+    assert!(matches!(
+        path(&r1, &state, "r2")[0],
+        Candidate::DirectObfs { .. }
+    ));
+    let r2 = desired(&state, &name("r2")).expect("ok").expect("signed");
+    let own = r2.obfs.expect("r2's own port");
+    assert_eq!(
+        (own.port, own.key, own.padding),
+        (30100, machine_key, PADDING)
+    );
+    assert!(
+        r2.paths
+            .iter()
+            .flat_map(|p| &p.candidates)
+            .all(|c| !matches!(c, Candidate::DirectObfs { .. })),
+        "r2 decides for no machine with a port"
+    );
+
+    for bad in [41820, 41822, 41821, 0] {
+        assert!(
+            state
+                .clone()
+                .set_obfs(&name("r2"), Some(bad), key, PADDING)
+                .is_err(),
+            "{bad}"
+        );
+    }
+    let dial_only = crate::ops::MachineChange {
+        reachability: Some(Reachability::DialOnly),
+        ..Default::default()
+    };
+    assert!(
+        state
+            .clone()
+            .set(&name("edge-vps"), dial_only.clone())
+            .is_ok()
+    );
+    let mut with_port = state.clone();
+    with_port
+        .set_obfs(&name("edge-vps"), Some(30200), key, PADDING)
+        .expect("edge-vps offers one");
+    assert!(with_port.set(&name("edge-vps"), dial_only).is_err());
+
+    state
+        .set_obfs(&name("r2"), None, key, PADDING)
+        .expect("removed");
+    signed(&site, &mut state);
+    let mac = desired(&state, &name("mac")).expect("ok").expect("signed");
+    assert!(matches!(
+        path(&mac, &state, "r2")[0],
+        Candidate::Direct { .. }
+    ));
+    assert!(
+        desired(&state, &name("r2"))
+            .expect("ok")
+            .expect("signed")
+            .obfs
+            .is_none()
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -28,7 +28,7 @@ use self::wgport::WgPort;
 use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::dataplane::{
     DataPlane, DataPlaneError, INTERFACE_NAME, InterfaceSpec, InterfaceState, PeerSpec, PeerStat,
-    WgPortProbes, WgPortRecv, WgPortSend, automatic_port,
+    ProbePort, WgPortProbes, WgPortRecv, WgPortSend, automatic_port,
 };
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
@@ -491,8 +491,12 @@ impl WgPortSend for WgPort {
 }
 
 impl WgPortRecv for nft::ProbeLog {
-    fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>> {
-        nft::ProbeLog::recv(self).map_err(std::io::Error::other)
+    fn recv(&mut self) -> std::io::Result<Vec<(ProbePort, SocketAddr, Vec<u8>)>> {
+        let probes = nft::ProbeLog::recv(self).map_err(std::io::Error::other)?;
+        Ok(probes
+            .into_iter()
+            .map(|(from, data)| (ProbePort::WireGuard, from, data))
+            .collect())
     }
 }
 

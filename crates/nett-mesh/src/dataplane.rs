@@ -101,13 +101,31 @@ pub enum DataPlaneError {
 /// and probes of UDP relays, going through WireGuard's own NAT mapping.
 pub trait WgPortSend: Send {
     fn send(&self, to: SocketAddr, data: &[u8]) -> std::io::Result<()>;
+
+    /// Sends wrapped from this machine's obfuscated port (design/obfuscation.md section 2), where
+    /// the data plane has one.
+    fn send_obfs(&self, _to: SocketAddr, _data: &[u8]) -> std::io::Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "this data plane has no obfuscated port",
+        ))
+    }
 }
 
-/// Copies of probe messages and cookie replies received on the WireGuard port.
+/// Which of this machine's public UDP ports a probe message came in on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProbePort {
+    WireGuard,
+    /// This machine's obfuscated port, opened by the data plane (design/obfuscation.md section 2).
+    Obfs,
+}
+
+/// Copies of probe messages and cookie replies received on the WireGuard port, and probe messages
+/// opened on the obfuscated port.
 pub trait WgPortRecv: Send {
-    /// A batch of (source address, UDP payload). Waits at most half a second and returns empty on timeout:
-    /// the caller uses this to periodically check whether it should exit.
-    fn recv(&mut self) -> std::io::Result<Vec<(SocketAddr, Vec<u8>)>>;
+    /// A batch of (port, source address, UDP payload). Waits at most half a second and returns empty
+    /// on timeout: the caller uses this to periodically check whether it should exit.
+    fn recv(&mut self) -> std::io::Result<Vec<(ProbePort, SocketAddr, Vec<u8>)>>;
 }
 
 /// Probes on the WireGuard port: the sending end goes to the thread that hosts the engine, the
@@ -218,6 +236,13 @@ pub trait DataPlane: Send {
     /// decides. The TLS transport binds its TLS connections to it (design/userspace.md section 6.2).
     fn underlay_interface(&self) -> Option<u32> {
         None
+    }
+
+    /// Whether the data plane wraps what it sends to peers' obfuscated ports on its WireGuard
+    /// socket, and opens what comes back from them (design/userspace.md section 4.1); otherwise the
+    /// obfuscated transport carries it through a loopback port (design/obfuscation.md section 2).
+    fn inline_obfs(&self) -> bool {
+        false
     }
 
     /// The names this machine's own DNS queries are answered from when they reach the data plane

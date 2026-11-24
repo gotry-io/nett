@@ -443,6 +443,7 @@ fn kind_label(kind: PathKindDoc, relay: Option<&NodeRef>, punched: bool) -> Stri
         PathKindDoc::Lan => "lan".to_owned(),
         PathKindDoc::Direct if punched => "direct (punched)".to_owned(),
         PathKindDoc::Direct => "direct".to_owned(),
+        PathKindDoc::DirectObfs => "direct (obfs)".to_owned(),
         PathKindDoc::Relay => with_node("relay", relay),
         PathKindDoc::RelayObfs => format!("{} (obfs)", with_node("relay", relay)),
         PathKindDoc::RelayTls => format!("{} (tls)", with_node("relay", relay)),

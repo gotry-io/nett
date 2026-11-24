@@ -17,7 +17,7 @@ use super::Tun;
 use super::plane::{Action, Plane, UnknownPeer};
 use super::session::{Sessions, TIMER_TICK};
 use crate::access::FilterSpec;
-use crate::dataplane::{DataPlaneError, PeerSpec, PeerStat, WgPortRecv, WgPortSend};
+use crate::dataplane::{DataPlaneError, PeerSpec, PeerStat, ProbePort, WgPortRecv, WgPortSend};
 
 /// Upper limit of the control command queue.
 const COMMANDS: usize = 64;
@@ -133,7 +133,7 @@ impl Drop for Worker {
 pub(super) struct ProbeQueue(Receiver<(SocketAddr, Vec<u8>)>);
 
 impl WgPortRecv for ProbeQueue {
-    fn recv(&mut self) -> io::Result<Vec<(SocketAddr, Vec<u8>)>> {
+    fn recv(&mut self) -> io::Result<Vec<(ProbePort, SocketAddr, Vec<u8>)>> {
         let first = match self.0.recv_timeout(PROBE_WAIT) {
             Ok(first) => first,
             Err(RecvTimeoutError::Timeout) => return Ok(Vec::new()),
@@ -146,7 +146,10 @@ impl WgPortRecv for ProbeQueue {
         };
         let mut batch = vec![first];
         batch.extend(self.0.try_iter().take(PROBES));
-        Ok(batch)
+        Ok(batch
+            .into_iter()
+            .map(|(from, data)| (ProbePort::WireGuard, from, data))
+            .collect())
     }
 }
 

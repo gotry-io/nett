@@ -128,6 +128,26 @@ impl State {
         })
     }
 
+    /// Gives a `public` machine its own obfuscated port, or removes it with `None` (design/site.md
+    /// section 4, ADR 0031). `key` becomes the site's relay key, from which the port's key is
+    /// derived, and `padding` its padding range, when the site has none yet.
+    pub fn set_obfs(
+        &mut self,
+        name: &NodeName,
+        port: Option<u16>,
+        key: RelayKey,
+        padding: ObfsPadding,
+    ) -> Result<(), SiteError> {
+        self.attempt(|s| {
+            if port.is_some() {
+                s.relay_key.get_or_insert(key);
+                s.obfs_padding.get_or_insert(padding);
+            }
+            s.machine_mut(name)?.obfs_port = port;
+            s.check()
+        })
+    }
+
     pub fn set_edge(
         &mut self,
         name: &NodeName,
@@ -322,6 +342,7 @@ impl State {
                 learned: Learned::default(),
                 mesh,
                 relay: None,
+                obfs_port: None,
                 edge: None,
                 routes: Vec::new(),
                 serve: Vec::new(),

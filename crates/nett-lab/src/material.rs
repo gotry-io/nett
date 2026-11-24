@@ -16,8 +16,8 @@ use nett_core::name::NodeName;
 use nett_core::prefix::IpPrefix;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
-    Candidate, DesiredMeshDoc, MeshPrefixes, ObfsPadding, ObfsSecret, PathDoc, ProbeToken,
-    Reachability, RelayDoc, RelayMemberDoc, RelayObfsDoc,
+    Candidate, DesiredMeshDoc, MeshPrefixes, ObfsPadding, ObfsPortDoc, ObfsSecret, PathDoc,
+    ProbeToken, Reachability, RelayDoc, RelayMemberDoc,
 };
 use nett_trust::admission::{
     AdmissionMaterial, AdmissionProof, AdmissionProofDoc, AdmissionProofKind,
@@ -626,6 +626,7 @@ pub fn generate(
             devices: vec![],
             names: names.clone(),
             relay: relays.get(&node.name).cloned(),
+            obfs: None,
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {
@@ -780,7 +781,7 @@ fn relay_docs(
                     .then_some(RELAY_TLS_PORT),
                 members,
                 links,
-                obfs: obfs_keys.get(&relay.name).map(|key| RelayObfsDoc {
+                obfs: obfs_keys.get(&relay.name).map(|key| ObfsPortDoc {
                     port: RELAY_OBFS_PORT,
                     key: ObfsSecret(*key),
                     padding: OBFS_PADDING,

@@ -26,6 +26,8 @@ mod dataplane {
     use super::session::Gotatun;
     use super::worker::{Command, ProbeQueue, ProbeSender, Worker};
     use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
+    #[cfg(test)]
+    use crate::dataplane::ProbePort;
     use crate::dataplane::{
         DataPlane, DataPlaneError, InterfaceSpec, InterfaceState, PeerSpec, PeerStat, WgPortProbes,
         automatic_port,
@@ -521,7 +523,7 @@ mod dataplane {
             probes_a.send.send(b.at, &probe).expect("send");
             let got = probes_b.recv.recv().expect("recv");
             // The source port is a's WireGuard port
-            assert_eq!(got, [(a.at, probe)]);
+            assert_eq!(got, [(ProbePort::WireGuard, a.at, probe)]);
         }
 
         #[test]

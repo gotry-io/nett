@@ -130,15 +130,14 @@ const BLOCK_SILENCE: Duration = Duration::from_secs(5 * 60);
 const BLOCK_WINDOW: Duration = Duration::from_secs(60 * 60);
 const TLS_PENALTY_MS: f64 = 20.0;
 
-/// Path types, from best to worst (section 8.2): through a relay, obfuscated UDP is better than UDP,
-/// which is better than TLS.
+/// Path types, from best to worst (section 8.2): obfuscated UDP to the peer's own obfuscated port
+/// before the plain direct path, and through a relay obfuscated UDP before UDP before TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PathKind {
     Lan,
-    /// Obfuscated UDP through the relay on the peer's own machine: it reaches the peer itself, so it
-    /// ranks with the direct paths, before the plain one (design/obfuscation.md section 5).
-    PeerRelayObfs,
+    /// Obfuscated UDP to the peer's own obfuscated port (design/obfuscation.md section 5).
+    DirectObfs,
     Direct,
     /// Obfuscated UDP via a relay (design/obfuscation.md section 5).
     RelayObfs,
@@ -151,13 +150,13 @@ impl PathKind {
     pub fn via_relay(self) -> bool {
         matches!(
             self,
-            PathKind::PeerRelayObfs | PathKind::Relay | PathKind::RelayObfs | PathKind::RelayTls
+            PathKind::Relay | PathKind::RelayObfs | PathKind::RelayTls
         )
     }
 
-    /// Obfuscated UDP, through the peer's own relay or another.
+    /// Obfuscated UDP, to the peer's own obfuscated port or through a relay.
     pub fn obfuscated(self) -> bool {
-        matches!(self, PathKind::PeerRelayObfs | PathKind::RelayObfs)
+        matches!(self, PathKind::DirectObfs | PathKind::RelayObfs)
     }
 }
 
@@ -256,7 +255,7 @@ impl PathStats {
     /// preference (section 8.1).
     pub fn score(&self, kind: PathKind) -> Option<f64> {
         let type_penalty = match kind {
-            PathKind::Lan | PathKind::PeerRelayObfs | PathKind::Direct => 0.0,
+            PathKind::Lan | PathKind::DirectObfs | PathKind::Direct => 0.0,
             PathKind::RelayObfs => RELAY_PENALTY_MS - OBFS_PREFERENCE_MS,
             PathKind::Relay => RELAY_PENALTY_MS,
             PathKind::RelayTls => RELAY_PENALTY_MS + TLS_PENALTY_MS,
@@ -1857,6 +1856,11 @@ mod tests {
         Route::Direct(format!("{ip}:50002").parse().expect("addr"))
     }
 
+    /// The peer's own obfuscated port, beside its WireGuard port.
+    fn direct_obfs() -> Route {
+        Route::Direct("198.51.100.2:30000".parse().expect("addr"))
+    }
+
     fn relay(n: u8) -> Route {
         Route::Relay {
             relay: KeyId([n; 8]),
@@ -3279,8 +3283,8 @@ mod tests {
         assert_eq!(sim.paths.take_newly_blocked(), Some(direct().endpoint()));
     }
 
-    /// Through a relay, obfuscated UDP is taken over plain UDP; through the relay on the peer's own
-    /// machine, over the plain direct path too (design/obfuscation.md section 5).
+    /// Through a relay, obfuscated UDP is taken over plain UDP; to the peer's own obfuscated port,
+    /// over the plain direct path too (design/obfuscation.md section 5).
     #[test]
     fn obfuscated_udp_comes_first_where_it_adds_no_hop() {
         let mut sim = Sim::new(vec![
@@ -3293,12 +3297,11 @@ mod tests {
 
         let mut sim = Sim::new(vec![
             (direct(), PathKind::Direct),
-            (relay_obfs(1), PathKind::PeerRelayObfs),
+            (direct_obfs(), PathKind::DirectObfs),
         ]);
-        sim.paths.set_peer_relay(KeyId([1; 8]));
         sim.run(Duration::from_secs(40));
         let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
-        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::BetterType)]);
+        assert_eq!(moves, vec![(direct_obfs(), SwitchReason::BetterType)]);
         sim.run(Duration::from_secs(120));
         assert_eq!(sim.switches.len(), 1, "stays: {:?}", sim.switches);
     }
@@ -3310,12 +3313,11 @@ mod tests {
         let mut sim = Sim::new(vec![
             (relay_tls(1), PathKind::RelayTls),
             (direct(), PathKind::Direct),
-            (relay_obfs(1), PathKind::PeerRelayObfs),
+            (direct_obfs(), PathKind::DirectObfs),
         ]);
-        sim.paths.set_peer_relay(KeyId([1; 8]));
         sim.run(Duration::from_secs(40));
         let moves: Vec<(Route, SwitchReason)> = sim.switches.iter().map(|s| (s.1, s.3)).collect();
-        assert_eq!(moves, vec![(relay_obfs(1), SwitchReason::BetterType)]);
+        assert_eq!(moves, vec![(direct_obfs(), SwitchReason::BetterType)]);
     }
 
     /// Leaving plain UDP for TLS, or obfuscated UDP for anything, records no block.

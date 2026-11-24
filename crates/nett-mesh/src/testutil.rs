@@ -240,6 +240,7 @@ impl Mesh {
                 .map(|n| (node_id(*n), format!("node-{n}").parse().expect("name")))
                 .collect(),
             relay: None,
+            obfs: None,
         }
     }
 }

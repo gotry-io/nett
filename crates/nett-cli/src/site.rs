@@ -35,8 +35,10 @@ use nett_trust::signing::EnrollmentKeyPair;
 use crate::hub::SiteHub;
 use crate::layout::{key_values, table};
 
-/// The first release that knows obfuscated UDP (design/obfuscation.md section 5).
+/// The first release that knows obfuscated UDP through relays (design/obfuscation.md section 5).
 const OBFS_SINCE: &str = "0.10.0";
+/// The first release that knows a machine's own obfuscated port (ADR 0031).
+const MACHINE_OBFS_SINCE: &str = "0.11.0";
 const DEFAULT_ORIGIN: &str = "https://nett.invalid";
 
 pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
@@ -50,7 +52,11 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
                                        of a --public machine; without one, --keys is the line
                                        printed on it by `nett keys` or `sudo nett install`
   set <name> [--public | --dial-only] [--ipv4 <address>|none] [--ipv6 <address>|none]
-             [--port <port>|default]   change how other machines reach it
+             [--port <port>|default] [--obfs [--obfs-port <udp port>] | --no-obfs]
+                                       change how other machines reach it. --obfs gives a
+                                       public machine an obfuscated UDP port beside its
+                                       WireGuard port, on a random port unless given, for
+                                       networks that block WireGuard
   relay <name> [--port <udp port>] [--tls <tcp port> | --no-tls] [--fingerprint <sha256:…>]
              [--obfs [--obfs-port <udp port>] | --no-obfs]
                                        run a relay on this public Linux machine (UDP 41822 and
@@ -245,7 +251,39 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                     .transpose()
                     .context("--port")?,
             };
-            Box::new(move |s| Ok(s.set(&name, change)?))
+            if no_obfs && (obfs || obfs_port.is_some()) {
+                bail!("--obfs and --no-obfs do not go together");
+            }
+            let obfs_port: Option<u16> = obfs_port
+                .as_deref()
+                .map(str::parse)
+                .transpose()
+                .context("--obfs-port")?;
+            let enabling_obfs = obfs || obfs_port.is_some();
+            if enabling_obfs {
+                require_release(
+                    &dir,
+                    MACHINE_OBFS_SINCE,
+                    "a machine offers an obfuscated port",
+                )?;
+            }
+            let (key, padding) = (new_relay_key()?, new_obfs_padding()?);
+            Box::new(move |s| {
+                // The port goes before a change to dial-only, and comes after one to public
+                if no_obfs {
+                    s.set_obfs(&name, None, key, padding)?;
+                }
+                s.set(&name, change)?;
+                if enabling_obfs {
+                    let machine = s.machine(&name)?;
+                    let port = match obfs_port.or(machine.obfs_port) {
+                        Some(p) => p,
+                        None => new_obfs_port(|p| machine.obfs_port_free(s.listen_port, p))?,
+                    };
+                    s.set_obfs(&name, Some(port), key, padding)?;
+                }
+                Ok(())
+            })
         }
         ["relay", name] => {
             let name = machine(name)?;
@@ -272,16 +310,8 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                 .transpose()
                 .context("--obfs-port")?;
             let enabling_obfs = obfs || obfs_port.is_some();
-            if enabling_obfs && let Some(hub) = SiteHub::load(&dir)? {
-                let older = crate::hub::older_than(&hub, OBFS_SINCE)?;
-                if !older.is_empty() {
-                    bail!(
-                        "the Hub and every machine need nett {OBFS_SINCE} or later before a relay \
-                         offers obfuscated UDP; older: {}. Approve the upgrade with `nett site \
-                         upgrade` first",
-                        older.join(", ")
-                    );
-                }
+            if enabling_obfs {
+                require_release(&dir, OBFS_SINCE, "a relay offers obfuscated UDP")?;
             }
             let padding = new_obfs_padding()?;
             let port: Option<u16> = port
@@ -314,7 +344,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
                         match obfs_port.or(now.and_then(|r| r.obfs_port)) {
                             Some(p) => Some(p),
                             None => Some(new_obfs_port(|p| {
-                                machine.obfs_port_free(s.listen_port, port, p)
+                                machine.relay_obfs_port_free(s.listen_port, port, p)
                             })?),
                         }
                     } else {
@@ -369,6 +399,24 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         _ => bail!(USAGE),
     };
     modify(&dir, yes, &[], change, None, None)
+}
+
+/// With a Hub, stops unless the Hub and every machine run `since` or later: a release that does not
+/// know a candidate kind rejects the whole desired state that carries one (design/obfuscation.md
+/// section 5). Without a Hub, every machine is upgraded first.
+fn require_release(dir: &Path, since: &str, what: &str) -> anyhow::Result<()> {
+    let Some(hub) = SiteHub::load(dir)? else {
+        return Ok(());
+    };
+    let older = crate::hub::older_than(&hub, since)?;
+    if !older.is_empty() {
+        bail!(
+            "the Hub and every machine need nett {since} or later before {what}; older: {}. \
+             Approve the upgrade with `nett site upgrade` first",
+            older.join(", ")
+        );
+    }
+    Ok(())
 }
 
 /// `nett site upgrade` (design/release.md section 7, ADR 0027): approves the release the Hub holds

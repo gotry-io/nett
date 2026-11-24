@@ -259,6 +259,8 @@ pub struct PathStatus {
 pub enum PathKindDoc {
     Lan,
     Direct,
+    /// Obfuscated UDP to the peer's own obfuscated port (design/obfuscation.md section 5).
+    DirectObfs,
     Relay,
     RelayObfs,
     RelayTls,

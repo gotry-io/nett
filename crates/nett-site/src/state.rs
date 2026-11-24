@@ -175,6 +175,10 @@ pub struct Machine {
     pub mesh: MeshAddresses,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<RelayRole>,
+    /// UDP port of the machine's own obfuscated port, beside its WireGuard port
+    /// (design/obfuscation.md section 2, ADR 0031); absent when it offers none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub obfs_port: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edge: Option<Edge>,
     /// Advertised routes.
@@ -215,12 +219,27 @@ impl Machine {
     }
 
     /// `port` can carry its relay's obfuscated transport: it is none of the relay port, the WireGuard
-    /// port and the ports nett itself uses on the host. `default` is the site's WireGuard port.
-    pub fn obfs_port_free(&self, default: u16, relay_port: u16, port: u16) -> bool {
+    /// port, the machine's own obfuscated port and the ports nett itself uses on the host. `default`
+    /// is the site's WireGuard port.
+    pub fn relay_obfs_port_free(&self, default: u16, relay_port: u16, port: u16) -> bool {
         port != 0
             && port != relay_port
             && !is_reserved_port(port)
             && Some(port) != self.listen_port(default)
+            && Some(port) != self.obfs_port
+    }
+
+    /// `port` can be the machine's own obfuscated port: it is none of the WireGuard port, the relay's
+    /// ports and the ports nett itself uses on the host.
+    pub fn obfs_port_free(&self, default: u16, port: u16) -> bool {
+        let mut relay = self
+            .relay
+            .iter()
+            .flat_map(|r| std::iter::once(r.port).chain(r.obfs_port));
+        port != 0
+            && !is_reserved_port(port)
+            && Some(port) != self.listen_port(default)
+            && !relay.any(|p| p == port)
     }
 
     /// Address other members use to connect to it: the one given takes precedence, otherwise the
@@ -632,11 +651,11 @@ impl State {
                     )));
                 }
                 if let Some(obfs) = relay.obfs_port {
-                    if !m.obfs_port_free(self.listen_port, relay.port, obfs) {
+                    if !m.relay_obfs_port_free(self.listen_port, relay.port, obfs) {
                         return Err(SiteError::invalid(format!(
-                            "machine `{name}`: obfuscated port {obfs} is 0, the relay port, the \
-                             WireGuard port, or one nett itself uses on the host; pick another with \
-                             --obfs-port"
+                            "machine `{name}`: the relay's obfuscated port {obfs} is 0, the relay \
+                             port, the WireGuard port, the machine's own obfuscated port, or one nett \
+                             itself uses on the host; pick another with --obfs-port"
                         )));
                     }
                     if !self.obfs_padding.is_some_and(|p| p.is_valid()) {
@@ -649,6 +668,28 @@ impl State {
                 if self.relay_key.is_none() {
                     return Err(SiteError::invalid(
                         "the site has a relay but no relay key".to_owned(),
+                    ));
+                }
+            }
+            if let Some(obfs) = m.obfs_port {
+                if m.reachability != Reachability::Public {
+                    return Err(SiteError::invalid(format!(
+                        "machine `{name}` offers an obfuscated port, which needs a machine others \
+                         connect to: keep it --public, or remove the port with `nett site set \
+                         {name} --no-obfs`"
+                    )));
+                }
+                if !m.obfs_port_free(self.listen_port, obfs) {
+                    return Err(SiteError::invalid(format!(
+                        "machine `{name}`: obfuscated port {obfs} is 0, the WireGuard port, one of \
+                         the relay's ports, or one nett itself uses on the host; pick another with \
+                         --obfs-port"
+                    )));
+                }
+                if !self.obfs_padding.is_some_and(|p| p.is_valid()) || self.relay_key.is_none() {
+                    return Err(SiteError::invalid(
+                        "the site has an obfuscated port but no valid padding range or relay key"
+                            .to_owned(),
                     ));
                 }
             }

@@ -27,7 +27,7 @@ use nett_trust::payload::ServedPort;
 use crate::clock::Clock;
 use crate::config::{ConfigError, DesiredMesh};
 use crate::coord::{Coordinator, Inbound};
-use crate::dataplane::{DataPlane, WgPortProbes, WgPortSend};
+use crate::dataplane::{DataPlane, ProbePort, WgPortProbes, WgPortSend};
 use crate::engine::Engine;
 use crate::event::{Event, EventSink};
 use crate::path::FAST_RECOVERY_INTERVAL;
@@ -631,8 +631,12 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
         self.receivers.push(std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) && !thread_stop.load(Ordering::Relaxed) {
                 if let Ok(probes) = log.recv() {
-                    for (from, data) in probes {
-                        forward(&tx, &dropped, Incoming::WgPort, from, data);
+                    for (port, from, data) in probes {
+                        let kind = match port {
+                            ProbePort::WireGuard => Incoming::WgPort,
+                            ProbePort::Obfs => Incoming::ObfsPort,
+                        };
+                        forward(&tx, &dropped, kind, from, data);
                     }
                 }
             }
@@ -664,6 +668,7 @@ impl<D: DataPlane, E: EventSink> Worker<D, E> {
                     s.transport.send_to(&data, map_v6(to)).map(drop)
                 }
                 Outgoing::WgPort { to, data } => s.wg_port.send.send(to, &data),
+                Outgoing::ObfsPort { to, data } => s.wg_port.send.send_obfs(to, &data),
                 Outgoing::Hub { peer, data } => {
                     self.coordinator.send(&peer, &data);
                     Ok(())

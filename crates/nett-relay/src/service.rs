@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 
 use nett_core::transport::CertFingerprint;
-use nett_mesh::config::RelayObfsDoc;
+use nett_mesh::config::ObfsPortDoc;
 use nett_mesh::helper::{FETCH_INTERVAL, HelperSource, RelayAssignment, TlsEntry, fetch_tls_entry};
 use tokio::sync::mpsc;
 
@@ -50,7 +50,7 @@ pub enum ServiceError {
 }
 
 /// The obfuscated port of an assignment, on every address (design/obfuscation.md section 2).
-pub async fn obfs_ingress(doc: &RelayObfsDoc) -> Result<ObfsIngress, ServiceError> {
+pub async fn obfs_ingress(doc: &ObfsPortDoc) -> Result<ObfsIngress, ServiceError> {
     let socket =
         tokio::net::UdpSocket::bind(SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), doc.port))
             .await

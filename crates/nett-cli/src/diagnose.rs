@@ -413,8 +413,11 @@ fn check_peer(peer: &PeerStatus) -> Option<Finding> {
         PathKindDoc::Relay,
         PathKindDoc::RelayObfs,
         PathKindDoc::RelayTls,
-    ]) && failing(&[PathKindDoc::Direct, PathKindDoc::Lan])
-    {
+    ]) && failing(&[
+        PathKindDoc::Direct,
+        PathKindDoc::DirectObfs,
+        PathKindDoc::Lan,
+    ]) {
         "every path fails: check that this machine can send UDP at all, and that the relays' ports \
          (UDP 41822, the obfuscated UDP port, TCP 443 or the ones set with nett site relay) are open"
             .to_owned()
@@ -422,6 +425,11 @@ fn check_peer(peer: &PeerStatus) -> Option<Finding> {
         format!(
             "the direct path fails: check that {label}'s WireGuard port (UDP 41820 unless set) is \
              open in its firewall and its cloud's security group"
+        )
+    } else if failing(&[PathKindDoc::DirectObfs]) {
+        format!(
+            "the obfuscated path fails: check that {label}'s obfuscated port is open in its \
+             firewall and its cloud's security group"
         )
     } else if failing(&[PathKindDoc::Relay]) {
         "the UDP relays fail: check that their relay port (UDP 41822 unless set) is open".to_owned()

@@ -9,8 +9,8 @@ use nett_core::id::NodeId;
 use nett_core::name::NodeName;
 use nett_core::transport::CertFingerprint;
 use nett_mesh::config::{
-    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, ObfsSecret, PathDoc, ProbeToken,
-    Reachability, RelayDoc, RelayMemberDoc, RelayObfsDoc,
+    Candidate, DesiredMesh, DesiredMeshDoc, DeviceDoc, ObfsPortDoc, ObfsSecret, PathDoc,
+    ProbeToken, Reachability, RelayDoc, RelayMemberDoc,
 };
 use nett_mesh::prober::is_decider;
 use nett_trust::revocation::Revocation;
@@ -76,13 +76,12 @@ pub fn connections(state: &State) -> BTreeSet<Pair> {
 }
 
 /// Candidate paths from this machine to a peer (design/site.md section 6): the LAN paths, then
-/// obfuscated UDP through the relay on the peer's own machine, which reaches the peer with the
-/// first handshake already obfuscated (design/obfuscation.md section 5), then the public direct
-/// ones, then the other paths through relays other than this machine's own.
+/// obfuscated UDP to the peer's own obfuscated port, so the first handshake is already obfuscated
+/// (design/obfuscation.md section 5), then the public direct ones, then the paths through relays
+/// other than this machine's own.
 pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
     let mut out = lan(state, me, peer);
-    let lan = out.len();
-    out.extend(public(state, me, peer));
+    out.extend(direct(state, me, peer));
     let Some(key) = &state.relay_key else {
         return out;
     };
@@ -93,15 +92,14 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
         let token = token(key, &path.relay.node_id, &me.node_id);
         let relay = path.relay.node_id.clone();
         let address = SocketAddr::new(path.ip, path.port);
-        let to_peer = path.relay.node_id == peer.node_id;
-        let candidate = match path.via {
+        out.push(match path.via {
             RelayVia::Udp => Candidate::Relay {
                 relay,
                 endpoint: address,
                 token,
             },
             RelayVia::Obfs(padding) => Candidate::RelayObfs {
-                key: obfs_key(key, &path.relay.node_id),
+                key: obfs_key(key, ObfsPortOf::Relay, &path.relay.node_id),
                 relay,
                 address,
                 padding,
@@ -113,12 +111,7 @@ pub fn candidates(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate>
                 fingerprint,
                 token,
             },
-        };
-        if to_peer && matches!(candidate, Candidate::RelayObfs { .. }) {
-            out.insert(lan, candidate);
-        } else {
-            out.push(candidate);
-        }
+        });
     }
     out
 }
@@ -163,7 +156,7 @@ pub fn relay_paths<'a>(state: &'a State, a: &Machine, b: &Machine) -> Vec<RelayP
     }
     // The LAN direct paths come in addition to the limit (design/mesh.md section 6)
     let room =
-        MAX_CANDIDATES.saturating_sub(public(state, a, b).len().max(public(state, b, a).len()));
+        MAX_CANDIDATES.saturating_sub(direct(state, a, b).len().max(direct(state, b, a).len()));
     let mut relays: Vec<(&Machine, IpAddr, RelayRole)> = state
         .machines
         .values()
@@ -266,14 +259,25 @@ fn tls_path<'a>(r: &'a Machine, ip: IpAddr, role: RelayRole) -> Option<RelayPath
     })
 }
 
-/// A relay's obfuscation key (design/obfuscation.md section 4): HMAC-SHA256 of the relay's node ID
-/// under the site's relay key, so the site and the Hub derive the same key.
-pub fn obfs_key(key: &RelayKey, relay: &NodeId) -> ObfsSecret {
+/// Whose obfuscated port a key is for: a relay's or a machine's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObfsPortOf {
+    Relay,
+    Machine,
+}
+
+/// An obfuscated port's key (design/obfuscation.md section 4): HMAC-SHA256 of a label and the node ID
+/// of the machine it is on under the site's relay key, so the site and the Hub derive the same key,
+/// and the two ports of a relay's machine have different ones.
+pub fn obfs_key(key: &RelayKey, of: ObfsPortOf, node: &NodeId) -> ObfsSecret {
     let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &key.0);
     let mut ctx = ring::hmac::Context::with_key(&key);
-    ctx.update(b"nett obfuscation v1");
+    ctx.update(match of {
+        ObfsPortOf::Relay => b"nett obfuscation v1".as_slice(),
+        ObfsPortOf::Machine => b"nett machine obfuscation v1".as_slice(),
+    });
     ctx.update(&[0]);
-    ctx.update(relay.as_str().as_bytes());
+    ctx.update(node.as_str().as_bytes());
     let mut out = [0u8; 32];
     out.copy_from_slice(ctx.sign().as_ref());
     ObfsSecret(out)
@@ -333,9 +337,9 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
     let obfs = role
         .obfs_port
         .zip(state.obfs_padding)
-        .map(|(port, padding)| RelayObfsDoc {
+        .map(|(port, padding)| ObfsPortDoc {
             port,
-            key: obfs_key(key, &me.node_id),
+            key: obfs_key(key, ObfsPortOf::Relay, &me.node_id),
             padding,
         });
     Some(RelayDoc {
@@ -344,6 +348,15 @@ fn relay_doc(state: &State, me: &Machine) -> Option<RelayDoc> {
         members,
         links,
         obfs,
+    })
+}
+
+/// The machine's own obfuscated port, with its key and the site's padding range (ADR 0031).
+fn own_obfs(state: &State, me: &Machine) -> Option<ObfsPortDoc> {
+    Some(ObfsPortDoc {
+        port: me.obfs_port?,
+        key: obfs_key(state.relay_key.as_ref()?, ObfsPortOf::Machine, &me.node_id),
+        padding: state.obfs_padding?,
     })
 }
 
@@ -373,6 +386,41 @@ fn lan(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
             endpoint: SocketAddr::new(ip, port),
         })
         .collect()
+}
+
+/// The direct paths that count toward the limit: obfuscated UDP to the peer's own obfuscated port
+/// for the end that decides the path, then the public direct ones.
+fn direct(state: &State, me: &Machine, peer: &Machine) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = direct_obfs(state, me, peer).into_iter().collect();
+    out.extend(public(state, me, peer));
+    out
+}
+
+/// Obfuscated UDP to the peer's own obfuscated port (design/obfuscation.md section 5), for the end
+/// that decides the path (mesh.md section 8.3): at its public IPv4 address, or IPv6 without one.
+fn direct_obfs(state: &State, me: &Machine, peer: &Machine) -> Option<Candidate> {
+    let port = peer.obfs_port?;
+    if !is_decider(
+        &me.node_id,
+        me.reachability,
+        &peer.node_id,
+        peer.reachability,
+    ) {
+        return None;
+    }
+    let ip = peer
+        .public_ipv4()
+        .map(IpAddr::V4)
+        .or_else(|| peer.public_ipv6().map(IpAddr::V6))?;
+    Some(Candidate::DirectObfs {
+        endpoint: SocketAddr::new(ip, port),
+        key: obfs_key(
+            state.relay_key.as_ref()?,
+            ObfsPortOf::Machine,
+            &peer.node_id,
+        ),
+        padding: state.obfs_padding?,
+    })
 }
 
 /// Direct candidate paths from this machine to a peer (design/mesh.md section 6): the LAN direct
@@ -478,6 +526,7 @@ pub fn desired(state: &State, name: &NodeName) -> Result<Option<DesiredMeshDoc>,
             .collect(),
         names,
         relay: relay_doc(state, me),
+        obfs: own_obfs(state, me),
     };
     // The generated desired state must be accepted by the mesh
     DesiredMesh::from_doc(doc.clone()).map_err(|e| {

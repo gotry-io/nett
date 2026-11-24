@@ -1,14 +1,15 @@
-//! Forwarding between loopback ports and relays' obfuscated ports (design/obfuscation.md section 2),
-//! one task per relay. Each packet from the loopback port is wrapped and sent on a socket connected
-//! to the relay's obfuscated port; each datagram from there is unwrapped and dispatched as on the TLS
-//! transport: relay replies to the mesh's port that sent the probe, the rest to WireGuard. What does
-//! not unwrap is dropped. The socket is connected, so the system delivers to it only the relay's
-//! datagrams: nothing here listens on a public address (hard rule 2).
+//! Forwarding between loopback ports and obfuscated ports, relays' and peers' (design/obfuscation.md
+//! section 2), one task per port. Each packet from the loopback port is wrapped and sent on a socket
+//! connected to the obfuscated port; each datagram from there is unwrapped and dispatched as on the
+//! TLS transport: replies to probes go to the mesh's port that sent the probe, the rest to
+//! WireGuard. What does not unwrap is dropped. The socket is connected, so the system delivers to it
+//! only that port's datagrams: nothing here listens on a public address (hard rule 2).
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use nett_core::transport::{ObfsTarget, RELAY_PROBE, RELAY_REPLY};
+use nett_mesh::probe::{DIRECT_PROBE, DIRECT_REPLY};
 use ring::rand::SystemRandom;
 use tokio::net::UdpSocket;
 
@@ -19,8 +20,8 @@ use crate::obfs::{MAX_MESSAGE, ObfsKey, Obfuscator, Padding, Salts};
 /// the largest padding.
 const MAX_DATAGRAM: usize = MAX_MESSAGE + 512;
 
-/// Runs one relay's forwarding until the task is aborted with its configuration: a port that fails
-/// is opened again, so the relay stays reachable once the cause goes away.
+/// Runs one obfuscated port's forwarding until the task is aborted with its configuration: a port
+/// that fails is opened again, so the port stays reachable once the cause goes away.
 pub(crate) async fn target_or_log(
     target: ObfsTarget,
     wireguard: SocketAddr,
@@ -35,7 +36,7 @@ pub(crate) async fn target_or_log(
             if started.elapsed() > REOPEN_MAX {
                 delay = REOPEN_DELAY;
             }
-            tracing::warn!(%listen, %error, retry_in = ?delay, "obfuscated transport for this relay stopped");
+            tracing::warn!(%listen, %error, retry_in = ?delay, "obfuscated transport for this port stopped");
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(REOPEN_MAX);
@@ -57,13 +58,13 @@ async fn target_loop(
     let obfuscator = Obfuscator::new(&ObfsKey::from_bytes(target.key.0), padding);
     let rng = SystemRandom::new();
     let mut salts = Salts::default();
-    // The mesh port that sent the probe: relay replies go back to it
+    // The mesh port that sent the probe: replies to probes go back to it
     let mut probe_source: Option<SocketAddr> = None;
     let mut buf = vec![0u8; MAX_MESSAGE];
     let mut datagram = vec![0u8; MAX_DATAGRAM];
     let mut wire = Vec::with_capacity(MAX_DATAGRAM);
     let mut plain = Vec::with_capacity(MAX_MESSAGE);
-    tracing::info!(relay = %target.connect, listen = %target.listen, "obfuscated transport ready");
+    tracing::info!(to = %target.connect, listen = %target.listen, "obfuscated transport ready");
     loop {
         tokio::select! {
             received = local.recv_from(&mut buf) => {
@@ -72,7 +73,7 @@ async fn target_loop(
                 if !from.ip().is_loopback() || len == 0 {
                     continue;
                 }
-                if buf[0] == RELAY_PROBE {
+                if matches!(buf[0], RELAY_PROBE | DIRECT_PROBE) {
                     probe_source = Some(from);
                 }
                 // A packet that cannot go out now is dropped, as UDP would drop it
@@ -86,7 +87,8 @@ async fn target_loop(
                 if obfuscator.unwrap(now_ms(), &mut salts, &datagram[..len], &mut plain).is_err() {
                     continue;
                 }
-                let to = if plain.first() == Some(&RELAY_REPLY) { probe_source } else { Some(wireguard) };
+                let reply = matches!(plain.first(), Some(&(RELAY_REPLY | DIRECT_REPLY)));
+                let to = if reply { probe_source } else { Some(wireguard) };
                 if let Some(to) = to {
                     drop(local.try_send_to(&plain, to));
                 }
@@ -188,23 +190,26 @@ mod tests {
         assert_eq!(plain, data);
         let member = from;
 
-        // A probe from the mesh's port: the relay's reply goes back to that port
-        mesh.send_to(&[RELAY_PROBE, 1, 2, 3], listen)
-            .await
-            .expect("probe");
-        tokio::time::timeout(within, relay.recv_from(&mut buf))
-            .await
-            .expect("in time")
-            .expect("relay receives the probe");
+        // A probe from the mesh's port, of a relay or of a peer's own port: the reply goes back to
+        // that port
         let mut wire = Vec::new();
-        o.wrap(&rng, now_ms(), &[RELAY_REPLY, 4, 5, 6], &mut wire)
-            .expect("wrap");
-        relay.send_to(&wire, member).await.expect("reply");
-        let (len, _) = tokio::time::timeout(within, mesh.recv_from(&mut buf))
-            .await
-            .expect("in time")
-            .expect("mesh gets the reply");
-        assert_eq!(buf[..len], [RELAY_REPLY, 4, 5, 6]);
+        for (probe, reply) in [(RELAY_PROBE, RELAY_REPLY), (DIRECT_PROBE, DIRECT_REPLY)] {
+            mesh.send_to(&[probe, 1, 2, 3], listen)
+                .await
+                .expect("probe");
+            tokio::time::timeout(within, relay.recv_from(&mut buf))
+                .await
+                .expect("in time")
+                .expect("relay receives the probe");
+            o.wrap(&rng, now_ms(), &[reply, 4, 5, 6], &mut wire)
+                .expect("wrap");
+            relay.send_to(&wire, member).await.expect("reply");
+            let (len, _) = tokio::time::timeout(within, mesh.recv_from(&mut buf))
+                .await
+                .expect("in time")
+                .expect("mesh gets the reply");
+            assert_eq!(buf[..len], [reply, 4, 5, 6]);
+        }
 
         // The relay's handshake reaches WireGuard as WireGuard sent it
         let mut handshake = vec![2u8, 0, 0, 0];

@@ -29,7 +29,7 @@ use crate::key::PrivateKey;
 use crate::members::{MemberSet, OwnPolicy};
 use crate::path::{CandidateState, PathKind, Role, Route};
 use crate::probe::{KeyId, NatType};
-use crate::prober::{ACTIVE_WINDOW, Incoming, Outgoing, Prober};
+use crate::prober::{ACTIVE_WINDOW, Incoming, Loopbacks, Outgoing, Prober};
 use crate::routes::Routes;
 use crate::status::{
     self, CandidateStateDoc, CandidateStatus, ConfigStatus, NatKind, NatStatus, NodeRef,
@@ -532,20 +532,26 @@ impl<D: DataPlane> Engine<D> {
             prober.set_blocked(trust.blocked());
             prober
         });
+        let inline = self.dataplane.inline_obfs();
         prober.update(
             &self.node_id,
             desired.reachability,
             &self.private_key,
             self.members.members(),
             &desired.paths,
-            desired.tls_endpoints(),
-            desired.obfs_endpoints(),
+            Loopbacks {
+                tls: desired.tls_endpoints(),
+                obfs: desired.obfs_endpoints(),
+                peer_obfs: (!inline).then(|| desired.peer_obfs_endpoints()),
+            },
         );
         // A transport's loopback port nobody uses is guarded, TLS and obfuscated UDP alike
+        let peer_obfs = desired.peer_obfs_endpoints().values().filter(|_| !inline);
         self.tls_endpoints = desired
             .tls_endpoints()
             .values()
             .chain(desired.obfs_endpoints().values())
+            .chain(peer_obfs)
             .copied()
             .collect();
         let mut peers: Vec<PeerSpec> = self
@@ -689,7 +695,7 @@ impl<D: DataPlane> Engine<D> {
         let Some(interface) = &self.interface else {
             return;
         };
-        let config = desired.transport(interface.listen_port);
+        let config = desired.transport(interface.listen_port, self.dataplane.inline_obfs());
         if self.transport.as_ref() != Some(&config) {
             events.emit(Event::TransportConfigChanged {
                 config: config.clone(),
@@ -1273,7 +1279,7 @@ impl<D: DataPlane> Engine<D> {
     fn shown_endpoint(&self, route: &Route, kind: PathKind) -> SocketAddr {
         let endpoint = route.endpoint();
         match kind {
-            PathKind::RelayTls | PathKind::RelayObfs | PathKind::PeerRelayObfs => {
+            PathKind::RelayTls | PathKind::RelayObfs | PathKind::DirectObfs => {
                 self.tls_relays.get(&endpoint).copied().unwrap_or(endpoint)
             }
             _ => endpoint,
@@ -1301,7 +1307,8 @@ fn kind_doc(kind: PathKind) -> PathKindDoc {
         PathKind::Lan => PathKindDoc::Lan,
         PathKind::Direct => PathKindDoc::Direct,
         PathKind::Relay => PathKindDoc::Relay,
-        PathKind::PeerRelayObfs | PathKind::RelayObfs => PathKindDoc::RelayObfs,
+        PathKind::DirectObfs => PathKindDoc::DirectObfs,
+        PathKind::RelayObfs => PathKindDoc::RelayObfs,
         PathKind::RelayTls => PathKindDoc::RelayTls,
     }
 }
