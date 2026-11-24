@@ -101,6 +101,11 @@ pub enum Event {
     },
     /// Applying the desired state in effect again after a data plane failure succeeded.
     DataPlaneRecovered,
+    /// An accepted desired state needs the other data plane: it is saved, and the process starts
+    /// again on that one (design/userspace.md section 4.2).
+    DataPlaneChanges {
+        reason: String,
+    },
     /// A new version of the access rule set passed verification (design/mesh.md section 12).
     AccessRulesApplied {
         version: u64,
@@ -234,6 +239,9 @@ pub fn log_event(event: &Event) {
         Event::ServeStopped { port } => tracing::info!(port, "stopped serving the port"),
         Event::DataPlaneFailed { reason } => tracing::warn!(%reason, "data plane update failed"),
         Event::DataPlaneRecovered => tracing::info!("data plane update succeeded on retry"),
+        Event::DataPlaneChanges { reason } => {
+            tracing::info!(%reason, "nett starts again on the other data plane")
+        }
         Event::AccessRulesApplied { version } => tracing::info!(version, "access rules applied"),
         Event::AccessRulesRejected { reason } => {
             tracing::warn!(%reason, "access rules rejected")

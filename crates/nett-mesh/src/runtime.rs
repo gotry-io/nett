@@ -89,6 +89,8 @@ pub struct Runtime {
     tx: SyncSender<Msg>,
     thread: Option<JoinHandle<()>>,
     coordinator: Arc<Coordinator>,
+    /// Notified once an accepted desired state needs the other data plane.
+    restart: Arc<tokio::sync::Notify>,
 }
 
 impl Applier for Runtime {
@@ -112,6 +114,8 @@ impl Runtime {
     ) -> std::io::Result<Self> {
         let (tx, rx) = sync_channel(QUEUE);
         let worker_tx = tx.clone();
+        let restart = Arc::new(tokio::sync::Notify::new());
+        let worker_restart = Arc::clone(&restart);
         let coordinator = Coordinator::new();
         let worker_coordinator = Arc::clone(&coordinator);
         let thread = std::thread::Builder::new()
@@ -181,6 +185,9 @@ impl Runtime {
                             // Drop when the party waiting for the result has already timed out and left
                             if let Some(reply) = reply {
                                 let _ = reply.try_send(outcome);
+                            }
+                            if worker.engine.restart_wanted() {
+                                worker_restart.notify_one();
                             }
                         }
                         Ok(Msg::Packet {
@@ -264,7 +271,16 @@ impl Runtime {
             tx,
             thread: Some(thread),
             coordinator,
+            restart,
         })
+    }
+
+    /// Completes once an accepted desired state needs the other data plane (design/userspace.md
+    /// section 4.2): it is saved by then, and the process exits for the service manager to start it
+    /// again.
+    pub fn restart_wanted(&self) -> impl std::future::Future<Output = ()> + Send + 'static {
+        let restart = Arc::clone(&self.restart);
+        async move { restart.notified().await }
     }
 
     /// The party behind the local interface, handed to [`crate::status::StatusServer`]. `reloads` leads to

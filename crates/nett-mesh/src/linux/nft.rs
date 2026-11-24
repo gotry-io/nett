@@ -158,6 +158,12 @@ pub(super) fn delete_table(name: &str) -> Result<(), NlError> {
     }
 }
 
+/// Removes the rules that copy probes on the WireGuard port, which only kernel WireGuard needs
+/// (design/userspace.md section 4.2).
+pub(crate) fn remove_probe_copy() -> Result<(), NlError> {
+    delete_table(TABLE)
+}
+
 /// All nftables tables the mesh creates.
 pub(super) fn tables() -> [&'static str; 4] {
     [

@@ -14,6 +14,8 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
+#[cfg(target_os = "linux")]
+use nett_mesh::config::{DesiredMesh, DesiredMeshDoc};
 use nett_mesh::engine::Engine;
 use nett_mesh::event::{EventSink, LogSink};
 #[cfg(target_os = "linux")]
@@ -261,6 +263,39 @@ mod syslog {
     }
 }
 
+/// Whether the desired state this machine starts from gives it an obfuscated port: the file the
+/// engine applies first when it is this machine's, otherwise the one it last accepted
+/// (design/userspace.md section 4.2).
+#[cfg(target_os = "linux")]
+fn offers_obfs(config: &Path, node_id: &NodeId, trust: &mut TrustStore) -> bool {
+    let file = nett_mesh::config::read_bounded(config, nett_mesh::config::MAX_DESIRED_BYTES)
+        .ok()
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<DesiredMeshDoc>(&bytes).ok())
+        .filter(|doc| doc.node_id == *node_id);
+    let doc = file.or_else(|| trust.accepted().ok().flatten());
+    doc.is_some_and(|doc| doc.obfs.is_some())
+}
+
+/// On kernel WireGuard: a machine given an obfuscated port moves to the userspace data plane, which
+/// opens it.
+#[cfg(target_os = "linux")]
+fn kernel_fits(desired: &DesiredMesh) -> Option<&'static str> {
+    desired.obfs.is_some().then_some(
+        "this machine now offers an obfuscated port, which the userspace data plane opens",
+    )
+}
+
+/// On the userspace data plane taken for the obfuscated port: once the port is gone, kernel
+/// WireGuard takes over again.
+#[cfg(target_os = "linux")]
+fn userspace_fits(desired: &DesiredMesh) -> Option<&'static str> {
+    desired
+        .obfs
+        .is_none()
+        .then_some("this machine no longer offers an obfuscated port; kernel WireGuard takes over")
+}
+
 /// When there is no trust store yet, this machine's node ID is taken from the desired state file:
 /// the engine uses it to confirm that every desired state is meant for this machine.
 fn node_id(config: &Path) -> anyhow::Result<NodeId> {
@@ -289,7 +324,8 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     let node = crate::node::InDaemon::prepare(&args.dir)?;
 
     // Read the trust store first, then the desired state (design/mesh.md section 4.2)
-    let trust = TrustStore::open(Box::new(DirBackend::new(args.dir.join(STATE_DIR))));
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut trust = TrustStore::open(Box::new(DirBackend::new(args.dir.join(STATE_DIR))));
     let node_id = match trust.node_id() {
         Some(id) => id.clone(),
         None => node_id(&config)?,
@@ -328,14 +364,17 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     #[cfg(not(feature = "lab"))]
     let clock = SystemClock;
     // Linux uses kernel WireGuard when the kernel has it and the userspace data plane otherwise
-    // (Synology DSM, old kernels; design/dsm.md section 5); macOS is a native member and uses the
-    // userspace data plane (design/userspace.md)
+    // (Synology DSM, old kernels; design/dsm.md section 5), and on a machine that offers an
+    // obfuscated port, which only the userspace data plane opens (design/userspace.md section 4.2);
+    // macOS is a native member and uses the userspace data plane (design/userspace.md)
     #[cfg(all(target_os = "linux", feature = "lab"))]
     let userspace = args.lab.userspace;
     #[cfg(all(target_os = "linux", not(feature = "lab")))]
     let userspace = false;
     #[cfg(target_os = "linux")]
-    let kernel = if userspace {
+    let obfs = offers_obfs(&config, &node_id, &mut trust);
+    #[cfg(target_os = "linux")]
+    let kernel = if userspace || obfs {
         None
     } else {
         match KernelWireGuard::open() {
@@ -350,20 +389,34 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let worker = match kernel {
         Some(dataplane) => Runtime::spawn(
-            Engine::new(node_id, key, dataplane).with_trust_store(trust),
+            Engine::new(node_id, key, dataplane)
+                .with_trust_store(trust)
+                .with_data_plane_fit(kernel_fits),
             sink,
             clock,
             nett_mesh::dns::PORT,
             runtime.handle().clone(),
         ),
-        None => Runtime::spawn(
-            Engine::new(node_id, key, UserspaceDataPlane::new(LinuxTun::open()?))
-                .with_trust_store(trust),
-            sink,
-            clock,
-            nett_mesh::dns::PORT,
-            runtime.handle().clone(),
-        ),
+        None => {
+            use nett_mesh::userspace::Platform as _;
+            let tun = LinuxTun::open()?;
+            // Taken for the obfuscated port where kernel WireGuard is there to go back to
+            let for_obfs = obfs && !userspace && tun.netfilter();
+            let engine =
+                Engine::new(node_id, key, UserspaceDataPlane::new(tun)).with_trust_store(trust);
+            let engine = if for_obfs {
+                engine.with_data_plane_fit(userspace_fits)
+            } else {
+                engine
+            };
+            Runtime::spawn(
+                engine,
+                sink,
+                clock,
+                nett_mesh::dns::PORT,
+                runtime.handle().clone(),
+            )
+        }
     };
     #[cfg(target_os = "macos")]
     let worker = Runtime::spawn(
@@ -374,6 +427,9 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
         runtime.handle().clone(),
     );
     let worker = worker.context("starting the mesh worker thread")?;
+    // An accepted desired state that needs the other data plane is saved; the service manager
+    // starts nett again on that one, as after an upgrade
+    let data_plane_changes = worker.restart_wanted();
     // The relay's hand-off port, which nett-relay hands TLS connections to (ADR 0032)
     #[cfg(target_os = "linux")]
     let handoff = Arc::new(std::sync::atomic::AtomicU16::new(0));
@@ -445,6 +501,7 @@ pub fn run(parser: lexopt::Parser) -> anyhow::Result<()> {
                 _ = terminate.recv() => {}
                 _ = interrupt.recv() => {}
                 () = restart => {}
+                () = data_plane_changes => tracing::info!("nett exits to start on the other data plane"),
             }
         };
         let (stop_transport, stopped) = tokio::sync::oneshot::channel::<()>();

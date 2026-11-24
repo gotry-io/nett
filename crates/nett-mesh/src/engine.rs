@@ -52,6 +52,9 @@ pub(crate) const RETRY_MAX: Duration = Duration::from_secs(30);
 /// process (Docker at boot) may have put a chain that drops forwarded traffic in front of it.
 const FORWARDING_RECHECK: Duration = Duration::from_secs(60);
 
+/// The reason a desired state needs the other data plane, or `None` when the one running suits it.
+pub type DataPlaneFit = fn(&DesiredMesh) -> Option<&'static str>;
+
 /// A desired state whose application hit a data plane failure, to apply again at `due`.
 struct Retry {
     desired: DesiredMesh,
@@ -134,6 +137,11 @@ pub struct Engine<D> {
     /// The desired state to apply again after a data plane failure; what the failure left closed stays
     /// closed until then (hard rule 6).
     retry: Option<Retry>,
+    /// Whether the data plane this process runs suits a desired state: the reason it does not, for
+    /// the process to start again on the one that does (design/userspace.md section 4.2).
+    fit: Option<DataPlaneFit>,
+    /// An accepted desired state needs the other data plane.
+    restart: bool,
     /// Loopback ports of TLS relays on the TLS transport -> the relay's TLS address: local status shows
     /// the latter.
     tls_relays: BTreeMap<SocketAddr, SocketAddr>,
@@ -187,9 +195,24 @@ impl<D: DataPlane> Engine<D> {
             names: BTreeMap::new(),
             applied_at: None,
             retry: None,
+            fit: None,
+            restart: false,
             tls_relays: BTreeMap::new(),
             trust: TrustStore::in_memory(),
         }
+    }
+
+    /// Checks each accepted desired state with `fit`: one it gives a reason for is saved, and the
+    /// process is asked to start again ([`Engine::restart_wanted`]).
+    pub fn with_data_plane_fit(mut self, fit: DataPlaneFit) -> Self {
+        self.fit = Some(fit);
+        self
+    }
+
+    /// An accepted desired state needs the other data plane: the process exits once it is saved, and
+    /// the service manager starts it again, as after an upgrade.
+    pub fn restart_wanted(&self) -> bool {
+        self.restart
     }
 
     /// Takes this trust store as the verification baseline: restores revocations and the versions previously
@@ -365,6 +388,14 @@ impl<D: DataPlane> Engine<D> {
             });
         }
         self.save_trust(desired, events);
+        if let Some(reason) = self.fit.and_then(|fit| fit(desired))
+            && !self.restart
+        {
+            self.restart = true;
+            events.emit(Event::DataPlaneChanges {
+                reason: reason.to_owned(),
+            });
+        }
         Ok(())
     }
 
@@ -619,8 +650,13 @@ impl<D: DataPlane> Engine<D> {
     /// ports (design/userspace.md section 4.1): after the filter and before the peers, so the first
     /// handshake to a peer's port is already wrapped. On failure, retried on the next desired state.
     fn apply_obfs(&mut self, desired: &DesiredMesh, events: &mut impl EventSink) {
+        // Only a data plane that holds the socket WireGuard reads opens a port of this machine; on
+        // another, the port waits for the process to start on one that does
         let spec = ObfsSpec {
-            port: desired.obfs.clone(),
+            port: desired
+                .obfs
+                .clone()
+                .filter(|_| self.dataplane.inline_obfs()),
             peers: if self.dataplane.inline_obfs() {
                 desired
                     .peer_obfs_ports()
@@ -1543,6 +1579,52 @@ mod tests {
                 .any(|ev| matches!(ev, Event::DataPlaneRecovered)),
             "{:?}",
             events.0
+        );
+    }
+
+    /// A desired state the running data plane does not suit is applied without what only the other
+    /// one does, saved, and asks once for the process to start again (design/userspace.md section
+    /// 4.2): on kernel WireGuard the obfuscated port waits for the userspace data plane.
+    #[test]
+    fn a_desired_state_for_the_other_data_plane_is_saved_and_asks_for_a_restart() {
+        fn needs_userspace(desired: &DesiredMesh) -> Option<&'static str> {
+            desired.obfs.is_some().then_some("an obfuscated port")
+        }
+        let mesh = Mesh::new(&[1, 2]);
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.reachability = Reachability::Public;
+        let backend = crate::store::MemoryBackend::default();
+        let mut e = engine(1)
+            .with_trust_store(TrustStore::open(Box::new(backend.clone())))
+            .with_data_plane_fit(needs_userspace);
+        let mut events = VecSink::default();
+        e.apply(&validated(doc.clone()), &mut events)
+            .expect("accepted");
+        assert!(!e.restart_wanted());
+
+        doc.obfs = Some(crate::config::ObfsPortDoc {
+            port: 30000,
+            key: crate::config::ObfsSecret([5; 32]),
+            padding: crate::config::ObfsPadding { min: 8, max: 64 },
+        });
+        for _ in 0..2 {
+            e.apply(&validated(doc.clone()), &mut events)
+                .expect("accepted");
+        }
+        assert!(e.restart_wanted());
+        let count = |f: fn(&Event) -> bool| events.0.iter().filter(|ev| f(ev)).count();
+        assert_eq!(count(|ev| matches!(ev, Event::DataPlaneChanges { .. })), 1);
+        assert_eq!(
+            count(|ev| matches!(ev, Event::DataPlaneFailed { .. })),
+            0,
+            "{:?}",
+            events.0
+        );
+        assert!(e.dataplane.peers.as_ref().is_some_and(|p| !p.is_empty()));
+        let mut store = TrustStore::open(Box::new(backend));
+        assert_eq!(
+            store.accepted().expect("readable").and_then(|d| d.obfs),
+            doc.obfs
         );
     }
 

@@ -74,6 +74,14 @@ impl Platform for LinuxTun {
 
     fn create(&mut self, spec: &InterfaceSpec) -> Result<TunDevice, DataPlaneError> {
         let os = |op| move |source| DataPlaneError::Os { op, source };
+        // Kernel WireGuard keeps its interface and its probe copy when the process exits, so a
+        // machine that moves to this data plane finds them (design/userspace.md section 4.2)
+        rtnl::del_link(&mut self.route, &spec.name)
+            .map_err(kernel("delete kernel WireGuard's mesh interface"))?;
+        if self.netfilter {
+            super::nft::remove_probe_copy()
+                .map_err(kernel("remove kernel WireGuard's probe copy rules"))?;
+        }
         let file = OpenOptions::new()
             .read(true)
             .write(true)
