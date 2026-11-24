@@ -213,11 +213,14 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 - A `dial-only` follower probes its TLS relays every 5 seconds, which keeps the standby connections authenticated (mesh.md section 5.3);
 - A machine without an upgrader (set up with `nett join` under another service manager) applies a release it already runs and reports a newer one as available;
-- The Hub and the container cannot replace the program they are started from, and upgrade through their state directory instead, with the same verification and rollback as machines (ADR 0026).
+- The Hub and the container cannot replace the program they are started from, and upgrade through their state directory instead, with the same verification and rollback as machines (ADR 0026);
+- On Linux the userspace data plane applies the kernel data plane's nftables rules on its TUN, so a machine on it keeps its filter, Edge and forwarding, and hands the kernel what it decrypts only once those rules are in place (userspace.md section 4.2).
 
 **Guards**
 
 - `nett-mesh:the_dial_only_follower_keeps_its_tls_relays_authenticated`
+- `nett-mesh:with_netfilter_the_kernel_decides_what_comes_in`
+- `lab:access`, `lab:devices` (each also on the userspace data plane)
 - `nett-node:a_machine_without_an_upgrader_reports_only_a_newer_release`
 - `nett-node:a_new_version_that_does_not_settle_goes_back_to_the_one_before`
 - `nett-hub:the_hub_relays_and_upgrades_only_as_approved`

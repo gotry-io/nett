@@ -60,6 +60,38 @@ mod dataplane {
         fn listen_tunnel(&self, addr: SocketAddr) -> io::Result<std::net::TcpListener>;
         /// Makes the routes on the mesh interface exactly `routes`.
         fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError>;
+        /// Whether the kernel's netfilter filters, translates Edge addresses and forwards on the mesh
+        /// interface (design/userspace.md section 4.2): then the data plane hands it every packet
+        /// whose source WireGuard authenticated, once its first rule set is in place.
+        fn netfilter(&self) -> bool {
+            false
+        }
+        /// The kernel's filter rules, where [`Self::netfilter`].
+        fn apply_filter(&mut self, _filter: &FilterSpec) -> Result<(), DataPlaneError> {
+            Ok(())
+        }
+        /// Edge source address translation and anti-spoofing, which only the kernel's netfilter does.
+        fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
+            match edge {
+                None => Ok(()),
+                Some(_) => Err(DataPlaneError::Unsupported(
+                    "Edge source address translation",
+                )),
+            }
+        }
+        /// Forwarding to advertised routes and for devices, which only the kernel's netfilter does.
+        fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
+            match ingress {
+                None => Ok(()),
+                Some(_) => Err(DataPlaneError::Unsupported(
+                    "forwarding to advertised routes and for devices",
+                )),
+            }
+        }
+        /// Whether this machine forwards IPv6, where the platform can tell.
+        fn ipv6_forwarding(&self) -> Option<bool> {
+            None
+        }
     }
 
     struct Running {
@@ -235,6 +267,12 @@ mod dataplane {
         }
 
         fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError> {
+            if self.platform.netfilter() {
+                // The kernel's rules first: until they are in place the in-process filter denies
+                // (hard rule 6)
+                self.platform.apply_filter(filter)?;
+                return self.worker()?.call(Command::Netfilter);
+            }
             let filter = filter.clone();
             self.worker()?.call(|r| Command::Filter(filter, r))
         }
@@ -245,21 +283,15 @@ mod dataplane {
         }
 
         fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
-            match edge {
-                None => Ok(()),
-                Some(_) => Err(DataPlaneError::Unsupported(
-                    "Edge source address translation",
-                )),
-            }
+            self.platform.apply_edge(edge)
         }
 
         fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
-            match ingress {
-                None => Ok(()),
-                Some(_) => Err(DataPlaneError::Unsupported(
-                    "forwarding to advertised routes and for devices",
-                )),
-            }
+            self.platform.apply_ingress(ingress)
+        }
+
+        fn ipv6_forwarding(&self) -> Option<bool> {
+            self.platform.ipv6_forwarding()
         }
 
         fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {

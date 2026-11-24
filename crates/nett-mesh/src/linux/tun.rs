@@ -1,7 +1,8 @@
-//! Platform backend of the userspace data plane on Linux (DSM, old kernels and lab scenarios,
-//! design/userspace.md): the TUN interface is created through `/dev/net/tun` and deleted when the mesh
-//! process exits; addresses, MTU and routes are configured through rtnetlink, the same as the kernel
-//! backend.
+//! Platform backend of the userspace data plane on Linux (DSM, old kernels, a machine that offers an
+//! obfuscated port, and lab scenarios; design/userspace.md): the TUN interface is created through
+//! `/dev/net/tun` and deleted when the mesh process exits; addresses, MTU and routes are configured
+//! through rtnetlink, and where the kernel holds nett's nftables tables the filter, the Edge and
+//! forwarding apply on the TUN with the kernel backend's rules (section 4.2).
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
@@ -13,6 +14,7 @@ use nett_core::prefix::IpPrefix;
 
 use super::netlink::Socket;
 use super::{kernel, rtnl, sync_addresses, sync_routes, sys};
+use crate::access::{EdgeSpec, FilterSpec, IngressSpec};
 use crate::dataplane::{DataPlaneError, InterfaceSpec};
 use crate::userspace::{Platform, Tun, dual_stack_udp};
 
@@ -20,6 +22,8 @@ pub struct LinuxTun {
     route: Socket,
     name: String,
     ifindex: Option<u32>,
+    /// The kernel holds nett's nftables tables (design/userspace.md section 4.2).
+    netfilter: bool,
 }
 
 impl LinuxTun {
@@ -28,6 +32,7 @@ impl LinuxTun {
             route: Socket::open(None).map_err(kernel("open rtnetlink socket"))?,
             name: String::new(),
             ifindex: None,
+            netfilter: super::nftables()?,
         })
     }
 
@@ -103,5 +108,41 @@ impl Platform for LinuxTun {
 
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {
         sync_routes(&mut self.route, self.ifindex, routes)
+    }
+
+    fn netfilter(&self) -> bool {
+        self.netfilter
+    }
+
+    fn apply_filter(&mut self, filter: &FilterSpec) -> Result<(), DataPlaneError> {
+        super::filter::install_access(filter).map_err(kernel("install access rules"))
+    }
+
+    fn apply_edge(&mut self, edge: Option<&EdgeSpec>) -> Result<(), DataPlaneError> {
+        if !self.netfilter {
+            return match edge {
+                None => Ok(()),
+                Some(_) => Err(DataPlaneError::Unsupported(
+                    "Edge source address translation without nftables",
+                )),
+            };
+        }
+        super::filter::install_edge(edge).map_err(kernel("install edge address rules"))
+    }
+
+    fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
+        if !self.netfilter {
+            return match ingress {
+                None => Ok(()),
+                Some(_) => Err(DataPlaneError::Unsupported(
+                    "forwarding to advertised routes and for devices without nftables",
+                )),
+            };
+        }
+        super::apply_ingress(ingress)
+    }
+
+    fn ipv6_forwarding(&self) -> Option<bool> {
+        super::ipv6_forwarding()
     }
 }

@@ -8,6 +8,9 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   service, and nett-relay runs only as the relay's TLS entry, where the relay serves TLS; an
   upgrade removes `nett-relay.service` from a machine whose relay does not. TLS connections
   through a relay stay open across a restart of its nett service.
+- On Linux the userspace data plane filters, translates Edge addresses and forwards with the
+  kernel's nftables, as kernel WireGuard does: a machine on it can be an Edge host, advertise
+  routes and carry devices.
 
 ## [0.10.0] - 2026-11-24
 

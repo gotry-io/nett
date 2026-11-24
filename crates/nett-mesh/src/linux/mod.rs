@@ -64,7 +64,7 @@ pub(crate) fn peer_cred(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<(u32
 pub fn teardown() -> Result<(), DataPlaneError> {
     let mut route = Socket::open(None).map_err(kernel("open rtnetlink socket"))?;
     rtnl::del_link(&mut route, INTERFACE_NAME).map_err(kernel("delete the mesh interface"))?;
-    if has_nft_tables(KernelWireGuard::open().map(drop))? {
+    if nftables()? {
         for table in nft::tables() {
             nft::delete_table(table).map_err(kernel("delete an nftables table"))?;
         }
@@ -73,9 +73,57 @@ pub fn teardown() -> Result<(), DataPlaneError> {
     Ok(())
 }
 
-/// Whether this machine can hold nett's nftables tables, from whether kernel WireGuard opens: only the
-/// kernel data plane creates them, and the userspace one (Synology DSM, old kernels) filters in the
-/// mesh. Its kernel may have no nftables at all, and then does not even answer a request.
+/// The forwarding rules of a smart gateway and a mobile gateway on the mesh interface, for the
+/// kernel data plane and the userspace one alike (design/userspace.md section 4.2); an error when
+/// the system does not forward or drops what it would.
+pub(crate) fn apply_ingress(ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
+    filter::install_ingress(ingress).map_err(kernel("install forwarding rules"))?;
+    let carry = ingress.is_some_and(IngressSpec::carries_devices);
+    let blocked = hostfw::reconcile(carry).map_err(kernel(
+        "accept device traffic in the system's FORWARD chain",
+    ))?;
+    if ingress.is_none() {
+        return Ok(());
+    }
+    // Forwarding is decided by this network namespace's settings (in a container, enable it with Compose
+    // sysctls); the mesh only checks and does not modify
+    let path = "/proc/sys/net/ipv4/ip_forward";
+    if !forwarding(path)? {
+        let what = if carry {
+            "carries devices"
+        } else {
+            "advertises routes"
+        };
+        return Err(DataPlaneError::Protocol {
+            op: "forward traffic",
+            detail: format!("{path} is 0: this node {what} but does not forward"),
+        });
+    }
+    if carry && !blocked.is_empty() {
+        return Err(DataPlaneError::Protocol {
+            op: "forward device traffic",
+            detail: format!(
+                "{} drops forwarded traffic by default, so devices cannot reach other machines \
+                 through this gateway; accept traffic from nett0 to nett0 there",
+                blocked.join(", ")
+            ),
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn ipv6_forwarding() -> Option<bool> {
+    forwarding("/proc/sys/net/ipv6/conf/all/forwarding").ok()
+}
+
+/// Whether this machine holds nett's nftables tables (design/userspace.md section 4.2).
+pub(crate) fn nftables() -> Result<bool, DataPlaneError> {
+    has_nft_tables(KernelWireGuard::open().map(drop))
+}
+
+/// Whether this machine can hold nett's nftables tables, from whether kernel WireGuard opens: a kernel
+/// without WireGuard (Synology DSM, old kernels) has the userspace data plane filter in the mesh, and
+/// may have no nftables at all, and then does not even answer a request.
 fn has_nft_tables(kernel: Result<(), DataPlaneError>) -> Result<bool, DataPlaneError> {
     match kernel {
         Ok(()) => Ok(true),
@@ -368,43 +416,11 @@ impl DataPlane for KernelWireGuard {
     }
 
     fn apply_ingress(&mut self, ingress: Option<&IngressSpec>) -> Result<(), DataPlaneError> {
-        filter::install_ingress(ingress).map_err(kernel("install forwarding rules"))?;
-        let carry = ingress.is_some_and(IngressSpec::carries_devices);
-        let blocked = hostfw::reconcile(carry).map_err(kernel(
-            "accept device traffic in the system's FORWARD chain",
-        ))?;
-        if ingress.is_none() {
-            return Ok(());
-        }
-        // Forwarding is decided by this network namespace's settings (in a container, enable it with Compose
-        // sysctls); the mesh only checks and does not modify
-        let path = "/proc/sys/net/ipv4/ip_forward";
-        if !forwarding(path)? {
-            let what = if carry {
-                "carries devices"
-            } else {
-                "advertises routes"
-            };
-            return Err(DataPlaneError::Protocol {
-                op: "forward traffic",
-                detail: format!("{path} is 0: this node {what} but does not forward"),
-            });
-        }
-        if carry && !blocked.is_empty() {
-            return Err(DataPlaneError::Protocol {
-                op: "forward device traffic",
-                detail: format!(
-                    "{} drops forwarded traffic by default, so devices cannot reach other machines \
-                     through this gateway; accept traffic from nett0 to nett0 there",
-                    blocked.join(", ")
-                ),
-            });
-        }
-        Ok(())
+        apply_ingress(ingress)
     }
 
     fn ipv6_forwarding(&self) -> Option<bool> {
-        forwarding("/proc/sys/net/ipv6/conf/all/forwarding").ok()
+        ipv6_forwarding()
     }
 
     fn sync_routes(&mut self, routes: &[IpPrefix]) -> Result<(), DataPlaneError> {

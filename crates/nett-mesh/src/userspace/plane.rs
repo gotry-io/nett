@@ -119,7 +119,13 @@ pub struct Plane<S> {
     sessions: S,
     peers: Vec<Peer>,
     filter: Filter,
-    /// This machine's mesh addresses: only packets addressed to them are written to the TUN.
+    /// The kernel's netfilter filters and forwards on the TUN (design/userspace.md section 4.2): every
+    /// packet whose source WireGuard authenticated is written to it, and the in-process filter is not
+    /// asked. Set once the kernel's first rule set is in place; until then the in-process filter
+    /// denies.
+    netfilter: bool,
+    /// This machine's mesh addresses: without the kernel's netfilter, only packets addressed to them
+    /// are written to the TUN.
     local: Vec<IpAddr>,
     /// Idle TLS loopback ports: packets coming in from them are dropped (design/mesh.md section 5.3).
     guarded: BTreeSet<u16>,
@@ -134,6 +140,7 @@ impl<S: Sessions> Plane<S> {
             sessions,
             peers: Vec::new(),
             filter: Filter::default(),
+            netfilter: false,
             local: Vec::new(),
             guarded: BTreeSet::new(),
             handshakes: HandshakeBudget::new(Instant::now()),
@@ -152,6 +159,11 @@ impl<S: Sessions> Plane<S> {
 
     pub fn set_filter(&mut self, filter: FilterSpec) {
         self.filter.set_rules(filter);
+    }
+
+    /// The kernel's netfilter has its rules in place and filters from now on.
+    pub fn hand_to_netfilter(&mut self) {
+        self.netfilter = true;
     }
 
     pub fn guard_tls_ports(&mut self, idle: &[u16]) {
@@ -384,10 +396,9 @@ impl<S: Sessions> Plane<S> {
         if !peer.allowed.iter().any(|a| a.contains(ip.src)) {
             return;
         }
-        if !self.local.contains(&ip.dst) {
-            return;
-        }
-        if !self.filter.inbound(&ip, now) {
+        // With the kernel's netfilter, the kernel filters what is for this machine and forwards the
+        // rest (Edge, advertised routes, devices), as on kernel WireGuard
+        if !self.netfilter && (!self.local.contains(&ip.dst) || !self.filter.inbound(&ip, now)) {
             return;
         }
         packet.truncate(ip.len);
@@ -583,6 +594,32 @@ mod tests {
         let ok = build::udp(a.mesh, 1, b.mesh, 53);
         let out = send(&mut a, &ok);
         assert_eq!(exchange(&mut a, &mut b, out).1, [ok]);
+    }
+
+    /// With the kernel's netfilter in place, a packet from an authenticated source goes to the TUN for
+    /// the kernel to filter or forward (to an Edge container, an advertised route or a device), and
+    /// the in-process filter is not asked; until then it denies (design/userspace.md section 4.2).
+    #[test]
+    fn with_netfilter_the_kernel_decides_what_comes_in() {
+        let (mut a, mut b) = pair(false);
+        let to_edge = build::udp(a.mesh, 1, ip("100.88.128.5"), 53);
+        let new_connection = build::tcp(a.mesh, 1, b.mesh, 22, SYN);
+        for packet in [&to_edge, &new_connection] {
+            let out = send_raw(&mut a, &b, packet);
+            assert!(exchange(&mut a, &mut b, out).1.is_empty(), "denied before");
+        }
+        b.plane.hand_to_netfilter();
+        let out = send_raw(&mut a, &b, &to_edge);
+        assert_eq!(
+            exchange(&mut a, &mut b, out).1,
+            std::slice::from_ref(&to_edge)
+        );
+        let out = send_raw(&mut a, &b, &new_connection);
+        assert_eq!(exchange(&mut a, &mut b, out).1, [new_connection]);
+        // The source is still WireGuard's to vouch for
+        let forged = build::udp(ip("100.88.0.9"), 1, b.mesh, 53);
+        let out = send_raw(&mut a, &b, &forged);
+        assert!(exchange(&mut a, &mut b, out).1.is_empty(), "forged source");
     }
 
     /// Without going through a's path selection and filtering, encrypts a packet directly with the session of

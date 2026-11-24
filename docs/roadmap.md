@@ -148,9 +148,9 @@ Checked items are met; the others name the stage that verifies them.
 - Multi-hop relaying and automatic path finding; relay choice from a line quality matrix, traffic limits per relay
 - An obfuscated UDP transport first: a censor that identifies WireGuard drops UDP sent from the identified address and port into its network (ADR 0011), so the transport wraps WireGuard's packets in a format with nothing fixed on the wire and site keys (ADR 0030)
   - [x] The format, relays' obfuscated port, the record of blocked endpoints, scenario 32 and the cost measured in the lab (0.10.0)
-  - [ ] The relay runs in the nett daemon, and nett-relay only terminates its public TCP (ADR 0032)
-  - [ ] On Linux, the userspace data plane applies the kernel data plane's nftables rules on its TUN (filter, Edge, forwarding), and the data plane follows the desired state (userspace.md section 4.2)
-  - [ ] A machine's own obfuscated port in the userspace data plane, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
+  - [x] The relay runs in the nett daemon, and nett-relay only terminates its public TCP (ADR 0032)
+  - [x] On Linux, the userspace data plane applies the kernel data plane's nftables rules on its TUN: filter, Edge, forwarding (userspace.md section 4.2)
+  - [ ] A machine's own obfuscated port in the userspace data plane, the data plane following the desired state, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
 - Then QUIC transport and UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 

@@ -44,6 +44,8 @@ pub(super) enum Command {
     Rehandshake(PeerSpec, SyncSender<Result<(), UnknownPeer>>),
     Stats(SyncSender<Vec<PeerStat>>),
     Filter(FilterSpec, SyncSender<()>),
+    /// The kernel's netfilter has its first rule set in place (design/userspace.md section 4.2).
+    Netfilter(SyncSender<()>),
     GuardTlsPorts(Vec<u16>, SyncSender<()>),
     SetLocal(Vec<IpAddr>, SyncSender<()>),
     SetNames(crate::dns::NameTable, SyncSender<()>),
@@ -282,6 +284,10 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                 }
                 Command::Filter(filter, reply) => {
                     self.plane.set_filter(filter);
+                    let _ = reply.send(());
+                }
+                Command::Netfilter(reply) => {
+                    self.plane.hand_to_netfilter();
                     let _ = reply.send(());
                 }
                 Command::GuardTlsPorts(ports, reply) => {

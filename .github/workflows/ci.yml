@@ -777,6 +777,8 @@ jobs:
               Scenario 19: outer path MTU of 1500, 1360, 1300 (IPv6) | mtu --bytes 268435456 --topology crates/nett-lab/topologies/mtu6.toml
               Access control, Edge address and forwarding to advertised routes (design/local-signing.md section 8) | access --topology crates/nett-lab/topologies/access.toml
               Devices: WireGuard clients reach what their rules allow through a mobile gateway whose FORWARD chain drops (design/devices.md section 10) | devices --topology crates/nett-lab/topologies/devices.toml
+              Access control, Edge address and forwarding on the userspace data plane, which filters and forwards with the kernel's nftables (design/userspace.md section 4.2) | access --userspace edge --userspace app --topology crates/nett-lab/topologies/access.toml
+              Devices through a mobile gateway on the userspace data plane (design/userspace.md section 4.2) | devices --userspace g --topology crates/nett-lab/topologies/devices.toml
               Scenario 31: a served port reaches a loopback service from an allowed member only, never from outside the mesh | serve --topology crates/nett-lab/topologies/serve.toml
               Hub: push, apply, the mesh keeps working when the Hub stops, catch-up after recovery, forged members and old-version rules are rejected (design/hub.md section 10) | hub --topology crates/nett-lab/topologies/direct.toml
           - group: handshake
