@@ -102,16 +102,16 @@ A machine's own obfuscated port (ADR 0031) is the user's choice for that machine
 
 The virtual machine runs other workloads, so CPU differences of about 10% are within the noise. All four measures are met on paths of 1 Gbit/s and below; the measurement across a real border follows the release. The first round, before the transports' sockets had the receive buffer of tunnel sockets (userspace.md section 4), reached 1.4 Gbit/s with several times the retransmissions of plain UDP: packets were dropped at the loopback port.
 
-**A machine's own port in the lab** (the same lab, release build, the whole lab on one CPU; the throughput scenario on `direct.toml`, as it is and with `--userspace b`, against `direct-obfs-only.toml`, as it is, a reaching b's port through the obfuscated transport's loopback port, and with `--userspace a`, a wrapping on its WireGuard socket; two rounds each, b on the userspace data plane for its port):
+**A machine's own port in the lab** (the same lab, release build, the whole lab on one CPU; the throughput scenario on `direct.toml`, as it is and with `--userspace b`, against `direct-obfs-only.toml`, as it is, a reaching b's port through the obfuscated transport's loopback port, and with `--userspace a`, a wrapping on its WireGuard socket; two rounds each, b on the userspace data plane for its port, which receives and sends in batches on Linux, userspace.md section 4):
 
 | Measure | Plain, kernel WireGuard | Plain, b on the userspace data plane | Obfuscated, a on kernel WireGuard | Obfuscated, a on the userspace data plane |
 |---|---|---|---|---|
-| Throughput on a 1 Gbit/s link | 894-906 Mbit/s | 675-879 Mbit/s | 436-691 Mbit/s | 603-666 Mbit/s |
-| Throughput without a rate limit | 1.8-4.0 Gbit/s | 0.88-1.47 Gbit/s | 0.64-0.96 Gbit/s | 0.89-1.08 Gbit/s |
-| Round trip, median | 0.24-0.27 ms | 0.22-0.25 ms | 0.28-0.29 ms | 0.14-0.18 ms |
-| Whole-machine CPU at 200 Mbit/s | 0.65-0.99 cores | 0.70-1.06 cores | 0.71-0.98 cores | 0.53-1.18 cores |
+| Throughput on a 1 Gbit/s link | 902-907 Mbit/s | 905-907 Mbit/s | 865-898 Mbit/s (96-99%) | 859-899 Mbit/s (95-99%) |
+| Throughput without a rate limit | 3.4-3.7 Gbit/s | 2.3-2.6 Gbit/s | 1.3-2.1 Gbit/s | 1.8-2.0 Gbit/s |
+| Round trip, median | 0.09-0.11 ms | 0.07-0.29 ms | 0.12-0.34 ms | 0.09-0.17 ms |
+| Whole-machine CPU at 200 Mbit/s | 0.45-0.75 cores | 0.44-1.02 cores | 0.62-0.83 cores | 0.34-0.67 cores |
 
-Idle memory (scenario 21 on `machine-obfs.toml`, 600 s after load): b's nett daemon, on the userspace data plane with its obfuscated port, holds 1.6 MB of anonymous pages, the kernel WireGuard and userspace clients 1.6-1.7 MB. The round trip, the CPU at the same rate and idle memory are within the bounds; the throughput is not. With both ends and the kernel on one CPU, the userspace data plane on the receiving end alone takes up to a quarter of a 1 Gbit/s path, and obfuscated UDP to its port reaches 48-76% of plain kernel WireGuard; a path that carries less than about 600 Mbit/s is not held back. Batched receive and send in the userspace data plane on Linux (userspace.md section 9) is what raises that limit.
+Idle memory (scenario 21 on `machine-obfs.toml`, 600 s after load): b's nett daemon, on the userspace data plane with its obfuscated port and its 128 KiB receive batch, holds 1.7 MB of anonymous pages, the kernel WireGuard and userspace clients 1.5-1.6 MB. All four measures are within the bounds on a 1 Gbit/s path; one of the two rounds adds 0.23 ms to the median round trip, within the noise of a machine that runs other workloads. Receiving and sending one datagram per system call, as before batching, the same runs reached 436-691 Mbit/s obfuscated and 675-879 plain with b on the userspace data plane: the system calls, not the obfuscation, were what the one CPU ran out of.
 
 **Across a real border** (after the release; a 1-vCPU machine abroad offering its own port, reached at about 150 ms by two machines across the border on kernel WireGuard, through the obfuscated transport's loopback port; about 37 MB in all): the machine's plain WireGuard port answered none of their probes, while its obfuscated port, on the same address, lost none and answered 2-14 ms faster than the path through the relay on the same machine; transfers from the machine abroad ran at 31-34 Mbit/s, and to it at the rate of each sender's uplink, 2.8 and 8.7 Mbit/s; its nett daemon held 1.4 MB of anonymous pages. A relay that offers no obfuscated port could not reach that machine at all: its leg went to the blocked plain port (section 2).
 

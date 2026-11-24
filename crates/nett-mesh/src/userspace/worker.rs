@@ -101,6 +101,12 @@ impl Worker {
             commands: rx,
             probes: probes_tx,
             probes_out: probes_out_rx,
+            #[cfg(target_os = "linux")]
+            batch: Batch {
+                recv: super::mmsg::RecvBatch::new(),
+                wireguard: Vec::with_capacity(super::mmsg::SLOTS),
+                obfs: Vec::with_capacity(super::mmsg::SLOTS),
+            },
         };
         let thread = std::thread::Builder::new()
             .name("nett-dataplane".into())
@@ -233,6 +239,17 @@ struct Loop<S, T> {
     commands: Receiver<Command>,
     probes: SyncSender<(UdpPort, SocketAddr, Vec<u8>)>,
     probes_out: Receiver<(UdpPort, SocketAddr, Vec<u8>)>,
+    /// Batched receive and send on Linux (design/userspace.md section 4).
+    #[cfg(target_os = "linux")]
+    batch: Batch,
+}
+
+/// The receive buffer and what waits to be sent on each port, for one wakeup.
+#[cfg(target_os = "linux")]
+struct Batch {
+    recv: super::mmsg::RecvBatch,
+    wireguard: Vec<(SocketAddr, Vec<u8>)>,
+    obfs: Vec<(SocketAddr, Vec<u8>)>,
 }
 
 /// Which of the data plane thread's sources are readable.
@@ -265,29 +282,11 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
             }
             let now = Instant::now();
             if ready.udp {
-                for _ in 0..BATCH {
-                    match self.socket.recv_from(&mut buf) {
-                        Ok((len, from)) => {
-                            self.plane
-                                .from_udp(incoming(from), &buf[..len], now, &mut out);
-                        }
-                        Err(_) => break,
-                    }
-                }
+                self.receive(UdpPort::WireGuard, &mut buf, now, &mut out);
                 self.execute(&mut out);
             }
-            if ready.obfs
-                && let Some((obfs, _)) = self.obfs.as_ref()
-            {
-                for _ in 0..BATCH {
-                    match obfs.recv_from(&mut buf) {
-                        Ok((len, from)) => {
-                            self.plane
-                                .from_obfs(incoming(from), &buf[..len], now, &mut out);
-                        }
-                        Err(_) => break,
-                    }
-                }
+            if ready.obfs {
+                self.receive(UdpPort::Obfs, &mut buf, now, &mut out);
                 self.execute(&mut out);
             }
             if ready.tun {
@@ -303,6 +302,40 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                 self.plane.tick(Instant::now(), &mut out);
                 self.execute(&mut out);
                 next_tick = Instant::now() + TIMER_TICK;
+            }
+        }
+    }
+
+    /// Takes what `port` holds, at most [`BATCH`] datagrams: in one `recvmmsg` on Linux, one at a
+    /// time elsewhere.
+    fn receive(&mut self, port: UdpPort, buf: &mut [u8], now: Instant, out: &mut Vec<Action>) {
+        let socket = match port {
+            UdpPort::WireGuard => &self.socket,
+            UdpPort::Obfs => match &self.obfs {
+                Some((socket, _)) => socket,
+                None => return,
+            },
+        };
+        let mut hand = |plane: &mut Plane<S>, from: SocketAddr, datagram: &[u8]| match port {
+            UdpPort::WireGuard => plane.from_udp(incoming(from), datagram, now, out),
+            UdpPort::Obfs => plane.from_obfs(incoming(from), datagram, now, out),
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let _ = buf;
+            if let Ok(n) = self.batch.recv.recv(socket) {
+                for i in 0..n {
+                    if let Some((datagram, from)) = self.batch.recv.get(i) {
+                        hand(&mut self.plane, from, datagram);
+                    }
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        for _ in 0..BATCH {
+            match socket.recv_from(buf) {
+                Ok((len, from)) => hand(&mut self.plane, from, &buf[..len]),
+                Err(_) => break,
             }
         }
     }
@@ -410,6 +443,24 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
             // A send failure (buffer full, no route) is the same as packet loss, handled by WireGuard and the path
             // layer
             match action {
+                // On Linux what goes out on a port waits for one `sendmmsg` at the end, in order
+                #[cfg(target_os = "linux")]
+                Action::Udp {
+                    port: UdpPort::WireGuard,
+                    to,
+                    datagram,
+                } => self.batch.wireguard.push((outgoing(to, self.v6), datagram)),
+                #[cfg(target_os = "linux")]
+                Action::Udp {
+                    port: UdpPort::Obfs,
+                    to,
+                    datagram,
+                } => {
+                    if let Some((_, v6)) = &self.obfs {
+                        self.batch.obfs.push((outgoing(to, *v6), datagram));
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 Action::Udp {
                     port: UdpPort::WireGuard,
                     to,
@@ -417,6 +468,7 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                 } => {
                     let _ = self.socket.send_to(&datagram, outgoing(to, self.v6));
                 }
+                #[cfg(not(target_os = "linux"))]
                 Action::Udp {
                     port: UdpPort::Obfs,
                     to,
@@ -434,6 +486,15 @@ impl<S: Sessions, T: Tun> Loop<S, T> {
                     let _ = self.probes.try_send((port, from, data));
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            super::mmsg::send(&self.socket, &self.batch.wireguard);
+            self.batch.wireguard.clear();
+            if let Some((obfs, _)) = &self.obfs {
+                super::mmsg::send(obfs, &self.batch.obfs);
+            }
+            self.batch.obfs.clear();
         }
     }
 }

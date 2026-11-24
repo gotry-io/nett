@@ -4,6 +4,17 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- On Linux the userspace data plane receives and sends up to 64 datagrams per system call. In
+  the lab, with everything on one CPU, a path to a machine's obfuscated port now carries 865-899
+  Mbit/s on a 1 Gbit/s link, where plain kernel WireGuard carries 902-907.
+- A pair on a machine's obfuscated port moves to a much faster relay over obfuscated UDP, as a
+  pair on a plain direct path does; it never moves to a plain relay for speed.
+- The first handshake of a path through a TLS or obfuscated transport is no longer refused while
+  the transport opens its loopback port, which delayed such a path by WireGuard's 5-second retry;
+  a change to the relays a machine reaches no longer drops the TLS connections of the others.
+- `nett site status` names a public machine whose WireGuard port answers no probe from machines
+  that reach it otherwise, with those machines, and suggests `nett site set <machine> --obfs`.
+
 ## [0.11.0] - 2026-11-24
 
 - The relay runs in the nett service of a machine that relays. A relay over UDP needs no second

@@ -313,7 +313,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - A served port's forwarder turns it off on both of its connections (mesh.md section 12.1);
 - A TLS relay connection that falls behind sends its newest packets: each end's send queue keeps 32 and drops the oldest, and the probe that opens the connection goes first and is never dropped (mesh.md section 5.3);
 - Every socket that carries tunnel traffic asks for a 1 MiB receive buffer: the WireGuard port socket, the relay's sockets, and the transports' loopback ports and the obfuscated transport's socket to its relay (userspace.md section 4);
-- The mesh opens each new loopback port of the transports before it points WireGuard at it, and the transports take it from there; targets that stay keep their task and connection when others change (mesh.md section 5.3).
+- The mesh opens each new loopback port of the transports before it points WireGuard at it, and the transports take it from there; targets that stay keep their task and connection when others change (mesh.md section 5.3);
+- On Linux the userspace data plane takes up to 64 datagrams per `recvmmsg` and sends what each wakeup produced with `sendmmsg`, in order per socket, so a burst costs a system call per batch; a datagram longer than its 2048-byte slot is not a tunnel's and is dropped (userspace.md section 4).
 
 **Guards**
 
@@ -325,6 +326,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:loopback_ports_are_opened_before_wireguard_is_pointed_at_them`
 - `nett-transport:a_packet_sent_before_the_transport_starts_is_not_lost`
 - `nett-transport:a_target_that_stays_keeps_its_task_when_others_change`
+- `nett-mesh:a_batch_takes_what_is_queued_and_leaves_out_what_is_too_long`
+- `nett-mesh:datagrams_go_out_in_order_batch_after_batch`
 
 **Not yet guarded**: the served port's forwarder. Its two sockets live inside the task that copies one to the other, and a test sees only their far ends, whose setting says nothing about the forwarder's; the setting sits beside the copy, in one place. The same holds for each transport's request for a larger receive buffer, one call beside the socket it opens; the throughput scenario (design/obfuscation.md section 9) shows a missing one as retransmissions, and runs before releases that change a transport rather than in CI, since its numbers need a quiet machine.
 

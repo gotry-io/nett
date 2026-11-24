@@ -4,6 +4,9 @@
 //! macOS, DSM and Linux with old kernels.
 
 pub mod filter;
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod mmsg;
 pub mod packet;
 pub mod plane;
 pub mod session;

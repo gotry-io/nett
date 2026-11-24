@@ -150,7 +150,8 @@ Checked items are met; the others name the stage that verifies them.
   - [x] The relay runs in the nett daemon, and nett-relay only terminates its public TCP (ADR 0032)
   - [x] On Linux, the userspace data plane applies the kernel data plane's nftables rules on its TUN: filter, Edge, forwarding (userspace.md section 4.2)
   - [x] A machine's own obfuscated port in the userspace data plane, the data plane following the desired state, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
-  - [ ] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`): the throughput of a machine that offers an obfuscated port, and the receive capacity of a userspace member reachable from outside under a flood (design/userspace.md section 9, design/obfuscation.md section 9)
+  - [x] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`): obfuscated UDP to a machine's port at 95-99% of plain kernel WireGuard on one CPU (design/obfuscation.md section 9)
+  - [ ] The userspace data plane under a handshake flood: tunnel loss and relay switching back and forth in scenario 20(c), with batches and without (design/userspace.md section 9)
 - Then QUIC transport and UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 

@@ -42,7 +42,7 @@ What comparable products do:
 ## Consequences
 
 - A machine that offers an obfuscated port loses what kernel WireGuard gives across restarts: its connections pause for the seconds a restart or an upgrade takes (userspace.md section 6.3);
-- Each packet costs more CPU: with the whole lab on one CPU, obfuscated UDP to a machine's port reaches 48-76% of plain kernel WireGuard on a 1 Gbit/s path, a path below about 600 Mbit/s is not held back, and the round trip and the CPU at the same rate stay within bounds (design/obfuscation.md section 9). Until the userspace data plane receives and sends in batches, its receive capacity under a flood is also lower than kernel WireGuard's (userspace.md section 9);
+- Each packet costs more CPU: with the whole lab on one CPU and the userspace data plane receiving and sending in batches, obfuscated UDP to a machine's port reaches 95-99% of plain kernel WireGuard on a 1 Gbit/s path, and the round trip and the CPU at the same rate stay within bounds (design/obfuscation.md section 9). Its receive capacity under a flood stays below kernel WireGuard's (userspace.md section 9);
 - One public UDP port more per machine that offers one, opened in its firewall once;
 - Synology DSM offers an obfuscated port once its userspace data plane forwards (roadmap stage 8);
 - ADR 0030's format, keys, relay port and record of blocked endpoints stay; its path through the relay on the peer's machine gives way to the machine's own port.
