@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.11.1] - 2026-11-24
+
 - On Linux the userspace data plane receives and sends up to 64 datagrams per system call. In
   the lab, with everything on one CPU, a path to a machine's obfuscated port now carries 865-899
   Mbit/s on a 1 Gbit/s link, where plain kernel WireGuard carries 902-907.
