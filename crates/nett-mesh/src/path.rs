@@ -53,12 +53,12 @@ const LOSSY_HOLD: Duration = Duration::from_secs(5);
 /// them: about a minute at one probe a second (section 8.2).
 const LOSS_RETURN_PROBES: u32 = 60;
 const LOSS_RETURN_LOSSES: u32 = 2;
-/// While the pair loses packets, a loss check probes each candidate and the current path this many
-/// times this often (section 8.2). A loss at one end of the pair, or on a link every path shares,
-/// shows in all of them, while a candidate's few probes at its usual interval can miss it. A
-/// candidate that lost at most [`LOSS_CHECK_LOSSES`] is clean, a path that helps against the
-/// current path's loss: at 15% loss a candidate passes about one check in 80, a clean one always
-/// and one losing 2% four in five.
+/// Before a candidate's score decides a switch, a loss check probes each candidate and the current
+/// path this many times this often (section 8.2). A candidate's few probes at its usual interval
+/// can show a loss it had by chance, or miss a loss at one end of the pair or on a link every path
+/// shares, which shows in all of these. A candidate that lost at most [`LOSS_CHECK_LOSSES`] is
+/// clean, a path that helps against the current path's loss: at 15% loss a candidate passes about
+/// one check in 80, a clean one always and one losing 2% four in five.
 const LOSS_CHECK_PROBES: u32 = 40;
 const LOSS_CHECK_INTERVAL: Duration = Duration::from_millis(50);
 const LOSS_CHECK_LOSSES: u32 = 1;
@@ -66,10 +66,11 @@ const LOSS_CHECK_LOSSES: u32 = 1;
 /// is probed the same way at the same time, loses alike: the loss is shared, and the two compare
 /// without it (section 8.2). At 15% on both, nine checks in ten find them alike.
 const LOSS_ALIKE_MARGIN: u32 = 4;
-/// A loss check starts at most this often; its results stand twice as long from its start, so while
-/// the pair keeps losing packets the next check renews them before they lapse.
+/// A loss check starts at most this often while the pair loses packets, and at most every
+/// [`LOSS_CHECK_QUIET`] otherwise; its results stand until the next check can renew them.
 const LOSS_CHECK_EVERY: Duration = Duration::from_secs(10);
-const LOSS_RESULTS_STAND: Duration = Duration::from_secs(20);
+const LOSS_CHECK_QUIET: Duration = Duration::from_secs(60);
+const LOSS_RESULTS_STAND: Duration = Duration::from_secs(70);
 /// Probe interval of candidates: every 15 seconds when there is traffic; when the current path is not of
 /// the best type, every 1 second for better types; when the current path has clearly degraded, every 3
 /// seconds for candidates of the same type; every 5 minutes when idle.
@@ -386,6 +387,10 @@ impl LossCheck {
     fn clean(&self) -> bool {
         self.done() && self.lost() <= LOSS_CHECK_LOSSES
     }
+
+    fn loss_rate(&self) -> f64 {
+        f64::from(self.lost()) / f64::from(self.results.results.clamp(1, 64))
+    }
 }
 
 /// What a candidate's score is compared with the current path's on (section 8.2).
@@ -395,9 +400,9 @@ enum Judge {
     Full,
     /// The scores without loss.
     Plain,
-    /// As the loss check found the two: a candidate measured clean on the full scores, the
-    /// current path's loss being its own; one that lost alike without loss, which is shared; one
-    /// that lost more, or is not measured yet, not at all.
+    /// As the loss check found them: a candidate's loss is what the check measured, with the
+    /// current path's own loss included; a candidate that lost about as much as the current path,
+    /// both losing, compares without loss, which is shared.
     Checked,
 }
 
@@ -1352,7 +1357,7 @@ impl PeerPaths {
                     self.role != Role::DecideTogether || self.tunnel_established || !active;
                 if !self.hold
                     && proposable
-                    && let Some(action) = self.check_improvement(now)
+                    && let Some(action) = self.check_improvement(now, active)
                 {
                     actions.push(action);
                 }
@@ -1426,11 +1431,14 @@ impl PeerPaths {
                 .any(|i| self.checking(i, now) || (i != self.current && self.fast_recovery(i, now)))
     }
 
-    /// Starts a loss check (section 8.2) unless one began within [`LOSS_CHECK_EVERY`]: each
-    /// candidate that is probed at all, the current path's included, gets [`LOSS_CHECK_PROBES`]
-    /// probes, one every [`LOSS_CHECK_INTERVAL`].
-    fn start_loss_check(&mut self, now: Instant) {
-        if self.loss_check_recent(now) {
+    /// Starts a loss check (section 8.2) unless one began within `every`: each candidate that is
+    /// probed at all, the current path's included, gets [`LOSS_CHECK_PROBES`] probes, one every
+    /// [`LOSS_CHECK_INTERVAL`].
+    fn start_loss_check(&mut self, now: Instant, every: Duration) {
+        if self
+            .loss_check
+            .is_some_and(|t| now.saturating_duration_since(t) < every)
+        {
             return;
         }
         self.loss_check = Some(now);
@@ -1469,10 +1477,13 @@ impl PeerPaths {
             .filter(|m| now.saturating_duration_since(m.began) < LOSS_RESULTS_STAND)
     }
 
-    /// A loss check measured candidate `index` losing almost nothing: a path that helps against
-    /// the current path's loss, wherever that loss lies (section 8.2).
-    fn measured_clean(&self, index: usize, now: Instant) -> bool {
-        self.measurement(index, now).is_some_and(|m| m.clean())
+    /// A loss check that began at most [`LOSS_CHECK_EVERY`] before `since` measured candidate
+    /// `index` losing almost nothing: a path that helps against a loss that began then, wherever
+    /// that loss lies (section 8.2).
+    fn measured_clean(&self, index: usize, since: Instant) -> bool {
+        self.candidates[index]
+            .measured
+            .is_some_and(|m| m.began + LOSS_CHECK_EVERY >= since && m.clean())
     }
 
     /// Candidate `index`'s score and the current path's to compare it with, as `judge` says, and
@@ -1490,16 +1501,18 @@ impl PeerPaths {
         let (s, current) = match judge {
             Judge::Full => full()?,
             Judge::Plain => plain()?,
-            Judge::Checked if self.measured_clean(index, now) => {
-                return full().map(|(s, current)| (s, current, true));
-            }
             Judge::Checked => {
                 let theirs = self.measurement(index, now)?;
-                let ours = self.measurement(self.current, now)?;
-                if theirs.lost() > ours.lost() + LOSS_ALIKE_MARGIN {
-                    return None;
+                let alike = self.measurement(self.current, now).is_some_and(|ours| {
+                    !ours.clean() && theirs.lost() <= ours.lost() + LOSS_ALIKE_MARGIN
+                });
+                if alike && !theirs.clean() {
+                    plain()?
+                } else {
+                    let s =
+                        c.stats.score_without_loss(c.kind)? + theirs.loss_rate() * LOSS_PENALTY_MS;
+                    return Some((s, self.tunnel.score(kind)?, theirs.clean()));
                 }
-                plain()?
             }
         };
         Some((s, current, false))
@@ -1527,37 +1540,40 @@ impl PeerPaths {
     }
 
     /// The candidate a switch for a better score is held for (section 8.2), whether the loss check
-    /// measured it clean, and since when the hold runs: while some candidate qualifies. While the
-    /// pair loses packets, a candidate's few probes can miss a loss every path shares, so a loss
-    /// check measures the candidates and the current path the same way, and the candidates compare
-    /// as it found them; the hold goes on while the check measures one better on its full score.
+    /// measured it clean, and since when the hold runs: while some candidate qualifies. A
+    /// candidate's few probes can show a loss it had by chance, or miss one every path shares, so
+    /// while the pair has traffic a loss check measures the candidates and the current path the
+    /// same way before a candidate's score decides, and the candidates compare as it found them.
     fn held_improvement(
         &mut self,
         now: Instant,
+        active: bool,
         limits: (f64, f64),
         qualifies: &dyn Fn(&Self, usize, &Candidate) -> bool,
         since: fn(&mut Self) -> &mut Option<Instant>,
     ) -> Option<(usize, bool, Instant)> {
         let full = self.improvement(now, Judge::Full, limits, qualifies);
-        // Checked while the pair loses packets, and renewed while its tunnel probes are still being
-        // lost, so the candidates go on comparing as checked until the hold ends
+        let plain = self.improvement(now, Judge::Plain, limits, qualifies);
         let measured = self.measurement(self.current, now).is_some();
-        let losing = self.lossy() || (measured && self.tunnel.loss_rate() > 0.0);
-        if losing
-            && (full.is_some()
-                || self
-                    .improvement(now, Judge::Plain, limits, qualifies)
-                    .is_some())
-        {
-            self.start_loss_check(now);
+        if active && (full.is_some() || plain.is_some()) {
+            // Renewed every 10 seconds while the tunnel still loses probes
+            let losing = self.lossy() || (measured && self.tunnel.loss_rate() > 0.0);
+            let every = if losing {
+                LOSS_CHECK_EVERY
+            } else {
+                LOSS_CHECK_QUIET
+            };
+            self.start_loss_check(now, every);
         }
-        let found = if self.lossy() || measured {
+        let pending = self.loss_check_pending(now);
+        let found = if self.lossy() || measured || pending {
             self.improvement(now, Judge::Checked, limits, qualifies)
         } else {
             full
         };
         let Some((i, clean)) = found else {
-            if full.is_some() && self.loss_check_pending(now) {
+            // The hold goes on while the check measures a candidate that qualifies
+            if pending && (full.is_some() || plain.is_some()) {
                 since(self).get_or_insert(now);
             } else {
                 *since(self) = None;
@@ -1730,7 +1746,7 @@ impl PeerPaths {
             && self.tunnel.loss_rate() > LOSS_FAILURE_RATE
         {
             let since = *self.high_loss_since.get_or_insert(now);
-            self.start_loss_check(now);
+            self.start_loss_check(now, LOSS_CHECK_EVERY);
             if now.saturating_duration_since(since) >= LOSS_FAILURE_HOLD {
                 return self.fail_over(now, since, SwitchReason::HighLoss);
             }
@@ -1819,7 +1835,7 @@ impl PeerPaths {
                 .filter(|(i, c)| {
                     *i != self.current && c.last_reply.is_some_and(|t| t >= fresh_since)
                 })
-                .filter(|(i, _)| !clean || self.measured_clean(*i, now))
+                .filter(|(i, _)| !clean || self.measured_clean(*i, fresh_since))
                 .filter(|(_, c)| !relays_only || matches!(c.route, Route::Relay { .. }))
                 .filter(|(_, c)| !others || !c.broken_beyond(now))
                 .filter_map(|(i, c)| c.stats.score(c.kind).map(|s| (i, !self.whole(c), s)))
@@ -1858,7 +1874,7 @@ impl PeerPaths {
     }
 
     /// When the current path is healthy, checks whether there is a better path.
-    fn check_improvement(&mut self, now: Instant) -> Option<Action> {
+    fn check_improvement(&mut self, now: Instant, active: bool) -> Option<Action> {
         let current_kind = self.current_kind();
         let current_score = self.tunnel.score(current_kind);
         // A relay chosen for being faster gives way to direct only when the pair is busy or direct has
@@ -1894,7 +1910,7 @@ impl PeerPaths {
         if let Some((i, _)) = better_type {
             return Some(self.decide(i, SwitchReason::BetterType, now));
         }
-        if let Some(action) = self.check_faster_relay(now, current_kind) {
+        if let Some(action) = self.check_faster_relay(now, active, current_kind) {
             return Some(action);
         }
         // A better path of the same type: switch only after it holds for 30 seconds. A path left while
@@ -1911,6 +1927,7 @@ impl PeerPaths {
         // switch goes to the best one when the hold ends
         let (i, clean, since) = self.held_improvement(
             now,
+            active,
             (SAME_TYPE_RATIO, SAME_TYPE_MIN_MS),
             &same_type,
             |paths| &mut paths.better_since,
@@ -1938,7 +1955,12 @@ impl PeerPaths {
     /// pair is not busy and the path is not queuing (section 8.2). From the obfuscated path to the
     /// peer's own port only an obfuscated relay counts, so being faster never gives up obfuscation.
     /// Pairs that switch together keep the order of path types.
-    fn check_faster_relay(&mut self, now: Instant, current_kind: PathKind) -> Option<Action> {
+    fn check_faster_relay(
+        &mut self,
+        now: Instant,
+        active: bool,
+        current_kind: PathKind,
+    ) -> Option<Action> {
         // A queue on the way (late in-tunnel replies) slows every path alike: no relay is faster then
         let queuing = self
             .last_late_reply
@@ -1968,6 +1990,7 @@ impl PeerPaths {
         // take turns); the switch goes to the fastest when the hold ends
         let (i, _, since) = self.held_improvement(
             now,
+            active,
             (FASTER_RELAY_RATIO, FASTER_RELAY_MIN_MS),
             &faster,
             |paths| &mut paths.faster_since,
@@ -2483,6 +2506,57 @@ mod tests {
 
     /// With both legs of the relay reported, the loss also makes direct score far worse than the
     /// relay, and the rule for a much faster relay may leave it first; the way back is held the same.
+    /// A relay is probed every 15 seconds while the pair is direct, so one probe it lost by chance
+    /// stays in its loss for minutes and costs it 50 ms of score: when direct then becomes slow, a
+    /// loss check measures the relay before that loss decides, and the pair moves to it after the
+    /// usual hold (design/mesh.md section 8.2, design/prototype.md scenario 25).
+    #[test]
+    fn a_chance_loss_on_a_sparsely_probed_relay_does_not_hold_it_back() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.rtt[1] = 50 * MS;
+        sim.far_leg[1] = Some(Duration::ZERO);
+        sim.run(Duration::from_secs(90));
+        // One relay probe is lost, then the relay answers again
+        sim.up[1] = false;
+        sim.run(Duration::from_secs(15));
+        sim.up[1] = true;
+        sim.run(Duration::from_secs(40));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        assert!(sim.paths.candidates[1].stats.loss_rate() > 0.0);
+        let slow = sim.now;
+        sim.rtt[0] = 151 * MS;
+        sim.run(Duration::from_secs(60));
+        let (at, to, _, reason) = *sim.switches.first().expect("moved to the relay");
+        assert_eq!((to, reason), (relay(1), SwitchReason::BetterScore));
+        let took = at.saturating_duration_since(slow);
+        assert!(took <= Duration::from_secs(40), "took {took:?}");
+    }
+
+    /// A much faster relay that does lose packets is measured once a minute at most, and its
+    /// measured loss keeps it from being taken.
+    #[test]
+    fn a_faster_relay_that_loses_is_measured_once_a_minute() {
+        let mut sim = Sim::new(vec![
+            (direct(), PathKind::Direct),
+            (relay(1), PathKind::Relay),
+        ]);
+        sim.rtt[1] = 50 * MS;
+        sim.far_leg[1] = Some(Duration::ZERO);
+        sim.run(Duration::from_secs(90));
+        sim.loss[1] = 0.2;
+        sim.rtt[0] = 151 * MS;
+        let probes = sim.candidate_probes;
+        sim.run(Duration::from_secs(5 * 60));
+        assert!(sim.switches.is_empty(), "{:?}", sim.switches);
+        // Five checks of both paths and the usual probes, where a check every 10 seconds would send
+        // about 2,400
+        let sent = sim.candidate_probes - probes;
+        assert!(sent <= 600, "sent {sent}");
+    }
+
     #[test]
     fn a_path_left_for_a_faster_relay_while_lossy_is_held_too() {
         let mut sim = Sim::new(vec![

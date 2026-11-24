@@ -101,12 +101,12 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 
 **Holds**: a pair leaves a path only for a failure that another path can help, and returns only on evidence that covers the condition it left for. A hold waits on the improvement, not on one candidate. A re-handshake counts as done only when WireGuard confirms it.
 
-**Breaks when** queueing is read as loss (every path shares the bottleneck); a loss at one end of the pair, or on a link every path shares, is read as the current path's, a candidate's few probes look clean by chance, and the pair leaves for it and a better score brings it back; a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure; a failover target is chosen on replies from before the failure, so the relay that stopped with the current path is taken again over its other transport; a two-ended switch is proposed through a tunnel that has not answered on the current path, and the decider switches alone; an outage the follower measured on the path it is leaving is acted on after it carried out the decider's proposal, and it waits for another proposal and then rotates away on its own.
+**Breaks when** queueing is read as loss (every path shares the bottleneck); a loss at one end of the pair, or on a link every path shares, is read as the current path's, a candidate's few probes look clean by chance, and the pair leaves for it and a better score brings it back; a candidate's sparse probes keep a loss it had by chance, which holds a much faster path back; a lossy path answers a few probes and looks recovered; two equal candidates take turns at being the best and each turn starts a hold again; a late packet on the old path or a peer under load makes a re-handshake miss, and the miss is read as a failure; a failover target is chosen on replies from before the failure, so the relay that stopped with the current path is taken again over its other transport; a two-ended switch is proposed through a tunnel that has not answered on the current path, and the decider switches alone; an outage the follower measured on the path it is leaving is acted on after it carried out the decider's proposal, and it waits for another proposal and then rotates away on its own.
 
 **Where it holds**
 
 - Late replies are queueing, not loss, and a path whose peer's packets still arrive has not failed (mesh.md sections 7 and 8.2);
-- While the pair loses packets, a check of 40 probes measures the candidates and the current path alike: the pair leaves for loss only for a candidate measured clean, and compares one that loses alike without the loss, so a loss every path shares moves nothing and a much faster path is still taken (mesh.md section 8.2);
+- Before a candidate's score decides a switch, a check of 40 probes measures the candidates and the current path alike, and a candidate's score counts the loss it showed there: the pair leaves for loss only for a candidate measured clean, and compares one that loses alike without the loss, so a loss every path shares moves nothing, a much faster path is still taken, and a loss a candidate had by chance does not hold it back (mesh.md section 8.2);
 - A path left while losing packets returns, by whichever rule, only once at most 2 of its last 60 probes are lost (mesh.md section 8.2);
 - The 30-second holds last while some candidate qualifies, and the switch goes to the best one when they end (mesh.md section 8.2);
 - After a re-handshake, completion is confirmed and the handshake repeated once on the same relay; a peer under load gets the time WireGuard's cookie retry needs (mesh.md section 8.4);
@@ -126,6 +126,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-mesh:late_tunnel_replies_keep_a_congested_path`
 - `nett-mesh:a_loss_every_path_shares_does_not_move_the_pair`
 - `nett-mesh:a_loss_every_path_shares_leaves_the_comparison_to_latency`
+- `nett-mesh:a_chance_loss_on_a_sparsely_probed_relay_does_not_hold_it_back`
+- `nett-mesh:a_faster_relay_that_loses_is_measured_once_a_minute`
 - `nett-mesh:a_path_left_for_loss_returns_once_its_loss_is_low`
 - `nett-mesh:a_relay_left_for_loss_returns_only_once_its_loss_is_low`
 - `nett-mesh:a_path_left_for_a_faster_relay_while_lossy_is_held_too`
