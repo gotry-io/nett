@@ -113,6 +113,8 @@ The virtual machine runs other workloads, so CPU differences of about 10% are wi
 
 Idle memory (scenario 21 on `machine-obfs.toml`, 600 s after load): b's nett daemon, on the userspace data plane with its obfuscated port, holds 1.6 MB of anonymous pages, the kernel WireGuard and userspace clients 1.6-1.7 MB. The round trip, the CPU at the same rate and idle memory are within the bounds; the throughput is not. With both ends and the kernel on one CPU, the userspace data plane on the receiving end alone takes up to a quarter of a 1 Gbit/s path, and obfuscated UDP to its port reaches 48-76% of plain kernel WireGuard; a path that carries less than about 600 Mbit/s is not held back. Batched receive and send in the userspace data plane on Linux (userspace.md section 9) is what raises that limit.
 
+**Across a real border** (after the release; a 1-vCPU machine abroad offering its own port, reached at about 150 ms by two machines across the border on kernel WireGuard, through the obfuscated transport's loopback port; about 37 MB in all): the machine's plain WireGuard port answered none of their probes, while its obfuscated port, on the same address, lost none and answered 2-14 ms faster than the path through the relay on the same machine; transfers from the machine abroad ran at 31-34 Mbit/s, and to it at the rate of each sender's uplink, 2.8 and 8.7 Mbit/s; its nett daemon held 1.4 MB of anonymous pages. A relay that offers no obfuscated port could not reach that machine at all: its leg went to the blocked plain port (section 2).
+
 ## 10. Verification
 
 | Level | Content |
