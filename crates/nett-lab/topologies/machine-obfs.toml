@@ -1,0 +1,50 @@
+# Scenario 33: b is public and offers its own obfuscated port; a (kernel WireGuard) and c (userspace
+# data plane) are behind cone NATs and reach it directly over that port, or through r1, which also
+# offers obfuscated UDP and TLS. A fault on b drops every plain WireGuard message to and from it.
+# Scenario 21 runs on it too, to measure b's idle memory with its obfuscated port
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "dial-only"
+behind = "nat-a"
+
+[[node]]
+name = "c"
+reachability = "dial-only"
+behind = "nat-c"
+userspace = true
+
+[[node]]
+name = "b"
+reachability = "public"
+obfs = true
+
+[[node]]
+name = "r1"
+reachability = "public"
+roles = ["relay"]
+
+[[router]]
+name = "nat-a"
+nat = "cone"
+
+[[router]]
+name = "nat-c"
+nat = "cone"
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct-obfs", "direct", "relay-obfs:r1", "relay:r1", "relay-tls:r1"]
+
+[[link]]
+peers = ["c", "b"]
+candidates = ["direct-obfs", "direct", "relay-obfs:r1", "relay:r1", "relay-tls:r1"]
+
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
+[[allow]]
+from = ["a", "b", "c"]
+to = ["a", "b", "c"]

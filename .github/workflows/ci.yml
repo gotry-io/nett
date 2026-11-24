@@ -765,6 +765,7 @@ jobs:
             scenarios: |
               Scenario 27: the network drops the peer's WireGuard port toward a relay, and the pair stays off that relay | relay-port-block --topology crates/nett-lab/topologies/far-leg.toml
               Scenario 32: a censor blocks each port WireGuard is sent to, and the pair moves to obfuscated UDP and stays there, also after a restart | wireguard-block --topology crates/nett-lab/topologies/obfs.toml
+              Scenario 33: a machine's own obfuscated port, with plain WireGuard to it dropped, directly and through a relay, and the data plane following the port | machine-obfs --topology crates/nett-lab/topologies/machine-obfs.toml
               Scenario 25: a relay much faster than direct takes a quiet pair, and a bulk transfer moves it back | faster-relay --topology crates/nett-lab/topologies/failover.toml
           - group: nat
             title: NAT, hole punching, MTU and access control

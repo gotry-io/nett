@@ -52,6 +52,7 @@ const USAGE: &str = "usage:
   nett-lab run relay-port-block --topology far-leg.toml --nett <path/to/nett> --out <dir>
       (what leaves b's WireGuard port toward r1 is dropped: the pair settles on r2 and stays there)
   nett-lab run wireguard-block --topology obfs.toml --nett <path/to/nett> --out <dir>
+  nett-lab run machine-obfs --topology machine-obfs.toml --nett <path/to/nett> --out <dir>
       (a censor blocks each port a sends WireGuard to: the pair moves to obfuscated UDP and stays)
   nett-lab run lossy-direct --topology failover.toml --nett <path/to/nett> --out <dir>
       (the direct path loses 20% for five minutes: the pair leaves it once and returns when the loss ends)
@@ -227,6 +228,7 @@ fn run() -> anyhow::Result<bool> {
                 "faster-relay" => scenario::faster_relay(&topology, &nett()?, &out)?,
                 "relay-port-block" => scenario::relay_port_block(&topology, &nett()?, &out)?,
                 "wireguard-block" => scenario::wireguard_block(&topology, &nett()?, &out)?,
+                "machine-obfs" => scenario::machine_obfs(&topology, &nett()?, &out)?,
                 "lossy-direct" => scenario::lossy_direct(&topology, &nett()?, &out)?,
                 "port-change" => scenario::port_change(&topology, &nett()?, &out)?,
                 "roaming" => scenario::roaming(

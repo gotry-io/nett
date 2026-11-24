@@ -80,6 +80,8 @@ pub const RELAY_TLS_PORT: u16 = 443;
 
 /// Obfuscated port of nett-relay in lab runs (design/obfuscation.md section 2).
 pub const RELAY_OBFS_PORT: u16 = 41910;
+/// A machine's own obfuscated port in lab runs (ADR 0031).
+pub const MACHINE_OBFS_PORT: u16 = 41920;
 /// The lab site's padding range for obfuscated UDP (design/obfuscation.md section 4).
 const OBFS_PADDING: ObfsPadding = ObfsPadding { min: 16, max: 200 };
 
@@ -516,7 +518,29 @@ pub fn generate(
         .filter(|(_, over)| *over == Over::Obfs)
         .map(|(relay, _)| (relay.to_owned(), random_token()))
         .collect();
-    let relays = relay_docs(topo, addresses, &nodes, &tokens, &fingerprints, &obfs_keys)?;
+    // Nodes that offer their own obfuscated port: one key each (design/obfuscation.md section 4)
+    let machine_keys: BTreeMap<String, [u8; 32]> = topo
+        .nodes
+        .iter()
+        .filter(|n| n.obfs)
+        .map(|n| (n.name.clone(), random_token()))
+        .collect();
+    let machine_port = |name: &str| {
+        machine_keys.get(name).map(|key| ObfsPortDoc {
+            port: MACHINE_OBFS_PORT,
+            key: ObfsSecret(*key),
+            padding: OBFS_PADDING,
+        })
+    };
+    let relays = relay_docs(
+        topo,
+        addresses,
+        &nodes,
+        &tokens,
+        &fingerprints,
+        &obfs_keys,
+        &machine_port,
+    )?;
 
     let access_rules = signer.access_rules(topo, &nodes, &edges)?;
     let names: BTreeMap<NodeId, NodeName> = nodes
@@ -579,6 +603,18 @@ pub fn generate(
                             token: ProbeToken(tokens[&(node.name.clone(), relay.to_owned())]),
                         }),
                         None if c == "punch" => Some(Candidate::Punch),
+                        // The peer's own obfuscated port, at its public address
+                        None if c == "direct-obfs" => {
+                            let port = machine_port(other)?;
+                            Some(Candidate::DirectObfs {
+                                endpoint: SocketAddr::new(
+                                    addresses.public_ipv4(other)?.into(),
+                                    port.port,
+                                ),
+                                key: port.key,
+                                padding: port.padding,
+                            })
+                        }
                         // Direct candidate: when the peer is on the "public network" it is its
                         // public address; `direct6` is its IPv6 address. Only points to public
                         // nodes: the port of a dial-only node is assigned by the system, and it
@@ -626,7 +662,7 @@ pub fn generate(
             devices: vec![],
             names: names.clone(),
             relay: relays.get(&node.name).cloned(),
-            obfs: None,
+            obfs: machine_port(&node.name),
         };
         write_json(&nodes[i].dir.join("desired.json"), &doc)?;
         if i == 0 {
@@ -736,6 +772,7 @@ fn relay_docs(
     tokens: &BTreeMap<(String, String), [u8; 32]>,
     fingerprints: &BTreeMap<String, CertFingerprint>,
     obfs_keys: &BTreeMap<String, [u8; 32]>,
+    machine_port: &dyn Fn(&str) -> Option<ObfsPortDoc>,
 ) -> anyhow::Result<BTreeMap<String, RelayDoc>> {
     let id_of = |name: &str| {
         nodes
@@ -768,7 +805,8 @@ fn relay_docs(
                         .public_ipv4(member)
                         .map(|ip| SocketAddr::new(ip.into(), LISTEN_PORT)),
                     token: ProbeToken(tokens[&(member.clone(), relay.name.clone())]),
-                    obfs: None,
+                    // A relay with an obfuscated port reaches a member's own one
+                    obfs: machine_port(member).filter(|_| obfs_keys.contains_key(&relay.name)),
                 });
             }
             links.push([id_of(&link.peers[0])?, id_of(&link.peers[1])?]);

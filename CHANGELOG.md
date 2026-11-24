@@ -11,6 +11,18 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 - On Linux the userspace data plane filters, translates Edge addresses and forwards with the
   kernel's nftables, as kernel WireGuard does: a machine on it can be an Edge host, advertise
   routes and carry devices.
+- `nett site set <machine> --obfs` gives a public machine an obfuscated UDP port of its own beside
+  its WireGuard port, on a random port unless `--obfs-port` gives one. The machine that decides a
+  connection to it reaches it there first after the LAN paths, without a relay, so the first
+  handshake is already obfuscated; `nett status` shows that path as `direct (obfs)`. A relay that
+  offers obfuscated UDP reaches such a machine through its port too, so neither leg is plain. On
+  Linux the machine runs nett's userspace data plane while it offers the port, and nett starts
+  again once to change data plane when the port is added or removed; the change listing says so
+  and names the port to open in its firewall. In the lab, with everything on one CPU, a path to
+  such a port carried about 440-690 Mbit/s where plain kernel WireGuard carried 900. Offering it needs the Hub and every machine on this
+  release; the command names the ones that are not.
+- Obfuscated UDP through the relay on a peer's own machine ranks with the other paths through
+  relays, after the plain direct path: the peer's own obfuscated port takes its place.
 
 ## [0.10.0] - 2026-11-24
 

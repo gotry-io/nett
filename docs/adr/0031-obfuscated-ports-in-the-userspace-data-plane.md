@@ -21,7 +21,7 @@ What comparable products do:
 - **Linux keeps the kernel's netfilter**: on Linux the userspace data plane applies the filter, Edge source address translation, anti-spoofing and forwarding with the same nftables rules as the kernel data plane, on its TUN interface, as Tailscale does; in-process filtering stays for platforms without nftables (macOS, Synology DSM) (design/userspace.md);
 - **The data plane follows the desired state**: a Linux machine with kernel WireGuard runs it unless its desired state offers an obfuscated port; the daemon restarts to change data plane, as an upgrade does;
 - **Senders**: a machine on the userspace data plane wraps on its own WireGuard socket what it sends to a peer's obfuscated port; a machine on kernel WireGuard reaches it through a loopback port of the obfuscated transport (ADR 0030);
-- **Paths**: the obfuscated path to a machine's own port ranks after LAN paths and before the plain direct path, in the place of the path through the relay on the peer's machine;
+- **Paths**: the obfuscated path to a machine's own port ranks after LAN paths and before the plain direct path, in the place of the path through the relay on the peer's machine. The port is the user's choice for that machine, so this order holds whatever the cost measured (design/obfuscation.md section 9), as Mullvad uses an obfuscation method the user sets from the first connection while its automatic mode tries plain WireGuard first (mullvadvpn-app `b94efb5f52`, `mullvad-relay-selector/src/relay_selector/mod.rs`);
 - **Relays**: keep their obfuscated port for relayed paths, and forward to a member that offers an obfuscated port through that port, so both legs of a relayed path are obfuscated; the relay and its ports run in the nett daemon (ADR 0032);
 - **Hard rule 2** lets the nett daemon listen on the machine's obfuscated port beside its WireGuard port, on UDP as all its public ports (ADR 0032): every datagram there is opened with the site's key before anything else reads it, and only authenticated probes and handshakes get an answer.
 
@@ -41,7 +41,8 @@ What comparable products do:
 
 ## Consequences
 
-- A machine that offers an obfuscated port loses what kernel WireGuard gives across restarts: its connections pause for the seconds a restart or an upgrade takes (userspace.md section 6.3), and each packet costs more CPU, measured before the release;
+- A machine that offers an obfuscated port loses what kernel WireGuard gives across restarts: its connections pause for the seconds a restart or an upgrade takes (userspace.md section 6.3);
+- Each packet costs more CPU: with the whole lab on one CPU, obfuscated UDP to a machine's port reaches 48-76% of plain kernel WireGuard on a 1 Gbit/s path, a path below about 600 Mbit/s is not held back, and the round trip and the CPU at the same rate stay within bounds (design/obfuscation.md section 9). Until the userspace data plane receives and sends in batches, its receive capacity under a flood is also lower than kernel WireGuard's (userspace.md section 9);
 - One public UDP port more per machine that offers one, opened in its firewall once;
 - Synology DSM offers an obfuscated port once its userspace data plane forwards (roadmap stage 8);
 - ADR 0030's format, keys, relay port and record of blocked endpoints stay; its path through the relay on the peer's machine gives way to the machine's own port.

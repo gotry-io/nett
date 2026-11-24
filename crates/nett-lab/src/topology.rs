@@ -42,6 +42,10 @@ pub struct Node {
     /// default.
     #[serde(default)]
     pub userspace: bool,
+    /// A `public` node that offers an obfuscated port beside its WireGuard port (ADR 0031): its
+    /// nett daemon runs the userspace data plane for it.
+    #[serde(default)]
+    pub obfs: bool,
     /// Lab B (real machines, design/prototype.md section 5.2): SSH host name, plus public IPv4
     /// (`public` nodes) and global IPv6 address. Lab A's addresses are decided by this machine's
     /// network plan, so these items are not written.
@@ -274,6 +278,14 @@ impl Topology {
                 parse_ports(port)?;
             }
         }
+        for node in self.nodes.iter().filter(|n| n.obfs) {
+            ensure!(
+                node.reachability == nett_mesh::config::Reachability::Public
+                    && node.behind.is_none(),
+                "node `{}` offers an obfuscated port, which needs a public node",
+                node.name
+            );
+        }
         for link in &self.links {
             for peer in &link.peers {
                 ensure!(
@@ -284,6 +296,12 @@ impl Topology {
             for candidate in &link.candidates {
                 match crate::material::relay_of(candidate) {
                     None if candidate == "direct" || candidate == "direct6" => {}
+                    None if candidate == "direct-obfs" => ensure!(
+                        link.peers
+                            .iter()
+                            .any(|p| self.nodes.iter().any(|n| &n.name == p && n.obfs)),
+                        "candidate `direct-obfs` needs a peer that offers an obfuscated port"
+                    ),
                     // Hole punching: both ends are dial-only (design/mesh.md section 6.1)
                     None if candidate == "punch" => ensure!(
                         link.peers

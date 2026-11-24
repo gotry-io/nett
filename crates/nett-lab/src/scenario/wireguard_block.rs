@@ -189,7 +189,7 @@ pub fn wireguard_block(topology: &Path, nett: &Path, out: &Path) -> anyhow::Resu
 }
 
 /// Waits until a's path to b is of a kind `want` accepts, and returns the status that shows it.
-fn wait_path(
+pub(super) fn wait_path(
     nett: &Path,
     a: &LabNode,
     b: &LabNode,
@@ -245,7 +245,7 @@ fn wait_state(
 }
 
 /// a's candidates toward b with what was measured of each.
-fn candidates(status: &StatusDoc, b: &LabNode) -> String {
+pub(super) fn candidates(status: &StatusDoc, b: &LabNode) -> String {
     status
         .peers
         .iter()

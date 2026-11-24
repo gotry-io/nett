@@ -263,7 +263,28 @@ pub fn block_udp_port_toward(name: &str, port: u16, to: &[std::net::IpAddr]) -> 
     Ok(())
 }
 
-/// Lifts [`block_udp`], [`block_udp_with`] or [`block_udp_port_toward`].
+/// Drops every plain WireGuard message to and from the node, on any port, outside the mesh
+/// interface: stands in for a censor that identified its WireGuard traffic, so only obfuscated UDP
+/// reaches it (design/obfuscation.md section 1).
+pub fn drop_plain_wireguard(name: &str) -> anyhow::Result<()> {
+    let ns = crate::net::netns(name);
+    let wireguard = "meta l4proto udp @th,64,8 1-4 @th,72,24 0 drop";
+    let rules = format!(
+        "table inet {FAULT_TABLE} {{\n\
+         chain in {{ type filter hook prerouting priority -300; iifname != \"nett0\" {wireguard}; }}\n\
+         chain out {{ type filter hook output priority 0; oifname != \"nett0\" {wireguard}; }}\n\
+         }}\n"
+    );
+    run_with_input(
+        "ip",
+        ["netns", "exec", &ns, "nft", "-f", "-"],
+        Some(rules.as_bytes()),
+        COMMAND_TIMEOUT,
+    )?;
+    Ok(())
+}
+
+/// Lifts [`block_udp`], [`block_udp_with`], [`block_udp_port_toward`] or [`drop_plain_wireguard`].
 pub fn unblock_udp(name: &str) -> anyhow::Result<()> {
     let ns = crate::net::netns(name);
     run(

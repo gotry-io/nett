@@ -1,0 +1,25 @@
+# The cost of a machine's own obfuscated port (design/obfuscation.md section 9, ADR 0031): as
+# direct.toml, with b offering an obfuscated port and the one candidate going there; b runs the
+# userspace data plane for it. Run the throughput scenario on both and compare
+
+[mesh]
+ipv4 = "100.88.0.0/16"
+ipv6 = "fd00:88::/48"
+
+[[node]]
+name = "a"
+reachability = "public"
+
+[[node]]
+name = "b"
+reachability = "public"
+obfs = true
+
+[[link]]
+peers = ["a", "b"]
+candidates = ["direct-obfs"]
+
+# Scenarios send and receive between these members (access is denied by default, ADR 0023)
+[[allow]]
+from = ["a", "b"]
+to = ["a", "b"]

@@ -19,6 +19,7 @@ mod faster_relay;
 mod hub;
 mod hub_relay;
 mod lossy_direct;
+mod machine_obfs;
 mod port_block;
 mod port_change;
 mod serve;
@@ -29,6 +30,7 @@ pub use faster_relay::faster_relay;
 pub use hub::{hub, leave_here};
 pub use hub_relay::hub_relay;
 pub use lossy_direct::lossy_direct;
+pub use machine_obfs::machine_obfs;
 pub use port_block::relay_port_block;
 pub use port_change::port_change;
 pub use serve::serve;
@@ -461,6 +463,28 @@ impl Lab {
     fn restart_relay(&mut self, node: &LabNode, nett: &Path) -> anyhow::Result<()> {
         self.stop(&node.name)?;
         self.spawn(node, nett)
+    }
+
+    /// Waits for a node's nett daemon to exit on its own, as it does to start on the other data
+    /// plane (design/userspace.md section 4.2); the lab then starts it, as the service manager does.
+    fn wait_exit(&mut self, name: &str, within: Duration) -> anyhow::Result<()> {
+        let i = self
+            .processes
+            .iter()
+            .position(|(n, _)| n == name)
+            .context("no such process")?;
+        let deadline = Instant::now() + within;
+        loop {
+            if self.processes[i].1.try_wait()?.is_some() {
+                self.processes.remove(i);
+                return Ok(());
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "{name}'s nett daemon did not exit within {within:?}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Ends a node's nett daemon and waits for it to exit.

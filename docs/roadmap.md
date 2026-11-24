@@ -117,7 +117,6 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 [design/mesh.md](design/mesh.md) section 10; ADR 0017.
 
 - [ ] LAN smart gateway: subnet router with source NAT by source class, on Linux and DSM
-- [ ] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`), before userspace members that are reachable from outside (design/userspace.md section 9)
 - [ ] Home Assistant OS add-on, which can act as a smart gateway, and its add-on repository
 
 ### 9. Several signing devices
@@ -150,7 +149,8 @@ Checked items are met; the others name the stage that verifies them.
   - [x] The format, relays' obfuscated port, the record of blocked endpoints, scenario 32 and the cost measured in the lab (0.10.0)
   - [x] The relay runs in the nett daemon, and nett-relay only terminates its public TCP (ADR 0032)
   - [x] On Linux, the userspace data plane applies the kernel data plane's nftables rules on its TUN: filter, Edge, forwarding (userspace.md section 4.2)
-  - [ ] A machine's own obfuscated port in the userspace data plane, the data plane following the desired state, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
+  - [x] A machine's own obfuscated port in the userspace data plane, the data plane following the desired state, and relays reaching members through theirs (ADR 0031); the cost measured again with the receiving end on the userspace data plane, on one CPU
+  - [ ] Batched receive and send in the userspace data plane on Linux (`recvmmsg`, `sendmmsg`): the throughput of a machine that offers an obfuscated port, and the receive capacity of a userspace member reachable from outside under a flood (design/userspace.md section 9, design/obfuscation.md section 9)
 - Then QUIC transport and UDP support for CONNECT
 - Hole punching when both sides are behind symmetric NAT (port guessing)
 

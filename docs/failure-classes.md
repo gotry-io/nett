@@ -67,7 +67,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The version of a machine's advertised routes keeps counting after all of them are removed (site.md section 5.2);
 - A new desired state that changes a pair's candidates keeps the pair on the path it uses, with what was measured and reported of it, instead of starting the pair over: one end of a two-ended pair starting from the first relay while the other stays split the pair until it met again (mesh.md section 8.4);
 - `nett site status` lists the problems of a machine that applied the latest push from the status it reports every 15 seconds, not from the reason it gave when applying, which describes that moment only (hub.md section 3.4);
-- launchd keeps the configuration it loaded: `sudo nett install` compares the fingerprint the loaded service carries with the current configuration, not the file, which the service itself rewrites after an upgrade (release.md section 7).
+- launchd keeps the configuration it loaded: `sudo nett install` compares the fingerprint the loaded service carries with the current configuration, not the file, which the service itself rewrites after an upgrade (release.md section 7);
+- On Linux the data plane follows the desired state: the daemon starts on the userspace data plane when the desired state it starts from gives the machine an obfuscated port and on kernel WireGuard otherwise, and an accepted desired state that needs the other one is saved and the daemon exits to start on it; the userspace data plane takes over the interface and probe copy rules kernel WireGuard left (userspace.md section 4.2).
 
 **Guards**
 
@@ -91,7 +92,8 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `ci:sudo nett install <token> (join the Hub, needs root)` (the service rewrites a launchd configuration that differs)
 - `nett-node:the_loaded_service_shows_the_fingerprint_of_its_configuration`
 - `ci:Full flow of sudo nett install (needs root)` (an older configuration loaded with the file current is loaded again)
-- `lab:port-change`, `lab:relay-restart`
+- `nett-mesh:a_desired_state_for_the_other_data_plane_is_saved_and_asks_for_a_restart`
+- `lab:port-change`, `lab:relay-restart`, `lab:machine-obfs`
 
 **Not yet guarded**: the restart of the relay by `sudo nett install` with a new program. It needs a second, different build of nett installed as root in one CI job, which the install flow does not build; until it does, it is watched when each release is installed on real machines.
 

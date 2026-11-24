@@ -156,7 +156,7 @@ vps-02    100.88.0.6  connected    direct              31 ms   <1%   12s ago
 ```
 
 - The header is this machine, one item per line; items that do not apply are not shown (for example there is no `edge` line without the `edge` role, and a `public` node has no `nat` line);
-- Peers are sorted by name; `PATH` shows the type and the relay it goes through, and a direct path obtained by hole punching is shown as `direct (punched)`;
+- Peers are sorted by name; `PATH` shows the type and the relay it goes through, and a direct path obtained by hole punching is shown as `direct (punched)`, one to the peer's own obfuscated port as `direct (obfs)`, and paths through a relay over obfuscated UDP or TLS as `relay <name> (obfs)` and `relay <name> (tls)`;
 - For peers where this machine is the follower (for example the `dial-only` peers of a `public` node), `RTT` and `LOSS` are `-`: only the decider measures, so look at the peer;
 - When there are `problems`, they are listed at the end, one per line, with a relative time:
 
