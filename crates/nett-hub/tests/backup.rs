@@ -66,7 +66,7 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
 
     // The machine asks for the backup when it connects, keeps it, and says so
     let kept = dir.join(nett_node::session::BACKUP_FILE);
-    let mut held = false;
+    let mut held = None;
     for _ in 0..200 {
         let (_, body) = call(&app, "GET", "/api/v1/site/status", Some(&token), vec![]).await;
         let reply: StatusResponse = serde_json::from_slice(&body).expect("status");
@@ -75,12 +75,20 @@ async fn a_machine_keeps_the_backup_and_the_hub_is_rebuilt_from_it() {
             .as_ref()
             .is_some_and(|b| b.held_by.contains(&"mac".to_owned()))
         {
-            held = true;
+            held = Some(reply);
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(held, "the Hub records that mac holds its backup");
+    let reply = held.expect("the Hub records that mac holds its backup");
+    // With the time mac confirmed it, up to which its copy holds the site (design/hub.md section 8.2)
+    let mac = reply
+        .machines
+        .iter()
+        .find(|m| m.name == "mac")
+        .expect("mac");
+    let backup = reply.backup.as_ref().expect("backup");
+    assert!(mac.backup_at.is_some_and(|at| at >= backup.made_at));
     assert_eq!(
         std::fs::metadata(&kept).expect("kept").permissions().mode() & 0o777,
         0o600

@@ -94,6 +94,14 @@
               "null"
             ]
           },
+          "backup_at": {
+            "description": "When the machine last confirmed it holds the Hub's latest backup (Unix seconds): its copy\nholds the site as of then (design/hub.md section 8.2). Empty when it holds none.",
+            "format": "int64",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "last_seen": {
             "format": "int64",
             "type": [

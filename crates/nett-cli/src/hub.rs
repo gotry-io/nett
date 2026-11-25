@@ -15,8 +15,8 @@ use nett_core::name::NodeName;
 use nett_mesh::status::{CandidateStateDoc, PathKindDoc, PeerState, StatusDoc};
 use nett_node::http::{Target, call};
 use nett_proto::api::{
-    EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus, PushResponse,
-    SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
+    BackupStatus, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus,
+    PushResponse, SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
 };
 use nett_proto::token::{Bytes32, Enroll, JoinToken, LinkCode, Secret32};
 use nett_site::changes::path_kind;
@@ -500,12 +500,7 @@ pub fn status(
         return Ok(());
     }
     let backup = match (&reply.backup, state.backup_key) {
-        (Some(b), _) => format!(
-            "made {}, kept by {} of {} machines",
-            crate::status::ago(Timestamp::from_unix_seconds(b.made_at), Timestamp::now()),
-            b.held_by.len(),
-            reply.machines.len()
-        ),
+        (Some(b), _) => backup_text(b, &reply.machines, Timestamp::now()),
         (None, Some(_)) => "none yet: machines ask for it when they connect".to_owned(),
         (None, None) => "no backup key: the Hub makes backups after `nett site link`".to_owned(),
     };
@@ -698,6 +693,47 @@ fn public_text(state: &State, name: &NodeName) -> Option<String> {
     })
 }
 
+/// How many machines hold a Hub backup and how current the oldest copy is (design/hub.md section
+/// 8.2): a machine's copy holds the site as of the time it last confirmed it held the latest one.
+fn backup_text(backup: &BackupStatus, machines: &[MachineStatus], now: Timestamp) -> String {
+    let made = crate::status::ago(Timestamp::from_unix_seconds(backup.made_at), now);
+    let total = machines.len();
+    // A Hub of the release before sends no confirmation times, only who holds the latest backup
+    if machines.iter().all(|m| m.backup_at.is_none()) {
+        return format!(
+            "made {made}, kept by {} of {total} machines",
+            backup.held_by.len()
+        );
+    }
+    let mut none: Vec<&str> = machines
+        .iter()
+        .filter(|m| m.backup_at.is_none())
+        .map(|m| m.name.as_str())
+        .collect();
+    none.sort_unstable();
+    let kept = if none.is_empty() {
+        format!("kept by all {total} machines")
+    } else {
+        format!(
+            "kept by {} of {total} machines (none on {})",
+            total - none.len(),
+            none.join(", ")
+        )
+    };
+    let oldest = machines
+        .iter()
+        .filter_map(|m| Some((m.backup_at?, m.name.as_str())))
+        .min()
+        .map(|(at, name)| {
+            format!(
+                ", the oldest current as of {} ({name})",
+                crate::status::ago(Timestamp::from_unix_seconds(at), now)
+            )
+        })
+        .unwrap_or_default();
+    format!("made {made}, {kept}{oldest}")
+}
+
 /// What needs attention on a machine (design/hub.md section 3.4). Problems left after applying a
 /// push are taken from the status the machine reports every 15 seconds, which shows whether they
 /// have healed since; the reason it gave when it applied describes that moment only. A push it
@@ -851,7 +887,51 @@ mod tests {
             status_at: None,
             upgrade_result: None,
             upgrade_reason: None,
+            backup_at: None,
         }
+    }
+
+    /// The backup line counts every machine that holds a copy and names how current the oldest
+    /// one is, from the time each machine last confirmed it held the latest backup, and the
+    /// machines that hold none (design/hub.md section 8.2). A machine that took the latest one first
+    /// does not make the others' copies count as missing.
+    #[test]
+    fn the_backup_line_counts_every_copy_and_names_the_oldest() {
+        let now = Timestamp::from_unix_seconds(1_795_570_000);
+        let held = |name: &str, hours_ago: Option<i64>| MachineStatus {
+            name: name.into(),
+            backup_at: hours_ago.map(|h| now.unix_seconds() - h * 3600),
+            ..machine(true, None, None)
+        };
+        let backup = BackupStatus {
+            made_at: now.unix_seconds() - 3600,
+            bytes: 267_766,
+            held_by: vec!["edge-vps".into()],
+        };
+        let all = [
+            held("edge-vps", Some(1)),
+            held("vps-02", Some(2)),
+            held("mac", Some(1)),
+        ];
+        assert_eq!(
+            backup_text(&backup, &all, now),
+            "made 1h ago, kept by all 3 machines, the oldest current as of 2h ago (vps-02)"
+        );
+        let some = [
+            held("edge-vps", Some(1)),
+            held("vps-03", None),
+            held("nas", None),
+        ];
+        assert_eq!(
+            backup_text(&backup, &some, now),
+            "made 1h ago, kept by 1 of 3 machines (none on nas, vps-03), the oldest current as of \
+             1h ago (edge-vps)"
+        );
+        let older_hub = [held("edge-vps", None), held("vps-02", None)];
+        assert_eq!(
+            backup_text(&backup, &older_hub, now),
+            "made 1h ago, kept by 1 of 2 machines"
+        );
     }
 
     /// A machine's reported status with these problems.

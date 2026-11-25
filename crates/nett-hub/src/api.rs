@@ -320,6 +320,9 @@ pub(crate) async fn status(AxumState(hub): AxumState<Arc<Hub>>, headers: HeaderM
                 upgrade_reason: row
                     .and_then(|r| r.upgrade_reason.clone())
                     .filter(|r| !r.is_empty()),
+                backup_at: row
+                    .filter(|r| r.backup_sha256.is_some())
+                    .and_then(|r| r.backup_at),
             });
         }
     }

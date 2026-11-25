@@ -107,6 +107,10 @@ pub struct MachineStatus {
     pub upgrade_result: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade_reason: Option<String>,
+    /// When the machine last confirmed it holds the Hub's latest backup (Unix seconds): its copy
+    /// holds the site as of then (design/hub.md section 8.2). Empty when it holds none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_at: Option<i64>,
 }
 
 /// API errors (design/api-resources.md section 2).
