@@ -4,6 +4,14 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `nett site status` no longer names a WireGuard port that answers no probe from machines that
+  reach the machine over its obfuscated port, and names the machines the port does answer, for
+  which only an obfuscated port helps.
+- On a machine that offers an obfuscated port, `nett status` shows a peer that reaches it there as
+  `direct (obfs)`, where it showed `direct`.
+- The backup line of `nett site status` counts every machine that holds a copy and says how
+  current the oldest is; it counted only the machines that held the newest copy, often just one.
+
 ## [0.11.2] - 2026-11-24
 
 - When a machine on the userspace data plane restarts, as one that offers an obfuscated port does on
