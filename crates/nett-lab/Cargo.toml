@@ -16,11 +16,12 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
-lexopt.workspace = true
 # The output macros, on every platform
 nett-core.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# Arguments of the lab scenarios, which run only on Linux
+lexopt.workspace = true
 nett-mesh.workspace = true
 nett-relay.workspace = true
 # Hub scenarios (design/hub.md section 10): site state, join tokens, Hub configuration, and, when
