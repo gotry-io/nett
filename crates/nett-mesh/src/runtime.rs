@@ -45,7 +45,7 @@ use crate::status::{
 /// [`FAST_RECOVERY_INTERVAL`]: advancing immediately on receipt of a probe message disturbs the timing,
 /// so advancing more densely lets due probes and confirmations proceed in time.
 const TICK: Duration = Duration::from_millis(100);
-/// Interval for checking the local clock error (design/mesh.md section 8.4).
+/// Interval for checking whether the clock is synchronized (design/mesh.md section 8.4).
 const CLOCK_CHECK: Duration = Duration::from_secs(10);
 /// Upper limit of the background thread's message queue.
 const QUEUE: usize = 1024;

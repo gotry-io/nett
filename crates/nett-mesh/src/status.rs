@@ -189,7 +189,7 @@ pub struct NodeStatus {
     /// LAN addresses, from which the Hub composes LAN direct candidates (design/mesh.md section 6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lan: Vec<crate::lan::LanAddress>,
-    /// Clock error within 2 seconds (design/mesh.md section 8.4).
+    /// The system's time service keeps the clock synchronized (design/mesh.md section 8.4).
     pub clock_trusted: bool,
     pub started_at: Timestamp,
 }

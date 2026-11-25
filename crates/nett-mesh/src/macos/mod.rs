@@ -44,7 +44,8 @@ pub fn bind_to_interface(fd: BorrowedFd<'_>, index: u32, v6: bool) -> io::Result
     sys::bind_to_interface(fd, index, v6)
 }
 
-/// System clock; the error is the maximum error reported by the kernel (`ntp_gettime`).
+/// System clock, synchronized while the kernel reports it so (`ntp_gettime`) and its maximum error
+/// is below the limit Linux keeps: the macOS kernel lets the bound grow without one.
 pub struct SystemClock;
 
 impl crate::clock::Clock for SystemClock {
@@ -53,7 +54,8 @@ impl crate::clock::Clock for SystemClock {
     }
 
     fn trusted(&self) -> bool {
-        sys::max_clock_error().is_ok_and(|e| e <= crate::clock::MAX_TRUSTED_ERROR)
+        sys::clock_state()
+            .is_ok_and(|(e, unsynchronized)| crate::clock::synchronized(e, unsynchronized))
     }
 }
 

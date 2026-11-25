@@ -387,3 +387,19 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-hub:an_open_stream_brings_the_machines_samples`
 
 **Not yet guarded**: the bytes a site's machines send in a day with no view open, which depends on how often their paths really change; it is measured on real machines after each release that changes what a status holds.
+
+## 12. A bound is not the value it bounds
+
+**Holds**: a decision that needs a value reads the value, or a state that implies it, and says which; a worst-case bound on the value is not taken for the value.
+
+**Breaks when** the kernel's maximum clock error, which grows by the worst drift from the last synchronization, is read as the clock's error: a clock milliseconds off counts as unsynchronized about an hour after its time service last set it, gives up time slots and shows `clock not synchronized`.
+
+**Where it holds**
+
+- The clock counts as synchronized while the system's time service keeps it so: the bound below the kernel's own limit, and on macOS the kernel not reporting it unsynchronized (mesh.md section 8.4).
+
+**Guards**
+
+- `nett-mesh:a_synchronized_clock_is_trusted_whatever_its_bound`
+
+**Not yet guarded**: reading the kernel's values, one system call on each platform beside the rule; the lab's clock scenario (17) sets whether a clock is trusted rather than reading it.

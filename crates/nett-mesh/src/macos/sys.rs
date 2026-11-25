@@ -313,8 +313,9 @@ pub(crate) fn dump_gateway_routes() -> io::Result<Vec<u8>> {
     ))
 }
 
-/// The kernel's reported maximum clock error (`ntp_gettime`).
-pub(crate) fn max_clock_error() -> io::Result<Duration> {
+/// The kernel's reported maximum clock error, and whether it reports the clock unsynchronized
+/// (`ntp_gettime`).
+pub(crate) fn clock_state() -> io::Result<(Duration, bool)> {
     let mut t = libc::ntptimeval {
         time: libc::timespec {
             tv_sec: 0,
@@ -328,7 +329,10 @@ pub(crate) fn max_clock_error() -> io::Result<Duration> {
     // SAFETY: the pointer points to a local ntptimeval, and the kernel writes it only during the call
     check(unsafe { libc::ntp_gettime(&raw mut t) })?;
     let micros = u64::try_from(t.maxerror).map_err(io::Error::other)?;
-    Ok(Duration::from_micros(micros))
+    Ok((
+        Duration::from_micros(micros),
+        t.time_state == libc::TIME_ERROR,
+    ))
 }
 
 /// Opens the system log: afterwards [`syslog`] is tagged with `nett` and the process ID.

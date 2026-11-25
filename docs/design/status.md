@@ -165,7 +165,7 @@ vps-02    100.88.0.6  connected    direct              31 ms   <1%   12s ago
   2m ago  desired state rejected, still using the previous one: listen port 41821 is one nett itself uses on this host: …
   ```
 
-- When the clock error exceeds 2 seconds (mesh.md section 8.4), the header gets an extra line `clock  not synchronized`; when this machine is not among the admitted members, the `mesh` line reads `not admitted`;
+- When the system's time service does not keep the clock synchronized (mesh.md section 8.4), the header gets an extra line `clock  not synchronized`; when this machine is not among the admitted members, the `mesh` line reads `not admitted`;
 
 - Round-trip times under 10 milliseconds keep one decimal place and the rest are rounded to integers; loss rates are rounded to integers, and shown as `<1%` when below 1% but not 0; byte counts use decimal units (`13.2 MB`); relative times are written as `41s ago`, `5m ago`, `2h ago`, `3d ago`;
 - When output is not a terminal it is the same, not truncated and without color.

@@ -19,6 +19,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
   `direct (obfs)`, where it showed `direct`.
 - The backup line of `nett site status` counts every machine that holds a copy and says how
   current the oldest is; it counted only the machines that held the newest copy, often just one.
+- A machine's clock counts as synchronized while its time service keeps it so. It counted as not
+  synchronized once the kernel's bound on its error passed 2 seconds, which happens about an hour
+  after a synchronization on a clock milliseconds off, and the machine then gave up rotating by
+  time slot and showed `clock not synchronized`.
 
 ## [0.11.2] - 2026-11-24
 

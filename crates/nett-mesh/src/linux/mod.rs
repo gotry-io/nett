@@ -33,7 +33,10 @@ use crate::dataplane::{
 use crate::key::PrivateKey;
 use nett_core::prefix::IpPrefix;
 
-/// System clock; the error is the maximum error reported by the kernel ([`sys::max_clock_error`]).
+/// System clock, synchronized while the maximum error the kernel reports
+/// ([`sys::max_clock_error`]) is below its limit. `STA_UNSYNC` is not read: systemd-timesyncd sets it
+/// to keep the kernel from writing a real-time clock that runs in local time, as systemd's own check
+/// ignores it.
 pub struct SystemClock;
 
 impl crate::clock::Clock for SystemClock {
@@ -42,7 +45,7 @@ impl crate::clock::Clock for SystemClock {
     }
 
     fn trusted(&self) -> bool {
-        sys::max_clock_error().is_ok_and(|e| e <= crate::clock::MAX_TRUSTED_ERROR)
+        sys::max_clock_error().is_ok_and(|e| crate::clock::synchronized(e, false))
     }
 }
 
