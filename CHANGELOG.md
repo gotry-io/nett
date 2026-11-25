@@ -4,6 +4,8 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-25
+
 - `nett top` shows this machine and its peers live, refreshed every second: state, path, traffic
   in and out, round-trip time and loss, short charts, and each peer's candidate paths and events.
   `nett site top` shows every machine and every link between them the same way through the Hub,
