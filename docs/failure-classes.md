@@ -366,3 +366,24 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-core:a_serialized_configuration_carries_no_key`
 
 **Not yet guarded**: the redacted `Debug` of each key type; each is one implementation next to its type.
+
+## 11. What is sent on a change is a change in meaning
+
+**Holds**: what a machine sends because something changed is judged on the values that mean a change, not on counts, measurements and times that move at every reading. What moves at every reading goes at a slow pace, fast only while someone watches, and the fast pace ends when they stop.
+
+**Breaks when** a change is judged by comparing a whole document whose counts move, so that on change becomes always (the whole status every 15 seconds, about 50 MB a day for a machine with five peers); when a measurement that turns with single probes counts as a change (a candidate's answers across a lossy border, the NAT type); when a faster pace asked for a viewer outlives the viewer.
+
+**Where it holds**
+
+- nett-node reports its status when it changes, judged without its counts and measurements, the answers of candidates other than the current one, the NAT it measures and the times that move with them, and at least every 10 minutes (hub.md section 5);
+- Samples go only while a `SampleRequest` lasts, which the Hub renews only while a live view's stream is open, and which a machine holds to at least 1 second apart and at most 60 seconds (hub.md section 5, top.md section 6);
+- The Hub passes samples and reports only to open streams, and keeps none.
+
+**Guards**
+
+- `nett-node:reports_go_when_the_status_changes_not_when_counts_move`
+- `nett-node:sampling_follows_requests_within_bounds`
+- `nett-hub:streams_are_counted_and_capped`
+- `nett-hub:an_open_stream_brings_the_machines_samples`
+
+**Not yet guarded**: the bytes a site's machines send in a day with no view open, which depends on how often their paths really change; it is measured on real machines after each release that changes what a status holds.

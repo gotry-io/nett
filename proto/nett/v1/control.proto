@@ -26,6 +26,8 @@ message Envelope {
     Inventory inventory = 30;
     LinkReport link_report = 31;
     PathSwitch path_switch = 32;
+    SampleRequest sample_request = 33;
+    LinkSample link_sample = 34;
     BackupFetch backup_fetch = 50;
     Backup backup = 51;
     ProgramFetch program_fetch = 52;
@@ -147,9 +149,34 @@ message Inventory {
 }
 
 // node → Hub: the mesh's local status (JSON in design/status.md section 6), displayed by
-// nett site status
+// nett site status; sent when it changes, judged without the counts and measurements, and at least
+// every 10 minutes (design/hub.md section 5)
 message LinkReport {
   bytes status = 1;
+}
+
+// Hub → node: asks for LinkSample every every_ms for the next for_ms, while a live view is open
+// (design/hub.md section 5); a later request replaces the one before. The node holds every_ms to
+// 1-10 seconds and for_ms to at most 60 seconds
+message SampleRequest {
+  uint32 every_ms = 1;
+  uint32 for_ms = 2;
+}
+
+// node → Hub: each peer's counts and measurements while a SampleRequest lasts (design/top.md
+// section 6); at_ms is the time on the daemon's monotonic clock, for rates between two samples
+message LinkSample {
+  uint64 at_ms = 1;
+  repeated PeerSample peers = 2;
+}
+
+message PeerSample {
+  string node_id = 1;
+  uint64 rx_bytes = 2;
+  uint64 tx_bytes = 3;
+  optional double rtt_ms = 4;
+  optional double loss = 5;
+  optional double jitter_ms = 6;
 }
 
 // Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is

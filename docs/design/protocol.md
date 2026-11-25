@@ -131,7 +131,9 @@ A fatal error (such as a revoked node or a refused enrollment) is sent and then 
 | Backup | node → Hub | `BackupFetch` | Asks for the latest encrypted backup of the Hub, with the SHA-256 of the one the node has; sent on connect and every 6 hours (the Hub never initiates connections to nodes, hub.md section 8.2) |
 | | Hub → node | `Backup` | The encrypted backup and its SHA-256, when the node does not have it yet; up to 4 MiB, sent in chunks (section 4.1) |
 | Mesh | Hub → node | The mesh partition in `DesiredState` | Addresses, peer public keys and admission material, candidate paths, relay list |
-| | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh's status document (`status.md` section 6), which nett-node reads from the mesh in the same process, sent when it changes |
+| | node → Hub | `LinkReport` | The current path, transport, and quality of a link; this machine's mapped address and NAT type (`mesh.md` section 6.1). The content is the JSON of the mesh's status document (`status.md` section 6), which nett-node reads from the mesh in the same process, sent when it changes, judged without the counts and measurements, and at least every 10 minutes (hub.md section 5) |
+| | Hub → node | `SampleRequest` | Asks for `LinkSample` every `every_ms` for the next `for_ms`; a later request replaces the one before. The Hub sends one every 5 seconds, with 2 and 10 seconds, while a live view is open; the node holds the interval to 1-10 seconds and the request to at most 60 seconds (hub.md section 5) |
+| | node → Hub | `LinkSample` | Each peer's byte counts, round-trip time, loss and jitter, and `at_ms`, the time on the daemon's monotonic clock in milliseconds, for rates between two samples; sent while a `SampleRequest` lasts. The Hub passes it to the open live views and keeps none (top.md section 6) |
 | | Both | `PathSwitch` | When both sides are `dial-only` and the current tunnel is unavailable, relays "switch to a given relay" and its confirmation through the Hub, and a member that restarted tells its peers (`mesh.md` section 8.4): node → Hub names the peer it is for, Hub → node the peer it came from, and carries the mesh's message (at most 64 bytes), authenticated end to end with a key only the two members can derive. The Hub passes it on only between two members that the site connects (site.md section 6) and only to a node that is connected at the time; it is not queued, and the two meshes resend |
 | Upgrades | node → Hub | `ProgramFetch` | Asks for the program of a release, by version and target; sent when the `release` partition names a higher version for this machine's target (release.md section 7, ADR 0025) |
 | | Hub → node | `ProgramPart` | The program from start to end, in parts of at most 48 KiB, each with its offset and the program's size, sent in order as the connection takes them; `Error` with `NOT_FOUND` when the Hub does not hold that program. One fetch per session at a time; a node whose session breaks fetches the program again |
@@ -240,6 +242,7 @@ message Task {
 | Single message | 60 KiB |
 | Chunk reassembly | 8 MiB per stream, reassembled in memory: the mesh has to parse the whole desired state anyway, and the desired state file itself does not exceed 4 MiB (`mesh.md` section 17); 2 streams at the same time, released as soon as they are used |
 | Program download | Written to disk as it arrives, never held whole in memory; one at a time |
+| Samples | At most one a second, for at most 60 seconds after the last `SampleRequest` |
 | Completed task records | 7 days, at most 1000 entries; entries whose `deadline` has not passed are not evicted, and when full new tasks are rejected |
 
 | Item | Hub-side limit |
@@ -248,6 +251,7 @@ message Task {
 | Handshakes in progress | 16 at a time, each within 10 seconds; more are closed without a reply |
 | Messages per session | 50 per second on average, bursts of 200; a node above that gets `RATE_LIMITED` and the session closes |
 | `PathSwitch` queued for a node | 16; further ones are dropped |
+| Live views | 4 streams at a time, 64 messages queued for each; a full queue drops its oldest and tells the view to read the status again (top.md section 6) |
 | Program streams | One per session; parts of 48 KiB read from disk as they are sent |
 | Acknowledgement reasons | 1024 characters kept |
 | Events | 100 per machine, kept 30 days (hub.md section 8) |

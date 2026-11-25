@@ -80,6 +80,107 @@
         ],
         "type": "object"
       },
+      "LivePeer": {
+        "description": "One peer's counts and measurements in a [`LiveSample`].",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "jitter_ms": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "loss": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rtt_ms": {
+            "format": "double",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "rx_bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "tx_bytes": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "rx_bytes",
+          "tx_bytes"
+        ],
+        "type": "object"
+      },
+      "LiveSample": {
+        "description": "A machine's sample on the live view's stream (`event: sample`, design/top.md section 6).",
+        "properties": {
+          "at_ms": {
+            "description": "The time on the machine's monotonic clock in milliseconds, for rates between two of its\nsamples; it starts again when the machine's session with the Hub does.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "peers": {
+            "items": {
+              "$ref": "#/components/schemas/LivePeer"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "node_id",
+          "at_ms",
+          "peers"
+        ],
+        "type": "object"
+      },
+      "LiveStatus": {
+        "description": "A machine's status report on the live view's stream (`event: status`, design/top.md section 6).",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "node_id": {
+            "type": "string"
+          },
+          "status": {
+            "description": "The mesh's local status (design/status.md section 6)."
+          },
+          "status_at": {
+            "description": "When the Hub received it (Unix seconds).",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "name",
+          "node_id",
+          "status_at",
+          "status"
+        ],
+        "type": "object"
+      },
       "MachineStatus": {
         "properties": {
           "address": {
@@ -542,6 +643,54 @@
         "summary": "Hub-side enrollment, leave and learned addresses (design/hub.md section 4): the signing tool\nfetches them first with every command.\nWhat happened on the Hub that the site has not taken in yet: admission material of machines\nthat joined, machines that left, and learned public addresses (design/hub.md section 4).",
         "tags": [
           "site"
+        ],
+        "x-nett-risk": "low",
+        "x-nett-scope": "owner"
+      }
+    },
+    "/api/v1/streams/links": {
+      "get": {
+        "operationId": "links_stream",
+        "responses": {
+          "200": {
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Server-sent events: `status` (a `LiveStatus`), `sample` (a `LiveSample`), and `resync` when messages were dropped and the status is to be read again"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "No or a wrong owner token"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "As many live views as the Hub serves are open"
+          }
+        },
+        "security": [
+          {
+            "owner_token": []
+          }
+        ],
+        "summary": "The live view's stream (design/top.md section 6): each machine's status reports and samples as\nthey arrive, as server-sent events. While it is open every connected machine samples; closing it\nis what stops them.",
+        "tags": [
+          "machines"
         ],
         "x-nett-risk": "low",
         "x-nett-scope": "owner"

@@ -380,6 +380,7 @@ Uses SSE:
 |---|---|
 | `GET /api/v1/streams/events` | Newly added activity events |
 | `GET /api/v1/streams/resources?kind=nodes` | Resource changes (`status` updates), for the console to refresh |
+| `GET /api/v1/streams/links` | Each machine's status reports and its samples every 2 seconds, which the machines send while a stream is open; for `nett site top` (design/top.md section 6) |
 
 The number of connections is capped; idle connections periodically send comment lines to stay alive.
 

@@ -14,6 +14,9 @@ pub const UPDATES_PATH: &str = "/api/v1/site/updates";
 /// A machine's recent events (design/hub.md section 8): `?node=<node ID>&limit=<1..=100>`.
 pub const EVENTS_PATH: &str = "/api/v1/site/events";
 pub const CONNECT_PATH: &str = "/node/v1/connect";
+/// The live view's stream (design/top.md section 6): server-sent events `status` ([`LiveStatus`]),
+/// `sample` ([`LiveSample`]) and `resync`.
+pub const LINKS_STREAM_PATH: &str = "/api/v1/streams/links";
 
 /// `POST /api/v1/link`: the random secret in the link code, plus the site's trust anchor list (JSON
 /// as is).
@@ -131,4 +134,43 @@ pub struct Event {
     /// `connected`, `disconnected`, `joined`, `left`, `config`, `upgrade`.
     pub kind: String,
     pub detail: String,
+}
+
+/// A machine's status report on the live view's stream (`event: status`, design/top.md section 6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LiveStatus {
+    pub name: String,
+    pub node_id: String,
+    /// When the Hub received it (Unix seconds).
+    pub status_at: i64,
+    /// The mesh's local status (design/status.md section 6).
+    pub status: serde_json::Value,
+}
+
+/// A machine's sample on the live view's stream (`event: sample`, design/top.md section 6).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LiveSample {
+    pub name: String,
+    pub node_id: String,
+    /// The time on the machine's monotonic clock in milliseconds, for rates between two of its
+    /// samples; it starts again when the machine's session with the Hub does.
+    pub at_ms: u64,
+    pub peers: Vec<LivePeer>,
+}
+
+/// One peer's counts and measurements in a [`LiveSample`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct LivePeer {
+    pub id: String,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_ms: Option<f64>,
 }

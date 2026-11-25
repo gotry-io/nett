@@ -452,6 +452,11 @@ async fn serve(
     let mut releases = hub.subscribe_release();
     releases.mark_unchanged();
     send_desired(hub, node, socket, &mut out).await?;
+    // While live views are open the machine samples (design/hub.md section 5): asked at once when
+    // the first opens or the session starts, then every few seconds
+    let mut views = hub.views.watch();
+    let mut renew = tokio::time::interval(crate::live::RENEW_EVERY);
+    renew.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut reassembler = Reassembler::default();
     let mut budget = Budget::new();
     let mut sending: Option<Sending> = None;
@@ -514,6 +519,15 @@ async fn serve(
                     message,
                 }))
                 .await?;
+            }
+            changed = views.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                renew.reset_immediately();
+            }
+            _ = renew.tick(), if *views.borrow() > 0 => {
+                out.send(socket, Body::SampleRequest(crate::live::LiveViews::request())).await?;
             }
             // One part per turn of the loop, so the session keeps answering while it sends
             part = next_part(next), if sending.is_some() => {
@@ -645,16 +659,30 @@ async fn handle(
             hub.leave(node, now()).await.map_err(|e| e.to_string())?;
             return Ok(false);
         }
+        // Passed to the open live views only (design/top.md section 6)
+        Some(Body::LinkSample(sample)) => {
+            if hub.views.watched()
+                && let Some(name) = hub.machine_name(node).await
+            {
+                hub.views.sample(&name, node, sample);
+            }
+        }
         Some(Body::LinkReport(report)) => {
             // Only valid JSON is stored, with a size limit: it is data supplied by the node (hard
             // rule 13)
             if report.status.len() <= MAX_STATUS
                 && let Ok(value) = serde_json::from_slice::<serde_json::Value>(&report.status)
             {
+                let at = now();
                 hub.db
-                    .set_status(node.as_str(), &value.to_string(), now())
+                    .set_status(node.as_str(), &value.to_string(), at)
                     .await
                     .map_err(|e| e.to_string())?;
+                if hub.views.watched()
+                    && let Some(name) = hub.machine_name(node).await
+                {
+                    hub.views.status(&name, node, at, &value);
+                }
                 // From the status the Hub learns the relay's certificate (design/mesh.md section 5.3),
                 // the LAN addresses and the WireGuard port (section 6)
                 let fingerprint = value

@@ -72,6 +72,8 @@ pub struct Hub {
     changes: watch::Sender<u64>,
     /// The current connection of each machine: a new connection replaces the old one.
     live: Mutex<HashMap<NodeId, Live>>,
+    /// The open live views, and what the machines send them (design/top.md section 6).
+    pub views: crate::live::LiveViews,
     /// The latest release (design/release.md section 7), sent as the `release` partition to the
     /// machines approved for it (ADR 0027).
     release: watch::Sender<Option<Arc<Release>>>,
@@ -192,6 +194,7 @@ impl Hub {
             site: RwLock::new(site),
             changes: watch::channel(generation).0,
             live: Mutex::new(HashMap::new()),
+            views: crate::live::LiveViews::default(),
             release: watch::channel(None).0,
             mirror: data
                 .as_deref()
@@ -494,6 +497,16 @@ impl Hub {
         let live = self.live.lock().await;
         live.get(to)
             .is_some_and(|l| l.switches.try_send((from.clone(), message)).is_ok())
+    }
+
+    /// The name the site gives the machine with this node ID.
+    pub async fn machine_name(&self, node: &NodeId) -> Option<String> {
+        let site = self.site().await?;
+        site.state
+            .machines
+            .iter()
+            .find(|(_, m)| m.node_id == *node)
+            .map(|(name, _)| name.to_string())
     }
 
     pub async fn online(&self) -> HashSet<NodeId> {

@@ -6,6 +6,7 @@ pub mod api;
 pub mod db;
 pub mod gateway;
 pub mod hub;
+pub mod live;
 pub mod mirror;
 pub mod openapi;
 pub mod tls;
@@ -29,6 +30,15 @@ pub async fn serve(
     // Peer address: the Hub learns the public address of a `public` machine from it
     // (design/hub.md section 5)
     let app = api::router(hub.clone()).into_make_service_with_connect_info::<gateway::Peer>();
+    // The server waits for its connections, and a live view's stream lasts until the view ends:
+    // the streams end when the shutdown begins
+    let shutdown = {
+        let hub = hub.clone();
+        async move {
+            shutdown.await;
+            hub.views.end();
+        }
+    };
     match tls {
         None => {
             axum::serve(listener, app)

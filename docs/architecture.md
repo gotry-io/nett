@@ -272,7 +272,7 @@ nett contains no AI logic. AI, like any other external program, uses nett only t
 | The relay (in the nett daemon) and nett-relay | The relay: blake2 (computes `mac1` per the WireGuard protocol), quinn later (QUIC); nett-relay: tokio, rustls (via tokio-rustls), tokio-tungstenite (WebSocket for the TLS transport entry), hyper (HTTP/2 CONNECT) |
 | TLS transport (in the nett daemon) | Rust: rustls (via tokio-rustls, verifying certificates by fingerprint), tokio-tungstenite, on the daemon's tokio runtime |
 | Userspace WireGuard | The `noise` layer of gotatun, for platforms without the kernel module (design/userspace.md section 3) |
-| Protocols | Public: REST + JSON (OpenAPI 3.1), plus SSE when the web console arrives; internal: WebSocket + Protobuf |
+| Protocols | Public: REST + JSON (OpenAPI 3.1), and SSE for streams (the live view's, design/top.md section 6; the web console's later); internal: WebSocket + Protobuf |
 | Web (console, ADR 0024) | React + Vite, TanStack Router / Query / Table, shadcn/ui + Tailwind, xyflow |
 | Reverse proxy in front of the Hub | Caddy (default, ADR 0009) |
 

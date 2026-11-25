@@ -88,6 +88,47 @@ pub struct StatusDoc {
     pub events: Vec<EventRecord>,
 }
 
+impl StatusDoc {
+    /// The status without the values that move on their own: byte counts, times of the last
+    /// packet and handshake, measurements, whether a candidate other than the current one answers
+    /// its probes, the NAT this machine measures, the time nett-relay last asked and the time a
+    /// problem was noted. A change in what is left makes nett-node report to the Hub
+    /// (design/hub.md section 5); the rest goes with the 10-minute report and the samples.
+    pub fn without_measurements(&self) -> Self {
+        let mut doc = self.clone();
+        doc.node.nat = None;
+        for p in &mut doc.peers {
+            (p.rx_bytes, p.tx_bytes) = (0, 0);
+            (p.last_received, p.last_handshake) = (None, None);
+            (p.rtt_ms, p.loss, p.jitter_ms) = (None, None, None);
+            for c in &mut p.candidates {
+                (c.rtt_ms, c.loss) = (None, None);
+                // One lost probe makes a candidate failing and the next answer ok again, as often
+                // as every 15 seconds across a lossy border; the current path and a recorded
+                // block are what stays
+                if !matches!(
+                    c.state,
+                    CandidateStateDoc::Current | CandidateStateDoc::Blocked
+                ) {
+                    c.state = CandidateStateDoc::Untested;
+                }
+            }
+        }
+        if let Some(gateway) = &mut doc.gateway {
+            for d in &mut gateway.devices {
+                (d.rx_bytes, d.tx_bytes, d.last_handshake) = (0, 0, None);
+            }
+        }
+        if let Some(relay) = &mut doc.relay {
+            relay.fetched_at = None;
+        }
+        for p in &mut doc.problems {
+            p.at = Timestamp::from_unix_seconds(0);
+        }
+        doc
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GatewayStatus {
     /// Whether this machine forwards IPv6, where the data plane can tell; without it devices reach

@@ -12,6 +12,7 @@
 | [site.md](site.md) | Site (M1, together with H1 of joining the Hub): maintaining machines, Edge, advertised routes and access rules with commands, connections derived from access rules, changes, signing and delivery, site directory | Draft |
 | [hub.md](hub.md) | Joining the Hub (M1, after local signing): the command line as the operating interface, the headless Hub, site and Hub, node and Hub, enrollment, steps (H1–H5) | Draft |
 | [status.md](status.md) | Local status (M1, before joining the Hub): the nett daemon's local socket and its queries, node name in the desired state, status contents, output of `nett status` | Draft |
+| [top.md](top.md) | Live views (M1, stage 6): `nett top` for this machine and `nett site top` for the whole mesh through the Hub, where their numbers come from, the stream the Hub serves while a view is open, screen and keys, the terminal library, verification | Draft |
 | [names-and-diagnostics.md](names-and-diagnostics.md) | Names and diagnostics (M1): the DNS responder for `<name>.nett.internal` and the system resolver on each platform, `nett whois`, `nett ping`, `nett doctor` | Draft |
 | [container.md](container.md) | The container (M1): one image from the registry, the token in the environment, the sidecar sharing its network, the daemon in it, joining, upgrades in place, the volume, verification | Draft |
 | [release.md](release.md) | Release and installation (M1): versions and artifacts, release workflow and signing, the command and the nett service on macOS, Linux | Draft |

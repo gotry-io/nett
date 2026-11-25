@@ -13,8 +13,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use nett_mesh::config::MAX_DESIRED_BYTES;
 use nett_proto::api::{
-    BackupStatus, CONNECT_PATH, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse,
-    MachineStatus, Problem, PushResponse, SITE_PATH, STATUS_PATH, StatusResponse, UPDATES_PATH,
+    BackupStatus, CONNECT_PATH, EVENTS_PATH, Event, LINK_PATH, LINKS_STREAM_PATH, LinkRequest,
+    LinkResponse, MachineStatus, Problem, PushResponse, SITE_PATH, STATUS_PATH, StatusResponse,
+    UPDATES_PATH,
 };
 use nett_site::state::State;
 use nett_trust::anchors::{TrustAnchors, TrustAnchorsDoc};
@@ -29,6 +30,7 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .route(STATUS_PATH, get(status))
         .route(UPDATES_PATH, get(updates))
         .route(EVENTS_PATH, get(events))
+        .route(LINKS_STREAM_PATH, get(links_stream))
         .route(CONNECT_PATH, get(crate::gateway::connect))
         .layer(DefaultBodyLimit::max(
             usize::try_from(MAX_DESIRED_BYTES).unwrap_or(usize::MAX),
@@ -213,6 +215,49 @@ pub(crate) async fn updates(AxumState(hub): AxumState<Arc<Hub>>, headers: Header
         Ok(updates) => Json(updates).into_response(),
         Err(e) => internal(e),
     }
+}
+
+/// The live view's stream (design/top.md section 6): each machine's status reports and samples as
+/// they arrive, as server-sent events. While it is open every connected machine samples; closing it
+/// is what stops them.
+#[utoipa::path(
+    get, path = "/api/v1/streams/links", tag = "machines",
+    responses(
+        (status = 200, description = "Server-sent events: `status` (a `LiveStatus`), `sample` \
+            (a `LiveSample`), and `resync` when messages were dropped and the status is to be \
+            read again", content_type = "text/event-stream", body = String),
+        (status = 401, description = "No or a wrong owner token", body = Problem),
+        (status = 503, description = "As many live views as the Hub serves are open", body = Problem),
+    ),
+    security(("owner_token" = [])),
+    extensions(("x-nett-scope" = json!("owner")), ("x-nett-risk" = json!("low"))),
+)]
+pub(crate) async fn links_stream(
+    AxumState(hub): AxumState<Arc<Hub>>,
+    headers: HeaderMap,
+) -> Response {
+    use crate::live::{KEEP_ALIVE, MAX_STREAMS, Next};
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    if let Some(r) = unauthorized(&hub, &headers).await {
+        return r;
+    }
+    let Some(view) = hub.views.open() else {
+        return problem(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Too many live views",
+            format!("at most {MAX_STREAMS} live views are open at a time"),
+        );
+    };
+    let events = futures_util::stream::unfold(view, |mut view| async move {
+        let event = match view.next().await? {
+            Next::Item(item) => SseEvent::default().event(item.event).data(&item.data),
+            Next::Resync => SseEvent::default().event("resync").data("{}"),
+        };
+        Some((Ok::<_, std::convert::Infallible>(event), view))
+    });
+    Sse::new(events)
+        .keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
+        .into_response()
 }
 
 /// A machine's recent events (design/hub.md section 8), newest first: `?node=<ID>&limit=<n>`.

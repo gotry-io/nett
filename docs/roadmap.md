@@ -99,6 +99,7 @@ A site that runs on local signing moves to the Hub, and the acceptance that does
 - [x] The Hub and the container upgrade themselves from their state directory, and roll back a version that does not settle (ADR 0026; CI, `container` job); verified on the Hub host
 - [ ] Upgrades start when the user approves them (ADR 0027): `nett site upgrade` for every machine and the Hub, or for one machine first
 - [ ] Served ports (ADR 0028): `nett site serve` forwards a member's mesh port to a service on its `127.0.0.1` (CI, scenario 31), replacing hand-run forwarders on the site's machines
+- [ ] Live views ([design/top.md](design/top.md)): `nett top` and `nett site top`; machines report their status to the Hub when it changes, and send samples every 2 seconds only while a view is open
 - [x] One nett daemon per machine (ADR 0013): one service on each machine, with nett-relay beside it where the machine relays; the site's machines move to it with `sudo nett uninstall` and `sudo nett install`, keeping their identity
 
 ### 7. Phones and restricted networks

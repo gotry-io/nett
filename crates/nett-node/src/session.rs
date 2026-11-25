@@ -14,14 +14,15 @@ use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use nett_mesh::config::{DesiredMeshDoc, MAX_DESIRED_BYTES, read_bounded};
-use nett_mesh::status::{ReloadOutcome, StatusSource};
+use nett_mesh::status::{PeerState, ReloadOutcome, StatusDoc, StatusSource};
 use nett_proto::api::CONNECT_PATH;
 use nett_proto::frame::{self, Reassembler};
 use nett_proto::noise::{Initiator, MAX_MESSAGE, Transport};
 use nett_proto::v1::envelope::Body;
 use nett_proto::v1::{
     AckResult, BackupFetch, DesiredState, Envelope, ErrorCode, Hello, Inventory, Leave, LinkReport,
-    PartitionAck, PartitionKind, PathSwitch, Ping, ProgramFetch, StateAck,
+    LinkSample, PartitionAck, PartitionKind, PathSwitch, PeerSample, Ping, ProgramFetch,
+    SampleRequest, StateAck,
 };
 use nett_trust::release::Version;
 use prost::Message as _;
@@ -37,6 +38,14 @@ use crate::url::HubUrl;
 
 /// Interval for reading the mesh's local status once (design/hub.md section 5).
 pub const STATUS_EVERY: Duration = Duration::from_secs(15);
+/// The longest the Hub goes without this machine's whole status: a report goes when the status
+/// changes, and the counts and measurements `nett site status` shows are at most this old
+/// (design/hub.md section 5).
+pub const REPORT_AT_LEAST_EVERY: Duration = Duration::from_secs(600);
+/// What a `SampleRequest` may ask, whatever the Hub sends (design/hub.md section 5).
+const SAMPLE_EVERY_MIN: Duration = Duration::from_secs(1);
+const SAMPLE_EVERY_MAX: Duration = Duration::from_secs(10);
+const SAMPLE_FOR_MAX: Duration = Duration::from_secs(60);
 /// Keepalive (protocol.md section 8): one Ping every 25 seconds; 3 consecutive missed replies count
 /// as a disconnect.
 const PING_EVERY: Duration = Duration::from_secs(25);
@@ -320,6 +329,104 @@ fn inventory(local: Option<std::net::SocketAddr>) -> Body {
     })
 }
 
+/// When this machine's status goes to the Hub (design/hub.md section 5): when it changes, judged
+/// without the values that move on their own, and at least every [`REPORT_AT_LEAST_EVERY`]. The
+/// counts and measurements change at every reading, so comparing them would send the whole status
+/// each time.
+#[derive(Default)]
+struct Reports {
+    /// What the last report said, without its measurements, and when it went.
+    last: Option<(StatusDoc, tokio::time::Instant)>,
+}
+
+impl Reports {
+    /// Whether `doc` is to be reported now; when it is, it counts as reported.
+    fn due(&mut self, doc: &StatusDoc, now: tokio::time::Instant) -> bool {
+        let significant = doc.without_measurements();
+        let due = self.last.as_ref().is_none_or(|(last, at)| {
+            *last != significant || now.duration_since(*at) >= REPORT_AT_LEAST_EVERY
+        });
+        if due {
+            self.last = Some((significant, now));
+        }
+        due
+    }
+}
+
+fn link_report(doc: &StatusDoc) -> Body {
+    Body::LinkReport(LinkReport {
+        status: serde_json::to_vec(doc).unwrap_or_default(),
+    })
+}
+
+/// A `SampleRequest` in force: samples every `every` until `until`.
+struct Sampling {
+    every: Duration,
+    until: tokio::time::Instant,
+    tick: tokio::time::Interval,
+}
+
+impl Sampling {
+    /// The sampling after `request`, held to [`SAMPLE_EVERY_MIN`]-[`SAMPLE_EVERY_MAX`] and at most
+    /// [`SAMPLE_FOR_MAX`] whatever the Hub asks; a request for no time ends it. A request at the
+    /// same pace only moves the end, so renewals do not add samples.
+    fn requested(
+        current: Option<Self>,
+        request: &SampleRequest,
+        now: tokio::time::Instant,
+    ) -> Option<Self> {
+        let every = Duration::from_millis(request.every_ms.into())
+            .clamp(SAMPLE_EVERY_MIN, SAMPLE_EVERY_MAX);
+        let lasts = Duration::from_millis(request.for_ms.into()).min(SAMPLE_FOR_MAX);
+        if lasts.is_zero() {
+            return None;
+        }
+        let until = now + lasts;
+        match current {
+            Some(mut s) if s.every == every => {
+                s.until = until;
+                Some(s)
+            }
+            _ => {
+                let mut tick = tokio::time::interval(every);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                Some(Self { every, until, tick })
+            }
+        }
+    }
+}
+
+/// The next sample time while sampling; never otherwise.
+async fn next_sample(sampling: &mut Option<Sampling>) {
+    match sampling {
+        Some(s) => {
+            s.tick.tick().await;
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Each linked peer's counts and measurements, with the time since the session began on the
+/// monotonic clock (design/top.md section 6).
+fn sample(doc: &StatusDoc, at: Duration) -> LinkSample {
+    LinkSample {
+        at_ms: u64::try_from(at.as_millis()).unwrap_or(u64::MAX),
+        peers: doc
+            .peers
+            .iter()
+            .filter(|p| p.state != PeerState::NoPath)
+            .map(|p| PeerSample {
+                node_id: p.id.to_string(),
+                rx_bytes: p.rx_bytes,
+                tx_bytes: p.tx_bytes,
+                rtt_ms: p.rtt_ms,
+                loss: p.loss,
+                jitter_ms: p.jitter_ms,
+            })
+            .collect(),
+    }
+}
+
 /// Waits for the next message from the Hub, until `deadline`.
 async fn next_envelope(
     ws: &mut Ws,
@@ -461,7 +568,9 @@ impl Node {
         let mut status = tokio::time::interval(STATUS_EVERY);
         status.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut missed = 0u32;
-        let mut reported: Option<Vec<u8>> = None;
+        let mut reports = Reports::default();
+        let mut sampling: Option<Sampling> = None;
+        let started = tokio::time::Instant::now();
         // A generation whose file is written but for which the mesh has not yet given a
         // result: ask it to read again when reading status
         let mut pending: Option<u64> = None;
@@ -576,6 +685,9 @@ impl Node {
                             tracing::info!(reason = %g.reason, "the Hub closed the session");
                             return Ok(Exit::Shutdown);
                         }
+                        Some(Body::SampleRequest(request)) => {
+                            sampling = Sampling::requested(sampling.take(), &request, tokio::time::Instant::now());
+                        }
                         Some(Body::Backup(backup)) => {
                             if let Some(have) = self.keep_backup(&backup) {
                                 // Tells the Hub this machine holds it now
@@ -640,11 +752,25 @@ impl Node {
                             out.send(&mut ws, Body::StateAck(ack)).await?;
                         }
                     }
-                    if let Some(bytes) = self.read_status().await
-                        && reported.as_ref() != Some(&bytes)
+                    if let Some(doc) = self.read_status().await
+                        && reports.due(&doc, tokio::time::Instant::now())
                     {
-                        out.send(&mut ws, Body::LinkReport(LinkReport { status: bytes.clone() })).await?;
-                        reported = Some(bytes);
+                        out.send(&mut ws, link_report(&doc)).await?;
+                    }
+                }
+                // While a live view is open (design/hub.md section 5): a sample each time, and a
+                // report as soon as the status changes
+                () = next_sample(&mut sampling) => {
+                    let now = tokio::time::Instant::now();
+                    if sampling.as_ref().is_none_or(|s| now >= s.until) {
+                        sampling = None;
+                        continue;
+                    }
+                    if let Some(doc) = self.read_status().await {
+                        out.send(&mut ws, Body::LinkSample(sample(&doc, now - started))).await?;
+                        if reports.due(&doc, now) {
+                            out.send(&mut ws, link_report(&doc)).await?;
+                        }
                     }
                 }
             }
@@ -688,12 +814,11 @@ impl Node {
         self.desired.with_file_name(BACKUP_FILE)
     }
 
-    async fn read_status(&self) -> Option<Vec<u8>> {
+    async fn read_status(&self) -> Option<StatusDoc> {
         let mesh = Arc::clone(&self.mesh);
-        let doc = tokio::task::spawn_blocking(move || mesh.snapshot())
+        tokio::task::spawn_blocking(move || mesh.snapshot())
             .await
-            .ok()??;
-        serde_json::to_vec(&doc).ok()
+            .ok()?
     }
 
     /// Applies a desired state and acknowledges it per partition (protocol.md section 6.2).
@@ -947,7 +1072,7 @@ fn release_without_upgrader(manifest: &[u8]) -> (AckResult, String) {
 mod tests {
     use std::path::PathBuf;
 
-    use nett_mesh::status::{Problem, ProblemKind};
+    use nett_mesh::status::{CandidateStateDoc, Problem, ProblemKind};
     use nett_trust::encoding::Timestamp;
 
     use super::*;
@@ -963,6 +1088,151 @@ mod tests {
         })
         .to_string()
         .into_bytes()
+    }
+
+    /// A status with one peer on a direct path, its candidates, a relay and a problem.
+    fn status(rx: u64, rtt: f64, path: &str, state: &str, events: usize) -> StatusDoc {
+        let event = |i: usize| {
+            serde_json::json!({"at": format!("2026-11-25T00:00:{i:02}Z"), "kind": "path_switched",
+                               "detail": "path switched"})
+        };
+        serde_json::from_value(serde_json::json!({
+            "v": 1, "version": "0.12.0",
+            "node": {"id": "node_01JD7M3XQ4W8N2K5R9T6V3B7C1", "name": "a", "admitted": true,
+                     "mesh": [], "edge": [], "routes": [], "reachability": "public",
+                     "dataplane": "userspace", "listen_port": 41820, "nat": null,
+                     "clock_trusted": true, "started_at": "2026-11-25T00:00:00Z"},
+            "config": {"applied_at": "2026-11-25T00:00:00Z", "access_rules_version": 3},
+            "peers": [{
+                "id": "node_01JD7M3XQ4W8N2K5R9T6V3B7C2", "name": "b", "mesh": [], "edge": [],
+                "routes": [], "state": state, "role": "decider",
+                "path": {"kind": path, "relay": null, "endpoint": "198.51.100.2:42001",
+                         "punched": false, "since": null, "reason": null},
+                "rtt_ms": rtt, "loss": 0.0, "jitter_ms": rtt / 10.0,
+                "last_handshake": format!("2026-11-25T00:{:02}:00Z", rx % 60),
+                "last_received": format!("2026-11-25T00:00:{:02}Z", rx % 60),
+                "rx_bytes": rx, "tx_bytes": rx * 2,
+                "candidates": [{"kind": path, "relay": null, "endpoint": "198.51.100.2:42001",
+                                "punched": false, "rtt_ms": rtt, "loss": 0.0, "state": "current"}]
+            }, {
+                "id": "node_01JD7M3XQ4W8N2K5R9T6V3B7C3", "name": "c", "mesh": [], "edge": [],
+                "routes": [], "state": "no_path", "role": null, "path": null, "rtt_ms": null,
+                "loss": null, "jitter_ms": null, "last_handshake": null, "last_received": null,
+                "rx_bytes": 0, "tx_bytes": 0, "candidates": []
+            }],
+            "relay": {"port": 41822, "tls_port": null, "members": 2, "links": 1,
+                      "fingerprint": null,
+                      "fetched_at": format!("2026-11-25T00:00:{:02}Z", rx % 60)},
+            "problems": [{"kind": "data_plane_failed", "node": null,
+                          "at": format!("2026-11-25T00:00:{:02}Z", rx % 60), "reason": "retrying"}],
+            "events": (0..events).map(event).collect::<Vec<_>>()
+        }))
+        .expect("fixture")
+    }
+
+    /// Counts, measurements and the times that move with them make no report, so a machine that
+    /// sees no change sends its status only every 10 minutes; a path, a state or an event makes
+    /// one at once (design/hub.md section 5).
+    #[tokio::test(start_paused = true)]
+    async fn reports_go_when_the_status_changes_not_when_counts_move() {
+        let mut reports = Reports::default();
+        let start = tokio::time::Instant::now();
+        assert!(reports.due(&status(1, 9.4, "direct_obfs", "connected", 1), start));
+        // Fifteen seconds at a time for almost 10 minutes, the counts and measurements moving
+        for i in 1..40u32 {
+            let at = start + STATUS_EVERY * i;
+            let moved = status(
+                u64::from(i) * 1000,
+                9.0 + f64::from(i),
+                "direct_obfs",
+                "connected",
+                1,
+            );
+            assert!(!reports.due(&moved, at), "reading {i} made a report");
+        }
+        let quiet = status(7, 3.0, "direct_obfs", "connected", 1);
+        assert!(reports.due(&quiet, start + REPORT_AT_LEAST_EVERY));
+        assert!(!reports.due(&quiet, start + REPORT_AT_LEAST_EVERY + STATUS_EVERY));
+
+        // A candidate other than the current one that stops and starts answering, and the NAT
+        // measured differently, are measurements too
+        let mut flapping = status(9, 3.0, "direct_obfs", "connected", 1);
+        let relay = serde_json::json!({"kind": "relay", "relay": null,
+            "endpoint": "198.51.100.9:41822", "punched": false, "rtt_ms": null, "loss": 1.0,
+            "state": "failing"});
+        flapping.peers[0]
+            .candidates
+            .push(serde_json::from_value(relay).expect("candidate"));
+        let at = start + REPORT_AT_LEAST_EVERY + STATUS_EVERY;
+        assert!(reports.due(&flapping, at), "a new candidate is a change");
+        for (i, state) in [
+            CandidateStateDoc::Ok,
+            CandidateStateDoc::Failing,
+            CandidateStateDoc::Untested,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            flapping.peers[0].candidates[1].state = state;
+            flapping.node.nat = (i % 2 == 0).then(|| {
+                serde_json::from_value(
+                    serde_json::json!({"type": "cone", "ipv4": "203.0.113.5:4500", "ipv6": null}),
+                )
+                .expect("nat")
+            });
+            assert!(
+                !reports.due(&flapping, at),
+                "candidate {state:?} made a report"
+            );
+        }
+        flapping.peers[0].candidates[1].state = CandidateStateDoc::Blocked;
+        assert!(reports.due(&flapping, at), "a recorded block is a change");
+
+        let later = start + REPORT_AT_LEAST_EVERY + STATUS_EVERY * 2;
+        assert!(reports.due(&status(7, 3.0, "relay", "connected", 1), later));
+        assert!(reports.due(&status(7, 3.0, "relay", "unreachable", 1), later));
+        assert!(reports.due(&status(7, 3.0, "relay", "unreachable", 2), later));
+        assert!(!reports.due(&status(8, 4.0, "relay", "unreachable", 2), later));
+    }
+
+    /// A request is held to 1-10 seconds and at most 60 seconds; a renewal at the same pace moves
+    /// only the end, and a request for no time ends the sampling (design/hub.md section 5).
+    #[tokio::test(start_paused = true)]
+    async fn sampling_follows_requests_within_bounds() {
+        let now = tokio::time::Instant::now();
+        let asked = |every_ms, for_ms| SampleRequest { every_ms, for_ms };
+        let s = Sampling::requested(None, &asked(2000, 10_000), now).expect("sampling");
+        assert_eq!(
+            (s.every, s.until),
+            (Duration::from_secs(2), now + Duration::from_secs(10))
+        );
+        let later = now + Duration::from_secs(5);
+        let s = Sampling::requested(Some(s), &asked(2000, 10_000), later).expect("renewed");
+        assert_eq!(s.until, later + Duration::from_secs(10));
+
+        let fast = Sampling::requested(None, &asked(10, u32::MAX), now).expect("held");
+        assert_eq!(
+            (fast.every, fast.until),
+            (SAMPLE_EVERY_MIN, now + SAMPLE_FOR_MAX)
+        );
+        let slow = Sampling::requested(None, &asked(u32::MAX, 1), now).expect("held");
+        assert_eq!(slow.every, SAMPLE_EVERY_MAX);
+        assert!(Sampling::requested(Some(slow), &asked(2000, 0), now).is_none());
+    }
+
+    /// A sample carries each linked peer's counts and measurements, and leaves out a peer the
+    /// site gives no path.
+    #[test]
+    fn a_sample_carries_the_linked_peers() {
+        let s = sample(
+            &status(500, 9.4, "direct", "connected", 0),
+            Duration::from_millis(2500),
+        );
+        assert_eq!(s.at_ms, 2500);
+        assert_eq!(s.peers.len(), 1);
+        let p = &s.peers[0];
+        assert_eq!(p.node_id, "node_01JD7M3XQ4W8N2K5R9T6V3B7C2");
+        assert_eq!((p.rx_bytes, p.tx_bytes, p.rtt_ms), (500, 1000, Some(9.4)));
     }
 
     #[test]

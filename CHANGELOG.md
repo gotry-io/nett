@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- Machines report their status to the Hub when it changes, and at least every 10 minutes; they
+  sent it every 15 seconds, about 50 MB a day for a machine with five peers, since its traffic
+  counts always moved. Counts and measurements reach the Hub with the 10-minute report, and every
+  2 seconds only while a `nett site top` is open.
 - `nett site status` no longer names a WireGuard port that answers no probe from machines that
   reach the machine over its obfuscated port, and names the machines the port does answer, for
   which only an obfuscated port helps.

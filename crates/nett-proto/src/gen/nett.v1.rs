@@ -9,7 +9,7 @@ pub struct Envelope {
     pub reply_to: u64,
     #[prost(message, optional, tag = "3")]
     pub sent_at: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 50, 51, 52, 53, 40")]
+    #[prost(oneof = "envelope::Body", tags = "10, 11, 12, 13, 14, 15, 16, 20, 21, 30, 31, 32, 33, 34, 50, 51, 52, 53, 40")]
     pub body: ::core::option::Option<envelope::Body>,
 }
 /// Nested message and enum types in `Envelope`.
@@ -40,6 +40,10 @@ pub mod envelope {
         LinkReport(super::LinkReport),
         #[prost(message, tag = "32")]
         PathSwitch(super::PathSwitch),
+        #[prost(message, tag = "33")]
+        SampleRequest(super::SampleRequest),
+        #[prost(message, tag = "34")]
+        LinkSample(super::LinkSample),
         #[prost(message, tag = "50")]
         BackupFetch(super::BackupFetch),
         #[prost(message, tag = "51")]
@@ -167,11 +171,46 @@ pub struct Inventory {
     pub addresses: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// node → Hub: the mesh's local status (JSON in design/status.md section 6), displayed by
-/// nett site status
+/// nett site status; sent when it changes, judged without the counts and measurements, and at least
+/// every 10 minutes (design/hub.md section 5)
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct LinkReport {
     #[prost(bytes = "vec", tag = "1")]
     pub status: ::prost::alloc::vec::Vec<u8>,
+}
+/// Hub → node: asks for LinkSample every every_ms for the next for_ms, while a live view is open
+/// (design/hub.md section 5); a later request replaces the one before. The node holds every_ms to
+/// 1-10 seconds and for_ms to at most 60 seconds
+#[derive(Clone, Copy, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SampleRequest {
+    #[prost(uint32, tag = "1")]
+    pub every_ms: u32,
+    #[prost(uint32, tag = "2")]
+    pub for_ms: u32,
+}
+/// node → Hub: each peer's counts and measurements while a SampleRequest lasts (design/top.md
+/// section 6); at_ms is the time on the daemon's monotonic clock, for rates between two samples
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct LinkSample {
+    #[prost(uint64, tag = "1")]
+    pub at_ms: u64,
+    #[prost(message, repeated, tag = "2")]
+    pub peers: ::prost::alloc::vec::Vec<PeerSample>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PeerSample {
+    #[prost(string, tag = "1")]
+    pub node_id: ::prost::alloc::string::String,
+    #[prost(uint64, tag = "2")]
+    pub rx_bytes: u64,
+    #[prost(uint64, tag = "3")]
+    pub tx_bytes: u64,
+    #[prost(double, optional, tag = "4")]
+    pub rtt_ms: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "5")]
+    pub loss: ::core::option::Option<f64>,
+    #[prost(double, optional, tag = "6")]
+    pub jitter_ms: ::core::option::Option<f64>,
 }
 /// Both directions: a switch proposal or confirmation between two dial-only members whose tunnel is
 /// down, or a member's notice to a peer that it restarted (design/mesh.md section 8.4). node → Hub:

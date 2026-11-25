@@ -4,7 +4,8 @@
 //! (`x-nett-scope`) and risk level (`x-nett-risk`).
 
 use nett_proto::api::{
-    Event, LinkRequest, LinkResponse, MachineStatus, Problem, PushResponse, StatusResponse,
+    Event, LinkRequest, LinkResponse, LivePeer, LiveSample, LiveStatus, MachineStatus, Problem,
+    PushResponse, StatusResponse,
 };
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
@@ -22,10 +23,12 @@ use utoipa::{Modify, OpenApi};
         crate::api::status,
         crate::api::updates,
         crate::api::events,
+        crate::api::links_stream,
         crate::gateway::connect,
     ),
     components(schemas(
         LinkRequest, LinkResponse, PushResponse, StatusResponse, MachineStatus, Event, Problem,
+        LiveStatus, LiveSample, LivePeer,
     )),
     modifiers(&OwnerToken),
 )]
