@@ -41,6 +41,7 @@ All site content is stored by the tool in the site directory (section 8), and th
 | `nett site rules` | List access rules; `nett site rules remove <number>` deletes one |
 | `nett site upgrade [<machine>...] [--hub]` | Approve the release the Hub holds: for the Hub and every machine, for the named machines, or with `--hub` for the Hub alone (release.md section 7) |
 | `nett site status` | List all machines; with a Hub, adds each one's online status and the path between each pair of machines (hub.md section 3.4) |
+| `nett site top` | All machines and the links between them, live through the Hub: state, path, traffic rates, round-trip time and loss, every 2 seconds (top.md) |
 | `nett site link` | Link with the Hub (hub.md section 3.1) |
 
 - Run only on the computer that holds the site, as an ordinary user, without `sudo`; the site directory defaults to `$XDG_CONFIG_HOME/nett` (`~/.config/nett` when unset), and `--dir` can place it elsewhere;

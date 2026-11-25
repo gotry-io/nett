@@ -31,6 +31,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # The device configuration `nett site device add` exports, and the private key in it
 qrcodegen.workspace = true
+# The live views (design/top.md section 8)
+ratatui.workspace = true
 zeroize.workspace = true
 
 # Mesh process: Linux, and the macOS native member (design/userspace.md)

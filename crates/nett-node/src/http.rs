@@ -97,38 +97,9 @@ pub async fn get_streaming(
     mut sink: impl FnMut(&[u8]) -> Result<(), String>,
 ) -> Result<(), HttpError> {
     let (target, path) = split_https(url)?;
-    let res = tokio::time::timeout(TIMEOUT, open(&target, "GET", &path, None, None))
-        .await
-        .map_err(|_| HttpError::Connect(format!("{url}: no answer within {TIMEOUT:?}")))??;
-    if !res.status().is_success() {
-        return Err(HttpError::Fetch {
-            url: url.to_owned(),
-            status: res.status().as_u16(),
-        });
-    }
-    let mut body = res.into_body();
-    let mut received = 0u64;
-    loop {
-        let frame = match tokio::time::timeout(idle, body.frame()).await {
-            Err(_) => {
-                return Err(HttpError::Stalled {
-                    url: url.to_owned(),
-                    idle,
-                    received,
-                });
-            }
-            Ok(None) => return Ok(()),
-            Ok(Some(frame)) => frame.map_err(|e| HttpError::Stopped {
-                url: url.to_owned(),
-                reason: e.to_string(),
-                received,
-            })?,
-        };
-        let Ok(data) = frame.into_data() else {
-            continue;
-        };
-        received += data.len() as u64;
-        if received > limit {
+    let mut body = open_body(&target, &path, None).await?;
+    while let Some(data) = body.next(idle).await? {
+        if body.received > limit {
             return Err(HttpError::TooLarge {
                 url: url.to_owned(),
                 limit: usize::try_from(limit).unwrap_or(usize::MAX),
@@ -137,8 +108,67 @@ pub async fn get_streaming(
         sink(&data).map_err(|reason| HttpError::Stopped {
             url: url.to_owned(),
             reason,
-            received,
+            received: body.received,
         })?;
+    }
+    Ok(())
+}
+
+/// Opens `path` on the Hub with the owner token, for a reply read as it arrives: the live view's
+/// stream (design/top.md section 6).
+pub async fn open_stream(target: &Target, path: &str, token: &str) -> Result<Body, HttpError> {
+    open_body(target, path, Some(token)).await
+}
+
+async fn open_body(target: &Target, path: &str, token: Option<&str>) -> Result<Body, HttpError> {
+    let url = format!("{}{path}", target.url);
+    let res = tokio::time::timeout(TIMEOUT, open(target, "GET", path, token, None))
+        .await
+        .map_err(|_| HttpError::Connect(format!("{url}: no answer within {TIMEOUT:?}")))??;
+    if !res.status().is_success() {
+        return Err(HttpError::Fetch {
+            url,
+            status: res.status().as_u16(),
+        });
+    }
+    Ok(Body {
+        url,
+        body: res.into_body(),
+        received: 0,
+    })
+}
+
+/// A reply's body, read as it arrives.
+pub struct Body {
+    url: String,
+    body: hyper::body::Incoming,
+    received: u64,
+}
+
+impl Body {
+    /// The next part, or `None` at the end; fails when nothing arrives for `idle`.
+    pub async fn next(&mut self, idle: Duration) -> Result<Option<Bytes>, HttpError> {
+        loop {
+            let frame = match tokio::time::timeout(idle, self.body.frame()).await {
+                Err(_) => {
+                    return Err(HttpError::Stalled {
+                        url: self.url.clone(),
+                        idle,
+                        received: self.received,
+                    });
+                }
+                Ok(None) => return Ok(None),
+                Ok(Some(frame)) => frame.map_err(|e| HttpError::Stopped {
+                    url: self.url.clone(),
+                    reason: e.to_string(),
+                    received: self.received,
+                })?,
+            };
+            if let Ok(data) = frame.into_data() {
+                self.received += data.len() as u64;
+                return Ok(Some(data));
+            }
+        }
     }
 }
 

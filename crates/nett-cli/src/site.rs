@@ -95,6 +95,8 @@ pub const USAGE: &str = "usage: nett site <command> [--dir <site>]
   rules remove <id>                    remove an access rule, for example r2
   status [<name>] [--json]             list the machines and their connections; with a Hub, also
                                        whether each one is online and applied the latest change
+  top                                  the machines and the links between them, live through the
+                                       Hub: state, path, traffic, round-trip time and loss
 
 Changes are listed before they are signed; --yes signs without asking (needed when not on a terminal).
 With a Hub, signed changes are pushed to it and reach the machines from there.
@@ -166,6 +168,7 @@ pub fn run(mut parser: lexopt::Parser) -> anyhow::Result<()> {
         ["link", code] => return crate::hub::link(&dir, code),
         ["status"] => return status(&dir, None, json),
         ["status", name] => return status(&dir, Some(&machine(name)?), json),
+        ["top"] => return crate::top::site(&dir),
         ["rules"] => return rules(&dir, json),
         ["devices"] => return devices(&dir, json),
         ["device", "add", name] => {

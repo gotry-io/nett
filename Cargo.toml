@@ -42,6 +42,9 @@ prost-types = { version = "0.14.4", default-features = false, features = ["std"]
 libc = { version = "0.2.191", default-features = false }
 # QR code of a device's WireGuard configuration, printed by `nett site device add`
 qrcodegen = { version = "1.8.0", default-features = false }
+# The live views `nett top` and `nett site top` (design/top.md section 8): raw input, resizing
+# and drawing only what changed, with the crossterm backend alone
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
 ring = { version = "0.17.14", default-features = false, features = ["alloc"] }
 rustix = { version = "1.1.6", default-features = false, features = ["std", "net"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }

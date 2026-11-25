@@ -13,25 +13,31 @@ pub(crate) fn key_values(rows: &[(&str, String)]) -> String {
 
 /// Aligns by column, two spaces between columns, no padding after the last column.
 pub(crate) fn table<const N: usize>(rows: &[[String; N]]) -> String {
-    let mut widths = [0usize; N];
+    let rows: Vec<&[String]> = rows.iter().map(|r| &r[..]).collect();
+    columns(&rows).into_iter().map(|line| line + "\n").collect()
+}
+
+/// The lines of [`table`], for rows of any length.
+pub(crate) fn columns(rows: &[&[String]]) -> Vec<String> {
+    let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let mut widths = vec![0usize; n];
     for row in rows {
-        for (w, cell) in widths.iter_mut().zip(row) {
+        for (w, cell) in widths.iter_mut().zip(row.iter()) {
             *w = (*w).max(cell.chars().count());
         }
     }
-    let mut out = String::new();
-    for row in rows {
-        let mut line = String::new();
-        for (i, cell) in row.iter().enumerate() {
-            if i + 1 == N {
-                line.push_str(cell);
-            } else {
-                let pad = widths[i] - cell.chars().count();
-                write!(line, "{cell}{}  ", " ".repeat(pad)).ok();
+    rows.iter()
+        .map(|row| {
+            let mut line = String::new();
+            for (i, cell) in row.iter().enumerate() {
+                if i + 1 == row.len() {
+                    line.push_str(cell);
+                } else {
+                    let pad = widths[i] - cell.chars().count();
+                    write!(line, "{cell}{}  ", " ".repeat(pad)).ok();
+                }
             }
-        }
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
-    out
+            line.trim_end().to_owned()
+        })
+        .collect()
 }

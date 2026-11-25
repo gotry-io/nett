@@ -159,18 +159,7 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
         let ports: Vec<String> = node.serve.iter().map(|p| format!("{p}/tcp")).collect();
         head.push(("serve", format!("{} to 127.0.0.1", ports.join(", "))));
     }
-    let mut network = vec![
-        reachability(node.reachability).to_owned(),
-        match node.dataplane {
-            DataPlaneKind::Kernel => "kernel WireGuard".to_owned(),
-            DataPlaneKind::Userspace => "userspace WireGuard".to_owned(),
-            DataPlaneKind::Other => "WireGuard".to_owned(),
-        },
-    ];
-    if let Some(port) = node.listen_port {
-        network.push(format!("port {port}"));
-    }
-    head.push(("network", network.join(", ")));
+    head.push(("network", network_text(node)));
     if let Some(nat) = &node.nat {
         let mut parts = vec![
             match nat.kind {
@@ -274,7 +263,7 @@ pub(crate) fn overview(doc: &StatusDoc, now: Timestamp) -> String {
 
 // ---- One peer (section 7.2) ----
 
-fn peer_detail(doc: &StatusDoc, p: &PeerStatus, now: Timestamp) -> String {
+pub(crate) fn peer_detail(doc: &StatusDoc, p: &PeerStatus, now: Timestamp) -> String {
     let mut head = vec![(
         "peer",
         labelled(p.name.as_ref().map(|n| n.as_str()), p.id.as_str()),
@@ -391,7 +380,7 @@ pub(crate) fn labelled(name: Option<&str>, id: &str) -> String {
 }
 
 /// Sorted by name; those without a name by node ID.
-fn sort_key(p: &PeerStatus) -> &str {
+pub(crate) fn sort_key(p: &PeerStatus) -> &str {
     p.name.as_ref().map_or(p.id.as_str(), |n| n.as_str())
 }
 
@@ -416,7 +405,7 @@ fn with_node(what: &str, node: Option<&NodeRef>) -> String {
     }
 }
 
-fn reachability(r: Reachability) -> &'static str {
+pub(crate) fn reachability(r: Reachability) -> &'static str {
     match r {
         Reachability::Public => "public",
         Reachability::DialOnly => "dial-only",
@@ -497,7 +486,23 @@ pub(crate) fn problem_text(p: &Problem) -> String {
     }
 }
 
-fn names(doc: &StatusDoc) -> std::collections::HashMap<String, String> {
+/// How this machine is reached and runs WireGuard: `dial-only, userspace WireGuard, port 53557`.
+pub(crate) fn network_text(node: &status::NodeStatus) -> String {
+    let mut network = vec![
+        reachability(node.reachability).to_owned(),
+        match node.dataplane {
+            DataPlaneKind::Kernel => "kernel WireGuard".to_owned(),
+            DataPlaneKind::Userspace => "userspace WireGuard".to_owned(),
+            DataPlaneKind::Other => "WireGuard".to_owned(),
+        },
+    ];
+    if let Some(port) = node.listen_port {
+        network.push(format!("port {port}"));
+    }
+    network.join(", ")
+}
+
+pub(crate) fn names(doc: &StatusDoc) -> std::collections::HashMap<String, String> {
     doc.peers
         .iter()
         .filter_map(|p| Some((p.id.to_string(), p.name.as_ref()?.to_string())))
@@ -511,7 +516,10 @@ fn names(doc: &StatusDoc) -> std::collections::HashMap<String, String> {
 }
 
 /// How an event is described; events that only newer versions have are shown by name.
-fn event_text(e: &EventRecord, names: &std::collections::HashMap<String, String>) -> String {
+pub(crate) fn event_text(
+    e: &EventRecord,
+    names: &std::collections::HashMap<String, String>,
+) -> String {
     let field = |k: &str| match e.fields.get(k) {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Null) | None => String::new(),
@@ -571,7 +579,7 @@ pub(crate) fn ms(v: f64) -> String {
 }
 
 /// Packet loss is rounded to an integer; when below 1% but not 0, written as `<1%`.
-fn loss(v: f64) -> String {
+pub(crate) fn loss(v: f64) -> String {
     let pct = v * 100.0;
     if pct > 0.0 && pct < 1.0 {
         "<1%".to_owned()

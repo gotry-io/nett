@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, bail};
 use nett_core::id::NodeId;
 use nett_core::name::NodeName;
-use nett_mesh::status::{CandidateStateDoc, PathKindDoc, PeerState, StatusDoc};
+use nett_mesh::status::{
+    CandidateStateDoc, PathKindDoc, PeerRole, PeerState, PeerStatus, StatusDoc,
+};
 use nett_node::http::{Target, call};
 use nett_proto::api::{
     BackupStatus, EVENTS_PATH, Event, LINK_PATH, LinkRequest, LinkResponse, MachineStatus,
@@ -74,7 +76,7 @@ impl SiteHub {
             .map_err(anyhow::Error::msg)
     }
 
-    fn target(&self) -> Target {
+    pub(crate) fn target(&self) -> Target {
         Target {
             url: self.url.clone(),
             tls_fingerprint: self.tls_fingerprint.map(|f| f.0),
@@ -104,7 +106,7 @@ fn request<T: for<'de> Deserialize<'de>>(
         .with_context(|| format!("the Hub's answer to {method} {path} is not valid"))
 }
 
-fn rules_text(state: &State) -> String {
+pub(crate) fn rules_text(state: &State) -> String {
     state.access_rules.as_ref().map_or_else(
         || "no access rules".to_owned(),
         |r| format!("access rules v{}", r.version),
@@ -172,7 +174,7 @@ pub fn fetch_updates(hub: &SiteHub) -> anyhow::Result<Updates> {
     request(&hub.target(), "GET", UPDATES_PATH, Some(&hub.token), None)
 }
 
-fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
+pub(crate) fn fetch_status(hub: &SiteHub) -> anyhow::Result<StatusResponse> {
     request(&hub.target(), "GET", STATUS_PATH, Some(&hub.token), None)
 }
 
@@ -520,14 +522,83 @@ pub fn status(
     ));
     lines.push(("backup", backup));
     out!("{}", key_values(&lines));
-    let docs: BTreeMap<String, StatusDoc> = reply
+    let docs = status_docs(&reply);
+    let problems = machine_problems(state, &reply, &docs, now);
+    let mut rows =
+        vec![["MACHINE", "ADDRESS", "HUB", "VERSION", "CONFIG", "PROBLEMS"].map(String::from)];
+    for m in &reply.machines {
+        rows.push([
+            m.name.clone(),
+            m.address.clone(),
+            hub_state(m).to_owned(),
+            m.nett_version.clone().unwrap_or_else(|| "-".into()),
+            config_text(m, reply.generation),
+            problems
+                .get(&m.node_id)
+                .cloned()
+                .unwrap_or_else(|| "-".into()),
+        ]);
+    }
+    outln!("\n{}", table(&rows).trim_end());
+
+    let mut pairs = Vec::new();
+    for pair in site_pairs(state) {
+        let (st, path, rtt) = match measured(&docs, &pair) {
+            Some((_, p)) => (
+                crate::status::state(p.state).to_owned(),
+                p.path
+                    .as_ref()
+                    .map_or_else(|| "-".to_owned(), crate::status::path_label),
+                p.rtt_ms.map_or_else(|| "-".to_owned(), crate::status::ms),
+            ),
+            None => (
+                "-".to_owned(),
+                path_kind(state, &pair.ids[0], &pair.ids[1]),
+                "-".to_owned(),
+            ),
+        };
+        let [a, b] = pair.names;
+        pairs.push([a, b, st, path, rtt]);
+    }
+    if !pairs.is_empty() {
+        let mut rows = vec![["PEER A", "PEER B", "STATE", "PATH", "RTT"].map(String::from)];
+        rows.extend(pairs);
+        outln!("\n{}", table(&rows).trim_end());
+    }
+    Ok(())
+}
+
+/// Each machine's status the Hub holds, by node ID.
+pub(crate) fn status_docs(reply: &StatusResponse) -> BTreeMap<String, StatusDoc> {
+    reply
         .machines
         .iter()
         .filter_map(|m| {
             let doc = serde_json::from_value(m.status.clone()?).ok()?;
             Some((m.node_id.clone(), doc))
         })
-        .collect();
+        .collect()
+}
+
+/// The machine's connection to the Hub (design/hub.md section 3.4).
+pub(crate) fn hub_state(m: &MachineStatus) -> &'static str {
+    if m.online {
+        "online"
+    } else if m.last_seen.is_some() {
+        "offline"
+    } else {
+        "never"
+    }
+}
+
+/// What needs attention on each machine, by node ID, as `PROBLEMS` shows it (design/hub.md
+/// section 3.4); machines with nothing are left out.
+pub(crate) fn machine_problems(
+    state: &State,
+    reply: &StatusResponse,
+    docs: &BTreeMap<String, StatusDoc>,
+    now: Timestamp,
+) -> BTreeMap<String, String> {
     let owners: Vec<PortOwner> = state
         .machines
         .iter()
@@ -540,17 +611,9 @@ pub fn status(
             })
         })
         .collect();
-    let unanswered = unanswered_ports(&owners, &docs);
-    let mut rows =
-        vec![["MACHINE", "ADDRESS", "HUB", "VERSION", "CONFIG", "PROBLEMS"].map(String::from)];
+    let unanswered = unanswered_ports(&owners, docs);
+    let mut out = BTreeMap::new();
     for m in &reply.machines {
-        let hub_state = if m.online {
-            "online".to_owned()
-        } else if m.last_seen.is_some() {
-            "offline".to_owned()
-        } else {
-            "never".to_owned()
-        };
         let problems = m
             .name
             .parse::<NodeName>()
@@ -558,61 +621,59 @@ pub fn status(
             .and_then(|n| pending_text(state, &n, now))
             .unwrap_or_else(|| problems_text(m, now));
         let problems = match (problems.as_str(), unanswered.get(&m.node_id)) {
+            ("-", None) => continue,
             (_, None) => problems,
             ("-", Some(port)) => port.clone(),
             (_, Some(port)) => format!("{problems}; {port}"),
         };
-        rows.push([
-            m.name.clone(),
-            m.address.clone(),
-            hub_state,
-            m.nett_version.clone().unwrap_or_else(|| "-".into()),
-            config_text(m, reply.generation),
-            problems,
-        ]);
+        out.insert(m.node_id.clone(), problems);
     }
-    outln!("\n{}", table(&rows).trim_end());
+    out
+}
 
-    let mut pairs = Vec::new();
-    for (a, b) in connections(state) {
-        let (Some(na), Some(nb)) = (state.name_of(&a), state.name_of(&b)) else {
-            continue;
-        };
-        let mut names = [na.to_string(), nb.to_string()];
-        let mut ids = [a.to_string(), b.to_string()];
-        if names[0] > names[1] {
-            names.swap(0, 1);
-            ids.swap(0, 1);
-        }
-        // When both ends report, takes the end that has measurements (mesh.md section 8.3: the
-        // decider measures the path)
-        let view = |from: &str, to: &str| {
-            docs.get(from)
-                .and_then(|d| d.peers.iter().find(|p| p.id.as_str() == to))
-        };
-        let peer = [view(&ids[0], &ids[1]), view(&ids[1], &ids[0])]
-            .into_iter()
-            .flatten()
-            .max_by_key(|p| p.rtt_ms.is_some());
-        let (st, path, rtt) = match peer {
-            Some(p) => (
-                crate::status::state(p.state).to_owned(),
-                p.path
-                    .as_ref()
-                    .map_or_else(|| "-".to_owned(), crate::status::path_label),
-                p.rtt_ms.map_or_else(|| "-".to_owned(), crate::status::ms),
-            ),
-            None => ("-".to_owned(), path_kind(state, &a, &b), "-".to_owned()),
-        };
-        pairs.push([names[0].clone(), names[1].clone(), st, path, rtt]);
-    }
-    if !pairs.is_empty() {
-        pairs.sort();
-        let mut rows = vec![["PEER A", "PEER B", "STATE", "PATH", "RTT"].map(String::from)];
-        rows.extend(pairs);
-        outln!("\n{}", table(&rows).trim_end());
-    }
-    Ok(())
+/// Two machines the site connects (site.md section 6), the names in order.
+pub(crate) struct Pair {
+    pub names: [String; 2],
+    pub ids: [NodeId; 2],
+}
+
+/// The site's pairs, sorted by name.
+pub(crate) fn site_pairs(state: &State) -> Vec<Pair> {
+    let mut pairs: Vec<Pair> = connections(state)
+        .into_iter()
+        .filter_map(|(a, b)| {
+            let mut names = [
+                state.name_of(&a)?.to_string(),
+                state.name_of(&b)?.to_string(),
+            ];
+            let mut ids = [a, b];
+            if names[0] > names[1] {
+                names.swap(0, 1);
+                ids.swap(0, 1);
+            }
+            Some(Pair { names, ids })
+        })
+        .collect();
+    pairs.sort_by(|x, y| x.names.cmp(&y.names));
+    pairs
+}
+
+/// The end of a pair that measures it (0 or 1) and its view of the other end: the decider, which
+/// measures the path (mesh.md section 8.3); when neither says so, the end with measurements.
+pub(crate) fn measured<'a>(
+    docs: &'a BTreeMap<String, StatusDoc>,
+    pair: &Pair,
+) -> Option<(usize, &'a PeerStatus)> {
+    let view = |from: usize| {
+        let to = &pair.ids[1 - from];
+        docs.get(pair.ids[from].as_str())
+            .and_then(|d| d.peers.iter().find(|p| p.id == *to))
+            .map(|p| (from, p))
+    };
+    [view(0), view(1)]
+        .into_iter()
+        .flatten()
+        .max_by_key(|(_, p)| (p.role == Some(PeerRole::Decider), p.rtt_ms.is_some()))
 }
 
 fn hub_line(m: &MachineStatus, now: Timestamp) -> String {

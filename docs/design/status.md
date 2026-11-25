@@ -135,7 +135,7 @@ Status contains no private keys, probe tokens, or any credential content other t
 
 ## 7. `nett status`
 
-Output is in English, following architecture.md section 14.3.
+Output is in English, following architecture.md section 14.3. `nett top` shows the same status live, with traffic rates (top.md section 4).
 
 ### 7.1 Overview
 

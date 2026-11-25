@@ -4,6 +4,10 @@ User-visible changes by version. Versions follow [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+- `nett top` shows this machine and its peers live, refreshed every second: state, path, traffic
+  in and out, round-trip time and loss, short charts, and each peer's candidate paths and events.
+  `nett site top` shows every machine and every link between them the same way through the Hub,
+  refreshed every 2 seconds.
 - Machines report their status to the Hub when it changes, and at least every 10 minutes; they
   sent it every 15 seconds, about 50 MB a day for a machine with five peers, since its traffic
   counts always moved. Counts and measurements reach the Hub with the 10-minute report, and every

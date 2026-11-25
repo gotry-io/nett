@@ -40,6 +40,8 @@ mod service_linux;
 mod site;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod status;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod top;
 
 /// One command: name, group in the help, one-line description and usage. The usage text lives in
 /// the module that implements it.
@@ -70,6 +72,13 @@ const COMMANDS: &[Command] = &[
         group: Group::Machine,
         summary: "Show this node and its peers",
         usage: status::USAGE,
+    },
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    Command {
+        name: "top",
+        group: Group::Machine,
+        summary: "Show this node and its peers live",
+        usage: top::USAGE,
     },
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     Command {
@@ -249,6 +258,8 @@ fn run() -> anyhow::Result<()> {
         "site" => site::run(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "status" => status::run(parser),
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        "top" => top::local(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         "ping" => diagnose::ping(parser),
         #[cfg(any(target_os = "linux", target_os = "macos"))]
