@@ -541,7 +541,7 @@ pub fn status(
                 name: name.to_string(),
                 id: m.node_id.clone(),
                 port: m.listen_port(state.listen_port)?,
-                obfs: m.obfs_port.is_some(),
+                obfs: m.obfs_port,
             })
         })
         .collect();
@@ -710,14 +710,15 @@ struct PortOwner {
     name: String,
     id: NodeId,
     port: u16,
-    /// It offers an obfuscated port already.
-    obfs: bool,
+    /// The obfuscated port it offers.
+    obfs: Option<u16>,
 }
 
 /// Each `public` machine whose WireGuard port answers no probe from at least [`UNANSWERED_FROM`]
-/// machines that reach it over another path, by node ID (design/hub.md section 3.4). This is their
-/// own measurement, from the status they report: a firewall that closes the port and a network on the
-/// way that drops WireGuard both give it.
+/// machines that reach it over another path and not over its obfuscated port, by node ID
+/// (design/hub.md section 3.4). This is their own measurement, from the status they report; the
+/// machines it does answer show that the port is open to some sources, which rules out opening it
+/// as the fix.
 fn unanswered_ports(
     owners: &[PortOwner],
     docs: &BTreeMap<String, StatusDoc>,
@@ -730,46 +731,58 @@ fn unanswered_ports(
         obfs,
     } in owners
     {
-        let port = *port;
-        let mut from: Vec<String> = docs
-            .values()
-            .filter(|doc| doc.node.id != *id)
-            .filter_map(|doc| {
-                let peer = doc.peers.iter().find(|p| p.id == *id)?;
-                let fails = peer.candidates.iter().any(|c| {
-                    c.kind == PathKindDoc::Direct
-                        && c.endpoint.port() == port
-                        && matches!(
-                            c.state,
-                            CandidateStateDoc::Failing | CandidateStateDoc::Blocked
-                        )
-                });
-                (peer.state == PeerState::Connected && fails).then(|| {
-                    doc.node
-                        .name
-                        .as_ref()
-                        .map_or_else(|| doc.node.id.to_string(), ToString::to_string)
+        let (port, obfs) = (*port, *obfs);
+        let mut from = Vec::new();
+        let mut answers = Vec::new();
+        for doc in docs.values().filter(|doc| doc.node.id != *id) {
+            let Some(peer) = doc.peers.iter().find(|p| p.id == *id) else {
+                continue;
+            };
+            let on = |kind: PathKindDoc, port: u16, states: &[CandidateStateDoc]| {
+                peer.candidates.iter().any(|c| {
+                    c.kind == kind && c.endpoint.port() == port && states.contains(&c.state)
                 })
-            })
-            .collect();
+            };
+            const WORKS: &[CandidateStateDoc] =
+                &[CandidateStateDoc::Current, CandidateStateDoc::Ok];
+            const FAILS: &[CandidateStateDoc] =
+                &[CandidateStateDoc::Failing, CandidateStateDoc::Blocked];
+            let reporter = doc
+                .node
+                .name
+                .as_ref()
+                .map_or_else(|| doc.node.id.to_string(), ToString::to_string);
+            if on(PathKindDoc::Direct, port, WORKS) {
+                answers.push(reporter);
+            } else if peer.state == PeerState::Connected
+                && on(PathKindDoc::Direct, port, FAILS)
+                && !obfs.is_some_and(|obfs| on(PathKindDoc::DirectObfs, obfs, WORKS))
+            {
+                from.push(reporter);
+            }
+        }
         if from.len() < UNANSWERED_FROM {
             continue;
         }
         from.sort();
-        let advice = if *obfs {
-            String::new()
-        } else {
-            format!(
-                "; open UDP {port} to it, or give it an obfuscated port: nett site set {name} --obfs"
-            )
-        };
-        out.insert(
-            id.to_string(),
-            format!(
-                "WireGuard port {port} answers no probe from {}, which reach it otherwise{advice}",
-                from.join(", ")
-            ),
+        answers.sort();
+        let measured = format!(
+            "WireGuard port {port} answers no probe from {}, which reach it otherwise",
+            from.join(", ")
         );
+        let line = match (answers.is_empty(), obfs.is_some()) {
+            (true, false) => format!(
+                "{measured}; open UDP {port} to it, or give it an obfuscated port: \
+                 nett site set {name} --obfs"
+            ),
+            (true, true) => measured,
+            (false, false) => format!(
+                "{measured}, but answers {}; give it an obfuscated port: nett site set {name} --obfs",
+                answers.join(", ")
+            ),
+            (false, true) => format!("{measured}, but answers {}", answers.join(", ")),
+        };
+        out.insert(id.to_string(), line);
     }
     out
 }
@@ -968,10 +981,28 @@ mod tests {
         );
     }
 
-    /// A reporting machine's view of one peer, `peer`, reached over `path` while its WireGuard
-    /// port's candidate is in `direct`.
-    fn view(me: (&str, char), peer: char, state: &str, direct: &str) -> StatusDoc {
+    /// A reporting machine's view of one peer, `peer`, reached over a relay while its WireGuard
+    /// port's candidate is in `direct` and, when it lists one, its obfuscated port's in `obfs`.
+    fn view(
+        me: (&str, char),
+        peer: char,
+        state: &str,
+        direct: &str,
+        obfs: Option<&str>,
+    ) -> StatusDoc {
         let id = |c: char| format!("node_01JD7M3XQ4W8N2K5R9T6V3B7C{c}");
+        let mut candidates = vec![
+            serde_json::json!({"kind": "direct", "relay": null, "endpoint": "198.51.100.9:41820",
+                               "punched": false, "rtt_ms": null, "loss": 1.0, "state": direct}),
+            serde_json::json!({"kind": "relay", "relay": null, "endpoint": "198.51.100.9:41822",
+                               "punched": false, "rtt_ms": 150.0, "loss": 0.0, "state": "current"}),
+        ];
+        if let Some(obfs) = obfs {
+            candidates.push(serde_json::json!({
+                "kind": "direct_obfs", "relay": null, "endpoint": "198.51.100.9:42001",
+                "punched": false, "rtt_ms": 150.0, "loss": 0.0, "state": obfs
+            }));
+        }
         serde_json::from_value(serde_json::json!({
             "v": 1, "version": "0.11.0",
             "node": {"id": id(me.1), "name": me.0, "admitted": true, "mesh": [], "edge": [],
@@ -984,65 +1015,125 @@ mod tests {
                 "state": state, "role": "decider", "path": null, "rtt_ms": null, "loss": null,
                 "jitter_ms": null, "last_handshake": null, "last_received": null,
                 "rx_bytes": 0, "tx_bytes": 0,
-                "candidates": [
-                    {"kind": "direct", "relay": null, "endpoint": "198.51.100.9:41820",
-                     "punched": false, "rtt_ms": null, "loss": 1.0, "state": direct},
-                    {"kind": "relay", "relay": null, "endpoint": "198.51.100.9:41822",
-                     "punched": false, "rtt_ms": 150.0, "loss": 0.0, "state": "current"}
-                ]
+                "candidates": candidates
             }],
             "problems": [], "events": []
         }))
         .expect("fixture")
     }
 
-    /// A public machine's WireGuard port that two machines reaching it otherwise cannot probe is
-    /// named, with the machines that measured it (design/hub.md section 3.4); one such machine, or
-    /// machines that do not reach it at all, are not enough, and a machine with an obfuscated port
-    /// gets no advice to add one.
-    #[test]
-    fn a_wireguard_port_others_cannot_reach_is_named() {
-        let far = PortOwner {
+    fn docs(views: Vec<StatusDoc>) -> BTreeMap<String, StatusDoc> {
+        views
+            .into_iter()
+            .map(|d| (d.node.id.to_string(), d))
+            .collect()
+    }
+
+    fn far(obfs: Option<u16>) -> PortOwner {
+        PortOwner {
             name: "far".into(),
             id: "node_01JD7M3XQ4W8N2K5R9T6V3B7C9".parse().expect("id"),
             port: 41820,
-            obfs: false,
+            obfs,
+        }
+    }
+
+    fn named(owner: &PortOwner, views: Vec<StatusDoc>) -> Option<String> {
+        unanswered_ports(std::slice::from_ref(owner), &docs(views)).remove(owner.id.as_str())
+    }
+
+    /// A public machine's WireGuard port that two machines reaching it otherwise cannot probe is
+    /// named, with the machines that measured it and those it answers (design/hub.md section 3.4):
+    /// with none answering, opening the port is advised; with one answering, the port is open to
+    /// some sources and only an obfuscated port is; a machine with one gets no advice to add one.
+    /// One such machine, or machines that do not reach it at all, are not enough.
+    #[test]
+    fn a_wireguard_port_others_cannot_reach_is_named() {
+        let both = || {
+            vec![
+                view(("a", '1'), '9', "connected", "failing", None),
+                view(("b", '2'), '9', "connected", "blocked", None),
+            ]
         };
-        let docs = |views: Vec<StatusDoc>| -> BTreeMap<String, StatusDoc> {
-            views
-                .into_iter()
-                .map(|d| (d.node.id.to_string(), d))
-                .collect()
-        };
-        let both = docs(vec![
-            view(("a", '1'), '9', "connected", "failing"),
-            view(("b", '2'), '9', "connected", "blocked"),
-        ]);
-        let named = unanswered_ports(std::slice::from_ref(&far), &both);
         assert_eq!(
-            named.get(far.id.as_str()).map(String::as_str),
+            named(&far(None), both()).as_deref(),
             Some(
                 "WireGuard port 41820 answers no probe from a, b, which reach it otherwise; open \
                  UDP 41820 to it, or give it an obfuscated port: nett site set far --obfs"
             )
         );
-        let obfuscated = PortOwner { obfs: true, ..far };
-        let named = unanswered_ports(std::slice::from_ref(&obfuscated), &both);
-        assert!(!named[obfuscated.id.as_str()].contains("--obfs"));
+        let mut answered = both();
+        answered.push(view(("c", '3'), '9', "connected", "ok", None));
+        assert_eq!(
+            named(&far(None), answered.clone()).as_deref(),
+            Some(
+                "WireGuard port 41820 answers no probe from a, b, which reach it otherwise, but \
+                 answers c; give it an obfuscated port: nett site set far --obfs"
+            )
+        );
+        assert_eq!(
+            named(&far(Some(42001)), both()).as_deref(),
+            Some("WireGuard port 41820 answers no probe from a, b, which reach it otherwise")
+        );
+        assert_eq!(
+            named(&far(Some(42001)), answered).as_deref(),
+            Some(
+                "WireGuard port 41820 answers no probe from a, b, which reach it otherwise, but \
+                 answers c"
+            )
+        );
 
         for views in [
-            vec![view(("a", '1'), '9', "connected", "failing")],
+            vec![view(("a", '1'), '9', "connected", "failing", None)],
             vec![
-                view(("a", '1'), '9', "connected", "failing"),
-                view(("b", '2'), '9', "unreachable", "failing"),
+                view(("a", '1'), '9', "connected", "failing", None),
+                view(("b", '2'), '9', "unreachable", "failing", None),
             ],
             vec![
-                view(("a", '1'), '9', "connected", "failing"),
-                view(("b", '2'), '9', "connected", "ok"),
+                view(("a", '1'), '9', "connected", "failing", None),
+                view(("b", '2'), '9', "connected", "ok", None),
             ],
         ] {
-            assert!(unanswered_ports(std::slice::from_ref(&obfuscated), &docs(views)).is_empty());
+            assert_eq!(named(&far(Some(42001)), views), None);
         }
+    }
+
+    /// Machines that cannot probe a WireGuard port but reach the machine's obfuscated port are
+    /// carried by it, as obfuscation is meant to carry them, so they are not counted (design/hub.md
+    /// section 3.4): with all of them on it the port is not named, and with some of them on it only
+    /// the others are. An obfuscated candidate to another port does not count.
+    #[test]
+    fn a_wireguard_port_obfuscation_carries_is_not_named() {
+        let carried = |obfs: &str| {
+            vec![
+                view(("a", '1'), '9', "connected", "failing", Some(obfs)),
+                view(("b", '2'), '9', "connected", "blocked", Some("ok")),
+                view(("c", '3'), '9', "connected", "ok", None),
+            ]
+        };
+        assert_eq!(named(&far(Some(42001)), carried("current")), None);
+        assert_eq!(
+            named(&far(Some(42046)), carried("current")).as_deref(),
+            Some(
+                "WireGuard port 41820 answers no probe from a, b, which reach it otherwise, but \
+                 answers c"
+            )
+        );
+        let mut some = carried("failing");
+        some.push(view(
+            ("d", '4'),
+            '9',
+            "connected",
+            "failing",
+            Some("untested"),
+        ));
+        assert_eq!(
+            named(&far(Some(42001)), some).as_deref(),
+            Some(
+                "WireGuard port 41820 answers no probe from a, d, which reach it otherwise, but \
+                 answers c"
+            )
+        );
     }
 
     #[test]
