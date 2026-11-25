@@ -379,6 +379,8 @@ impl DataPlane for KernelWireGuard {
             .map(|p| PeerStat {
                 public_key: p.public_key,
                 endpoint: p.endpoint,
+                // A machine that offers an obfuscated port runs the userspace data plane
+                port: UdpPort::WireGuard,
                 rx_bytes: p.rx_bytes,
                 tx_bytes: p.tx_bytes,
                 last_handshake: p.last_handshake,

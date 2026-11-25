@@ -327,6 +327,8 @@ pub struct FakeDataPlane {
     /// absent).
     pub traffic: std::collections::HashMap<X25519PublicKey, (u64, u64)>,
     pub handshakes: std::collections::HashMap<X25519PublicKey, std::time::SystemTime>,
+    /// Peers whose endpoint came in on this machine's obfuscated port, which `peer_stats` reports.
+    pub obfs_endpoints: std::collections::HashSet<X25519PublicKey>,
     /// The interface the underlay sockets are bound to.
     pub underlay_interface: Option<u32>,
 }
@@ -347,6 +349,7 @@ impl FakeDataPlane {
             edge: None,
             ingress: None,
             routes: Vec::new(),
+            obfs_endpoints: std::collections::HashSet::new(),
             underlay_interface: None,
             fail_filter: None,
             calls: Vec::new(),
@@ -408,6 +411,11 @@ impl DataPlane for FakeDataPlane {
                 PeerStat {
                     public_key: p.public_key,
                     endpoint: p.endpoint,
+                    port: if self.obfs_endpoints.contains(&p.public_key) {
+                        crate::dataplane::UdpPort::Obfs
+                    } else {
+                        crate::dataplane::UdpPort::WireGuard
+                    },
                     rx_bytes,
                     tx_bytes,
                     last_handshake: self.handshakes.get(&p.public_key).copied(),

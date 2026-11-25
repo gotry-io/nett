@@ -153,6 +153,10 @@ pub struct WgPortProbes {
 pub struct PeerStat {
     pub public_key: X25519PublicKey,
     pub endpoint: Option<SocketAddr>,
+    /// The port the endpoint came in on: a peer that reaches this machine's obfuscated port sends
+    /// from the same address as over plain WireGuard, so only the port tells the two apart
+    /// (design/status.md section 6).
+    pub port: UdpPort,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     /// Time of the most recent completed handshake (wall clock). Empty when no handshake has completed since

@@ -296,6 +296,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - The change listing names what the Hub learned about a machine that its reachability line does not show (its WireGuard port, LAN addresses, relay certificate), so that a change fetched from the Hub is never an empty report (site.md section 7);
 - The change listing names a relay's obfuscated port, which the user opens in the machine's firewall, and `nett site relay --obfs` names the Hub and the machines on a release too old for it (site.md section 4.1, obfuscation.md section 5);
 - `nett site status` names a public machine whose WireGuard port answers no probe from machines that reach it otherwise and not over its obfuscated port, with those machines, the machines it does answer, and what to do, rather than leaving each machine's view to be read one by one (hub.md section 3.4);
+- A follower's path comes from WireGuard's current endpoint, and an endpoint that came in on the machine's obfuscated port shows as `direct_obfs`: the peer sends from the same address over plain and obfuscated UDP, so only the port the data plane records tells them apart (status.md section 6);
 - A command whose reader has gone ends quietly with success, a message that cannot be written leaves the exit status alone, and any other failure to write the output says why: the programs write through `nett_core::output`, and the workspace lints deny `println!` and its kin, which panic instead (architecture.md section 14.3).
 
 **Guards**
@@ -310,6 +311,7 @@ Guards are written as `<crate>:<test function>`, `lab:<scenario>` (a `nett-lab r
 - `nett-cli:the_hub_and_machines_on_an_older_release_are_named`
 - `nett-cli:a_wireguard_port_others_cannot_reach_is_named`
 - `nett-cli:a_wireguard_port_obfuscation_carries_is_not_named`
+- `nett-mesh:a_follower_reached_at_its_obfuscated_port_shows_it`
 - `nett-cli:a_closed_output_ends_the_command_quietly`
 - `nett-cli:a_closed_error_output_keeps_the_failure`
 - `nett-cli:a_full_output_says_why_and_fails`

@@ -314,6 +314,7 @@ impl<S: Sessions> Plane<S> {
             .map(|p| PeerStat {
                 public_key: p.key,
                 endpoint: p.endpoint,
+                port: p.port,
                 rx_bytes: p.rx_bytes,
                 tx_bytes: p.tx_bytes,
                 last_handshake: self

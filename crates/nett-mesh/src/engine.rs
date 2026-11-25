@@ -175,6 +175,8 @@ struct Traffic {
     last_rx: Option<Instant>,
     last_tx: Option<Instant>,
     endpoint: Option<SocketAddr>,
+    /// The endpoint came in on this machine's obfuscated port.
+    obfs: bool,
     last_handshake: Option<SystemTime>,
 }
 
@@ -1187,6 +1189,7 @@ impl<D: DataPlane> Engine<D> {
                     traffic.rx_bytes = stat.rx_bytes;
                     traffic.tx_bytes = stat.tx_bytes;
                     traffic.endpoint = stat.endpoint;
+                    traffic.obfs = stat.port == crate::dataplane::UdpPort::Obfs;
                     traffic.last_handshake = stat.last_handshake;
                 }
                 continue;
@@ -1206,6 +1209,7 @@ impl<D: DataPlane> Engine<D> {
             traffic.rx_bytes = stat.rx_bytes;
             traffic.tx_bytes = stat.tx_bytes;
             traffic.endpoint = stat.endpoint;
+            traffic.obfs = stat.port == crate::dataplane::UdpPort::Obfs;
             traffic.last_handshake = stat.last_handshake;
             prober.on_bytes(id, now, stat.rx_bytes.saturating_add(stat.tx_bytes));
             if before != Some(bytes) {
@@ -1356,21 +1360,31 @@ impl<D: DataPlane> Engine<D> {
                 {
                     Some(c) => Some(path_status(c.route, c.kind, c.punched)),
                     // Following through roaming: which of this machine's candidates WireGuard's current endpoint is, or
-                    // the relay on this machine (section 5.1); otherwise it is direct
-                    None => traffic.and_then(|t| t.endpoint).map(|endpoint| {
-                        let (route, kind) = view
-                            .as_ref()
-                            .and_then(|v| v.routes.iter().find(|(r, _)| r.endpoint() == endpoint))
-                            .copied()
-                            .or_else(|| {
-                                (Some(endpoint) == own_relay).then(|| {
-                                    let relay = KeyId::of(self.node_id.as_str().as_bytes());
-                                    (Route::Relay { relay, endpoint }, PathKind::Relay)
+                    // the relay on this machine (section 5.1); otherwise it is direct. A peer reaching this
+                    // machine's obfuscated port sends from its own WireGuard port, so a direct path is
+                    // obfuscated when the endpoint came in on that port (design/status.md section 6)
+                    None => traffic.and_then(|t| t.endpoint.map(|e| (e, t.obfs))).map(
+                        |(endpoint, obfs)| {
+                            let (route, kind) = view
+                                .as_ref()
+                                .and_then(|v| {
+                                    v.routes.iter().find(|(r, _)| r.endpoint() == endpoint)
                                 })
-                            })
-                            .unwrap_or((Route::Direct(endpoint), PathKind::Direct));
-                        path_status(route, kind, false)
-                    }),
+                                .copied()
+                                .or_else(|| {
+                                    (Some(endpoint) == own_relay).then(|| {
+                                        let relay = KeyId::of(self.node_id.as_str().as_bytes());
+                                        (Route::Relay { relay, endpoint }, PathKind::Relay)
+                                    })
+                                })
+                                .unwrap_or((Route::Direct(endpoint), PathKind::Direct));
+                            let kind = match kind {
+                                PathKind::Lan | PathKind::Direct if obfs => PathKind::DirectObfs,
+                                kind => kind,
+                            };
+                            path_status(route, kind, false)
+                        },
+                    ),
                 };
                 let tunnel = view.as_ref().and_then(|v| v.tunnel);
                 PeerStatus {
@@ -2780,6 +2794,47 @@ mod tests {
             (PathKindDoc::Direct, Some(roamed))
         );
         assert!(st.node.nat.is_none());
+    }
+
+    /// A peer that reaches this machine's obfuscated port sends from its WireGuard port, the address
+    /// of this machine's direct candidate to it: the port its endpoint came in on, not the address,
+    /// makes the follower's path obfuscated (design/status.md section 6), and the same endpoint on
+    /// the WireGuard port is plain direct.
+    #[test]
+    fn a_follower_reached_at_its_obfuscated_port_shows_it() {
+        use crate::config::{Candidate, PathDoc};
+        use crate::status::{PathKindDoc, PeerRole};
+        let mesh = Mesh::new(&[1, 2]);
+        let mut e = engine(1);
+        let mut events = VecSink::default();
+        let peer: SocketAddr = "203.0.113.7:41820".parse().expect("addr");
+        let mut doc = mesh.desired(1, vec![mesh.material(1, 1), mesh.material(2, 1)]);
+        doc.reachability = Reachability::Public;
+        doc.paths = vec![PathDoc {
+            peer: node_id(2),
+            peer_reachability: Reachability::DialOnly,
+            candidates: vec![Candidate::Direct { endpoint: peer }],
+        }];
+        e.apply(&validated(doc), &mut events).expect("accepted");
+        let key = e.dataplane.peers.as_ref().expect("peers")[0].public_key;
+        e.dataplane.peers.as_mut().expect("peers")[0].endpoint = Some(peer);
+        // Each reading a second after the last, past the interval statistics are read at
+        let mut now = Instant::now();
+        let mut path = |obfs: bool| {
+            if obfs {
+                e.dataplane.obfs_endpoints.insert(key);
+            } else {
+                e.dataplane.obfs_endpoints.remove(&key);
+            }
+            now += Duration::from_secs(1);
+            e.tick(now, 0, &mut events);
+            let st = e.status(now, SystemTime::now(), Timestamp::now());
+            assert_eq!(st.peers[0].role, Some(PeerRole::Follower));
+            let path = st.peers[0].path.clone().expect("path");
+            (path.kind, path.endpoint)
+        };
+        assert_eq!(path(true), (PathKindDoc::DirectObfs, Some(peer)));
+        assert_eq!(path(false), (PathKindDoc::Direct, Some(peer)));
     }
 
     /// A peer that reaches this machine through the relay on this machine shows that relay as its
